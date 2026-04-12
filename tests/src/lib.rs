@@ -1,0 +1,13 @@
+//! Integration and unit tests for nexus-core modules.
+
+#[cfg(test)]
+mod auth_tests;
+
+#[cfg(test)]
+mod config_tests;
+
+#[cfg(test)]
+mod error_tests;
+
+#[cfg(test)]
+mod types_tests;

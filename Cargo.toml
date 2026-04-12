@@ -1,0 +1,33 @@
+[workspace]
+members = ["nexusctl", "nexus-core", "tests"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["MPOWR IT GmbH <info@mpowr.tech>"]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+nexus-core = { path = "nexus-core" }
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+console = "0.15"
+dialoguer = "0.11"
+dirs = "6"
+anyhow = "1"
+sha2 = "0.10"
+open = "5"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
