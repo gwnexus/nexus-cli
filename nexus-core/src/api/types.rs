@@ -7,16 +7,16 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Project membership entry from the identity endpoint.
+/// Note: These come directly from Supabase and use snake_case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectMembership {
     pub project_id: String,
     pub role: String,
 }
 
 /// Agent assignment entry from the identity endpoint.
+/// Note: These come directly from Supabase and use snake_case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentAssignment {
     pub project_id: String,
     pub agent_id: String,

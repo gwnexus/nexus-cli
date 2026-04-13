@@ -168,10 +168,10 @@ fn test_identity_response_deserialize() {
         "isPlatformOwner": true,
         "tenantId": "20c72e35-d4d8-4e40-a7be-efff14d8eaff",
         "memberships": [
-            {"projectId": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d", "role": "owner"}
+            {"project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d", "role": "owner"}
         ],
         "agentAssignments": [
-            {"projectId": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d", "agentId": "nexus-app-agent", "agentOwner": null}
+            {"project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d", "agent_id": "nexus-app-agent", "agent_owner": null}
         ]
     }"#;
 
