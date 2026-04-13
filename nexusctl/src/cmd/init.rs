@@ -468,8 +468,8 @@ fn write_mcp_configs(
       "command": "node",
       "args": ["tools/nexus-mcp/dist/server.js"],
       "env": {{
-        "NEXUS_API_URL": "{{{{env:NEXUS_API_URL}}}}",
-        "NEXUS_PRIVATE_TOKEN": "{{{{env:NEXUS_PRIVATE_TOKEN}}}}"
+        "NEXUS_API_URL": "${{NEXUS_API_URL}}",
+        "NEXUS_PRIVATE_TOKEN": "${{NEXUS_PRIVATE_TOKEN}}"
       }}
     }}
   }}
