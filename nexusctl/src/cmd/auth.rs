@@ -69,16 +69,40 @@ pub fn logout() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Display current authentication status.
+/// Display current authentication and workspace status.
 pub async fn status(api_url: &str) -> anyhow::Result<()> {
+    println!(
+        "{} Nexus Status",
+        style(">>").bold().cyan()
+    );
+    println!();
+
+    // --- API URL ---
+    println!("  API URL:  {}", style(api_url).dim());
+
+    // --- Workspace ---
+    let cwd = std::env::current_dir()?;
+    let has_nexus_dir = cwd.join(".nexus").exists();
+    if has_nexus_dir {
+        println!("  Workspace: {}", cwd.display());
+    } else {
+        println!(
+            "  Workspace: {} (no .nexus/ found)",
+            style(cwd.display()).dim()
+        );
+    }
+    println!();
+
+    // --- Auth status ---
     let creds = Credentials::load()?;
 
     match creds {
         None => {
             println!(
-                "{} Not authenticated. Run 'nexus login' first.",
+                "  Auth:     {} Not authenticated",
                 style("--").bold().yellow()
             );
+            println!("            Run 'nexus login' to authenticate.");
         }
         Some(ref c) => {
             // Show token prefix
@@ -87,34 +111,56 @@ pub async fn status(api_url: &str) -> anyhow::Result<()> {
             } else {
                 c.token.clone()
             };
-            println!(
-                "{} Token: {}",
-                style(">>").bold().cyan(),
-                prefix
-            );
 
             // Verify against API
             let client = NexusClient::new(api_url, Some(c.token.clone()))?;
             match client.auth_status().await {
-                Ok(status) => {
+                Ok(auth) => {
                     println!(
-                        "{} Authenticated as {} ({})",
+                        "  Auth:     {} {} ({})",
                         style("OK").bold().green(),
-                        style(&status.user.email).bold(),
-                        status.user.platform_role,
+                        style(&auth.user.email).bold(),
+                        auth.user.platform_role,
                     );
-                    if let Some(ref name) = status.user.display_name {
-                        println!("   Name: {}", name);
+                    if let Some(ref name) = auth.user.display_name {
+                        println!("            Name: {}", name);
                     }
+                    println!("            Token: {}", style(prefix).dim());
                 }
                 Err(e) => {
                     println!(
-                        "{} Token verification failed: {}",
+                        "  Auth:     {} Token invalid: {}",
                         style("ERR").bold().red(),
                         e
                     );
+                    println!("            Token: {}", style(prefix).dim());
                 }
             }
+        }
+    }
+    println!();
+
+    // --- Linked project ---
+    match nexus_core::config::load_linked_project(None)? {
+        Some(project) => {
+            println!(
+                "  Project:  {} {} ({})",
+                style("OK").bold().green(),
+                style(&project.name).bold(),
+                if !project.slug.is_empty() {
+                    &project.slug
+                } else {
+                    "-"
+                }
+            );
+            println!("            ID: {}", style(&project.id).dim());
+        }
+        None => {
+            println!(
+                "  Project:  {} No project linked",
+                style("--").bold().yellow()
+            );
+            println!("            Run 'nexus link' to link this directory to a project.");
         }
     }
 

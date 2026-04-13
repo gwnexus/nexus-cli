@@ -7,7 +7,13 @@ mod auth_tests;
 mod config_tests;
 
 #[cfg(test)]
+mod deinit_tests;
+
+#[cfg(test)]
 mod error_tests;
+
+#[cfg(test)]
+mod link_tests;
 
 #[cfg(test)]
 mod types_tests;

@@ -121,6 +121,7 @@ pub struct SkillExportResponse {
 pub struct ProjectSummary {
     pub id: String,
     pub name: String,
+    pub slug: Option<String>,
     pub description: Option<String>,
     pub status: String,
     pub created_at: String,
@@ -130,6 +131,12 @@ pub struct ProjectSummary {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectListResponse {
     pub projects: Vec<ProjectSummary>,
+}
+
+/// Single project detail response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectDetailResponse {
+    pub project: ProjectSummary,
 }
 
 // ---------------------------------------------------------------------------

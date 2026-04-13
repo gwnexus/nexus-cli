@@ -24,6 +24,7 @@
 use console::style;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::Credentials;
+use nexus_core::config;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -55,7 +56,11 @@ pub async fn run(
         style(project_name).bold()
     );
     println!("   Target: {}", target.display());
-    if let Some(pid) = project_id {
+
+    // Resolve project ID from CLI flag or linked project config
+    let resolved_pid = config::resolve_project_id(project_id, Some(&target)).ok();
+
+    if let Some(ref pid) = resolved_pid {
         println!("   Project: {}", style(pid).dim());
     }
     println!();
@@ -71,7 +76,7 @@ pub async fn run(
     // -----------------------------------------------------------------------
     // Phase 1: Local scaffolding
     // -----------------------------------------------------------------------
-    create_nexus_dir(&target, project_name, project_id)?;
+    create_nexus_dir(&target, project_name, resolved_pid.as_deref())?;
     create_claude_dir(&target, project_name)?;
     create_opencode_dir(&target)?;
     create_agents_md(&target, project_name, force)?;
@@ -80,7 +85,7 @@ pub async fn run(
     // -----------------------------------------------------------------------
     // Phase 2: Server-aware init (when project_id + token are available)
     // -----------------------------------------------------------------------
-    if let Some(pid) = project_id {
+    if let Some(ref pid) = resolved_pid {
         let token = resolve_token();
         if let Some(ref tok) = token {
             println!(

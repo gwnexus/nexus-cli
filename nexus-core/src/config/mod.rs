@@ -1,6 +1,7 @@
 //! Nexus Core configuration module.
 //!
-//! Manages the CLI configuration file at `~/.config/nexus/config.toml`.
+//! Manages the CLI configuration file at `~/.config/nexus/config.toml`
+//! and the project-local configuration at `.nexus/config.toml`.
 //! Provides defaults and cascading resolution for CLI flags.
 
 use serde::{Deserialize, Serialize};
@@ -146,4 +147,128 @@ impl Config {
             ))),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Project-local configuration (.nexus/config.toml)
+// ---------------------------------------------------------------------------
+
+/// Project information stored in `.nexus/config.toml` under the `[project]` section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    /// Nexus project UUID.
+    pub id: String,
+
+    /// Human-readable project name.
+    #[serde(default)]
+    pub name: String,
+
+    /// URL-safe project slug.
+    #[serde(default)]
+    pub slug: String,
+}
+
+/// The full `.nexus/config.toml` file structure.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectInfo>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<toml::Value>,
+}
+
+/// Returns the path to the project-local `.nexus/config.toml`,
+/// searching from the given directory (or cwd).
+pub fn project_config_path(from: Option<&std::path::Path>) -> Result<PathBuf, Error> {
+    let base = match from {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    Ok(base.join(".nexus").join("config.toml"))
+}
+
+/// Load the project-local config from `.nexus/config.toml`.
+/// Returns `None` if the file does not exist.
+pub fn load_project_config(from: Option<&std::path::Path>) -> Result<Option<ProjectConfig>, Error> {
+    let path = project_config_path(from)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let config: ProjectConfig = toml::from_str(&content)?;
+    Ok(Some(config))
+}
+
+/// Save the project-local config to `.nexus/config.toml`.
+/// Creates `.nexus/` if it doesn't exist.
+pub fn save_project_config(
+    from: Option<&std::path::Path>,
+    config: &ProjectConfig,
+) -> Result<(), Error> {
+    let path = project_config_path(from)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = toml::to_string_pretty(config)?;
+    std::fs::write(&path, content)?;
+    Ok(())
+}
+
+/// Remove the `[project]` section from `.nexus/config.toml`.
+/// Preserves other sections (e.g. `[mcp]`).
+pub fn remove_project_section(from: Option<&std::path::Path>) -> Result<bool, Error> {
+    let path = project_config_path(from)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut config: ProjectConfig = toml::from_str(&content)?;
+    if config.project.is_none() {
+        return Ok(false);
+    }
+    config.project = None;
+    let new_content = toml::to_string_pretty(&config)?;
+    std::fs::write(&path, new_content)?;
+    Ok(true)
+}
+
+/// Load the linked project info from `.nexus/config.toml`.
+/// Returns `None` if not linked.
+pub fn load_linked_project(from: Option<&std::path::Path>) -> Result<Option<ProjectInfo>, Error> {
+    match load_project_config(from)? {
+        Some(pc) => Ok(pc.project),
+        None => Ok(None),
+    }
+}
+
+/// Resolve a project ID from multiple sources (highest priority first):
+/// 1. Explicit CLI flag (`--project-id`)
+/// 2. `.nexus/config.toml` `[project].id`
+///
+/// Returns an error with a helpful message if neither is set.
+pub fn resolve_project_id(
+    cli_project_id: Option<&str>,
+    workspace: Option<&std::path::Path>,
+) -> Result<String, Error> {
+    // 1. CLI flag takes priority
+    if let Some(id) = cli_project_id {
+        if !id.is_empty() {
+            return Ok(id.to_string());
+        }
+    }
+
+    // 2. Check .nexus/config.toml
+    if let Some(project) = load_linked_project(workspace)? {
+        if !project.id.is_empty() {
+            return Ok(project.id);
+        }
+    }
+
+    Err(Error::Config(
+        "No project ID found. Either:\n  \
+         - Pass --project-id <UUID>\n  \
+         - Run 'nexus link' to link this directory to a project"
+            .to_string(),
+    ))
 }

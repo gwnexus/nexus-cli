@@ -55,13 +55,30 @@ pub enum Command {
         force: bool,
     },
 
+    /// Link this directory to a Nexus project.
+    Link {
+        /// Nexus project UUID to link directly (skips interactive selection).
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Unlink this directory from its Nexus project.
+    Unlink,
+
+    /// Remove all Nexus/AI scaffold files from this directory.
+    Deinit {
+        /// Delete without confirmation prompt.
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Authenticate with the Nexus platform.
     Login,
 
     /// Remove stored credentials.
     Logout,
 
-    /// Show current authentication status.
+    /// Show current authentication and project status.
     Status,
 
     /// View or update CLI configuration.
@@ -178,6 +195,54 @@ mod tests {
                 assert!(force);
             }
             _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_link_no_args() {
+        let cli = Cli::try_parse_from(["nexus", "link"]).unwrap();
+        match cli.command {
+            Command::Link { ref project_id } => {
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_link_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus", "link", "--project-id", "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        ]).unwrap();
+        match cli.command {
+            Command::Link { ref project_id } => {
+                assert_eq!(project_id.as_deref(), Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"));
+            }
+            _ => panic!("expected Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unlink() {
+        let cli = Cli::try_parse_from(["nexus", "unlink"]).unwrap();
+        assert!(matches!(cli.command, Command::Unlink));
+    }
+
+    #[test]
+    fn test_parse_deinit_no_force() {
+        let cli = Cli::try_parse_from(["nexus", "deinit"]).unwrap();
+        match cli.command {
+            Command::Deinit { force } => assert!(!force),
+            _ => panic!("expected Deinit command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_deinit_with_force() {
+        let cli = Cli::try_parse_from(["nexus", "deinit", "--force"]).unwrap();
+        match cli.command {
+            Command::Deinit { force } => assert!(force),
+            _ => panic!("expected Deinit command"),
         }
     }
 

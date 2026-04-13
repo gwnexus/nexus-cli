@@ -2,7 +2,9 @@
 
 mod auth;
 mod config_cmd;
+mod deinit;
 mod init;
+mod link;
 
 use crate::{Cli, Command, ConfigAction};
 
@@ -13,6 +15,17 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
             init::run(path, name.as_deref(), project_id.as_deref(), &api_url, force).await?;
+        }
+        Command::Link { ref project_id } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            link::link(&api_url, project_id.as_deref()).await?;
+        }
+        Command::Unlink => {
+            link::unlink()?;
+        }
+        Command::Deinit { force } => {
+            deinit::run(force)?;
         }
         Command::Login => {
             let config = nexus_core::config::Config::load()?;
