@@ -9,8 +9,10 @@ use crate::{Cli, Command, ConfigAction};
 /// Dispatch the parsed CLI command to the appropriate handler.
 pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Init { path, name, force } => {
-            init::run(&path, name.as_deref(), force).await?;
+        Command::Init { ref path, ref name, ref project_id, force } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            init::run(path, name.as_deref(), project_id.as_deref(), &api_url, force).await?;
         }
         Command::Login => {
             let config = nexus_core::config::Config::load()?;

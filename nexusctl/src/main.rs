@@ -46,6 +46,10 @@ pub enum Command {
         #[arg(short, long)]
         name: Option<String>,
 
+        /// Nexus project UUID (enables server-aware init: pulls skills, commands, MCP config).
+        #[arg(long)]
+        project_id: Option<String>,
+
         /// Skip interactive prompts and use defaults.
         #[arg(short, long)]
         force: bool,
@@ -130,9 +134,10 @@ mod tests {
     fn test_parse_init_default() {
         let cli = Cli::try_parse_from(["nexus", "init"]).unwrap();
         match cli.command {
-            Command::Init { ref path, ref name, force } => {
+            Command::Init { ref path, ref name, ref project_id, force } => {
                 assert_eq!(path, ".");
                 assert!(name.is_none());
+                assert!(project_id.is_none());
                 assert!(!force);
             }
             _ => panic!("expected Init command"),
@@ -143,9 +148,10 @@ mod tests {
     fn test_parse_init_with_path_and_name() {
         let cli = Cli::try_parse_from(["nexus", "init", "/tmp/myproject", "-n", "My Project"]).unwrap();
         match cli.command {
-            Command::Init { ref path, ref name, force } => {
+            Command::Init { ref path, ref name, ref project_id, force } => {
                 assert_eq!(path, "/tmp/myproject");
                 assert_eq!(name.as_deref(), Some("My Project"));
+                assert!(project_id.is_none());
                 assert!(!force);
             }
             _ => panic!("expected Init command"),
@@ -157,6 +163,20 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "init", "--force"]).unwrap();
         match cli.command {
             Command::Init { force, .. } => assert!(force),
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_init_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus", "init", ".", "--project-id", "fdc7a78c-d0b9-46fd-8206-9fc57301de2d", "--force",
+        ]).unwrap();
+        match cli.command {
+            Command::Init { ref project_id, force, .. } => {
+                assert_eq!(project_id.as_deref(), Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"));
+                assert!(force);
+            }
             _ => panic!("expected Init command"),
         }
     }

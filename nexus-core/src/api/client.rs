@@ -6,9 +6,10 @@
 //! - Typed error mapping from HTTP status codes
 
 use reqwest::StatusCode;
+use serde_json::json;
 use tracing::debug;
 
-use crate::api::types::{ApiError, AuthStatusResponse};
+use crate::api::types::{ApiError, AuthStatus, AuthStatusResponse, IdentityResponse, SkillExportResponse};
 use crate::Error;
 
 /// HTTP client for the Nexus API.
@@ -53,9 +54,32 @@ impl NexusClient {
         self.token = Some(token);
     }
 
-    /// Check authentication status by calling the auth endpoint.
+    /// Check authentication status via the MCP identity endpoint.
+    ///
+    /// Returns a legacy `AuthStatusResponse` wrapper for backward compatibility
+    /// with the login/status commands.
     pub async fn auth_status(&self) -> Result<AuthStatusResponse, Error> {
-        self.get("/api/auth/me").await
+        let identity: IdentityResponse = self.get("/api/mcp/identity").await?;
+        let user = AuthStatus::from(&identity);
+        Ok(AuthStatusResponse { user })
+    }
+
+    /// Get the full identity response from `GET /api/mcp/identity`.
+    ///
+    /// Returns user info, platform role, project memberships, and agent assignments.
+    pub async fn get_identity(&self) -> Result<IdentityResponse, Error> {
+        self.get("/api/mcp/identity").await
+    }
+
+    /// Export all enabled skills for a project via `POST /api/mcp/skills`.
+    ///
+    /// Calls the `sk_export` action on the MCP skills endpoint.
+    pub async fn export_skills(&self, project_id: &str) -> Result<SkillExportResponse, Error> {
+        let body = json!({
+            "action": "sk_export",
+            "project_id": project_id
+        });
+        self.post("/api/mcp/skills", &body).await
     }
 
     /// Send a GET request and deserialize the JSON response.
@@ -73,7 +97,6 @@ impl NexusClient {
     }
 
     /// Send a POST request with a JSON body and deserialize the response.
-    #[allow(dead_code)]
     async fn post<T, B>(&self, path: &str, body: &B) -> Result<T, Error>
     where
         T: serde::de::DeserializeOwned,

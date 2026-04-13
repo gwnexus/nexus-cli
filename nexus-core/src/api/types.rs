@@ -2,7 +2,50 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Authentication status returned by the Nexus API.
+// ---------------------------------------------------------------------------
+// Identity (GET /api/mcp/identity)
+// ---------------------------------------------------------------------------
+
+/// Project membership entry from the identity endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMembership {
+    pub project_id: String,
+    pub role: String,
+}
+
+/// Agent assignment entry from the identity endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAssignment {
+    pub project_id: String,
+    pub agent_id: String,
+    pub agent_owner: Option<String>,
+}
+
+/// Identity response returned by `GET /api/mcp/identity`.
+///
+/// This is a flat JSON object (not wrapped in a `user` key).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityResponse {
+    pub user_id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub is_platform_admin: bool,
+    pub is_platform_owner: bool,
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub memberships: Vec<ProjectMembership>,
+    #[serde(default)]
+    pub agent_assignments: Vec<AgentAssignment>,
+}
+
+// ---------------------------------------------------------------------------
+// Legacy auth types (kept for backward compat, delegates to IdentityResponse)
+// ---------------------------------------------------------------------------
+
+/// Authentication status -- legacy wrapper around IdentityResponse fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthStatus {
     pub user_id: String,
@@ -11,11 +54,67 @@ pub struct AuthStatus {
     pub platform_role: String,
 }
 
-/// Wrapper for auth status API response.
+impl From<&IdentityResponse> for AuthStatus {
+    fn from(id: &IdentityResponse) -> Self {
+        let role = if id.is_platform_owner {
+            "platform_owner"
+        } else if id.is_platform_admin {
+            "platform_admin"
+        } else {
+            "member"
+        };
+        Self {
+            user_id: id.user_id.clone(),
+            email: id.email.clone(),
+            display_name: id.display_name.clone(),
+            platform_role: role.to_string(),
+        }
+    }
+}
+
+/// Wrapper for auth status API response (legacy).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthStatusResponse {
     pub user: AuthStatus,
 }
+
+// ---------------------------------------------------------------------------
+// Skill export (POST /api/mcp/skills  action=sk_export)
+// ---------------------------------------------------------------------------
+
+/// Project summary included in the skill export response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillExportProject {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+}
+
+/// A single exported skill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedSkill {
+    pub skill_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub version: i64,
+    pub body: Option<String>,
+    pub command_slug: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+/// Response from `sk_export` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillExportResponse {
+    pub action: String,
+    pub project: SkillExportProject,
+    pub skills: Vec<ExportedSkill>,
+    pub count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
 
 /// Project summary returned by listing endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +131,10 @@ pub struct ProjectSummary {
 pub struct ProjectListResponse {
     pub projects: Vec<ProjectSummary>,
 }
+
+// ---------------------------------------------------------------------------
+// Generic error
+// ---------------------------------------------------------------------------
 
 /// Generic API error shape returned by the Nexus server.
 #[derive(Debug, Clone, Deserialize)]
