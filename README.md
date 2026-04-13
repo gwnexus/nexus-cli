@@ -36,6 +36,8 @@ nexus logout            Remove stored credentials
 nexus status            Show auth, project, and workspace status
 nexus link [--project-id <id>]  Bind a project to the current workspace
 nexus unlink            Remove project binding from the workspace
+nexus pull [--project-id <id>]  Pull skills and config from the Nexus platform
+nexus skills export [--project-id <id>]  Export enabled skills as JSON
 nexus deinit [--force]  Remove all AI scaffold files from the workspace
 nexus config show       Display configuration
 nexus config set K=V    Update a configuration value

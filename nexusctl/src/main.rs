@@ -81,6 +81,19 @@ pub enum Command {
     /// Show current authentication and project status.
     Status,
 
+    /// Pull skills and configuration from the Nexus platform into this workspace.
+    Pull {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Skills management subcommands.
+    Skills {
+        #[command(subcommand)]
+        action: SkillsAction,
+    },
+
     /// View or update CLI configuration.
     Config {
         #[command(subcommand)]
@@ -102,6 +115,17 @@ pub enum ConfigAction {
 
     /// Show the configuration file path.
     Path,
+}
+
+/// Skills management subcommands.
+#[derive(Debug, Subcommand)]
+pub enum SkillsAction {
+    /// Export enabled skills for the linked project as JSON.
+    Export {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
 }
 
 impl Cli {
@@ -315,5 +339,53 @@ mod tests {
     fn test_unknown_command_fails() {
         let result = Cli::try_parse_from(["nexus", "unknown"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_pull_no_args() {
+        let cli = Cli::try_parse_from(["nexus", "pull"]).unwrap();
+        match cli.command {
+            Command::Pull { ref project_id } => {
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus", "pull", "--project-id", "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        ]).unwrap();
+        match cli.command {
+            Command::Pull { ref project_id } => {
+                assert_eq!(project_id.as_deref(), Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"));
+            }
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_skills_export_no_args() {
+        let cli = Cli::try_parse_from(["nexus", "skills", "export"]).unwrap();
+        match cli.command {
+            Command::Skills { action: SkillsAction::Export { ref project_id } } => {
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Skills Export command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_skills_export_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus", "skills", "export", "--project-id", "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        ]).unwrap();
+        match cli.command {
+            Command::Skills { action: SkillsAction::Export { ref project_id } } => {
+                assert_eq!(project_id.as_deref(), Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"));
+            }
+            _ => panic!("expected Skills Export command"),
+        }
     }
 }

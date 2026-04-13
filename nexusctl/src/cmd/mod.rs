@@ -5,8 +5,10 @@ mod config_cmd;
 mod deinit;
 mod init;
 mod link;
+mod pull;
+mod skills_cmd;
 
-use crate::{Cli, Command, ConfigAction};
+use crate::{Cli, Command, ConfigAction, SkillsAction};
 
 /// Dispatch the parsed CLI command to the appropriate handler.
 pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
@@ -40,6 +42,18 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let api_url = cli.resolve_api_url(&config);
             auth::status(&api_url).await?;
         }
+        Command::Pull { ref project_id } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            pull::run(&api_url, project_id.as_deref()).await?;
+        }
+        Command::Skills { ref action } => match action {
+            SkillsAction::Export { ref project_id } => {
+                let config = nexus_core::config::Config::load()?;
+                let api_url = cli.resolve_api_url(&config);
+                skills_cmd::export(&api_url, project_id.as_deref()).await?;
+            }
+        },
         Command::Config { action } => match action {
             ConfigAction::Show => config_cmd::show()?,
             ConfigAction::Set { pair } => config_cmd::set(&pair)?,
