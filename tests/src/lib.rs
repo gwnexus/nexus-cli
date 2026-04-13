@@ -4,6 +4,9 @@
 mod auth_tests;
 
 #[cfg(test)]
+mod client_tests;
+
+#[cfg(test)]
 mod config_tests;
 
 #[cfg(test)]
