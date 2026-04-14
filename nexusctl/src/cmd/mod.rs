@@ -16,7 +16,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Init { ref path, ref name, ref project_id, force } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
-            init::run(path, name.as_deref(), project_id.as_deref(), &api_url, force).await?;
+            init::run(path, name.as_deref(), project_id.as_deref(), &api_url, force, config.mcp_source).await?;
         }
         Command::Link { ref project_id } => {
             let config = nexus_core::config::Config::load()?;

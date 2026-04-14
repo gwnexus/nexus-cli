@@ -23,6 +23,50 @@ pub enum OutputPreference {
     Plain,
 }
 
+/// MCP server source preference.
+///
+/// Controls whether `nexus init` generates MCP configs pointing to the
+/// published npm package (`npx @mpowr/nexus-mcp`) or a local checkout
+/// (`node tools/nexus-mcp/dist/server.js`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpSource {
+    /// Use the published npm package via npx (default).
+    Npm,
+    /// Use a local checkout of the MCP server.
+    Local,
+}
+
+impl Default for McpSource {
+    fn default() -> Self {
+        Self::Npm
+    }
+}
+
+impl fmt::Display for McpSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Npm => write!(f, "npm"),
+            Self::Local => write!(f, "local"),
+        }
+    }
+}
+
+impl FromStr for McpSource {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "npm" => Ok(Self::Npm),
+            "local" => Ok(Self::Local),
+            other => Err(Error::Config(format!(
+                "unknown mcp_source '{}', expected: npm, local",
+                other
+            ))),
+        }
+    }
+}
+
 impl Default for OutputPreference {
     fn default() -> Self {
         Self::Table
@@ -69,6 +113,10 @@ pub struct Config {
     /// Disable colored output.
     #[serde(default)]
     pub no_color: bool,
+
+    /// MCP server source: npm (default) or local.
+    #[serde(default)]
+    pub mcp_source: McpSource,
 }
 
 fn default_api_url() -> String {
@@ -81,6 +129,7 @@ impl Default for Config {
             api_url: DEFAULT_API_URL.to_string(),
             default_output: OutputPreference::default(),
             no_color: false,
+            mcp_source: McpSource::default(),
         }
     }
 }
@@ -141,8 +190,12 @@ impl Config {
                     .map_err(|_| Error::Config(format!("invalid bool value: '{}'", value)))?;
                 Ok(())
             }
+            "mcp_source" => {
+                self.mcp_source = value.parse()?;
+                Ok(())
+            }
             other => Err(Error::Config(format!(
-                "unknown config key '{}', valid keys: api_url, default_output, no_color",
+                "unknown config key '{}', valid keys: api_url, default_output, no_color, mcp_source",
                 other
             ))),
         }

@@ -1,6 +1,6 @@
 //! Tests for nexus_core::config module.
 
-use nexus_core::config::{Config, OutputPreference};
+use nexus_core::config::{Config, McpSource, OutputPreference};
 
 #[test]
 fn test_config_default_values() {
@@ -8,6 +8,7 @@ fn test_config_default_values() {
     assert_eq!(config.api_url, "https://nexus.mpowr.tech");
     assert_eq!(config.default_output, OutputPreference::Table);
     assert!(!config.no_color);
+    assert_eq!(config.mcp_source, McpSource::Npm);
 }
 
 #[test]
@@ -36,6 +37,7 @@ fn test_config_toml_roundtrip() {
         api_url: "https://custom.nexus.api".to_string(),
         default_output: OutputPreference::Json,
         no_color: true,
+        mcp_source: McpSource::Local,
     };
 
     let serialized = toml::to_string_pretty(&config).unwrap();
@@ -44,6 +46,7 @@ fn test_config_toml_roundtrip() {
     assert_eq!(deserialized.api_url, config.api_url);
     assert_eq!(deserialized.default_output, config.default_output);
     assert_eq!(deserialized.no_color, config.no_color);
+    assert_eq!(deserialized.mcp_source, config.mcp_source);
 }
 
 #[test]
@@ -56,6 +59,7 @@ fn test_config_backward_compat_minimal() {
     // Defaults should fill in
     assert_eq!(config.default_output, OutputPreference::Table);
     assert!(!config.no_color);
+    assert_eq!(config.mcp_source, McpSource::Npm);
 }
 
 #[test]
@@ -67,10 +71,22 @@ fn test_output_preference_display() {
 
 #[test]
 fn test_output_preference_from_str() {
-    assert_eq!("table".parse::<OutputPreference>().unwrap(), OutputPreference::Table);
-    assert_eq!("json".parse::<OutputPreference>().unwrap(), OutputPreference::Json);
-    assert_eq!("plain".parse::<OutputPreference>().unwrap(), OutputPreference::Plain);
-    assert_eq!("JSON".parse::<OutputPreference>().unwrap(), OutputPreference::Json);
+    assert_eq!(
+        "table".parse::<OutputPreference>().unwrap(),
+        OutputPreference::Table
+    );
+    assert_eq!(
+        "json".parse::<OutputPreference>().unwrap(),
+        OutputPreference::Json
+    );
+    assert_eq!(
+        "plain".parse::<OutputPreference>().unwrap(),
+        OutputPreference::Plain
+    );
+    assert_eq!(
+        "JSON".parse::<OutputPreference>().unwrap(),
+        OutputPreference::Json
+    );
 }
 
 #[test]
@@ -81,7 +97,11 @@ fn test_output_preference_from_str_invalid() {
 
 #[test]
 fn test_output_preference_serde_roundtrip() {
-    let prefs = vec![OutputPreference::Table, OutputPreference::Json, OutputPreference::Plain];
+    let prefs = vec![
+        OutputPreference::Table,
+        OutputPreference::Json,
+        OutputPreference::Plain,
+    ];
     for pref in prefs {
         let json = serde_json::to_string(&pref).unwrap();
         let deserialized: OutputPreference = serde_json::from_str(&json).unwrap();
@@ -101,6 +121,12 @@ fn test_config_set_valid_keys() {
 
     config.set("no_color", "true").unwrap();
     assert!(config.no_color);
+
+    config.set("mcp_source", "local").unwrap();
+    assert_eq!(config.mcp_source, McpSource::Local);
+
+    config.set("mcp_source", "npm").unwrap();
+    assert_eq!(config.mcp_source, McpSource::Npm);
 }
 
 #[test]
@@ -122,4 +148,41 @@ fn test_config_set_invalid_output() {
     let mut config = Config::default();
     let result = config.set("default_output", "xml");
     assert!(result.is_err());
+}
+
+#[test]
+fn test_config_set_invalid_mcp_source() {
+    let mut config = Config::default();
+    let result = config.set("mcp_source", "docker");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_mcp_source_display() {
+    assert_eq!(McpSource::Npm.to_string(), "npm");
+    assert_eq!(McpSource::Local.to_string(), "local");
+}
+
+#[test]
+fn test_mcp_source_from_str() {
+    assert_eq!("npm".parse::<McpSource>().unwrap(), McpSource::Npm);
+    assert_eq!("local".parse::<McpSource>().unwrap(), McpSource::Local);
+    assert_eq!("NPM".parse::<McpSource>().unwrap(), McpSource::Npm);
+    assert_eq!("LOCAL".parse::<McpSource>().unwrap(), McpSource::Local);
+}
+
+#[test]
+fn test_mcp_source_from_str_invalid() {
+    assert!("docker".parse::<McpSource>().is_err());
+    assert!("".parse::<McpSource>().is_err());
+}
+
+#[test]
+fn test_mcp_source_serde_roundtrip() {
+    let sources = vec![McpSource::Npm, McpSource::Local];
+    for src in sources {
+        let json = serde_json::to_string(&src).unwrap();
+        let deserialized: McpSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, src);
+    }
 }

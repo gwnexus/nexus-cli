@@ -14,6 +14,7 @@ pub mod error;
 // Re-exports for convenience
 pub use error::Error;
 pub use config::OutputPreference;
+pub use config::McpSource;
 
 /// Convenience type alias for results using the nexus-core error type.
 pub type Result<T> = std::result::Result<T, Error>;

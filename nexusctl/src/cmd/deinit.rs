@@ -14,7 +14,6 @@ const SCAFFOLD_ENTRIES: &[&str] = &[
     ".opencode/commands",
     "opencode.json",
     "opencode.jsonc",
-    ".mcp.json",
     "AGENTS.md",
 ];
 

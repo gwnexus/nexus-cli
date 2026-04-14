@@ -7,15 +7,18 @@
 //! +-- .nexus/
 //! |   +-- config.toml          # project-local Nexus config
 //! +-- .claude/
-//! |   +-- CLAUDE.md            # Claude agent instructions
+//! |   +-- CLAUDE.md            # Claude agent instructions (git-ignored)
 //! |   +-- skills/              # Claude skill definitions (pulled from server)
 //! +-- .opencode/
 //! |   +-- commands/            # OpenCode command definitions (from skills)
-//! +-- opencode.json            # OpenCode MCP server configuration
-//! +-- .mcp.json                # Claude MCP server configuration
+//! +-- opencode.json            # OpenCode MCP server configuration (git-ignored)
 //! +-- AGENTS.md                # Agent role definitions
 //! +-- .gitignore (appended)    # Nexus-specific ignores
 //! ```
+//!
+//! Both `opencode.json` and `.claude/CLAUDE.md` are user-managed files that
+//! must NOT be committed to the repository. They are added to `.gitignore`
+//! by this command and are only created if they do not already exist.
 //!
 //! When `--project-id` is provided and a valid token exists, the init command
 //! becomes **server-aware**: it verifies the identity, exports skills from the
@@ -25,6 +28,7 @@ use console::style;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::Credentials;
 use nexus_core::config;
+use nexus_core::McpSource;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -35,6 +39,7 @@ pub async fn run(
     project_id: Option<&str>,
     api_url: &str,
     force: bool,
+    mcp_source: McpSource,
 ) -> anyhow::Result<()> {
     let target = PathBuf::from(path).canonicalize().unwrap_or_else(|_| {
         // Path doesn't exist yet; resolve relative to cwd
@@ -145,7 +150,7 @@ pub async fn run(
                     }
 
                     // Write MCP server configs
-                    write_mcp_configs(&target, project_name, api_url)?;
+                    write_mcp_configs(&target, project_name, api_url, mcp_source)?;
                 }
                 Err(e) => {
                     println!(
@@ -227,12 +232,22 @@ name = "{name}"
 }
 
 /// Create .claude/ directory with instruction template and skills folder.
+///
+/// CLAUDE.md is only written if it does not already exist (it is user-managed
+/// and excluded from version control via .gitignore).
 fn create_claude_dir(target: &Path, project_name: &str) -> anyhow::Result<()> {
     let claude_dir = target.join(".claude");
     fs::create_dir_all(claude_dir.join("skills"))?;
 
-    let claude_md = format!(
-        r#"---
+    let claude_md_path = claude_dir.join("CLAUDE.md");
+    if claude_md_path.exists() {
+        println!(
+            "   {} .claude/CLAUDE.md already exists, skipping",
+            style("--").yellow()
+        );
+    } else {
+        let claude_md = format!(
+            r#"---
 type: bootstrap
 scope: repo
 project: {name}
@@ -266,11 +281,13 @@ NEVER:
 - commit secrets
 - persist secrets into shared memory
 "#,
-        name = project_name,
-    );
+            name = project_name,
+        );
 
-    fs::write(claude_dir.join("CLAUDE.md"), claude_md)?;
-    print_created(".claude/CLAUDE.md");
+        fs::write(&claude_md_path, claude_md)?;
+        print_created(".claude/CLAUDE.md");
+    }
+
     print_created(".claude/skills/");
 
     Ok(())
@@ -361,6 +378,8 @@ fn append_gitignore(target: &Path) -> anyhow::Result<()> {
 {marker}
 .env.local
 .nexus/credentials.toml
+opencode.json
+.claude/CLAUDE.md
 "#,
         marker = marker,
     );
@@ -451,54 +470,70 @@ Load the skill file at `.claude/skills/{skill_id}/SKILL.md` and follow its instr
     Ok(())
 }
 
-/// Write MCP server configurations to `opencode.json` and `.mcp.json`.
+/// Write MCP server configuration to `opencode.json`.
+///
+/// Uses the correct OpenCode config schema:
+/// - Top-level key `mcp` (not `mcpServers`)
+/// - `type: "local"` (not `"stdio"`)
+/// - `command` is an array including arguments
+/// - `environment` (not `env`)
+/// - Variable substitution via `{env:VAR}` syntax
+///
+/// When `mcp_source` is `Npm` (default), the command runs the published
+/// `@mpowr/nexus-mcp` package via npx. When `Local`, it points to the
+/// local checkout at `tools/nexus-mcp/dist/server.js`.
+///
+/// Skips writing if the file already exists (user-managed, not tracked in git).
 fn write_mcp_configs(
     target: &Path,
-    project_name: &str,
+    _project_name: &str,
     _api_url: &str,
+    mcp_source: McpSource,
 ) -> anyhow::Result<()> {
-    // opencode.json (OpenCode MCP config)
+    let opencode_path = target.join("opencode.json");
+
+    if opencode_path.exists() {
+        println!(
+            "   {} opencode.json already exists, skipping",
+            style("--").yellow()
+        );
+        return Ok(());
+    }
+
+    let command_block = match mcp_source {
+        McpSource::Npm => r#""command": ["npx", "@mpowr/nexus-mcp"]"#,
+        McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
+    };
+
     let opencode_json = format!(
         r#"{{
-  "$schema": "https://opencode.ai/config.schema.json",
-  "name": "{name}",
-  "mcpServers": {{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {{
     "nexus": {{
-      "type": "stdio",
-      "command": "node",
-      "args": ["tools/nexus-mcp/dist/server.js"],
-      "env": {{
-        "NEXUS_API_URL": "${{NEXUS_API_URL}}",
-        "NEXUS_PRIVATE_TOKEN": "${{NEXUS_PRIVATE_TOKEN}}"
+      "type": "local",
+      {command_block},
+      "environment": {{
+        "NEXUS_API_URL": "{{env:NEXUS_API_URL}}",
+        "NEXUS_PRIVATE_TOKEN": "{{env:NEXUS_PRIVATE_TOKEN}}"
       }}
     }}
   }}
 }}
 "#,
-        name = project_name,
+        command_block = command_block,
     );
 
-    fs::write(target.join("opencode.json"), opencode_json)?;
-    print_created("opencode.json");
+    fs::write(&opencode_path, opencode_json)?;
 
-    // .mcp.json (Claude Code MCP config)
-    let mcp_json = r#"{
-  "mcpServers": {
-    "nexus": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["tools/nexus-mcp/dist/server.js"],
-      "env": {
-        "NEXUS_API_URL": "${NEXUS_API_URL}",
-        "NEXUS_PRIVATE_TOKEN": "${NEXUS_PRIVATE_TOKEN}"
-      }
-    }
-  }
-}
-"#;
-
-    fs::write(target.join(".mcp.json"), mcp_json)?;
-    print_created(".mcp.json");
+    let source_label = match mcp_source {
+        McpSource::Npm => "npm (@mpowr/nexus-mcp)",
+        McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
+    };
+    println!(
+        "   {} opencode.json (MCP source: {})",
+        style("+").bold().green(),
+        source_label,
+    );
 
     Ok(())
 }
@@ -557,6 +592,7 @@ mod tests {
             None,
             "https://nexus.mpowr.tech",
             false,
+            McpSource::Npm,
         )
         .await
         .unwrap();
@@ -577,9 +613,8 @@ mod tests {
         let agents = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
         assert!(agents.contains("test-project"));
 
-        // Should NOT have opencode.json or .mcp.json (no project_id)
+        // Should NOT have opencode.json (no project_id, so no server-aware phase)
         assert!(!dir.join("opencode.json").exists());
-        assert!(!dir.join(".mcp.json").exists());
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
@@ -596,6 +631,7 @@ mod tests {
             Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"),
             "https://nexus.mpowr.tech",
             false,
+            McpSource::Npm,
         )
         .await
         .unwrap();
@@ -618,6 +654,7 @@ mod tests {
             None,
             "https://nexus.mpowr.tech",
             false,
+            McpSource::Npm,
         )
         .await;
         assert!(result.is_err());
@@ -637,6 +674,7 @@ mod tests {
             None,
             "https://nexus.mpowr.tech",
             true,
+            McpSource::Npm,
         )
         .await;
         assert!(result.is_ok());
@@ -657,12 +695,39 @@ mod tests {
             None,
             "https://nexus.mpowr.tech",
             false,
+            McpSource::Npm,
         )
         .await
         .unwrap();
 
         let agents = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
         assert_eq!(agents, "custom content");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_init_preserves_existing_claude_md() {
+        let dir = temp_project_dir("preserves-claude-md");
+        let claude_dir = dir.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(claude_dir.join("CLAUDE.md"), "user-managed instructions").unwrap();
+
+        run(
+            dir.to_str().unwrap(),
+            Some("test"),
+            None,
+            "https://nexus.mpowr.tech",
+            false,
+            McpSource::Npm,
+        )
+        .await
+        .unwrap();
+
+        // Must NOT overwrite existing CLAUDE.md
+        let claude_md = fs::read_to_string(claude_dir.join("CLAUDE.md")).unwrap();
+        assert_eq!(claude_md, "user-managed instructions");
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
@@ -679,6 +744,7 @@ mod tests {
             None,
             "https://nexus.mpowr.tech",
             true,
+            McpSource::Npm,
         )
         .await
         .unwrap();
@@ -700,6 +766,7 @@ mod tests {
             None,
             "https://nexus.mpowr.tech",
             false,
+            McpSource::Npm,
         )
         .await
         .unwrap();
@@ -711,6 +778,7 @@ mod tests {
             None,
             "https://nexus.mpowr.tech",
             true,
+            McpSource::Npm,
         )
         .await
         .unwrap();
@@ -718,6 +786,10 @@ mod tests {
         let gitignore = fs::read_to_string(dir.join(".gitignore")).unwrap();
         let marker_count = gitignore.matches("# Nexus CLI").count();
         assert_eq!(marker_count, 1, "gitignore marker should appear only once");
+
+        // Verify that opencode.json and .claude/CLAUDE.md are in .gitignore
+        assert!(gitignore.contains("opencode.json"), "opencode.json must be in .gitignore");
+        assert!(gitignore.contains(".claude/CLAUDE.md"), ".claude/CLAUDE.md must be in .gitignore");
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
@@ -808,21 +880,63 @@ mod tests {
     }
 
     #[test]
-    fn test_write_mcp_configs() {
-        let dir = temp_project_dir("mcp-configs");
+    fn test_write_mcp_configs_npm_mode() {
+        let dir = temp_project_dir("mcp-configs-npm");
 
-        write_mcp_configs(&dir, "test-proj", "https://nexus.mpowr.tech").unwrap();
+        write_mcp_configs(&dir, "test-proj", "https://nexus.mpowr.tech", McpSource::Npm).unwrap();
 
-        // opencode.json
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(oc.contains("\"nexus\""));
-        assert!(oc.contains("tools/nexus-mcp/dist/server.js"));
-        assert!(oc.contains("test-proj"));
+        // Must use npx command for npm mode
+        assert!(oc.contains("@mpowr/nexus-mcp"));
+        assert!(oc.contains("npx"));
+        assert!(!oc.contains("tools/nexus-mcp/dist/server.js"));
+        // Must use "mcp" key (not "mcpServers")
+        assert!(oc.contains("\"mcp\""));
+        assert!(!oc.contains("\"mcpServers\""));
+        // Must use "local" type (not "stdio")
+        assert!(oc.contains("\"local\""));
+        assert!(!oc.contains("\"stdio\""));
+        // Must use "environment" (not "env")
+        assert!(oc.contains("\"environment\""));
+        // Must use {env:VAR} syntax
+        assert!(oc.contains("{env:NEXUS_API_URL}"));
 
-        // .mcp.json
-        let mcp = fs::read_to_string(dir.join(".mcp.json")).unwrap();
-        assert!(mcp.contains("\"nexus\""));
-        assert!(mcp.contains("tools/nexus-mcp/dist/server.js"));
+        // .mcp.json must NOT be created
+        assert!(!dir.join(".mcp.json").exists());
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_local_mode() {
+        let dir = temp_project_dir("mcp-configs-local");
+
+        write_mcp_configs(&dir, "test-proj", "https://nexus.mpowr.tech", McpSource::Local).unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        // Must use local command
+        assert!(oc.contains("tools/nexus-mcp/dist/server.js"));
+        assert!(!oc.contains("npx"));
+        assert!(!oc.contains("@mpowr/nexus-mcp"));
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_skips_existing() {
+        let dir = temp_project_dir("mcp-configs-skip");
+
+        // Pre-create opencode.json with custom content
+        fs::write(dir.join("opencode.json"), "user-managed content").unwrap();
+
+        write_mcp_configs(&dir, "test-proj", "https://nexus.mpowr.tech", McpSource::Npm).unwrap();
+
+        // Must NOT overwrite existing file
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        assert_eq!(oc, "user-managed content");
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
