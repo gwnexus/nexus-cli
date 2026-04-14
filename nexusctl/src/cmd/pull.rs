@@ -31,9 +31,7 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Result<
 
     // Resolve authentication token
     let token = resolve_token().ok_or_else(|| {
-        anyhow::anyhow!(
-            "No authentication token found. Run 'nexus login' first."
-        )
+        anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
     })?;
 
     let client = NexusClient::new(api_url, Some(token))?;
@@ -82,10 +80,7 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Result<
     );
 
     println!();
-    println!(
-        "{} Pull complete.",
-        style("OK").bold().green()
-    );
+    println!("{} Pull complete.", style("OK").bold().green());
 
     Ok(())
 }
@@ -108,7 +103,10 @@ fn write_skill(target: &Path, skill: &nexus_core::api::ExportedSkill) -> anyhow:
     let skill_dir = target.join(".claude").join("skills").join(&skill.skill_id);
     fs::create_dir_all(&skill_dir)?;
 
-    let body = skill.body.as_deref().unwrap_or("<!-- No skill body defined -->");
+    let body = skill
+        .body
+        .as_deref()
+        .unwrap_or("<!-- No skill body defined -->");
 
     let content = format!(
         r#"---

@@ -181,7 +181,10 @@ fn test_identity_response_deserialize() {
     assert_eq!(identity.display_name.as_deref(), Some("Patrick"));
     assert!(identity.is_platform_admin);
     assert!(identity.is_platform_owner);
-    assert_eq!(identity.tenant_id.as_deref(), Some("20c72e35-d4d8-4e40-a7be-efff14d8eaff"));
+    assert_eq!(
+        identity.tenant_id.as_deref(),
+        Some("20c72e35-d4d8-4e40-a7be-efff14d8eaff")
+    );
     assert_eq!(identity.memberships.len(), 1);
     assert_eq!(identity.memberships[0].role, "owner");
     assert_eq!(identity.agent_assignments.len(), 1);
@@ -300,7 +303,10 @@ fn test_skill_export_response_deserialize() {
 
     assert_eq!(resp.skills[0].skill_id, "nx-git-commit");
     assert_eq!(resp.skills[0].name, "Git Commit");
-    assert_eq!(resp.skills[0].command_slug.as_deref(), Some("nexus-git-commit"));
+    assert_eq!(
+        resp.skills[0].command_slug.as_deref(),
+        Some("nexus-git-commit")
+    );
     assert!(!resp.skills[0].pinned);
 
     assert_eq!(resp.skills[1].skill_id, "nx-session-close");

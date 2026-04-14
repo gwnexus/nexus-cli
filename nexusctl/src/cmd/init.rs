@@ -44,9 +44,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let target = PathBuf::from(path).canonicalize().unwrap_or_else(|_| {
         // Path doesn't exist yet; resolve relative to cwd
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(path)
+        std::env::current_dir().unwrap_or_default().join(path)
     });
 
     let project_name = name.unwrap_or_else(|| {
@@ -74,9 +72,7 @@ pub async fn run(
     // Check if already initialized
     let nexus_dir = target.join(".nexus");
     if nexus_dir.exists() && !force {
-        anyhow::bail!(
-            "Directory already contains .nexus/. Use --force to reinitialize."
-        );
+        anyhow::bail!("Directory already contains .nexus/. Use --force to reinitialize.");
     }
 
     // -----------------------------------------------------------------------
@@ -167,7 +163,10 @@ pub async fn run(
                 "   {} No token found. Skipping server sync.",
                 style("--").yellow()
             );
-            println!("   Run 'nexus login' and then 'nexus init --force --project-id {}' again.", pid);
+            println!(
+                "   Run 'nexus login' and then 'nexus init --force --project-id {}' again.",
+                pid
+            );
         }
     }
 
@@ -403,7 +402,11 @@ AGENTS.md
         marker = marker,
     );
 
-    let ignores = if shadowed_ai { shadow_ignores } else { base_ignores };
+    let ignores = if shadowed_ai {
+        shadow_ignores
+    } else {
+        base_ignores
+    };
 
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -427,14 +430,14 @@ AGENTS.md
 // ---------------------------------------------------------------------------
 
 /// Write a skill definition to `.claude/skills/<skill_id>/SKILL.md`.
-fn write_skill(
-    target: &Path,
-    skill: &nexus_core::api::ExportedSkill,
-) -> anyhow::Result<()> {
+fn write_skill(target: &Path, skill: &nexus_core::api::ExportedSkill) -> anyhow::Result<()> {
     let skill_dir = target.join(".claude").join("skills").join(&skill.skill_id);
     fs::create_dir_all(&skill_dir)?;
 
-    let body = skill.body.as_deref().unwrap_or("<!-- No skill body defined -->");
+    let body = skill
+        .body
+        .as_deref()
+        .unwrap_or("<!-- No skill body defined -->");
 
     let content = format!(
         r#"---
@@ -462,10 +465,7 @@ source: nexus-platform
 }
 
 /// Write an OpenCode command for a skill to `.opencode/commands/<slug>.md`.
-fn write_command(
-    target: &Path,
-    skill: &nexus_core::api::ExportedSkill,
-) -> anyhow::Result<()> {
+fn write_command(target: &Path, skill: &nexus_core::api::ExportedSkill) -> anyhow::Result<()> {
     let slug = match skill.command_slug.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => return Ok(()), // No command slug, skip
@@ -570,11 +570,7 @@ fn write_mcp_configs(
 
 /// Print a "created" status line.
 fn print_created(path: &str) {
-    println!(
-        "   {} {}",
-        style("+").bold().green(),
-        path
-    );
+    println!("   {} {}", style("+").bold().green(), path);
 }
 
 /// Print the completion message.
@@ -599,11 +595,8 @@ mod tests {
 
     /// Helper to create a unique temp directory for testing init.
     fn temp_project_dir(suffix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "nexus-test-{}-{}",
-            std::process::id(),
-            suffix
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nexus-test-{}-{}", std::process::id(), suffix));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -823,8 +816,14 @@ mod tests {
         assert_eq!(marker_count, 1, "gitignore marker should appear only once");
 
         // Verify that opencode.json and .claude/CLAUDE.md are in .gitignore
-        assert!(gitignore.contains("opencode.json"), "opencode.json must be in .gitignore");
-        assert!(gitignore.contains(".claude/CLAUDE.md"), ".claude/CLAUDE.md must be in .gitignore");
+        assert!(
+            gitignore.contains("opencode.json"),
+            "opencode.json must be in .gitignore"
+        );
+        assert!(
+            gitignore.contains(".claude/CLAUDE.md"),
+            ".claude/CLAUDE.md must be in .gitignore"
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
@@ -846,11 +845,26 @@ mod tests {
         .unwrap();
 
         let gitignore = fs::read_to_string(dir.join(".gitignore")).unwrap();
-        assert!(gitignore.contains("AGENTS.md"), "AGENTS.md must be in .gitignore with --shadowed-ai");
-        assert!(gitignore.contains(".claude/"), ".claude/ must be in .gitignore with --shadowed-ai");
-        assert!(gitignore.contains(".opencode/"), ".opencode/ must be in .gitignore with --shadowed-ai");
-        assert!(gitignore.contains(".nexus/"), ".nexus/ must be in .gitignore with --shadowed-ai");
-        assert!(gitignore.contains("opencode.json"), "opencode.json must be in .gitignore with --shadowed-ai");
+        assert!(
+            gitignore.contains("AGENTS.md"),
+            "AGENTS.md must be in .gitignore with --shadowed-ai"
+        );
+        assert!(
+            gitignore.contains(".claude/"),
+            ".claude/ must be in .gitignore with --shadowed-ai"
+        );
+        assert!(
+            gitignore.contains(".opencode/"),
+            ".opencode/ must be in .gitignore with --shadowed-ai"
+        );
+        assert!(
+            gitignore.contains(".nexus/"),
+            ".nexus/ must be in .gitignore with --shadowed-ai"
+        );
+        assert!(
+            gitignore.contains("opencode.json"),
+            "opencode.json must be in .gitignore with --shadowed-ai"
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
@@ -944,7 +958,13 @@ mod tests {
     fn test_write_mcp_configs_npm_mode() {
         let dir = temp_project_dir("mcp-configs-npm");
 
-        write_mcp_configs(&dir, "test-proj", "https://nexus.mpowr.tech", McpSource::Npm).unwrap();
+        write_mcp_configs(
+            &dir,
+            "test-proj",
+            "https://nexus.mpowr.tech",
+            McpSource::Npm,
+        )
+        .unwrap();
 
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(oc.contains("\"nexus\""));
@@ -974,7 +994,13 @@ mod tests {
     fn test_write_mcp_configs_local_mode() {
         let dir = temp_project_dir("mcp-configs-local");
 
-        write_mcp_configs(&dir, "test-proj", "https://nexus.mpowr.tech", McpSource::Local).unwrap();
+        write_mcp_configs(
+            &dir,
+            "test-proj",
+            "https://nexus.mpowr.tech",
+            McpSource::Local,
+        )
+        .unwrap();
 
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
         // Must use local command
@@ -993,7 +1019,13 @@ mod tests {
         // Pre-create opencode.json with custom content
         fs::write(dir.join("opencode.json"), "user-managed content").unwrap();
 
-        write_mcp_configs(&dir, "test-proj", "https://nexus.mpowr.tech", McpSource::Npm).unwrap();
+        write_mcp_configs(
+            &dir,
+            "test-proj",
+            "https://nexus.mpowr.tech",
+            McpSource::Npm,
+        )
+        .unwrap();
 
         // Must NOT overwrite existing file
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();

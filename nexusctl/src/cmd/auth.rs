@@ -9,19 +9,13 @@ use nexus_core::auth::{Credentials, TOKEN_PREFIX};
 /// Prompts the user for a personal access token, validates the format,
 /// verifies it against the Nexus API, and stores the credentials.
 pub async fn login(api_url: &str) -> anyhow::Result<()> {
-    println!(
-        "{} Nexus authentication",
-        style(">>").bold().cyan()
-    );
+    println!("{} Nexus authentication", style(">>").bold().cyan());
     println!();
     println!(
         "Enter your personal access token (starts with '{}').",
         TOKEN_PREFIX
     );
-    println!(
-        "You can generate one at: {}/dashboard/settings",
-        api_url
-    );
+    println!("You can generate one at: {}/dashboard/settings", api_url);
     println!();
 
     // Read token from stdin
@@ -31,15 +25,13 @@ pub async fn login(api_url: &str) -> anyhow::Result<()> {
     Credentials::validate_token_format(&token)?;
 
     // Verify against API
-    println!(
-        "{} Verifying token...",
-        style(">>").bold().cyan()
-    );
+    println!("{} Verifying token...", style(">>").bold().cyan());
 
     let client = NexusClient::new(api_url, Some(token.clone()))?;
-    let auth_status = client.auth_status().await.map_err(|e| {
-        anyhow::anyhow!("Token verification failed: {}", e)
-    })?;
+    let auth_status = client
+        .auth_status()
+        .await
+        .map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
 
     // Store credentials
     let creds = Credentials {
@@ -62,19 +54,13 @@ pub async fn login(api_url: &str) -> anyhow::Result<()> {
 /// Remove stored credentials.
 pub fn logout() -> anyhow::Result<()> {
     Credentials::remove()?;
-    println!(
-        "{} Credentials removed.",
-        style("OK").bold().green()
-    );
+    println!("{} Credentials removed.", style("OK").bold().green());
     Ok(())
 }
 
 /// Display current authentication and workspace status.
 pub async fn status(api_url: &str) -> anyhow::Result<()> {
-    println!(
-        "{} Nexus Status",
-        style(">>").bold().cyan()
-    );
+    println!("{} Nexus Status", style(">>").bold().cyan());
     println!();
 
     // --- API URL ---

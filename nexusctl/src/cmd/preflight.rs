@@ -39,19 +39,15 @@ fn print_check(label: &str, result: &CheckResult) {
 
 /// Run a command and capture stdout (first line, trimmed).
 fn cmd_version(bin: &str, args: &[&str]) -> Option<String> {
-    Proc::new(bin)
-        .args(args)
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                // Take first line only
-                Some(s.lines().next().unwrap_or("").to_string())
-            } else {
-                None
-            }
-        })
+    Proc::new(bin).args(args).output().ok().and_then(|o| {
+        if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            // Take first line only
+            Some(s.lines().next().unwrap_or("").to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// Check: git
@@ -167,7 +163,9 @@ fn check_workspace() -> CheckResult {
         Ok(Some(project)) => CheckResult::Pass(format!("{} ({})", project.name, project.id)),
         Ok(None) => {
             if config_file.exists() {
-                CheckResult::Warn("Workspace exists but no project linked -- run 'nexus link'".into())
+                CheckResult::Warn(
+                    "Workspace exists but no project linked -- run 'nexus link'".into(),
+                )
             } else {
                 CheckResult::Warn("Workspace exists but no config.toml".into())
             }
@@ -204,17 +202,11 @@ fn check_mcp_configs() -> CheckResult {
 /// Run all preflight checks.
 pub async fn run(api_url: &str) -> anyhow::Result<()> {
     println!();
-    println!(
-        "{} Nexus Preflight Check",
-        style(">>").bold().cyan()
-    );
+    println!("{} Nexus Preflight Check", style(">>").bold().cyan());
     println!();
 
     // ── Tool checks ──
-    println!(
-        "  {}",
-        style("Tools").bold().underlined()
-    );
+    println!("  {}", style("Tools").bold().underlined());
     let git = check_git();
     print_check("git", &git);
     let node = check_node();
@@ -226,10 +218,7 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
     println!();
 
     // ── Config & Auth ──
-    println!(
-        "  {}",
-        style("Configuration").bold().underlined()
-    );
+    println!("  {}", style("Configuration").bold().underlined());
     let (config_check, _config) = check_config();
     print_check("config", &config_check);
     let (creds_check, token) = check_credentials();
@@ -239,10 +228,7 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
     println!();
 
     // ── Workspace ──
-    println!(
-        "  {}",
-        style("Workspace").bold().underlined()
-    );
+    println!("  {}", style("Workspace").bold().underlined());
     let workspace = check_workspace();
     print_check("project", &workspace);
     let mcp = check_mcp_configs();
@@ -250,7 +236,17 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
     println!();
 
     // ── Summary ──
-    let all_checks = [&git, &node, &npm, &npx, &config_check, &creds_check, &api_check, &workspace, &mcp];
+    let all_checks = [
+        &git,
+        &node,
+        &npm,
+        &npx,
+        &config_check,
+        &creds_check,
+        &api_check,
+        &workspace,
+        &mcp,
+    ];
     let fail_count = all_checks.iter().filter(|c| c.is_fail()).count();
     let warn_count = all_checks
         .iter()

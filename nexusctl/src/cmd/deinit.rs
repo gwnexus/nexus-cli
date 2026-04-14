@@ -55,11 +55,9 @@ pub fn run(force: bool) -> anyhow::Result<()> {
     println!();
 
     // Confirm unless --force
-    if !force {
-        if !confirm_deletion()? {
-            println!("   Aborted.");
-            return Ok(());
-        }
+    if !force && !confirm_deletion()? {
+        println!("   Aborted.");
+        return Ok(());
     }
 
     // Remove each entry
@@ -69,21 +67,13 @@ pub fn run(force: bool) -> anyhow::Result<()> {
 
     // Also clean up .opencode/ if it's now empty
     let opencode_dir = cwd.join(".opencode");
-    if opencode_dir.exists() {
-        if is_dir_empty(&opencode_dir)? {
-            fs::remove_dir(&opencode_dir)?;
-            println!(
-                "   {} .opencode/ (now empty)",
-                style("-").bold().red()
-            );
-        }
+    if opencode_dir.exists() && is_dir_empty(&opencode_dir)? {
+        fs::remove_dir(&opencode_dir)?;
+        println!("   {} .opencode/ (now empty)", style("-").bold().red());
     }
 
     println!();
-    println!(
-        "{} Nexus scaffold removed.",
-        style("OK").bold().green()
-    );
+    println!("{} Nexus scaffold removed.", style("OK").bold().green());
 
     Ok(())
 }
@@ -95,18 +85,10 @@ fn remove_entry(path: &Path) -> anyhow::Result<()> {
 
     if path.is_dir() {
         fs::remove_dir_all(path)?;
-        println!(
-            "   {} {}/",
-            style("x").bold().red(),
-            relative.display()
-        );
+        println!("   {} {}/", style("x").bold().red(), relative.display());
     } else {
         fs::remove_file(path)?;
-        println!(
-            "   {} {}",
-            style("x").bold().red(),
-            relative.display()
-        );
+        println!("   {} {}", style("x").bold().red(), relative.display());
     }
 
     Ok(())

@@ -17,9 +17,7 @@ pub async fn export(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Resu
 
     // Resolve authentication token
     let token = resolve_token().ok_or_else(|| {
-        anyhow::anyhow!(
-            "No authentication token found. Run 'nexus login' first."
-        )
+        anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
     })?;
 
     let client = NexusClient::new(api_url, Some(token))?;

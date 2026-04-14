@@ -14,10 +14,25 @@ use crate::{Cli, Command, ConfigAction, SkillsAction};
 /// Dispatch the parsed CLI command to the appropriate handler.
 pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Init { ref path, ref name, ref project_id, force, shadowed_ai } => {
+        Command::Init {
+            ref path,
+            ref name,
+            ref project_id,
+            force,
+            shadowed_ai,
+        } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
-            init::run(path, name.as_deref(), project_id.as_deref(), &api_url, force || cli.yes, config.mcp_source, shadowed_ai).await?;
+            init::run(
+                path,
+                name.as_deref(),
+                project_id.as_deref(),
+                &api_url,
+                force || cli.yes,
+                config.mcp_source,
+                shadowed_ai,
+            )
+            .await?;
         }
         Command::Link { ref project_id } => {
             let config = nexus_core::config::Config::load()?;

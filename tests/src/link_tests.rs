@@ -13,11 +13,8 @@ use std::path::PathBuf;
 
 /// Helper: create a unique temp directory for each test.
 fn temp_dir(suffix: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "nexus-link-test-{}-{}",
-        std::process::id(),
-        suffix
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("nexus-link-test-{}-{}", std::process::id(), suffix));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -90,7 +87,10 @@ fn test_load_project_config_returns_none_when_missing() {
     let dir = temp_dir("load-missing");
 
     let result = load_project_config(Some(&dir)).unwrap();
-    assert!(result.is_none(), "should return None when file does not exist");
+    assert!(
+        result.is_none(),
+        "should return None when file does not exist"
+    );
 
     // Cleanup
     let _ = fs::remove_dir_all(&dir);
@@ -144,7 +144,10 @@ fn test_remove_project_section_returns_false_when_no_project() {
     save_project_config(Some(&dir), &config).unwrap();
 
     let removed = remove_project_section(Some(&dir)).unwrap();
-    assert!(!removed, "should return false when no project section existed");
+    assert!(
+        !removed,
+        "should return false when no project section existed"
+    );
 
     // Cleanup
     let _ = fs::remove_dir_all(&dir);
@@ -156,7 +159,10 @@ fn test_remove_project_section_returns_false_when_no_file() {
 
     // No .nexus/config.toml at all
     let removed = remove_project_section(Some(&dir)).unwrap();
-    assert!(!removed, "should return false when config file does not exist");
+    assert!(
+        !removed,
+        "should return false when config file does not exist"
+    );
 
     // Cleanup
     let _ = fs::remove_dir_all(&dir);
@@ -218,7 +224,10 @@ fn test_resolve_project_id_errors_when_nothing_set() {
 
     // No config, no CLI flag
     let result = resolve_project_id(None, Some(&dir));
-    assert!(result.is_err(), "should error when no project ID is available");
+    assert!(
+        result.is_err(),
+        "should error when no project ID is available"
+    );
 
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -297,9 +306,15 @@ fn test_project_config_toml_content() {
 
     // Read raw TOML and verify structure
     let raw = fs::read_to_string(dir.join(".nexus/config.toml")).unwrap();
-    assert!(raw.contains("[project]"), "should contain [project] section");
+    assert!(
+        raw.contains("[project]"),
+        "should contain [project] section"
+    );
     assert!(raw.contains("uuid-123"), "should contain the project ID");
-    assert!(raw.contains("Content Check"), "should contain the project name");
+    assert!(
+        raw.contains("Content Check"),
+        "should contain the project name"
+    );
 
     // Cleanup
     let _ = fs::remove_dir_all(&dir);

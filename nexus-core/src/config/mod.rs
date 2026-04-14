@@ -15,62 +15,13 @@ use crate::Error;
 const DEFAULT_API_URL: &str = "https://nexus.mpowr.tech";
 
 /// Output format preference, stored in config and resolved from CLI flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputPreference {
+    #[default]
     Table,
     Json,
     Plain,
-}
-
-/// MCP server source preference.
-///
-/// Controls whether `nexus init` generates MCP configs pointing to the
-/// published npm package (`npx @mpowr/nexus-mcp`) or a local checkout
-/// (`node tools/nexus-mcp/dist/server.js`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpSource {
-    /// Use the published npm package via npx (default).
-    Npm,
-    /// Use a local checkout of the MCP server.
-    Local,
-}
-
-impl Default for McpSource {
-    fn default() -> Self {
-        Self::Npm
-    }
-}
-
-impl fmt::Display for McpSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Npm => write!(f, "npm"),
-            Self::Local => write!(f, "local"),
-        }
-    }
-}
-
-impl FromStr for McpSource {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "npm" => Ok(Self::Npm),
-            "local" => Ok(Self::Local),
-            other => Err(Error::Config(format!(
-                "unknown mcp_source '{}', expected: npm, local",
-                other
-            ))),
-        }
-    }
-}
-
-impl Default for OutputPreference {
-    fn default() -> Self {
-        Self::Table
-    }
 }
 
 impl fmt::Display for OutputPreference {
@@ -93,6 +44,45 @@ impl FromStr for OutputPreference {
             "plain" => Ok(Self::Plain),
             other => Err(Error::Config(format!(
                 "unknown output format '{}', expected: table, json, plain",
+                other
+            ))),
+        }
+    }
+}
+
+/// MCP server source preference.
+///
+/// Controls whether `nexus init` generates MCP configs pointing to the
+/// published npm package (`npx @mpowr/nexus-mcp`) or a local checkout
+/// (`node tools/nexus-mcp/dist/server.js`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpSource {
+    /// Use the published npm package via npx (default).
+    #[default]
+    Npm,
+    /// Use a local checkout of the MCP server.
+    Local,
+}
+
+impl fmt::Display for McpSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Npm => write!(f, "npm"),
+            Self::Local => write!(f, "local"),
+        }
+    }
+}
+
+impl FromStr for McpSource {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "npm" => Ok(Self::Npm),
+            "local" => Ok(Self::Local),
+            other => Err(Error::Config(format!(
+                "unknown mcp_source '{}', expected: npm, local",
                 other
             ))),
         }
@@ -137,9 +127,8 @@ impl Default for Config {
 impl Config {
     /// Returns the configuration directory path: `~/.config/nexus/`.
     pub fn dir() -> Result<PathBuf, Error> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            Error::Config("unable to determine home directory".to_string())
-        })?;
+        let home = dirs::home_dir()
+            .ok_or_else(|| Error::Config("unable to determine home directory".to_string()))?;
         Ok(home.join(".config").join("nexus"))
     }
 

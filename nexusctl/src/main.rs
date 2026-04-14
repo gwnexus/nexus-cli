@@ -141,7 +141,10 @@ pub enum SkillsAction {
 
 impl Cli {
     /// Resolve the effective output format from CLI flag -> config -> default.
-    pub fn resolve_output(&self, config: &nexus_core::config::Config) -> nexus_core::OutputPreference {
+    pub fn resolve_output(
+        &self,
+        config: &nexus_core::config::Config,
+    ) -> nexus_core::OutputPreference {
         if let Some(ref fmt) = self.output {
             fmt.parse().unwrap_or(config.default_output)
         } else {
@@ -186,7 +189,13 @@ mod tests {
     fn test_parse_init_default() {
         let cli = Cli::try_parse_from(["nexus", "init"]).unwrap();
         match cli.command {
-            Command::Init { ref path, ref name, ref project_id, force, shadowed_ai } => {
+            Command::Init {
+                ref path,
+                ref name,
+                ref project_id,
+                force,
+                shadowed_ai,
+            } => {
                 assert_eq!(path, ".");
                 assert!(name.is_none());
                 assert!(project_id.is_none());
@@ -199,9 +208,16 @@ mod tests {
 
     #[test]
     fn test_parse_init_with_path_and_name() {
-        let cli = Cli::try_parse_from(["nexus", "init", "/tmp/myproject", "-n", "My Project"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["nexus", "init", "/tmp/myproject", "-n", "My Project"]).unwrap();
         match cli.command {
-            Command::Init { ref path, ref name, ref project_id, force, .. } => {
+            Command::Init {
+                ref path,
+                ref name,
+                ref project_id,
+                force,
+                ..
+            } => {
                 assert_eq!(path, "/tmp/myproject");
                 assert_eq!(name.as_deref(), Some("My Project"));
                 assert!(project_id.is_none());
@@ -223,11 +239,24 @@ mod tests {
     #[test]
     fn test_parse_init_with_project_id() {
         let cli = Cli::try_parse_from([
-            "nexus", "init", ".", "--project-id", "fdc7a78c-d0b9-46fd-8206-9fc57301de2d", "--force",
-        ]).unwrap();
+            "nexus",
+            "init",
+            ".",
+            "--project-id",
+            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "--force",
+        ])
+        .unwrap();
         match cli.command {
-            Command::Init { ref project_id, force, .. } => {
-                assert_eq!(project_id.as_deref(), Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"));
+            Command::Init {
+                ref project_id,
+                force,
+                ..
+            } => {
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                );
                 assert!(force);
             }
             _ => panic!("expected Init command"),
@@ -248,11 +277,18 @@ mod tests {
     #[test]
     fn test_parse_link_with_project_id() {
         let cli = Cli::try_parse_from([
-            "nexus", "link", "--project-id", "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
-        ]).unwrap();
+            "nexus",
+            "link",
+            "--project-id",
+            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        ])
+        .unwrap();
         match cli.command {
             Command::Link { ref project_id } => {
-                assert_eq!(project_id.as_deref(), Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"));
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                );
             }
             _ => panic!("expected Link command"),
         }
@@ -304,16 +340,21 @@ mod tests {
     fn test_parse_config_show() {
         let cli = Cli::try_parse_from(["nexus", "config", "show"]).unwrap();
         match cli.command {
-            Command::Config { action: ConfigAction::Show } => {}
+            Command::Config {
+                action: ConfigAction::Show,
+            } => {}
             _ => panic!("expected Config Show"),
         }
     }
 
     #[test]
     fn test_parse_config_set() {
-        let cli = Cli::try_parse_from(["nexus", "config", "set", "api_url=https://custom.url"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["nexus", "config", "set", "api_url=https://custom.url"]).unwrap();
         match cli.command {
-            Command::Config { action: ConfigAction::Set { ref pair } } => {
+            Command::Config {
+                action: ConfigAction::Set { ref pair },
+            } => {
                 assert_eq!(pair, "api_url=https://custom.url");
             }
             _ => panic!("expected Config Set"),
@@ -324,7 +365,9 @@ mod tests {
     fn test_parse_config_path() {
         let cli = Cli::try_parse_from(["nexus", "config", "path"]).unwrap();
         match cli.command {
-            Command::Config { action: ConfigAction::Path } => {}
+            Command::Config {
+                action: ConfigAction::Path,
+            } => {}
             _ => panic!("expected Config Path"),
         }
     }
@@ -337,7 +380,8 @@ mod tests {
 
     #[test]
     fn test_global_api_url_flag() {
-        let cli = Cli::try_parse_from(["nexus", "--api-url", "https://custom.api", "status"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["nexus", "--api-url", "https://custom.api", "status"]).unwrap();
         assert_eq!(cli.api_url.as_deref(), Some("https://custom.api"));
     }
 
@@ -367,11 +411,18 @@ mod tests {
     #[test]
     fn test_parse_pull_with_project_id() {
         let cli = Cli::try_parse_from([
-            "nexus", "pull", "--project-id", "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
-        ]).unwrap();
+            "nexus",
+            "pull",
+            "--project-id",
+            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        ])
+        .unwrap();
         match cli.command {
             Command::Pull { ref project_id } => {
-                assert_eq!(project_id.as_deref(), Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"));
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                );
             }
             _ => panic!("expected Pull command"),
         }
@@ -381,7 +432,9 @@ mod tests {
     fn test_parse_skills_export_no_args() {
         let cli = Cli::try_parse_from(["nexus", "skills", "export"]).unwrap();
         match cli.command {
-            Command::Skills { action: SkillsAction::Export { ref project_id } } => {
+            Command::Skills {
+                action: SkillsAction::Export { ref project_id },
+            } => {
                 assert!(project_id.is_none());
             }
             _ => panic!("expected Skills Export command"),
@@ -391,11 +444,21 @@ mod tests {
     #[test]
     fn test_parse_skills_export_with_project_id() {
         let cli = Cli::try_parse_from([
-            "nexus", "skills", "export", "--project-id", "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
-        ]).unwrap();
+            "nexus",
+            "skills",
+            "export",
+            "--project-id",
+            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        ])
+        .unwrap();
         match cli.command {
-            Command::Skills { action: SkillsAction::Export { ref project_id } } => {
-                assert_eq!(project_id.as_deref(), Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"));
+            Command::Skills {
+                action: SkillsAction::Export { ref project_id },
+            } => {
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                );
             }
             _ => panic!("expected Skills Export command"),
         }

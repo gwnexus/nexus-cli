@@ -26,12 +26,10 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
     let client = NexusClient::new(api_url, Some(token))?;
 
     // Verify identity first
-    let identity = client.get_identity().await.map_err(|e| {
-        anyhow::anyhow!(
-            "Authentication failed: {}. Run 'nexus login' first.",
-            e
-        )
-    })?;
+    let identity = client
+        .get_identity()
+        .await
+        .map_err(|e| anyhow::anyhow!("Authentication failed: {}. Run 'nexus login' first.", e))?;
     println!(
         "   {} Authenticated as {}",
         style("+").bold().green(),
@@ -40,23 +38,18 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
 
     let selected_project = if let Some(pid) = project_id {
         // Direct link: validate the project exists and user has access
-        println!(
-            "   Validating project {}...",
-            style(pid).dim()
-        );
-        let resp = client.get_project(pid).await.map_err(|e| {
-            anyhow::anyhow!(
-                "Cannot access project '{}': {}",
-                pid,
-                e
-            )
-        })?;
+        println!("   Validating project {}...", style(pid).dim());
+        let resp = client
+            .get_project(pid)
+            .await
+            .map_err(|e| anyhow::anyhow!("Cannot access project '{}': {}", pid, e))?;
         resp.project
     } else {
         // Interactive: list projects and let user pick
-        let resp = client.list_projects().await.map_err(|e| {
-            anyhow::anyhow!("Failed to list projects: {}", e)
-        })?;
+        let resp = client
+            .list_projects()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
 
         if resp.projects.is_empty() {
             anyhow::bail!("No projects found. Create a project in the Nexus dashboard first.");
@@ -85,18 +78,14 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
     let project_info = ProjectInfo {
         id: selected_project.id.clone(),
         name: selected_project.name.clone(),
-        slug: selected_project
-            .slug
-            .clone()
-            .unwrap_or_default(),
+        slug: selected_project.slug.clone().unwrap_or_default(),
     };
 
     // Load existing config or create new
-    let mut project_config = config::load_project_config(None)?
-        .unwrap_or_else(|| ProjectConfig {
-            project: None,
-            mcp: None,
-        });
+    let mut project_config = config::load_project_config(None)?.unwrap_or(ProjectConfig {
+        project: None,
+        mcp: None,
+    });
     project_config.project = Some(project_info);
     config::save_project_config(None, &project_config)?;
 
@@ -143,9 +132,7 @@ fn resolve_token() -> anyhow::Result<String> {
 
     match Credentials::load()? {
         Some(creds) => Ok(creds.token),
-        None => anyhow::bail!(
-            "Not authenticated. Run 'nexus login' first."
-        ),
+        None => anyhow::bail!("Not authenticated. Run 'nexus login' first."),
     }
 }
 

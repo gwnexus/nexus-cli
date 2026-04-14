@@ -25,9 +25,8 @@ pub struct Credentials {
 impl Credentials {
     /// Returns the credentials file path: `~/.config/nexus/credentials.toml`.
     pub fn path() -> Result<PathBuf, Error> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            Error::Auth("unable to determine home directory".to_string())
-        })?;
+        let home = dirs::home_dir()
+            .ok_or_else(|| Error::Auth("unable to determine home directory".to_string()))?;
         Ok(home.join(".config").join("nexus").join("credentials.toml"))
     }
 
@@ -93,9 +92,7 @@ impl Credentials {
             )));
         }
         if token.len() < TOKEN_PREFIX.len() + 10 {
-            return Err(Error::Auth(
-                "token is too short to be valid".to_string(),
-            ));
+            return Err(Error::Auth("token is too short to be valid".to_string()));
         }
         Ok(())
     }
