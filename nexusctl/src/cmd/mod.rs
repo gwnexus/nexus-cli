@@ -5,6 +5,7 @@ mod config_cmd;
 mod deinit;
 mod init;
 mod link;
+mod preflight;
 mod pull;
 mod skills_cmd;
 
@@ -13,10 +14,10 @@ use crate::{Cli, Command, ConfigAction, SkillsAction};
 /// Dispatch the parsed CLI command to the appropriate handler.
 pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Init { ref path, ref name, ref project_id, force } => {
+        Command::Init { ref path, ref name, ref project_id, force, shadowed_ai } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
-            init::run(path, name.as_deref(), project_id.as_deref(), &api_url, force, config.mcp_source).await?;
+            init::run(path, name.as_deref(), project_id.as_deref(), &api_url, force || cli.yes, config.mcp_source, shadowed_ai).await?;
         }
         Command::Link { ref project_id } => {
             let config = nexus_core::config::Config::load()?;
@@ -27,7 +28,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             link::unlink()?;
         }
         Command::Deinit { force } => {
-            deinit::run(force)?;
+            deinit::run(force || cli.yes)?;
         }
         Command::Login => {
             let config = nexus_core::config::Config::load()?;
@@ -54,6 +55,11 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 skills_cmd::export(&api_url, project_id.as_deref()).await?;
             }
         },
+        Command::Preflight => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            preflight::run(&api_url).await?;
+        }
         Command::Config { action } => match action {
             ConfigAction::Show => config_cmd::show()?,
             ConfigAction::Set { pair } => config_cmd::set(&pair)?,

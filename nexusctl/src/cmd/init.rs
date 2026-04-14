@@ -40,6 +40,7 @@ pub async fn run(
     api_url: &str,
     force: bool,
     mcp_source: McpSource,
+    shadowed_ai: bool,
 ) -> anyhow::Result<()> {
     let target = PathBuf::from(path).canonicalize().unwrap_or_else(|_| {
         // Path doesn't exist yet; resolve relative to cwd
@@ -85,7 +86,7 @@ pub async fn run(
     create_claude_dir(&target, project_name)?;
     create_opencode_dir(&target)?;
     create_agents_md(&target, project_name, force)?;
-    append_gitignore(&target)?;
+    append_gitignore(&target, shadowed_ai)?;
 
     // -----------------------------------------------------------------------
     // Phase 2: Server-aware init (when project_id + token are available)
@@ -362,7 +363,12 @@ You are expected to:
 }
 
 /// Append Nexus-specific entries to .gitignore if not already present.
-fn append_gitignore(target: &Path) -> anyhow::Result<()> {
+///
+/// When `shadowed_ai` is true, ALL AI scaffold files are added to .gitignore
+/// (AGENTS.md, .claude/, .opencode/, opencode.json). Without this flag, only
+/// sensitive/user-managed files are ignored (.env.local, credentials, opencode.json,
+/// CLAUDE.md).
+fn append_gitignore(target: &Path, shadowed_ai: bool) -> anyhow::Result<()> {
     let gitignore_path = target.join(".gitignore");
     let marker = "# Nexus CLI";
 
@@ -373,7 +379,7 @@ fn append_gitignore(target: &Path) -> anyhow::Result<()> {
         }
     }
 
-    let nexus_ignores = format!(
+    let base_ignores = format!(
         r#"
 {marker}
 .env.local
@@ -384,14 +390,34 @@ opencode.json
         marker = marker,
     );
 
+    let shadow_ignores = format!(
+        r#"
+{marker}
+.env.local
+.nexus/
+.claude/
+.opencode/
+opencode.json
+AGENTS.md
+"#,
+        marker = marker,
+    );
+
+    let ignores = if shadowed_ai { shadow_ignores } else { base_ignores };
+
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&gitignore_path)?;
 
     use std::io::Write;
-    file.write_all(nexus_ignores.as_bytes())?;
-    print_created(".gitignore (appended)");
+    file.write_all(ignores.as_bytes())?;
+
+    if shadowed_ai {
+        print_created(".gitignore (appended, --shadowed-ai: all AI files ignored)");
+    } else {
+        print_created(".gitignore (appended)");
+    }
 
     Ok(())
 }
@@ -593,6 +619,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -632,6 +659,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -655,6 +683,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             false,
             McpSource::Npm,
+            false,
         )
         .await;
         assert!(result.is_err());
@@ -675,6 +704,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             true,
             McpSource::Npm,
+            false,
         )
         .await;
         assert!(result.is_ok());
@@ -696,6 +726,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -721,6 +752,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -745,6 +777,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             true,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -767,6 +800,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -779,6 +813,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             true,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -790,6 +825,32 @@ mod tests {
         // Verify that opencode.json and .claude/CLAUDE.md are in .gitignore
         assert!(gitignore.contains("opencode.json"), "opencode.json must be in .gitignore");
         assert!(gitignore.contains(".claude/CLAUDE.md"), ".claude/CLAUDE.md must be in .gitignore");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_init_shadowed_ai_gitignore() {
+        let dir = temp_project_dir("shadowed-ai");
+        run(
+            dir.to_str().unwrap(),
+            Some("test"),
+            None,
+            "https://nexus.mpowr.tech",
+            false,
+            McpSource::Npm,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let gitignore = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert!(gitignore.contains("AGENTS.md"), "AGENTS.md must be in .gitignore with --shadowed-ai");
+        assert!(gitignore.contains(".claude/"), ".claude/ must be in .gitignore with --shadowed-ai");
+        assert!(gitignore.contains(".opencode/"), ".opencode/ must be in .gitignore with --shadowed-ai");
+        assert!(gitignore.contains(".nexus/"), ".nexus/ must be in .gitignore with --shadowed-ai");
+        assert!(gitignore.contains("opencode.json"), "opencode.json must be in .gitignore with --shadowed-ai");
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);

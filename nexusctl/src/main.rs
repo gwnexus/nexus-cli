@@ -29,6 +29,10 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
+    /// Accept all defaults without prompting (non-interactive mode).
+    #[arg(short = 'y', long = "yes", global = true)]
+    pub yes: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -53,6 +57,10 @@ pub enum Command {
         /// Skip interactive prompts and use defaults.
         #[arg(short, long)]
         force: bool,
+
+        /// Shadow all AI scaffold files in .gitignore (AGENTS.md, .claude/, .opencode/, opencode.json).
+        #[arg(long)]
+        shadowed_ai: bool,
     },
 
     /// Link this directory to a Nexus project.
@@ -99,6 +107,9 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Run preflight checks to verify environment readiness.
+    Preflight,
 }
 
 /// Configuration subcommands.
@@ -175,11 +186,12 @@ mod tests {
     fn test_parse_init_default() {
         let cli = Cli::try_parse_from(["nexus", "init"]).unwrap();
         match cli.command {
-            Command::Init { ref path, ref name, ref project_id, force } => {
+            Command::Init { ref path, ref name, ref project_id, force, shadowed_ai } => {
                 assert_eq!(path, ".");
                 assert!(name.is_none());
                 assert!(project_id.is_none());
                 assert!(!force);
+                assert!(!shadowed_ai);
             }
             _ => panic!("expected Init command"),
         }
@@ -189,7 +201,7 @@ mod tests {
     fn test_parse_init_with_path_and_name() {
         let cli = Cli::try_parse_from(["nexus", "init", "/tmp/myproject", "-n", "My Project"]).unwrap();
         match cli.command {
-            Command::Init { ref path, ref name, ref project_id, force } => {
+            Command::Init { ref path, ref name, ref project_id, force, .. } => {
                 assert_eq!(path, "/tmp/myproject");
                 assert_eq!(name.as_deref(), Some("My Project"));
                 assert!(project_id.is_none());
@@ -387,5 +399,32 @@ mod tests {
             }
             _ => panic!("expected Skills Export command"),
         }
+    }
+
+    #[test]
+    fn test_parse_preflight() {
+        let cli = Cli::try_parse_from(["nexus", "preflight"]).unwrap();
+        assert!(matches!(cli.command, Command::Preflight));
+    }
+
+    #[test]
+    fn test_parse_init_shadowed_ai() {
+        let cli = Cli::try_parse_from(["nexus", "init", "--shadowed-ai"]).unwrap();
+        match cli.command {
+            Command::Init { shadowed_ai, .. } => assert!(shadowed_ai),
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_global_yes_flag() {
+        let cli = Cli::try_parse_from(["nexus", "-y", "init"]).unwrap();
+        assert!(cli.yes);
+    }
+
+    #[test]
+    fn test_global_yes_long_flag() {
+        let cli = Cli::try_parse_from(["nexus", "--yes", "deinit"]).unwrap();
+        assert!(cli.yes);
     }
 }
