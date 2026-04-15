@@ -129,7 +129,10 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> an
                             style("--force").bold()
                         );
                         println!();
-                        println!("{} Pull complete (directives skipped).", style("OK").bold().green());
+                        println!(
+                            "{} Pull complete (directives skipped).",
+                            style("OK").bold().green()
+                        );
                         return Ok(());
                     }
                 }
@@ -187,10 +190,7 @@ fn detect_existing_files(
 
 /// Ask the user for overwrite confirmation.
 fn confirm_overwrite() -> anyhow::Result<bool> {
-    print!(
-        "   {} Overwrite? [y/N] ",
-        style("?").bold().cyan()
-    );
+    print!("   {} Overwrite? [y/N] ", style("?").bold().cyan());
     io::stdout().flush()?;
 
     let mut input = String::new();
@@ -316,10 +316,7 @@ pub fn render_directives_markdown(directives: &[nexus_core::api::ExportedDirecti
         Vec<&nexus_core::api::ExportedDirective>,
     > = std::collections::BTreeMap::new();
     for d in directives {
-        categories
-            .entry(d.category.clone())
-            .or_default()
-            .push(d);
+        categories.entry(d.category.clone()).or_default().push(d);
     }
 
     for (category, items) in &categories {
@@ -395,7 +392,10 @@ mod tests {
         // Category headings (BTreeMap => alphabetical: Migration before Security)
         let migration_pos = md.find("## Migration").unwrap();
         let security_pos = md.find("## Security").unwrap();
-        assert!(migration_pos < security_pos, "categories should be alphabetical");
+        assert!(
+            migration_pos < security_pos,
+            "categories should be alphabetical"
+        );
 
         // Priority tags
         assert!(md.contains("### Use HTTPS [HIGH]"));

@@ -537,13 +537,12 @@ fn write_directives(
     );
 
     // Group by category
-    let mut categories: std::collections::BTreeMap<String, Vec<&nexus_core::api::ExportedDirective>> =
-        std::collections::BTreeMap::new();
+    let mut categories: std::collections::BTreeMap<
+        String,
+        Vec<&nexus_core::api::ExportedDirective>,
+    > = std::collections::BTreeMap::new();
     for d in directives {
-        categories
-            .entry(d.category.clone())
-            .or_default()
-            .push(d);
+        categories.entry(d.category.clone()).or_default().push(d);
     }
 
     for (category, items) in &categories {
