@@ -113,6 +113,29 @@ pub struct SkillExportResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Directive export (POST /api/mcp/directives  action=directive_export)
+// ---------------------------------------------------------------------------
+
+/// A single exported directive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedDirective {
+    pub id: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub category: String,
+    pub priority: String,
+}
+
+/// Response from `directive_export` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectiveExportResponse {
+    pub action: String,
+    pub project: SkillExportProject,
+    pub directives: Vec<ExportedDirective>,
+    pub count: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------
 

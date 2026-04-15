@@ -10,8 +10,8 @@ use serde_json::json;
 use tracing::debug;
 
 use crate::api::types::{
-    ApiError, AuthStatus, AuthStatusResponse, IdentityResponse, ProjectDetailResponse,
-    ProjectListResponse, SkillExportResponse,
+    ApiError, AuthStatus, AuthStatusResponse, DirectiveExportResponse, IdentityResponse,
+    ProjectDetailResponse, ProjectListResponse, SkillExportResponse,
 };
 use crate::Error;
 
@@ -83,6 +83,20 @@ impl NexusClient {
             "project_id": project_id
         });
         self.post("/api/mcp/skills", &body).await
+    }
+
+    /// Export all enabled directives for a project via `POST /api/mcp/directives`.
+    ///
+    /// Calls the `directive_export` action on the MCP directives endpoint.
+    pub async fn export_directives(
+        &self,
+        project_id: &str,
+    ) -> Result<DirectiveExportResponse, Error> {
+        let body = json!({
+            "action": "directive_export",
+            "project_id": project_id
+        });
+        self.post("/api/mcp/directives", &body).await
     }
 
     /// List all projects accessible to the authenticated user.

@@ -158,6 +158,32 @@ pub async fn run(
                     println!("   Local scaffolding is complete; skills not synced.");
                 }
             }
+
+            // Export directives for this project
+            match client.export_directives(pid).await {
+                Ok(dir_export) => {
+                    if dir_export.directives.is_empty() {
+                        println!(
+                            "   {} No directives for this project.",
+                            style("--").yellow()
+                        );
+                    } else {
+                        write_directives(&target, &dir_export.directives)?;
+                        println!(
+                            "   {} {} directive(s) synced",
+                            style("+").bold().green(),
+                            dir_export.directives.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        "   {} Directive export failed: {}",
+                        style("!").bold().yellow(),
+                        e
+                    );
+                }
+            }
         } else {
             println!(
                 "   {} No token found. Skipping server sync.",
@@ -494,6 +520,66 @@ Load the skill file at `.claude/skills/{skill_id}/SKILL.md` and follow its instr
     print_created(&format!(".opencode/commands/{}.md", slug));
 
     Ok(())
+}
+
+/// Write all directives to `.claude/directives.md` as a single Markdown file.
+///
+/// Directives are grouped by category, with priority indicated inline.
+fn write_directives(
+    target: &Path,
+    directives: &[nexus_core::api::ExportedDirective],
+) -> anyhow::Result<()> {
+    let claude_dir = target.join(".claude");
+    fs::create_dir_all(&claude_dir)?;
+
+    let mut content = String::from(
+        "---\ntype: project-directives\nsource: nexus-platform\n---\n\n# Project Directives\n\n",
+    );
+
+    // Group by category
+    let mut categories: std::collections::BTreeMap<String, Vec<&nexus_core::api::ExportedDirective>> =
+        std::collections::BTreeMap::new();
+    for d in directives {
+        categories
+            .entry(d.category.clone())
+            .or_default()
+            .push(d);
+    }
+
+    for (category, items) in &categories {
+        content.push_str(&format!("## {}\n\n", capitalize(category)));
+
+        for d in items {
+            let priority_tag = match d.priority.as_str() {
+                "high" | "urgent" => format!(" [{}]", d.priority.to_uppercase()),
+                _ => String::new(),
+            };
+
+            content.push_str(&format!("### {}{}\n\n", d.title, priority_tag));
+
+            if let Some(ref body) = d.body {
+                if !body.is_empty() {
+                    content.push_str(body);
+                    content.push_str("\n\n");
+                }
+            }
+        }
+    }
+
+    let path = claude_dir.join("directives.md");
+    fs::write(&path, format!("{}\n", content.trim_end()))?;
+    print_created(".claude/directives.md");
+
+    Ok(())
+}
+
+/// Capitalize the first letter of a string.
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+    }
 }
 
 /// Write MCP server configuration to `opencode.json`.

@@ -1,12 +1,12 @@
 //! The `nexus pull` command.
 //!
-//! Pulls skills, commands, and MCP configuration from the Nexus platform
-//! into the current workspace. Requires a linked project (via `nexus link`
-//! or `nexus init --project-id`) and valid authentication.
+//! Pulls skills, commands, directives, and MCP configuration from the Nexus
+//! platform into the current workspace. Requires a linked project (via
+//! `nexus link` or `nexus init --project-id`) and valid authentication.
 //!
 //! This is the incremental sync counterpart to `nexus init`:
 //! - `init` creates the full scaffold from scratch
-//! - `pull` updates skills and commands in an existing workspace
+//! - `pull` updates skills, commands, and directives in an existing workspace
 
 use console::style;
 use nexus_core::api::NexusClient;
@@ -58,26 +58,51 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Result<
             "   {} No skills assigned to this project.",
             style("--").yellow()
         );
-        return Ok(());
+    } else {
+        // Ensure directories exist
+        fs::create_dir_all(workspace.join(".claude/skills"))?;
+        fs::create_dir_all(workspace.join(".opencode/commands"))?;
+
+        // Write skills and commands
+        let mut written = 0;
+        for skill in &export.skills {
+            write_skill(&workspace, skill)?;
+            write_command(&workspace, skill)?;
+            written += 1;
+        }
+
+        println!(
+            "   {} {} skill(s) synced",
+            style("+").bold().green(),
+            written
+        );
     }
 
-    // Ensure directories exist
-    fs::create_dir_all(workspace.join(".claude/skills"))?;
-    fs::create_dir_all(workspace.join(".opencode/commands"))?;
-
-    // Write skills and commands
-    let mut written = 0;
-    for skill in &export.skills {
-        write_skill(&workspace, skill)?;
-        write_command(&workspace, skill)?;
-        written += 1;
+    // Export directives
+    match client.export_directives(&project_id).await {
+        Ok(dir_export) => {
+            if dir_export.directives.is_empty() {
+                println!(
+                    "   {} No directives for this project.",
+                    style("--").yellow()
+                );
+            } else {
+                write_directives(&workspace, &dir_export.directives)?;
+                println!(
+                    "   {} {} directive(s) synced",
+                    style("+").bold().green(),
+                    dir_export.directives.len()
+                );
+            }
+        }
+        Err(e) => {
+            println!(
+                "   {} Could not fetch directives: {}",
+                style("!").bold().yellow(),
+                e
+            );
+        }
     }
-
-    println!(
-        "   {} {} skill(s) synced",
-        style("+").bold().green(),
-        written
-    );
 
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
@@ -165,4 +190,66 @@ Load the skill file at `.claude/skills/{skill_id}/SKILL.md` and follow its instr
 
 fn print_synced(path: &str) {
     println!("   {} {}", style("~").bold().blue(), path);
+}
+
+/// Write all directives to `.claude/directives.md` as a single Markdown file.
+///
+/// Directives are grouped by category, with priority indicated inline.
+fn write_directives(
+    target: &Path,
+    directives: &[nexus_core::api::ExportedDirective],
+) -> anyhow::Result<()> {
+    let claude_dir = target.join(".claude");
+    fs::create_dir_all(&claude_dir)?;
+
+    let mut content = String::from(
+        "---\ntype: project-directives\nsource: nexus-platform\n---\n\n# Project Directives\n\n",
+    );
+
+    // Group by category
+    let mut categories: std::collections::BTreeMap<String, Vec<&nexus_core::api::ExportedDirective>> =
+        std::collections::BTreeMap::new();
+    for d in directives {
+        categories
+            .entry(d.category.clone())
+            .or_default()
+            .push(d);
+    }
+
+    for (category, items) in &categories {
+        content.push_str(&format!("## {}\n\n", capitalize(category)));
+
+        for d in items {
+            let priority_tag = match d.priority.as_str() {
+                "high" | "urgent" => format!(" [{}]", d.priority.to_uppercase()),
+                _ => String::new(),
+            };
+
+            content.push_str(&format!("### {}{}\n\n", d.title, priority_tag));
+
+            if let Some(ref body) = d.body {
+                if !body.is_empty() {
+                    content.push_str(body);
+                    content.push_str("\n\n");
+                }
+            }
+        }
+    }
+
+    let path = claude_dir.join("directives.md");
+    fs::write(&path, content.trim_end())?;
+    // Append final newline
+    fs::write(&path, format!("{}\n", fs::read_to_string(&path)?.trim_end()))?;
+    print_synced(".claude/directives.md");
+
+    Ok(())
+}
+
+/// Capitalize the first letter of a string.
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+    }
 }
