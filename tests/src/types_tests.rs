@@ -331,3 +331,127 @@ fn test_exported_skill_without_body() {
     assert!(skill.command_slug.is_none());
     assert!(skill.description.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Directive export types
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_exported_directive_deserialize() {
+    let json = r#"{
+        "id": "0a0df02f-edc8-4f1a-a1f7-43be3cbca2f9",
+        "title": "Use HTTPS everywhere",
+        "body": "All production endpoints must use HTTPS.",
+        "category": "security",
+        "priority": "high"
+    }"#;
+
+    let d: ExportedDirective = serde_json::from_str(json).unwrap();
+    assert_eq!(d.id, "0a0df02f-edc8-4f1a-a1f7-43be3cbca2f9");
+    assert_eq!(d.title, "Use HTTPS everywhere");
+    assert_eq!(
+        d.body.as_deref(),
+        Some("All production endpoints must use HTTPS.")
+    );
+    assert_eq!(d.category, "security");
+    assert_eq!(d.priority, "high");
+}
+
+#[test]
+fn test_exported_directive_null_body() {
+    let json = r#"{
+        "id": "abc-123",
+        "title": "Simple rule",
+        "body": null,
+        "category": "general",
+        "priority": "medium"
+    }"#;
+
+    let d: ExportedDirective = serde_json::from_str(json).unwrap();
+    assert!(d.body.is_none());
+    assert_eq!(d.category, "general");
+    assert_eq!(d.priority, "medium");
+}
+
+#[test]
+fn test_directive_export_response_deserialize() {
+    let json = r#"{
+        "action": "directive_export",
+        "project": {
+            "id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "slug": "nexus-app",
+            "name": "NEXUS-APP"
+        },
+        "directives": [
+            {
+                "id": "d1",
+                "title": "Green healthcheck",
+                "body": null,
+                "category": "deployment",
+                "priority": "high"
+            },
+            {
+                "id": "d2",
+                "title": "Run migrations locally",
+                "body": "Use makefile targets.",
+                "category": "migration",
+                "priority": "medium"
+            }
+        ],
+        "count": 2
+    }"#;
+
+    let resp: DirectiveExportResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.action, "directive_export");
+    assert_eq!(resp.project.slug, "nexus-app");
+    assert_eq!(resp.project.name, "NEXUS-APP");
+    assert_eq!(resp.count, 2);
+    assert_eq!(resp.directives.len(), 2);
+
+    assert_eq!(resp.directives[0].title, "Green healthcheck");
+    assert_eq!(resp.directives[0].priority, "high");
+    assert!(resp.directives[0].body.is_none());
+
+    assert_eq!(resp.directives[1].title, "Run migrations locally");
+    assert_eq!(
+        resp.directives[1].body.as_deref(),
+        Some("Use makefile targets.")
+    );
+}
+
+#[test]
+fn test_directive_export_response_empty_directives() {
+    let json = r#"{
+        "action": "directive_export",
+        "project": {
+            "id": "abc",
+            "slug": "test",
+            "name": "Test"
+        },
+        "directives": [],
+        "count": 0
+    }"#;
+
+    let resp: DirectiveExportResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.count, 0);
+    assert!(resp.directives.is_empty());
+}
+
+#[test]
+fn test_exported_directive_serialize_roundtrip() {
+    let d = ExportedDirective {
+        id: "test-id".into(),
+        title: "Test".into(),
+        body: Some("Body text".into()),
+        category: "general".into(),
+        priority: "low".into(),
+    };
+
+    let json = serde_json::to_string(&d).unwrap();
+    let d2: ExportedDirective = serde_json::from_str(&json).unwrap();
+    assert_eq!(d.id, d2.id);
+    assert_eq!(d.title, d2.title);
+    assert_eq!(d.body, d2.body);
+    assert_eq!(d.category, d2.category);
+    assert_eq!(d.priority, d2.priority);
+}

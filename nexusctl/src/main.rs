@@ -94,6 +94,10 @@ pub enum Command {
         /// Override the linked project ID.
         #[arg(long)]
         project_id: Option<String>,
+
+        /// Overwrite existing files without confirmation.
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Skills management subcommands.
@@ -401,8 +405,12 @@ mod tests {
     fn test_parse_pull_no_args() {
         let cli = Cli::try_parse_from(["nexus", "pull"]).unwrap();
         match cli.command {
-            Command::Pull { ref project_id } => {
+            Command::Pull {
+                ref project_id,
+                force,
+            } => {
                 assert!(project_id.is_none());
+                assert!(!force);
             }
             _ => panic!("expected Pull command"),
         }
@@ -418,12 +426,34 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::Pull { ref project_id } => {
+            Command::Pull {
+                ref project_id,
+                force,
+            } => {
                 assert_eq!(
                     project_id.as_deref(),
                     Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
                 );
+                assert!(!force);
             }
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_with_force() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--force"]).unwrap();
+        match cli.command {
+            Command::Pull { force, .. } => assert!(force),
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_short_force() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "-f"]).unwrap();
+        match cli.command {
+            Command::Pull { force, .. } => assert!(force),
             _ => panic!("expected Pull command"),
         }
     }

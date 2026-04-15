@@ -7,16 +7,20 @@
 //! This is the incremental sync counterpart to `nexus init`:
 //! - `init` creates the full scaffold from scratch
 //! - `pull` updates skills, commands, and directives in an existing workspace
+//!
+//! When existing files are detected, the user is prompted for confirmation
+//! unless `--force` or `-y` is passed.
 
 use console::style;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::Credentials;
 use nexus_core::config;
 use std::fs;
+use std::io::{self, Write};
 use std::path::Path;
 
 /// Run the pull command.
-pub async fn run(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Result<()> {
+pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
     // Resolve project ID from CLI flag or linked project
@@ -59,6 +63,28 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Result<
             style("--").yellow()
         );
     } else {
+        // Check for existing files and prompt if not forced
+        let existing = detect_existing_files(&workspace, &export.skills);
+        if !existing.is_empty() && !force {
+            println!();
+            println!(
+                "   {} The following files already exist and will be overwritten:",
+                style("!").bold().yellow()
+            );
+            for path in &existing {
+                println!("      {}", style(path).dim());
+            }
+            println!();
+            if !confirm_overwrite()? {
+                println!(
+                    "   {} Pull cancelled. Use {} to overwrite.",
+                    style("--").yellow(),
+                    style("--force").bold()
+                );
+                return Ok(());
+            }
+        }
+
         // Ensure directories exist
         fs::create_dir_all(workspace.join(".claude/skills"))?;
         fs::create_dir_all(workspace.join(".opencode/commands"))?;
@@ -87,6 +113,27 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Result<
                     style("--").yellow()
                 );
             } else {
+                // Check for existing directives file
+                let directives_path = workspace.join(".claude/directives.md");
+                if directives_path.exists() && !force {
+                    println!();
+                    println!(
+                        "   {} {} already exists and will be overwritten.",
+                        style("!").bold().yellow(),
+                        style(".claude/directives.md").dim()
+                    );
+                    if !confirm_overwrite()? {
+                        println!(
+                            "   {} Directives skipped. Use {} to overwrite.",
+                            style("--").yellow(),
+                            style("--force").bold()
+                        );
+                        println!();
+                        println!("{} Pull complete (directives skipped).", style("OK").bold().green());
+                        return Ok(());
+                    }
+                }
+
                 write_directives(&workspace, &dir_export.directives)?;
                 println!(
                     "   {} {} directive(s) synced",
@@ -108,6 +155,49 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Result<
     println!("{} Pull complete.", style("OK").bold().green());
 
     Ok(())
+}
+
+/// Detect existing skill/command files that would be overwritten.
+fn detect_existing_files(
+    workspace: &Path,
+    skills: &[nexus_core::api::ExportedSkill],
+) -> Vec<String> {
+    let mut existing = Vec::new();
+    for skill in skills {
+        let skill_path = workspace
+            .join(".claude/skills")
+            .join(&skill.skill_id)
+            .join("SKILL.md");
+        if skill_path.exists() {
+            existing.push(format!(".claude/skills/{}/SKILL.md", skill.skill_id));
+        }
+        if let Some(ref slug) = skill.command_slug {
+            if !slug.is_empty() {
+                let cmd_path = workspace
+                    .join(".opencode/commands")
+                    .join(format!("{}.md", slug));
+                if cmd_path.exists() {
+                    existing.push(format!(".opencode/commands/{}.md", slug));
+                }
+            }
+        }
+    }
+    existing
+}
+
+/// Ask the user for overwrite confirmation.
+fn confirm_overwrite() -> anyhow::Result<bool> {
+    print!(
+        "   {} Overwrite? [y/N] ",
+        style("?").bold().cyan()
+    );
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_lowercase();
+
+    Ok(answer == "y" || answer == "yes")
 }
 
 /// Resolve a token from (1) NEXUS_PRIVATE_TOKEN env var, or (2) stored credentials.
@@ -195,20 +285,36 @@ fn print_synced(path: &str) {
 /// Write all directives to `.claude/directives.md` as a single Markdown file.
 ///
 /// Directives are grouped by category, with priority indicated inline.
-fn write_directives(
+/// High and urgent directives are tagged with `[HIGH]` / `[URGENT]`.
+pub fn write_directives(
     target: &Path,
     directives: &[nexus_core::api::ExportedDirective],
 ) -> anyhow::Result<()> {
     let claude_dir = target.join(".claude");
     fs::create_dir_all(&claude_dir)?;
 
+    let content = render_directives_markdown(directives);
+
+    let path = claude_dir.join("directives.md");
+    fs::write(&path, content)?;
+    print_synced(".claude/directives.md");
+
+    Ok(())
+}
+
+/// Render directives into a Markdown string.
+///
+/// Exported as a standalone function for testability.
+pub fn render_directives_markdown(directives: &[nexus_core::api::ExportedDirective]) -> String {
     let mut content = String::from(
         "---\ntype: project-directives\nsource: nexus-platform\n---\n\n# Project Directives\n\n",
     );
 
-    // Group by category
-    let mut categories: std::collections::BTreeMap<String, Vec<&nexus_core::api::ExportedDirective>> =
-        std::collections::BTreeMap::new();
+    // Group by category (BTreeMap for stable ordering)
+    let mut categories: std::collections::BTreeMap<
+        String,
+        Vec<&nexus_core::api::ExportedDirective>,
+    > = std::collections::BTreeMap::new();
     for d in directives {
         categories
             .entry(d.category.clone())
@@ -221,7 +327,8 @@ fn write_directives(
 
         for d in items {
             let priority_tag = match d.priority.as_str() {
-                "high" | "urgent" => format!(" [{}]", d.priority.to_uppercase()),
+                "high" => " [HIGH]".to_string(),
+                "urgent" => " [URGENT]".to_string(),
                 _ => String::new(),
             };
 
@@ -236,13 +343,7 @@ fn write_directives(
         }
     }
 
-    let path = claude_dir.join("directives.md");
-    fs::write(&path, content.trim_end())?;
-    // Append final newline
-    fs::write(&path, format!("{}\n", fs::read_to_string(&path)?.trim_end()))?;
-    print_synced(".claude/directives.md");
-
-    Ok(())
+    format!("{}\n", content.trim_end())
 }
 
 /// Capitalize the first letter of a string.
@@ -251,5 +352,181 @@ fn capitalize(s: &str) -> String {
     match c.next() {
         None => String::new(),
         Some(f) => f.to_uppercase().to_string() + c.as_str(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nexus_core::api::ExportedDirective;
+
+    #[test]
+    fn test_render_directives_groups_by_category() {
+        let directives = vec![
+            ExportedDirective {
+                id: "1".into(),
+                title: "Use HTTPS".into(),
+                body: Some("Always use HTTPS in production.".into()),
+                category: "security".into(),
+                priority: "high".into(),
+            },
+            ExportedDirective {
+                id: "2".into(),
+                title: "Run migrations locally".into(),
+                body: Some("Use makefile targets.".into()),
+                category: "migration".into(),
+                priority: "medium".into(),
+            },
+            ExportedDirective {
+                id: "3".into(),
+                title: "Enable MFA".into(),
+                body: None,
+                category: "security".into(),
+                priority: "urgent".into(),
+            },
+        ];
+
+        let md = render_directives_markdown(&directives);
+
+        // Frontmatter
+        assert!(md.starts_with("---\ntype: project-directives\n"));
+        assert!(md.contains("source: nexus-platform"));
+
+        // Category headings (BTreeMap => alphabetical: Migration before Security)
+        let migration_pos = md.find("## Migration").unwrap();
+        let security_pos = md.find("## Security").unwrap();
+        assert!(migration_pos < security_pos, "categories should be alphabetical");
+
+        // Priority tags
+        assert!(md.contains("### Use HTTPS [HIGH]"));
+        assert!(md.contains("### Enable MFA [URGENT]"));
+        assert!(md.contains("### Run migrations locally\n")); // no tag for medium
+
+        // Body content
+        assert!(md.contains("Always use HTTPS in production."));
+        assert!(md.contains("Use makefile targets."));
+
+        // Ends with newline
+        assert!(md.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_render_directives_empty() {
+        let md = render_directives_markdown(&[]);
+        assert!(md.contains("# Project Directives"));
+        assert!(md.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_render_directives_empty_body_skipped() {
+        let directives = vec![ExportedDirective {
+            id: "1".into(),
+            title: "No body directive".into(),
+            body: Some("".into()),
+            category: "general".into(),
+            priority: "low".into(),
+        }];
+
+        let md = render_directives_markdown(&directives);
+        assert!(md.contains("### No body directive\n"));
+        // Should NOT have double newlines after the heading (empty body skipped)
+        assert!(!md.contains("### No body directive\n\n\n"));
+    }
+
+    #[test]
+    fn test_render_directives_null_body() {
+        let directives = vec![ExportedDirective {
+            id: "1".into(),
+            title: "Null body".into(),
+            body: None,
+            category: "general".into(),
+            priority: "medium".into(),
+        }];
+
+        let md = render_directives_markdown(&directives);
+        assert!(md.contains("### Null body\n"));
+    }
+
+    #[test]
+    fn test_capitalize() {
+        assert_eq!(capitalize("security"), "Security");
+        assert_eq!(capitalize(""), "");
+        assert_eq!(capitalize("a"), "A");
+        assert_eq!(capitalize("ABC"), "ABC");
+        assert_eq!(capitalize("migration"), "Migration");
+    }
+
+    #[test]
+    fn test_detect_existing_files_empty_workspace() {
+        let tmp = std::env::temp_dir().join("nexus_test_detect_empty");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let skills = vec![nexus_core::api::ExportedSkill {
+            skill_id: "nx-test".into(),
+            name: "Test".into(),
+            description: None,
+            version: 1,
+            body: None,
+            command_slug: Some("test-cmd".into()),
+            pinned: false,
+        }];
+
+        let existing = detect_existing_files(&tmp, &skills);
+        assert!(existing.is_empty());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_detect_existing_files_with_existing() {
+        let tmp = std::env::temp_dir().join("nexus_test_detect_existing");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join(".claude/skills/nx-test")).unwrap();
+        fs::write(tmp.join(".claude/skills/nx-test/SKILL.md"), "old").unwrap();
+        fs::create_dir_all(tmp.join(".opencode/commands")).unwrap();
+        fs::write(tmp.join(".opencode/commands/test-cmd.md"), "old").unwrap();
+
+        let skills = vec![nexus_core::api::ExportedSkill {
+            skill_id: "nx-test".into(),
+            name: "Test".into(),
+            description: None,
+            version: 1,
+            body: None,
+            command_slug: Some("test-cmd".into()),
+            pinned: false,
+        }];
+
+        let existing = detect_existing_files(&tmp, &skills);
+        assert_eq!(existing.len(), 2);
+        assert!(existing.contains(&".claude/skills/nx-test/SKILL.md".to_string()));
+        assert!(existing.contains(&".opencode/commands/test-cmd.md".to_string()));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_write_directives_creates_file() {
+        let tmp = std::env::temp_dir().join("nexus_test_write_dir");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let directives = vec![ExportedDirective {
+            id: "d1".into(),
+            title: "Test directive".into(),
+            body: Some("Do the thing.".into()),
+            category: "testing".into(),
+            priority: "high".into(),
+        }];
+
+        write_directives(&tmp, &directives).unwrap();
+
+        let path = tmp.join(".claude/directives.md");
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("### Test directive [HIGH]"));
+        assert!(content.contains("Do the thing."));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
