@@ -184,6 +184,30 @@ pub async fn run(
                     );
                 }
             }
+
+            // Export agent files (AGENTS.md, CLAUDE.md, etc.) from platform
+            // Overwrites the Phase 1 local templates with server-managed content.
+            match client.export_agent_files(pid).await {
+                Ok(af_export) => {
+                    if !af_export.agent_files.is_empty() {
+                        for af in &af_export.agent_files {
+                            write_agent_file(&target, af)?;
+                        }
+                        println!(
+                            "   {} {} agent file(s) synced",
+                            style("+").bold().green(),
+                            af_export.agent_files.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        "   {} Agent file export not available ({}), using local templates",
+                        style("!").bold().yellow(),
+                        e
+                    );
+                }
+            }
         } else {
             println!(
                 "   {} No token found. Skipping server sync.",
@@ -568,6 +592,23 @@ fn write_directives(
     let path = claude_dir.join("directives.md");
     fs::write(&path, format!("{}\n", content.trim_end()))?;
     print_created(".claude/directives.md");
+
+    Ok(())
+}
+
+/// Write a single agent file exported from the platform to its `target_path`.
+///
+/// Creates any intermediate directories as needed.
+/// The file body is already template-substituted by the server.
+fn write_agent_file(target: &Path, af: &nexus_core::api::ExportedAgentFile) -> anyhow::Result<()> {
+    let dest = target.join(&af.target_path);
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&dest, &af.body)?;
+    print_created(&af.target_path);
 
     Ok(())
 }

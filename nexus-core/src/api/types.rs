@@ -136,6 +136,31 @@ pub struct DirectiveExportResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Agent file export (POST /api/mcp/agent-files  action=af_export)
+// ---------------------------------------------------------------------------
+
+/// A single exported agent file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedAgentFile {
+    pub file_key: String,
+    pub target_path: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub category: String,
+    pub version: i64,
+    pub body: String,
+}
+
+/// Response from `af_export` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentFileExportResponse {
+    pub project_id: String,
+    pub project_name: String,
+    pub agent_files: Vec<ExportedAgentFile>,
+    pub count: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------
 

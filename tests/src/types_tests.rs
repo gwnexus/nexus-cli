@@ -455,3 +455,120 @@ fn test_exported_directive_serialize_roundtrip() {
     assert_eq!(d.category, d2.category);
     assert_eq!(d.priority, d2.priority);
 }
+
+// ---------------------------------------------------------------------------
+// Agent file export types
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_exported_agent_file_deserialize() {
+    let json = r##"{
+        "file_key": "agents-md",
+        "target_path": "AGENTS.md",
+        "name": "AGENTS.md",
+        "description": "Agent role definitions",
+        "category": "agent",
+        "version": 1,
+        "body": "---\ntype: agent-policy\n---\n# Test"
+    }"##;
+
+    let af: ExportedAgentFile = serde_json::from_str(json).unwrap();
+    assert_eq!(af.file_key, "agents-md");
+    assert_eq!(af.target_path, "AGENTS.md");
+    assert_eq!(af.name, "AGENTS.md");
+    assert_eq!(af.description.as_deref(), Some("Agent role definitions"));
+    assert_eq!(af.category, "agent");
+    assert_eq!(af.version, 1);
+    assert!(af.body.contains("agent-policy"));
+}
+
+#[test]
+fn test_exported_agent_file_null_description() {
+    let json = r##"{
+        "file_key": "claude-md",
+        "target_path": ".claude/CLAUDE.md",
+        "name": "CLAUDE.md",
+        "description": null,
+        "category": "agent",
+        "version": 2,
+        "body": "# Bootstrap"
+    }"##;
+
+    let af: ExportedAgentFile = serde_json::from_str(json).unwrap();
+    assert!(af.description.is_none());
+    assert_eq!(af.version, 2);
+}
+
+#[test]
+fn test_agent_file_export_response_deserialize() {
+    let json = r##"{
+        "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        "project_name": "NEXUS-APP",
+        "agent_files": [
+            {
+                "file_key": "agents-md",
+                "target_path": "AGENTS.md",
+                "name": "AGENTS.md",
+                "description": null,
+                "category": "agent",
+                "version": 1,
+                "body": "# Agents"
+            },
+            {
+                "file_key": "claude-md",
+                "target_path": ".claude/CLAUDE.md",
+                "name": "CLAUDE.md",
+                "description": "Bootstrap file",
+                "category": "agent",
+                "version": 3,
+                "body": "# Bootstrap"
+            }
+        ],
+        "count": 2
+    }"##;
+
+    let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.project_id, "fdc7a78c-d0b9-46fd-8206-9fc57301de2d");
+    assert_eq!(resp.project_name, "NEXUS-APP");
+    assert_eq!(resp.count, 2);
+    assert_eq!(resp.agent_files.len(), 2);
+    assert_eq!(resp.agent_files[0].file_key, "agents-md");
+    assert_eq!(resp.agent_files[1].file_key, "claude-md");
+    assert_eq!(resp.agent_files[1].version, 3);
+}
+
+#[test]
+fn test_agent_file_export_response_empty() {
+    let json = r#"{
+        "project_id": "abc",
+        "project_name": "Test",
+        "agent_files": [],
+        "count": 0
+    }"#;
+
+    let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.count, 0);
+    assert!(resp.agent_files.is_empty());
+}
+
+#[test]
+fn test_exported_agent_file_serialize_roundtrip() {
+    let af = ExportedAgentFile {
+        file_key: "cursorrules".into(),
+        target_path: ".cursorrules".into(),
+        name: ".cursorrules".into(),
+        description: Some("Cursor IDE rules".into()),
+        category: "ide".into(),
+        version: 1,
+        body: "# Cursor Rules\nFollow these rules.".into(),
+    };
+
+    let json = serde_json::to_string(&af).unwrap();
+    let af2: ExportedAgentFile = serde_json::from_str(&json).unwrap();
+    assert_eq!(af.file_key, af2.file_key);
+    assert_eq!(af.target_path, af2.target_path);
+    assert_eq!(af.body, af2.body);
+    assert_eq!(af.description, af2.description);
+    assert_eq!(af.category, af2.category);
+    assert_eq!(af.version, af2.version);
+}

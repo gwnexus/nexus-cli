@@ -10,8 +10,8 @@ use serde_json::json;
 use tracing::debug;
 
 use crate::api::types::{
-    ApiError, AuthStatus, AuthStatusResponse, DirectiveExportResponse, IdentityResponse,
-    ProjectDetailResponse, ProjectListResponse, SkillExportResponse,
+    AgentFileExportResponse, ApiError, AuthStatus, AuthStatusResponse, DirectiveExportResponse,
+    IdentityResponse, ProjectDetailResponse, ProjectListResponse, SkillExportResponse,
 };
 use crate::Error;
 
@@ -97,6 +97,21 @@ impl NexusClient {
             "project_id": project_id
         });
         self.post("/api/mcp/directives", &body).await
+    }
+
+    /// Export all active agent files for a project via `POST /api/mcp/agent-files`.
+    ///
+    /// Calls the `af_export` action on the MCP agent-files endpoint.
+    /// Returns agent files with template variables substituted for the given project.
+    pub async fn export_agent_files(
+        &self,
+        project_id: &str,
+    ) -> Result<AgentFileExportResponse, Error> {
+        let body = json!({
+            "action": "af_export",
+            "project_id": project_id
+        });
+        self.post("/api/mcp/agent-files", &body).await
     }
 
     /// List all projects accessible to the authenticated user.

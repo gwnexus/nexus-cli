@@ -19,6 +19,11 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+/// Marker in YAML frontmatter indicating the file is managed by Nexus CLI.
+/// Files without this marker are considered user-managed and will not be
+/// overwritten by `nexus pull`.
+const MANAGED_MARKER: &str = "source: nexus-platform";
+
 /// Run the pull command.
 pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
@@ -50,6 +55,8 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> an
 
     // Export skills
     let export = client.export_skills(&project_id).await?;
+    let project_name = export.project.name.clone();
+
     println!(
         "   {} Project: {} ({})",
         style("+").bold().green(),
@@ -105,44 +112,41 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> an
     }
 
     // Export directives
-    match client.export_directives(&project_id).await {
+    let has_directives = match client.export_directives(&project_id).await {
         Ok(dir_export) => {
             if dir_export.directives.is_empty() {
                 println!(
                     "   {} No directives for this project.",
                     style("--").yellow()
                 );
+                false
             } else {
                 // Check for existing directives file
                 let directives_path = workspace.join(".claude/directives.md");
                 if directives_path.exists() && !force {
-                    println!();
-                    println!(
-                        "   {} {} already exists and will be overwritten.",
-                        style("!").bold().yellow(),
-                        style(".claude/directives.md").dim()
-                    );
-                    if !confirm_overwrite()? {
+                    if !is_managed_file(&directives_path) {
                         println!(
-                            "   {} Directives skipped. Use {} to overwrite.",
-                            style("--").yellow(),
-                            style("--force").bold()
+                            "   {} .claude/directives.md is user-managed (no nexus-platform marker), skipping",
+                            style("--").yellow()
                         );
-                        println!();
+                    } else {
+                        // Managed file, overwrite silently on pull
+                        write_directives(&workspace, &dir_export.directives)?;
                         println!(
-                            "{} Pull complete (directives skipped).",
-                            style("OK").bold().green()
+                            "   {} {} directive(s) synced",
+                            style("+").bold().green(),
+                            dir_export.directives.len()
                         );
-                        return Ok(());
                     }
+                } else {
+                    write_directives(&workspace, &dir_export.directives)?;
+                    println!(
+                        "   {} {} directive(s) synced",
+                        style("+").bold().green(),
+                        dir_export.directives.len()
+                    );
                 }
-
-                write_directives(&workspace, &dir_export.directives)?;
-                println!(
-                    "   {} {} directive(s) synced",
-                    style("+").bold().green(),
-                    dir_export.directives.len()
-                );
+                true
             }
         }
         Err(e) => {
@@ -151,6 +155,54 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> an
                 style("!").bold().yellow(),
                 e
             );
+            false
+        }
+    };
+
+    // Export agent files (AGENTS.md, CLAUDE.md, etc.) from platform
+    match client.export_agent_files(&project_id).await {
+        Ok(af_export) => {
+            if af_export.agent_files.is_empty() {
+                println!(
+                    "   {} No agent files configured for this project.",
+                    style("--").yellow()
+                );
+            } else {
+                let mut af_written = 0;
+                for af in &af_export.agent_files {
+                    let target_path = workspace.join(&af.target_path);
+
+                    // Check managed-file marker before overwriting
+                    if target_path.exists() && !force && !is_managed_file(&target_path) {
+                        println!(
+                            "   {} {} is user-managed, skipping (use --force to overwrite)",
+                            style("--").yellow(),
+                            af.target_path
+                        );
+                        continue;
+                    }
+
+                    write_agent_file(&workspace, af)?;
+                    af_written += 1;
+                }
+                if af_written > 0 {
+                    println!(
+                        "   {} {} agent file(s) synced",
+                        style("+").bold().green(),
+                        af_written
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            // Fallback to hardcoded templates when af_export is unavailable
+            println!(
+                "   {} Agent file export not available ({}), using local templates",
+                style("!").bold().yellow(),
+                e
+            );
+            sync_claude_md(&workspace, &project_name, has_directives, force)?;
+            sync_agents_md(&workspace, &project_name, force)?;
         }
     }
 
@@ -159,6 +211,215 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> an
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Managed file sync (CLAUDE.md, AGENTS.md)
+// ---------------------------------------------------------------------------
+
+/// Check whether a file contains the `source: nexus-platform` marker,
+/// indicating it is managed by Nexus CLI and safe to overwrite.
+pub fn is_managed_file(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    match fs::read_to_string(path) {
+        Ok(content) => content.contains(MANAGED_MARKER),
+        Err(_) => false,
+    }
+}
+
+/// Sync `.claude/CLAUDE.md` — the agent bootstrap file.
+///
+/// - If the file does not exist → create it
+/// - If it exists and has the nexus-platform marker → overwrite
+/// - If it exists without the marker → user-managed, skip (warn)
+fn sync_claude_md(
+    workspace: &Path,
+    project_name: &str,
+    has_directives: bool,
+    force: bool,
+) -> anyhow::Result<()> {
+    let claude_dir = workspace.join(".claude");
+    fs::create_dir_all(&claude_dir)?;
+
+    let path = claude_dir.join("CLAUDE.md");
+
+    if path.exists() && !force && !is_managed_file(&path) {
+        println!(
+            "   {} .claude/CLAUDE.md is user-managed, skipping (use --force to overwrite)",
+            style("--").yellow()
+        );
+        return Ok(());
+    }
+
+    let content = render_claude_md(project_name, has_directives);
+    fs::write(&path, content)?;
+    print_synced(".claude/CLAUDE.md");
+
+    Ok(())
+}
+
+/// Sync `AGENTS.md` — the agent role definition file.
+///
+/// - If the file does not exist → create it
+/// - If it exists and has the nexus-platform marker → overwrite
+/// - If it exists without the marker → user-managed, skip (warn)
+fn sync_agents_md(workspace: &Path, project_name: &str, force: bool) -> anyhow::Result<()> {
+    let path = workspace.join("AGENTS.md");
+
+    if path.exists() && !force && !is_managed_file(&path) {
+        println!(
+            "   {} AGENTS.md is user-managed, skipping (use --force to overwrite)",
+            style("--").yellow()
+        );
+        return Ok(());
+    }
+
+    let content = render_agents_md(project_name);
+    fs::write(&path, content)?;
+    print_synced("AGENTS.md");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Agent file writer (server-driven)
+// ---------------------------------------------------------------------------
+
+/// Write a single agent file exported from the platform to its `target_path`.
+///
+/// Creates any intermediate directories as needed.
+/// The file body is already template-substituted by the server.
+pub fn write_agent_file(
+    workspace: &Path,
+    af: &nexus_core::api::ExportedAgentFile,
+) -> anyhow::Result<()> {
+    let target = workspace.join(&af.target_path);
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&target, &af.body)?;
+    print_synced(&af.target_path);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Template renderers (fallback when af_export is unavailable)
+// ---------------------------------------------------------------------------
+
+/// Render the `.claude/CLAUDE.md` bootstrap file content.
+///
+/// When `has_directives` is true, a step to load directives is included
+/// in the bootstrap sequence.
+pub fn render_claude_md(project_name: &str, has_directives: bool) -> String {
+    let directives_step = if has_directives {
+        "\n3. Load project directives from `.claude/directives.md`"
+    } else {
+        ""
+    };
+
+    // Adjust step numbering based on whether directives are included
+    let (review_step, continue_step) = if has_directives {
+        ("4", "5")
+    } else {
+        ("3", "4")
+    };
+
+    format!(
+        r#"---
+type: bootstrap
+scope: repo
+project: {name}
+source: nexus-platform
+status: active
+---
+
+# BOOTSTRAP SEQUENCE
+
+1. Load agent identity from `AGENTS.md`
+2. Connect to the Nexus MCP server{directives_step}
+{review_step}. Review active planning and ADR context
+{continue_step}. Continue with the active workstream
+
+---
+
+# PROJECT
+
+This workspace is configured for the **{name}** project.
+
+Treat all project memory and coordination artifacts as architecture-critical.
+
+---
+
+# ENVIRONMENT
+
+Read secrets only from `.env.local`.
+
+NEVER:
+- print secrets
+- commit secrets
+- persist secrets into shared memory
+"#,
+        name = project_name,
+        directives_step = directives_step,
+        review_step = review_step,
+        continue_step = continue_step,
+    )
+}
+
+/// Render the `AGENTS.md` agent policy file content.
+pub fn render_agents_md(project_name: &str) -> String {
+    format!(
+        r#"---
+type: agent-policy
+scope: repo
+project: {name}
+source: nexus-platform
+status: active
+---
+
+# ACTIVE AGENTS
+
+- app-agent (PRIMARY)
+
+---
+
+# AGENT ROLE DEFINITION
+
+## app-agent (PRIMARY)
+
+You are responsible for:
+
+- Application architecture and development
+- Code quality and testing
+- Documentation and knowledge management
+
+You are expected to:
+
+- Maintain architectural clarity
+- Keep durable truth out of ephemeral chat context
+- Preserve auditability and handoff quality
+
+---
+
+# GLOBAL RULES
+
+- Decisions must be documented (ADR or architectural note)
+- Sessions are execution history, not long-term truth
+- Durable learnings go to project memory
+- No speculation presented as fact
+- Correctness over speed
+"#,
+        name = project_name,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// File detection & confirmation
+// ---------------------------------------------------------------------------
 
 /// Detect existing skill/command files that would be overwritten.
 fn detect_existing_files(
@@ -212,6 +473,10 @@ fn resolve_token() -> Option<String> {
         _ => None,
     }
 }
+
+// ---------------------------------------------------------------------------
+// File writers
+// ---------------------------------------------------------------------------
 
 /// Write a skill definition to `.claude/skills/<skill_id>/SKILL.md`.
 fn write_skill(target: &Path, skill: &nexus_core::api::ExportedSkill) -> anyhow::Result<()> {
@@ -351,6 +616,10 @@ fn capitalize(s: &str) -> String {
         Some(f) => f.to_uppercase().to_string() + c.as_str(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -528,5 +797,162 @@ mod tests {
         assert!(content.contains("Do the thing."));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // -- CLAUDE.md template tests --
+
+    #[test]
+    fn test_render_claude_md_with_directives() {
+        let md = render_claude_md("MyProject", true);
+        assert!(md.contains("source: nexus-platform"));
+        assert!(md.contains("project: MyProject"));
+        assert!(md.contains("Load project directives from `.claude/directives.md`"));
+        assert!(md.contains("1. Load agent identity"));
+        assert!(md.contains("2. Connect to the Nexus MCP server"));
+        assert!(md.contains("3. Load project directives"));
+        assert!(md.contains("4. Review active planning"));
+        assert!(md.contains("5. Continue with the active workstream"));
+    }
+
+    #[test]
+    fn test_render_claude_md_without_directives() {
+        let md = render_claude_md("MyProject", false);
+        assert!(md.contains("source: nexus-platform"));
+        assert!(!md.contains("directives"));
+        assert!(md.contains("3. Review active planning"));
+        assert!(md.contains("4. Continue with the active workstream"));
+    }
+
+    #[test]
+    fn test_render_claude_md_environment_section() {
+        let md = render_claude_md("Test", true);
+        assert!(md.contains("Read secrets only from `.env.local`"));
+        assert!(md.contains("NEVER:"));
+        assert!(md.contains("- print secrets"));
+    }
+
+    // -- AGENTS.md template tests --
+
+    #[test]
+    fn test_render_agents_md() {
+        let md = render_agents_md("MyProject");
+        assert!(md.contains("source: nexus-platform"));
+        assert!(md.contains("project: MyProject"));
+        assert!(md.contains("app-agent (PRIMARY)"));
+        assert!(md.contains("# GLOBAL RULES"));
+        assert!(md.contains("Correctness over speed"));
+    }
+
+    // -- is_managed_file tests --
+
+    #[test]
+    fn test_is_managed_file_with_marker() {
+        let tmp = std::env::temp_dir().join("nexus_test_managed_yes");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("test.md");
+        fs::write(&path, "---\nsource: nexus-platform\n---\n# Hello").unwrap();
+        assert!(is_managed_file(&path));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_is_managed_file_without_marker() {
+        let tmp = std::env::temp_dir().join("nexus_test_managed_no");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("test.md");
+        fs::write(&path, "---\ntype: bootstrap\n---\n# Hello").unwrap();
+        assert!(!is_managed_file(&path));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_is_managed_file_nonexistent() {
+        let path = std::env::temp_dir().join("nexus_test_managed_nofile/nope.md");
+        assert!(!is_managed_file(&path));
+    }
+
+    // -- write_agent_file tests --
+
+    #[test]
+    fn test_write_agent_file_creates_file() {
+        let tmp = std::env::temp_dir().join("nexus_test_write_af");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let af = nexus_core::api::ExportedAgentFile {
+            file_key: "agents-md".into(),
+            target_path: "AGENTS.md".into(),
+            name: "AGENTS.md".into(),
+            description: None,
+            category: "agent".into(),
+            version: 1,
+            body: "---\ntype: agent-policy\nsource: nexus-platform\n---\n# Test".into(),
+        };
+
+        write_agent_file(&tmp, &af).unwrap();
+
+        let path = tmp.join("AGENTS.md");
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("source: nexus-platform"));
+        assert!(content.contains("# Test"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_write_agent_file_creates_subdirectories() {
+        let tmp = std::env::temp_dir().join("nexus_test_write_af_sub");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let af = nexus_core::api::ExportedAgentFile {
+            file_key: "claude-md".into(),
+            target_path: ".claude/CLAUDE.md".into(),
+            name: "CLAUDE.md".into(),
+            description: Some("Bootstrap file".into()),
+            category: "agent".into(),
+            version: 2,
+            body: "# Bootstrap\nTest content".into(),
+        };
+
+        write_agent_file(&tmp, &af).unwrap();
+
+        let path = tmp.join(".claude/CLAUDE.md");
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# Bootstrap"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_agent_file_export_response_deserialize() {
+        let json = r##"{
+            "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "project_name": "NEXUS-APP",
+            "agent_files": [
+                {
+                    "file_key": "agents-md",
+                    "target_path": "AGENTS.md",
+                    "name": "AGENTS.md",
+                    "description": null,
+                    "category": "agent",
+                    "version": 1,
+                    "body": "# Test"
+                }
+            ],
+            "count": 1
+        }"##;
+
+        let resp: nexus_core::api::AgentFileExportResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.project_name, "NEXUS-APP");
+        assert_eq!(resp.agent_files.len(), 1);
+        assert_eq!(resp.agent_files[0].file_key, "agents-md");
+        assert_eq!(resp.agent_files[0].target_path, "AGENTS.md");
+        assert_eq!(resp.agent_files[0].version, 1);
+        assert_eq!(resp.count, 1);
     }
 }
