@@ -78,6 +78,21 @@ pub async fn run(
     // -----------------------------------------------------------------------
     // Phase 1: Local scaffolding
     // -----------------------------------------------------------------------
+
+    // Warn if npx is not available (needed for MCP server)
+    if std::process::Command::new("npx")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        println!(
+            "   {} npx not found -- MCP server requires Node.js / npm",
+            style("!").bold().yellow()
+        );
+    }
+
     create_nexus_dir(&target, project_name, resolved_pid.as_deref())?;
     create_claude_dir(&target, project_name)?;
     create_opencode_dir(&target)?;
@@ -635,13 +650,20 @@ fn capitalize(s: &str) -> String {
 /// `@mpowr/nexus-mcp` package via npx. When `Local`, it points to the
 /// local checkout at `tools/nexus-mcp/dist/server.js`.
 ///
-/// Skips writing if the file already exists (user-managed, not tracked in git).
+/// Generates both `opencode.json` (OpenCode) and `.claude/mcp.json` (Claude Code).
+/// Skips writing each file if it already exists (user-managed).
 fn write_mcp_configs(
     target: &Path,
     _project_name: &str,
     _api_url: &str,
     mcp_source: McpSource,
 ) -> anyhow::Result<()> {
+    let source_label = match mcp_source {
+        McpSource::Npm => "npm (@mpowr/nexus-mcp)",
+        McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
+    };
+
+    // --- OpenCode config (opencode.json) ---
     let opencode_path = target.join("opencode.json");
 
     if opencode_path.exists() {
@@ -649,16 +671,14 @@ fn write_mcp_configs(
             "   {} opencode.json already exists, skipping",
             style("--").yellow()
         );
-        return Ok(());
-    }
+    } else {
+        let command_block = match mcp_source {
+            McpSource::Npm => r#""command": ["npx", "@mpowr/nexus-mcp"]"#,
+            McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
+        };
 
-    let command_block = match mcp_source {
-        McpSource::Npm => r#""command": ["npx", "@mpowr/nexus-mcp"]"#,
-        McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
-    };
-
-    let opencode_json = format!(
-        r#"{{
+        let opencode_json = format!(
+            r#"{{
   "$schema": "https://opencode.ai/config.json",
   "mcp": {{
     "nexus": {{
@@ -672,20 +692,60 @@ fn write_mcp_configs(
   }}
 }}
 "#,
-        command_block = command_block,
-    );
+            command_block = command_block,
+        );
 
-    fs::write(&opencode_path, opencode_json)?;
+        fs::write(&opencode_path, opencode_json)?;
+        println!(
+            "   {} opencode.json (MCP source: {})",
+            style("+").bold().green(),
+            source_label,
+        );
+    }
 
-    let source_label = match mcp_source {
-        McpSource::Npm => "npm (@mpowr/nexus-mcp)",
-        McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
-    };
-    println!(
-        "   {} opencode.json (MCP source: {})",
-        style("+").bold().green(),
-        source_label,
-    );
+    // --- Claude Code config (.claude/mcp.json) ---
+    let claude_mcp_path = target.join(".claude").join("mcp.json");
+
+    if claude_mcp_path.exists() {
+        println!(
+            "   {} .claude/mcp.json already exists, skipping",
+            style("--").yellow()
+        );
+    } else {
+        let (cmd, args) = match mcp_source {
+            McpSource::Npm => ("npx", r#""@mpowr/nexus-mcp""#),
+            McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
+        };
+
+        let claude_mcp_json = format!(
+            r#"{{
+  "mcpServers": {{
+    "nexus": {{
+      "command": "{cmd}",
+      "args": [{args}],
+      "env": {{
+        "NEXUS_API_URL": "https://nexus.mpowr.tech",
+        "NEXUS_PRIVATE_TOKEN": "${{NEXUS_PRIVATE_TOKEN}}"
+      }}
+    }}
+  }}
+}}
+"#,
+            cmd = cmd,
+            args = args,
+        );
+
+        // .claude/ directory should already exist from earlier init steps
+        if let Some(parent) = claude_mcp_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&claude_mcp_path, claude_mcp_json)?;
+        println!(
+            "   {} .claude/mcp.json (MCP source: {})",
+            style("+").bold().green(),
+            source_label,
+        );
+    }
 
     Ok(())
 }
@@ -1109,8 +1169,17 @@ mod tests {
         // Must use {env:VAR} syntax
         assert!(oc.contains("{env:NEXUS_API_URL}"));
 
-        // .mcp.json must NOT be created
+        // .mcp.json must NOT be created (legacy root-level format)
         assert!(!dir.join(".mcp.json").exists());
+
+        // .claude/mcp.json MUST be created
+        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        assert!(cm.contains("\"mcpServers\""));
+        assert!(cm.contains("@mpowr/nexus-mcp"));
+        assert!(cm.contains("NEXUS_PRIVATE_TOKEN"));
+        // Claude uses "command" + "args" format, not "command": [array]
+        assert!(cm.contains("\"command\": \"npx\""));
+        assert!(cm.contains("\"args\""));
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
@@ -1134,6 +1203,11 @@ mod tests {
         assert!(!oc.contains("npx"));
         assert!(!oc.contains("@mpowr/nexus-mcp"));
 
+        // .claude/mcp.json must also exist with local path
+        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        assert!(cm.contains("tools/nexus-mcp/dist/server.js"));
+        assert!(cm.contains("\"command\": \"node\""));
+
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1142,8 +1216,10 @@ mod tests {
     fn test_write_mcp_configs_skips_existing() {
         let dir = temp_project_dir("mcp-configs-skip");
 
-        // Pre-create opencode.json with custom content
+        // Pre-create both config files with custom content
         fs::write(dir.join("opencode.json"), "user-managed content").unwrap();
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(dir.join(".claude/mcp.json"), "user-managed claude").unwrap();
 
         write_mcp_configs(
             &dir,
@@ -1153,9 +1229,11 @@ mod tests {
         )
         .unwrap();
 
-        // Must NOT overwrite existing file
+        // Must NOT overwrite existing files
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert_eq!(oc, "user-managed content");
+        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        assert_eq!(cm, "user-managed claude");
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
