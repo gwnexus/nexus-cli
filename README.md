@@ -18,6 +18,11 @@ The installer detects your platform (macOS/Linux, x86_64/aarch64), downloads
 the pre-built binary from GitHub Releases, and verifies its SHA-256 checksum.
 If no binary exists for your platform it falls back to `cargo install --git`.
 
+> **Note:** Releases v0.1.3 and v0.1.4 contain installer URLs that point to
+> `raw.githubusercontent.com`, which is not accessible for private repos. If you
+> are on one of these versions, please upgrade to **v0.1.5+** where the
+> installer is served via CDN.
+
 ### From source
 
 ```bash
