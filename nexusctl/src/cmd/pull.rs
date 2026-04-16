@@ -294,6 +294,17 @@ pub fn write_agent_file(
     workspace: &Path,
     af: &nexus_core::api::ExportedAgentFile,
 ) -> anyhow::Result<()> {
+    // Path traversal protection: reject target_path with parent-dir components
+    let normalized = std::path::Path::new(&af.target_path);
+    for component in normalized.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            anyhow::bail!(
+                "refusing to write: target_path '{}' contains '..' traversal",
+                af.target_path
+            );
+        }
+    }
+
     let target = workspace.join(&af.target_path);
 
     if let Some(parent) = target.parent() {

@@ -12,6 +12,7 @@ use tracing::debug;
 use crate::api::types::{
     AgentFileExportResponse, ApiError, AuthStatus, AuthStatusResponse, DirectiveExportResponse,
     IdentityResponse, ProjectDetailResponse, ProjectListResponse, SkillExportResponse,
+    SkillListResponse,
 };
 use crate::Error;
 
@@ -82,6 +83,24 @@ impl NexusClient {
             "action": "sk_export",
             "project_id": project_id
         });
+        self.post("/api/mcp/skills", &body).await
+    }
+
+    /// List all skills for the current tenant via `POST /api/mcp/skills`.
+    ///
+    /// Calls the `sk_list` action on the MCP skills endpoint.
+    pub async fn list_skills(
+        &self,
+        status_filter: Option<&[String]>,
+        limit: Option<u32>,
+    ) -> Result<SkillListResponse, Error> {
+        let mut body = json!({ "action": "sk_list" });
+        if let Some(statuses) = status_filter {
+            body["status_filter"] = json!(statuses);
+        }
+        if let Some(lim) = limit {
+            body["limit"] = json!(lim);
+        }
         self.post("/api/mcp/skills", &body).await
     }
 

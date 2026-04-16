@@ -135,6 +135,17 @@ pub enum ConfigAction {
 /// Skills management subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SkillsAction {
+    /// List all skills for the current tenant.
+    List {
+        /// Filter by status: draft, active, archived (comma-separated, default: draft,active).
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Maximum number of skills to return (default: 50, max: 100).
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+
     /// Export enabled skills for the linked project as JSON.
     Export {
         /// Override the linked project ID.

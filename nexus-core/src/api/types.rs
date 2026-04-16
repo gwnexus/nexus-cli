@@ -79,6 +79,33 @@ pub struct AuthStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Skill list (POST /api/mcp/skills  action=sk_list)
+// ---------------------------------------------------------------------------
+
+/// A single skill summary returned by `sk_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSummary {
+    pub id: String,
+    pub skill_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub auto_generate_command: Option<bool>,
+    pub command_slug: Option<String>,
+    pub version: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response from `sk_list` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillListResponse {
+    pub action: String,
+    pub count: usize,
+    pub skills: Vec<SkillSummary>,
+}
+
+// ---------------------------------------------------------------------------
 // Skill export (POST /api/mcp/skills  action=sk_export)
 // ---------------------------------------------------------------------------
 

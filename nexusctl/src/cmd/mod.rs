@@ -67,6 +67,15 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             pull::run(&api_url, project_id.as_deref(), force || cli.yes).await?;
         }
         Command::Skills { ref action } => match action {
+            SkillsAction::List {
+                ref status,
+                limit,
+            } => {
+                let config = nexus_core::config::Config::load()?;
+                let api_url = cli.resolve_api_url(&config);
+                let output = cli.resolve_output(&config);
+                skills_cmd::list(&api_url, status.as_deref(), *limit, output).await?;
+            }
             SkillsAction::Export { ref project_id } => {
                 let config = nexus_core::config::Config::load()?;
                 let api_url = cli.resolve_api_url(&config);
