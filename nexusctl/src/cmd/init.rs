@@ -161,8 +161,13 @@ pub async fn run(
                         write_command(&target, skill)?;
                     }
 
-                    // Write MCP server configs
-                    write_mcp_configs(&target, project_name, api_url, mcp_source)?;
+                    // Write MCP server configs (with literal token + URL baked in)
+                    let mcp_api_url = if force {
+                        api_url.to_string()
+                    } else {
+                        prompt_with_default("   Nexus API URL", api_url)?
+                    };
+                    write_mcp_configs(&target, project_name, &mcp_api_url, tok, mcp_source)?;
                 }
                 Err(e) => {
                     println!(
@@ -666,7 +671,8 @@ fn capitalize(s: &str) -> String {
 fn write_mcp_configs(
     target: &Path,
     _project_name: &str,
-    _api_url: &str,
+    api_url: &str,
+    token: &str,
     mcp_source: McpSource,
 ) -> anyhow::Result<()> {
     let source_label = match mcp_source {
@@ -696,14 +702,16 @@ fn write_mcp_configs(
       "type": "local",
       {command_block},
       "environment": {{
-        "NEXUS_API_URL": "{{env:NEXUS_API_URL}}",
-        "NEXUS_PRIVATE_TOKEN": "{{env:NEXUS_PRIVATE_TOKEN}}"
+        "NEXUS_API_URL": "{api_url}",
+        "NEXUS_PRIVATE_TOKEN": "{token}"
       }}
     }}
   }}
 }}
 "#,
             command_block = command_block,
+            api_url = api_url,
+            token = token,
         );
 
         fs::write(&opencode_path, opencode_json)?;
@@ -735,8 +743,8 @@ fn write_mcp_configs(
       "command": "{cmd}",
       "args": [{args}],
       "env": {{
-        "NEXUS_API_URL": "https://nexus.mpowr.tech",
-        "NEXUS_PRIVATE_TOKEN": "${{NEXUS_PRIVATE_TOKEN}}"
+        "NEXUS_API_URL": "{api_url}",
+        "NEXUS_PRIVATE_TOKEN": "{token}"
       }}
     }}
   }}
@@ -744,6 +752,8 @@ fn write_mcp_configs(
 "#,
             cmd = cmd,
             args = args,
+            api_url = api_url,
+            token = token,
         );
 
         // .claude/ directory should already exist from earlier init steps
@@ -764,6 +774,24 @@ fn write_mcp_configs(
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+/// Prompt the user for input with a default value. Returns default on empty input.
+fn prompt_with_default(label: &str, default: &str) -> anyhow::Result<String> {
+    use std::io::{self, BufRead, Write};
+
+    print!("{} [{}]: ", label, style(default).dim());
+    io::stdout().flush()?;
+
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    let trimmed = line.trim();
+
+    if trimmed.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
 
 /// Print a "created" status line.
 fn print_created(path: &str) {
