@@ -160,14 +160,6 @@ pub async fn run(
                         write_skill(&target, skill)?;
                         write_command(&target, skill)?;
                     }
-
-                    // Write MCP server configs (with literal token + URL baked in)
-                    let mcp_api_url = if force {
-                        api_url.to_string()
-                    } else {
-                        prompt_with_default("   Nexus API URL", api_url)?
-                    };
-                    write_mcp_configs(&target, project_name, &mcp_api_url, tok, mcp_source)?;
                 }
                 Err(e) => {
                     println!(
@@ -178,6 +170,14 @@ pub async fn run(
                     println!("   Local scaffolding is complete; skills not synced.");
                 }
             }
+
+            // Write MCP server configs (independent of skill export)
+            let mcp_api_url = if force {
+                api_url.to_string()
+            } else {
+                prompt_with_default("   Nexus API URL", api_url)?
+            };
+            write_mcp_configs(&target, project_name, &mcp_api_url, tok, mcp_source)?;
 
             // Export directives for this project
             match client.export_directives(pid).await {
