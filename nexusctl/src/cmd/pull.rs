@@ -15,6 +15,7 @@ use console::style;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::Credentials;
 use nexus_core::config;
+use nexus_core::McpSource;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -25,7 +26,12 @@ use std::path::Path;
 const MANAGED_MARKER: &str = "source: nexus-platform";
 
 /// Run the pull command.
-pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> anyhow::Result<()> {
+pub async fn run(
+    api_url: &str,
+    cli_project_id: Option<&str>,
+    force: bool,
+    mcp_source: McpSource,
+) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
     // Resolve project ID from CLI flag or linked project
@@ -43,7 +49,7 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> an
         anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
     })?;
 
-    let client = NexusClient::new(api_url, Some(token))?;
+    let client = NexusClient::new(api_url, Some(token.clone()))?;
 
     // Verify identity
     let identity = client.get_identity().await?;
@@ -205,6 +211,9 @@ pub async fn run(api_url: &str, cli_project_id: Option<&str>, force: bool) -> an
             sync_agents_md(&workspace, &project_name, force)?;
         }
     }
+
+    // Write MCP server configs if they don't exist yet
+    write_mcp_configs_if_missing(&workspace, api_url, &token, mcp_source)?;
 
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
@@ -483,6 +492,106 @@ fn resolve_token() -> Option<String> {
         Ok(Some(creds)) => Some(creds.token),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// MCP config generation
+// ---------------------------------------------------------------------------
+
+/// Write MCP server configs (`opencode.json`, `.claude/mcp.json`) if they
+/// don't already exist. This ensures `nexus pull` can bootstrap a workspace
+/// that was initialized before MCP config generation was added.
+fn write_mcp_configs_if_missing(
+    workspace: &Path,
+    api_url: &str,
+    token: &str,
+    mcp_source: McpSource,
+) -> anyhow::Result<()> {
+    let opencode_path = workspace.join("opencode.json");
+    let claude_mcp_path = workspace.join(".claude").join("mcp.json");
+
+    // Nothing to do if both configs already exist
+    if opencode_path.exists() && claude_mcp_path.exists() {
+        return Ok(());
+    }
+
+    let source_label = match mcp_source {
+        McpSource::Npm => "npm (@mpowr/nexus-mcp)",
+        McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
+    };
+
+    if !opencode_path.exists() {
+        let command_block = match mcp_source {
+            McpSource::Npm => r#""command": ["npx", "@mpowr/nexus-mcp"]"#,
+            McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
+        };
+
+        let opencode_json = format!(
+            r#"{{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {{
+    "nexus": {{
+      "type": "local",
+      {command_block},
+      "environment": {{
+        "NEXUS_API_URL": "{api_url}",
+        "NEXUS_PRIVATE_TOKEN": "{token}"
+      }}
+    }}
+  }}
+}}
+"#,
+            command_block = command_block,
+            api_url = api_url,
+            token = token,
+        );
+
+        fs::write(&opencode_path, opencode_json)?;
+        println!(
+            "   {} opencode.json (MCP source: {})",
+            style("+").bold().green(),
+            source_label,
+        );
+    }
+
+    if !claude_mcp_path.exists() {
+        let (cmd, args) = match mcp_source {
+            McpSource::Npm => ("npx", r#""@mpowr/nexus-mcp""#),
+            McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
+        };
+
+        let claude_mcp_json = format!(
+            r#"{{
+  "mcpServers": {{
+    "nexus": {{
+      "command": "{cmd}",
+      "args": [{args}],
+      "env": {{
+        "NEXUS_API_URL": "{api_url}",
+        "NEXUS_PRIVATE_TOKEN": "{token}"
+      }}
+    }}
+  }}
+}}
+"#,
+            cmd = cmd,
+            args = args,
+            api_url = api_url,
+            token = token,
+        );
+
+        if let Some(parent) = claude_mcp_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&claude_mcp_path, claude_mcp_json)?;
+        println!(
+            "   {} .claude/mcp.json (MCP source: {})",
+            style("+").bold().green(),
+            source_label,
+        );
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -965,5 +1074,122 @@ mod tests {
         assert_eq!(resp.agent_files[0].target_path, "AGENTS.md");
         assert_eq!(resp.agent_files[0].version, 1);
         assert_eq!(resp.count, 1);
+    }
+
+    // ── MCP config generation tests ────────────────────────────────────────
+
+    fn temp_pull_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexus-pull-test-{}", name));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_write_mcp_configs_if_missing_creates_both() {
+        let dir = temp_pull_dir("mcp-creates");
+
+        write_mcp_configs_if_missing(
+            &dir,
+            "https://nexus.mpowr.tech",
+            "nxs_pat_pull-test-token",
+            McpSource::Npm,
+        )
+        .unwrap();
+
+        // opencode.json must exist with literal values
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        assert!(oc.contains("\"nexus\""));
+        assert!(oc.contains("nxs_pat_pull-test-token"));
+        assert!(oc.contains("https://nexus.mpowr.tech"));
+        assert!(oc.contains("npx"));
+        assert!(!oc.contains("{env:"));
+
+        // .claude/mcp.json must exist
+        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        assert!(cm.contains("\"mcpServers\""));
+        assert!(cm.contains("nxs_pat_pull-test-token"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_if_missing_skips_existing() {
+        let dir = temp_pull_dir("mcp-skips");
+
+        // Pre-create both files
+        fs::write(dir.join("opencode.json"), "existing-oc").unwrap();
+        fs::write(dir.join(".claude/mcp.json"), "existing-cm").unwrap();
+
+        write_mcp_configs_if_missing(
+            &dir,
+            "https://nexus.mpowr.tech",
+            "nxs_pat_should-not-appear",
+            McpSource::Npm,
+        )
+        .unwrap();
+
+        // Must NOT overwrite
+        assert_eq!(
+            fs::read_to_string(dir.join("opencode.json")).unwrap(),
+            "existing-oc"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join(".claude/mcp.json")).unwrap(),
+            "existing-cm"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_if_missing_creates_only_missing() {
+        let dir = temp_pull_dir("mcp-partial");
+
+        // Only opencode.json exists
+        fs::write(dir.join("opencode.json"), "existing-oc").unwrap();
+
+        write_mcp_configs_if_missing(
+            &dir,
+            "https://nexus.mpowr.tech",
+            "nxs_pat_partial-token",
+            McpSource::Npm,
+        )
+        .unwrap();
+
+        // opencode.json untouched
+        assert_eq!(
+            fs::read_to_string(dir.join("opencode.json")).unwrap(),
+            "existing-oc"
+        );
+        // .claude/mcp.json created
+        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        assert!(cm.contains("nxs_pat_partial-token"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_if_missing_local_mode() {
+        let dir = temp_pull_dir("mcp-local");
+
+        write_mcp_configs_if_missing(
+            &dir,
+            "https://nexus.mpowr.tech",
+            "nxs_pat_local-token",
+            McpSource::Local,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        assert!(oc.contains("tools/nexus-mcp/dist/server.js"));
+        assert!(!oc.contains("npx"));
+
+        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        assert!(cm.contains("\"command\": \"node\""));
+        assert!(cm.contains("tools/nexus-mcp/dist/server.js"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

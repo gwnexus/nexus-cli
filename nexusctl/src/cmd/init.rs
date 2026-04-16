@@ -1187,6 +1187,7 @@ mod tests {
             &dir,
             "test-proj",
             "https://nexus.mpowr.tech",
+            "nxs_pat_test-token-1234567890",
             McpSource::Npm,
         )
         .unwrap();
@@ -1205,8 +1206,10 @@ mod tests {
         assert!(!oc.contains("\"stdio\""));
         // Must use "environment" (not "env")
         assert!(oc.contains("\"environment\""));
-        // Must use {env:VAR} syntax
-        assert!(oc.contains("{env:NEXUS_API_URL}"));
+        // Must contain literal token and URL (not env var references)
+        assert!(oc.contains("https://nexus.mpowr.tech"));
+        assert!(oc.contains("nxs_pat_test-token-1234567890"));
+        assert!(!oc.contains("{env:"));
 
         // .mcp.json must NOT be created (legacy root-level format)
         assert!(!dir.join(".mcp.json").exists());
@@ -1215,7 +1218,7 @@ mod tests {
         let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
         assert!(cm.contains("\"mcpServers\""));
         assert!(cm.contains("@mpowr/nexus-mcp"));
-        assert!(cm.contains("NEXUS_PRIVATE_TOKEN"));
+        assert!(cm.contains("nxs_pat_test-token-1234567890"));
         // Claude uses "command" + "args" format, not "command": [array]
         assert!(cm.contains("\"command\": \"npx\""));
         assert!(cm.contains("\"args\""));
@@ -1232,6 +1235,7 @@ mod tests {
             &dir,
             "test-proj",
             "https://nexus.mpowr.tech",
+            "nxs_pat_local-test-token",
             McpSource::Local,
         )
         .unwrap();
@@ -1264,6 +1268,7 @@ mod tests {
             &dir,
             "test-proj",
             "https://nexus.mpowr.tech",
+            "nxs_pat_skip-test-token",
             McpSource::Npm,
         )
         .unwrap();
