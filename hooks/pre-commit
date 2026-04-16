@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run cargo fmt and fail if formatting changes are needed.
+# Install: cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or:      make install-hooks
+
+set -euo pipefail
+
+# Only check if Rust files are staged
+RUST_STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' || true)
+
+if [ -z "$RUST_STAGED" ]; then
+  exit 0
+fi
+
+echo ">> Running cargo fmt --check..."
+
+# Unset RUSTFLAGS to avoid devbox/nix mold linker issues on macOS
+if ! RUSTFLAGS="" cargo fmt --all -- --check 2>/dev/null; then
+  echo ""
+  echo "!! Formatting check failed. Run 'cargo fmt --all' and stage the changes."
+  echo ""
+  exit 1
+fi
+
+echo "   Format check passed."

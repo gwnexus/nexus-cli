@@ -128,6 +128,14 @@ nexus-cli/
 cargo build --release
 ```
 
+## Development
+
+Install the pre-commit hook to run `cargo fmt` automatically before each commit:
+
+```bash
+cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+```
+
 ## Test
 
 ```bash
