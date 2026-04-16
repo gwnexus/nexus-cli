@@ -273,26 +273,36 @@ fn create_nexus_dir(
     let nexus_dir = target.join(".nexus");
     fs::create_dir_all(&nexus_dir)?;
 
-    let project_id_line = match project_id {
-        Some(id) => format!("id = \"{}\"", id),
-        None => "# id = \"<set via --project-id>\"".to_string(),
+    let project_section = match project_id {
+        Some(id) => format!(
+            r#"[project]
+name = "{name}"
+id = "{id}"
+"#,
+            name = project_name,
+            id = id,
+        ),
+        None => format!(
+            r#"# Project not yet linked. Run `nexus link` or `nexus init --project-id <UUID>`.
+# [project]
+# name = "{name}"
+# id = "<project-uuid>"
+"#,
+            name = project_name,
+        ),
     };
 
     let config_content = format!(
         r#"# Nexus project-local configuration
 # Managed by `nexus init`. Safe to edit manually.
 
-[project]
-name = "{name}"
-{project_id_line}
-
+{project_section}
 [mcp]
 # MCP server binary (resolved relative to project root)
 # server_cmd = "node"
 # server_args = ["tools/nexus-mcp/dist/server.js"]
 "#,
-        name = project_name,
-        project_id_line = project_id_line,
+        project_section = project_section,
     );
 
     fs::write(nexus_dir.join("config.toml"), config_content)?;
