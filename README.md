@@ -11,7 +11,7 @@ configuration management.
 Requires a GitHub PAT with `repo` scope for the private release artifacts:
 
 ```bash
-GITHUB_TOKEN=ghp_xxx curl -fsSL https://raw.githubusercontent.com/mpowr-it/nexus-cli/main/install.sh | bash
+curl -fsSL https://d1187p3nik605m.cloudfront.net/cli/install.sh | bash
 ```
 
 The installer detects your platform (macOS/Linux, x86_64/aarch64), downloads

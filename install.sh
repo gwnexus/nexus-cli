@@ -2,7 +2,7 @@
 # Nexus CLI installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/mpowr-it/nexus-cli/main/install.sh | bash
+#   curl -fsSL https://d1187p3nik605m.cloudfront.net/cli/install.sh | bash
 #
 # Options (via env vars):
 #   NEXUS_VERSION   Pin a specific version tag, e.g. "v0.1.1" (default: latest release)
