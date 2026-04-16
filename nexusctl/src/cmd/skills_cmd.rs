@@ -30,9 +30,7 @@ pub async fn list(
             .collect()
     });
 
-    let resp = client
-        .list_skills(statuses.as_deref(), limit)
-        .await?;
+    let resp = client.list_skills(statuses.as_deref(), limit).await?;
 
     match output {
         OutputPreference::Json => {
@@ -66,10 +64,7 @@ pub async fn list(
                         _ => style(&skill.status).white(),
                     };
 
-                    let cmd = skill
-                        .command_slug
-                        .as_deref()
-                        .unwrap_or("-");
+                    let cmd = skill.command_slug.as_deref().unwrap_or("-");
 
                     // Truncate name to 28 chars to keep table aligned
                     let name_display = if skill.name.len() > 28 {
