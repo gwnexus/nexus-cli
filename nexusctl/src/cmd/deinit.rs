@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 const SCAFFOLD_ENTRIES: &[&str] = &[
     ".nexus",
     ".claude",
-    ".opencode/commands",
+    ".opencode",
     "opencode.json",
     "opencode.jsonc",
     "AGENTS.md",
@@ -65,13 +65,6 @@ pub fn run(force: bool) -> anyhow::Result<()> {
         remove_entry(path)?;
     }
 
-    // Also clean up .opencode/ if it's now empty
-    let opencode_dir = cwd.join(".opencode");
-    if opencode_dir.exists() && is_dir_empty(&opencode_dir)? {
-        fs::remove_dir(&opencode_dir)?;
-        println!("   {} .opencode/ (now empty)", style("-").bold().red());
-    }
-
     println!();
     println!("{} Nexus scaffold removed.", style("OK").bold().green());
 
@@ -92,11 +85,6 @@ fn remove_entry(path: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Check if a directory is empty.
-fn is_dir_empty(path: &Path) -> anyhow::Result<bool> {
-    Ok(fs::read_dir(path)?.next().is_none())
 }
 
 /// Ask the user to confirm deletion.
