@@ -8,6 +8,7 @@ mod link;
 mod preflight;
 mod pull;
 mod skills_cmd;
+mod upgrade;
 
 use crate::{Cli, Command, ConfigAction, SkillsAction};
 
@@ -95,6 +96,9 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             ConfigAction::Set { pair } => config_cmd::set(&pair)?,
             ConfigAction::Path => config_cmd::path()?,
         },
+        Command::Upgrade => {
+            upgrade::run()?;
+        }
     }
     Ok(())
 }

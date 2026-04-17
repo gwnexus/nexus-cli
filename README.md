@@ -46,6 +46,7 @@ nexus deinit [--force]                  Remove all AI scaffold files from the wo
 nexus config show                       Display configuration
 nexus config set K=V                    Update a configuration value
 nexus config path                       Show the config file path
+nexus upgrade                           Upgrade CLI to latest release version
 ```
 
 ### Global Flags

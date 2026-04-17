@@ -3,7 +3,7 @@
 //! The `nexus` binary provides project scaffolding, authentication,
 //! and configuration management for the Nexus platform.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod cmd;
@@ -12,9 +12,8 @@ mod cmd;
 #[derive(Debug, Parser)]
 #[command(
     name = "nexus",
-    version,
-    about = "Nexus CLI for mpowr-nexus platform operations",
-    long_about = "Project scaffolding, authentication, and configuration management\nfor the mpowr-nexus multi-agent collaboration platform."
+    version = env!("CARGO_PKG_VERSION"),
+    about = "Nexus CLI — mpowr-nexus platform operations",
 )]
 pub struct Cli {
     /// Nexus API base URL (overrides config file).
@@ -114,6 +113,9 @@ pub enum Command {
 
     /// Run preflight checks to verify environment readiness.
     Preflight,
+
+    /// Upgrade the Nexus CLI to the latest release version.
+    Upgrade,
 }
 
 /// Configuration subcommands.
@@ -179,7 +181,13 @@ impl Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    // Build dynamic about string with version + copyright
+    let version = env!("CARGO_PKG_VERSION");
+    let about = format!(
+        "Nexus CLI v{version} \u{2014} mpowr-nexus platform operations\n(C) 2025-present MPOWR IT GmbH | OPS-Lab Team & Friends"
+    );
+
+    let cli = Cli::from_arg_matches(&Cli::command().about(about).get_matches())?;
 
     // Initialize tracing
     let filter = if cli.verbose {
@@ -530,5 +538,11 @@ mod tests {
     fn test_global_yes_long_flag() {
         let cli = Cli::try_parse_from(["nexus", "--yes", "deinit"]).unwrap();
         assert!(cli.yes);
+    }
+
+    #[test]
+    fn test_parse_upgrade() {
+        let cli = Cli::try_parse_from(["nexus", "upgrade"]).unwrap();
+        assert!(matches!(cli.command, Command::Upgrade));
     }
 }
