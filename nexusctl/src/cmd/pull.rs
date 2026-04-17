@@ -35,7 +35,33 @@ pub async fn run(
     let workspace = std::env::current_dir()?;
 
     // Resolve project ID from CLI flag or linked project
-    let project_id = config::resolve_project_id(cli_project_id, Some(&workspace))?;
+    let project_id = match config::resolve_project_id(cli_project_id, Some(&workspace)) {
+        Ok(id) => id,
+        Err(_) => {
+            println!();
+            println!(
+                "   {} No project linked to this workspace.",
+                style("!").bold().yellow()
+            );
+            println!();
+            println!(
+                "   Without a linked project, {} cannot pull project-specific",
+                style("nexus pull").bold()
+            );
+            println!("   skills, agent files, directives, or MCP configuration.");
+            println!();
+            println!(
+                "   Run {} to bind this workspace to a Nexus project,",
+                style("nexus link").bold().cyan()
+            );
+            println!(
+                "   or pass {} directly.",
+                style("--project-id <UUID>").bold().cyan()
+            );
+            println!();
+            return Ok(());
+        }
+    };
 
     println!(
         "{} Pulling from Nexus platform...",
