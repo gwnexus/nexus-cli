@@ -5,7 +5,7 @@
 
 use console::style;
 use nexus_core::api::NexusClient;
-use nexus_core::auth::Credentials;
+use nexus_core::auth::resolve_token;
 use nexus_core::config;
 use nexus_core::OutputPreference;
 
@@ -68,7 +68,7 @@ pub async fn list(
 
                     // Truncate name to 28 chars to keep table aligned
                     let name_display = if skill.name.len() > 28 {
-                        format!("{}...", &skill.name[..25])
+                        format!("{}...", skill.name.chars().take(25).collect::<String>())
                     } else {
                         skill.name.clone()
                     };
@@ -122,17 +122,4 @@ pub async fn export(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Resu
     );
 
     Ok(())
-}
-
-/// Resolve a token from (1) NEXUS_PRIVATE_TOKEN env var, or (2) stored credentials.
-fn resolve_token() -> Option<String> {
-    if let Ok(token) = std::env::var("NEXUS_PRIVATE_TOKEN") {
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-    match Credentials::load() {
-        Ok(Some(creds)) => Some(creds.token),
-        _ => None,
-    }
 }

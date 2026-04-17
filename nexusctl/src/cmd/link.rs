@@ -7,7 +7,7 @@
 
 use console::style;
 use nexus_core::api::NexusClient;
-use nexus_core::auth::Credentials;
+use nexus_core::auth::require_token;
 use nexus_core::config::{self, ProjectConfig, ProjectInfo};
 
 /// Run the `nexus link` command.
@@ -22,7 +22,7 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
     println!();
 
     // Require authentication
-    let token = resolve_token()?;
+    let token = require_token()?;
     let client = NexusClient::new(api_url, Some(token))?;
 
     // Verify identity first
@@ -130,19 +130,6 @@ pub fn unlink() -> anyhow::Result<()> {
 }
 
 /// Resolve a token from env var or stored credentials.
-fn resolve_token() -> anyhow::Result<String> {
-    if let Ok(token) = std::env::var("NEXUS_PRIVATE_TOKEN") {
-        if !token.is_empty() {
-            return Ok(token);
-        }
-    }
-
-    match Credentials::load()? {
-        Some(creds) => Ok(creds.token),
-        None => anyhow::bail!("Not authenticated. Run 'nexus login' first."),
-    }
-}
-
 /// Read a numeric selection from stdin (1-indexed).
 fn read_selection(max: usize) -> anyhow::Result<usize> {
     use std::io::{self, BufRead, Write};

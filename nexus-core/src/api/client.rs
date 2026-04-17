@@ -17,11 +17,20 @@ use crate::api::types::{
 use crate::Error;
 
 /// HTTP client for the Nexus API.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NexusClient {
     client: reqwest::Client,
     base_url: String,
     token: Option<String>,
+}
+
+impl std::fmt::Debug for NexusClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NexusClient")
+            .field("base_url", &self.base_url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl NexusClient {

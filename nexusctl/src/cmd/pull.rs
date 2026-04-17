@@ -13,7 +13,7 @@
 
 use console::style;
 use nexus_core::api::NexusClient;
-use nexus_core::auth::Credentials;
+use nexus_core::auth::resolve_token;
 use nexus_core::config;
 use nexus_core::McpSource;
 use std::fs;
@@ -518,19 +518,6 @@ fn confirm_overwrite() -> anyhow::Result<bool> {
     let answer = input.trim().to_lowercase();
 
     Ok(answer == "y" || answer == "yes")
-}
-
-/// Resolve a token from (1) NEXUS_PRIVATE_TOKEN env var, or (2) stored credentials.
-fn resolve_token() -> Option<String> {
-    if let Ok(token) = std::env::var("NEXUS_PRIVATE_TOKEN") {
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-    match Credentials::load() {
-        Ok(Some(creds)) => Some(creds.token),
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------

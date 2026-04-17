@@ -26,7 +26,7 @@
 
 use console::style;
 use nexus_core::api::NexusClient;
-use nexus_core::auth::Credentials;
+use nexus_core::auth::resolve_token;
 use nexus_core::config;
 use nexus_core::McpSource;
 use std::fs;
@@ -350,22 +350,6 @@ pub async fn run(
     Ok(())
 }
 
-/// Resolve a token from (1) NEXUS_PRIVATE_TOKEN env var, or (2) stored credentials.
-fn resolve_token() -> Option<String> {
-    // Env var takes precedence (useful for CI/CD and MCP servers)
-    if let Ok(token) = std::env::var("NEXUS_PRIVATE_TOKEN") {
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-
-    // Fall back to stored credentials
-    match Credentials::load() {
-        Ok(Some(creds)) => Some(creds.token),
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Phase 1 helpers: Local scaffolding
 // ---------------------------------------------------------------------------
@@ -495,11 +479,7 @@ fn is_nexus_dir_link_only(nexus_dir: &Path) -> bool {
         return false;
     };
     let files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    files.len() == 1
-        && files[0]
-            .file_name()
-            .to_str()
-            .map_or(false, |n| n == "config.toml")
+    files.len() == 1 && files[0].file_name().to_str() == Some("config.toml")
 }
 
 /// Create AGENTS.md with a template agent definition.

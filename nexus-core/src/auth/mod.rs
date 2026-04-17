@@ -12,7 +12,7 @@ use crate::Error;
 pub const TOKEN_PREFIX: &str = "nxs_pat_";
 
 /// Stored credentials for authenticating against the Nexus API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Credentials {
     /// The personal access token (starts with `nxs_pat_`).
     pub token: String,
@@ -20,6 +20,15 @@ pub struct Credentials {
     /// Optional ISO 8601 expiry timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl Credentials {
@@ -96,4 +105,32 @@ impl Credentials {
         }
         Ok(())
     }
+}
+
+/// Resolve an authentication token from available sources.
+///
+/// Checks in order:
+/// 1. `NEXUS_PRIVATE_TOKEN` environment variable (useful for CI/CD and MCP servers)
+/// 2. Stored credentials on disk (`~/.config/nexus/credentials.toml`)
+///
+/// Returns `None` if no token is available.
+pub fn resolve_token() -> Option<String> {
+    if let Ok(token) = std::env::var("NEXUS_PRIVATE_TOKEN") {
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+    match Credentials::load() {
+        Ok(Some(creds)) => Some(creds.token),
+        _ => None,
+    }
+}
+
+/// Resolve an authentication token, returning an error if none is found.
+///
+/// Same resolution order as [`resolve_token`], but returns a descriptive
+/// error instead of `None`.
+pub fn require_token() -> Result<String, Error> {
+    resolve_token()
+        .ok_or_else(|| Error::Auth("Not authenticated. Run 'nexus login' first.".to_string()))
 }

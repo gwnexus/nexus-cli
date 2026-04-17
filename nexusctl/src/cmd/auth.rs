@@ -92,10 +92,10 @@ pub async fn status(api_url: &str) -> anyhow::Result<()> {
         }
         Some(ref c) => {
             // Show token prefix
-            let prefix = if c.token.len() > 16 {
-                format!("{}...", &c.token[..16])
+            let prefix = if c.token.len() > 8 {
+                format!("{}****...", &c.token[..8])
             } else {
-                c.token.clone()
+                "****".to_string()
             };
 
             // Verify against API
