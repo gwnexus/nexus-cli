@@ -66,6 +66,41 @@ pub async fn run(
 
     if let Some(ref pid) = resolved_pid {
         println!("   Project: {}", style(pid).dim());
+    } else if !force {
+        println!(
+            "   {} No project linked to this workspace.",
+            style("!").bold().yellow()
+        );
+        println!();
+        println!(
+            "   Without a linked project, {} will only create the local",
+            style("nexus init").bold()
+        );
+        println!("   scaffold. Project-specific skills, agent files, directives,");
+        println!("   and MCP configuration will not be pulled.");
+        println!();
+        println!(
+            "   After init, run {} to bind a project, then {}.",
+            style("nexus link").bold().cyan(),
+            style("nexus pull").bold().cyan()
+        );
+        println!();
+
+        // Only prompt if stdin is a TTY (skip in tests / pipes)
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            print!("   Continue without a project? [y/N] ");
+            use std::io::{self, BufRead, Write};
+            io::stdout().flush()?;
+            let mut line = String::new();
+            io::stdin().lock().read_line(&mut line)?;
+            let answer = line.trim().to_lowercase();
+            if answer != "y" && answer != "yes" {
+                println!("   Aborted.");
+                return Ok(());
+            }
+            println!();
+        }
     }
     println!();
 
