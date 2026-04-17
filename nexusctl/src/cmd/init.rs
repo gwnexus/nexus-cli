@@ -104,10 +104,13 @@ pub async fn run(
     }
     println!();
 
-    // Check if already initialized
+    // Check if already fully initialized (skip if .nexus/ only contains config.toml from `nexus link`)
     let nexus_dir = target.join(".nexus");
     if nexus_dir.exists() && !force {
-        anyhow::bail!("Directory already contains .nexus/. Use --force to reinitialize.");
+        let is_link_only = is_nexus_dir_link_only(&nexus_dir);
+        if !is_link_only {
+            anyhow::bail!("Directory already contains .nexus/. Use --force to reinitialize.");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -482,6 +485,21 @@ fn create_opencode_dir(target: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(opencode_dir.join("commands"))?;
     print_created(".opencode/commands/");
     Ok(())
+}
+
+/// Check if `.nexus/` only contains a `config.toml` (created by `nexus link`).
+/// Returns true when the directory is a "link-only" state and can be safely
+/// re-initialized without `--force`.
+fn is_nexus_dir_link_only(nexus_dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(nexus_dir) else {
+        return false;
+    };
+    let files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    files.len() == 1
+        && files[0]
+            .file_name()
+            .to_str()
+            .map_or(false, |n| n == "config.toml")
 }
 
 /// Create AGENTS.md with a template agent definition.
