@@ -60,11 +60,18 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
         println!();
         for (i, p) in resp.projects.iter().enumerate() {
             let slug_display = p.slug.as_deref().unwrap_or("-");
+            let flavor = match p.agent_owner.as_deref() {
+                Some("opencode") => " [opencode]",
+                Some("claude-cli") => " [claude-cli]",
+                Some("both") => " [opencode + claude-cli]",
+                _ => "",
+            };
             println!(
-                "   {}  {} ({})",
+                "   {}  {} ({}){}",
                 style(format!("[{}]", i + 1)).bold(),
                 style(&p.name).bold(),
-                style(slug_display).dim()
+                style(slug_display).dim(),
+                style(flavor).cyan()
             );
         }
         println!();

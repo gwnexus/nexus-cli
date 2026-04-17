@@ -128,6 +128,29 @@ nexus-cli/
 cargo build --release
 ```
 
+## Tips
+
+> **:warning: Local agent file changes are overwritten by `nexus pull`.**
+>
+> Files managed by the Nexus platform (AGENTS.md, CLAUDE.md, .cursorrules,
+> copilot-instructions.md, plugin configs, etc.) are pulled from the server
+> and will **overwrite** any local modifications. `nexus pull` warns before
+> overwriting, but with `--force` changes are lost silently.
+>
+> **Pushing local changes back to the platform is not yet supported.**
+> If you need custom content, edit the agent files in the Nexus dashboard
+> and run `nexus pull` to sync them to your workspace.
+
+- Run `nexus pull` periodically (or after skill/agent file changes in the dashboard) to keep your workspace in sync.
+- Use `/nexus-init` inside OpenCode or Claude CLI to bootstrap the agent after initialization.
+- Each project is optimized for a specific tool flavor (OpenCode, Claude CLI, or both). Run `nexus link` to see which flavor is configured.
+
+## Known Issues
+
+- **No push support for agent files.** Local edits to managed files (AGENTS.md, CLAUDE.md, etc.) cannot be synced back to the platform. Edit in the dashboard instead.
+- **`nexus pull` overwrites without merge.** There is no diff/merge strategy — the server version always wins. Back up local changes before pulling if needed.
+- **macOS build requires `RUSTFLAGS=""`** when using devbox/nix (the default `RUSTFLAGS=-C link-arg=-fuse-ld=mold` does not work on macOS).
+
 ## Development
 
 Install the pre-commit hook to run `cargo fmt` automatically before each commit:

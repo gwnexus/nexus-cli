@@ -212,8 +212,21 @@ pub async fn run(
         }
     }
 
+    // Resolve tool flavor from project details
+    let tool_flavor = client
+        .get_project(&project_id)
+        .await
+        .ok()
+        .and_then(|d| d.project.agent_owner);
+
     // Write MCP server configs if they don't exist yet
-    write_mcp_configs_if_missing(&workspace, api_url, &token, mcp_source)?;
+    write_mcp_configs_if_missing(
+        &workspace,
+        api_url,
+        &token,
+        mcp_source,
+        tool_flavor.as_deref(),
+    )?;
 
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
@@ -506,12 +519,18 @@ fn write_mcp_configs_if_missing(
     api_url: &str,
     token: &str,
     mcp_source: McpSource,
+    tool_flavor: Option<&str>,
 ) -> anyhow::Result<()> {
     let opencode_path = workspace.join("opencode.json");
     let claude_mcp_path = workspace.join(".claude").join("mcp.json");
 
-    // Nothing to do if both configs already exist
-    if opencode_path.exists() && claude_mcp_path.exists() {
+    let skip_opencode = matches!(tool_flavor, Some("claude-cli"));
+    let skip_claude = matches!(tool_flavor, Some("opencode"));
+
+    // Nothing to do if all relevant configs already exist
+    let opencode_done = skip_opencode || opencode_path.exists();
+    let claude_done = skip_claude || claude_mcp_path.exists();
+    if opencode_done && claude_done {
         return Ok(());
     }
 
@@ -520,7 +539,7 @@ fn write_mcp_configs_if_missing(
         McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
     };
 
-    if !opencode_path.exists() {
+    if !skip_opencode && !opencode_path.exists() {
         let command_block = match mcp_source {
             McpSource::Npm => r#""command": ["npx", "@mpowr/nexus-mcp"]"#,
             McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
@@ -554,7 +573,7 @@ fn write_mcp_configs_if_missing(
         );
     }
 
-    if !claude_mcp_path.exists() {
+    if !skip_claude && !claude_mcp_path.exists() {
         let (cmd, args) = match mcp_source {
             McpSource::Npm => ("npx", r#""@mpowr/nexus-mcp""#),
             McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
@@ -1095,6 +1114,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             "nxs_pat_pull-test-token",
             McpSource::Npm,
+            None,
         )
         .unwrap();
 
@@ -1127,6 +1147,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             "nxs_pat_should-not-appear",
             McpSource::Npm,
+            None,
         )
         .unwrap();
 
@@ -1155,6 +1176,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             "nxs_pat_partial-token",
             McpSource::Npm,
+            None,
         )
         .unwrap();
 
@@ -1179,6 +1201,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             "nxs_pat_local-token",
             McpSource::Local,
+            None,
         )
         .unwrap();
 

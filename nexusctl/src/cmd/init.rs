@@ -141,6 +141,12 @@ pub async fn run(
             }
 
             // Export skills for this project
+            let tool_flavor = client
+                .get_project(pid)
+                .await
+                .ok()
+                .and_then(|d| d.project.agent_owner);
+
             match client.export_skills(pid).await {
                 Ok(export) => {
                     println!(
@@ -177,7 +183,14 @@ pub async fn run(
             } else {
                 prompt_with_default("   Nexus API URL", api_url)?
             };
-            write_mcp_configs(&target, project_name, &mcp_api_url, tok, mcp_source)?;
+            write_mcp_configs(
+                &target,
+                project_name,
+                &mcp_api_url,
+                tok,
+                mcp_source,
+                tool_flavor.as_deref(),
+            )?;
 
             // Export directives for this project
             match client.export_directives(pid).await {
@@ -227,6 +240,61 @@ pub async fn run(
                         e
                     );
                 }
+            }
+
+            // Show tool flavor and next steps
+            {
+                let flavor = tool_flavor.as_deref().unwrap_or("opencode");
+                let flavor_label = match flavor {
+                    "both" => "OpenCode + Claude CLI",
+                    "claude-cli" => "Claude CLI",
+                    _ => "OpenCode",
+                };
+                println!();
+                println!(
+                    "{} Nexus workspace initialized successfully.",
+                    style("OK").bold().green()
+                );
+                println!(
+                    "   This project is optimized for: {}",
+                    style(flavor_label).bold().cyan()
+                );
+                println!();
+                println!("Next steps:");
+                match flavor {
+                    "claude-cli" => {
+                        println!("  1. Start Claude CLI in this directory");
+                        println!(
+                            "  2. Run {} to bootstrap the agent",
+                            style("/nexus-init").bold()
+                        );
+                    }
+                    "opencode" => {
+                        println!("  1. Start OpenCode in this directory");
+                        println!(
+                            "  2. Run {} to bootstrap the agent",
+                            style("/nexus-init").bold()
+                        );
+                    }
+                    _ => {
+                        println!("  1. Start OpenCode or Claude CLI in this directory");
+                        println!(
+                            "  2. Run {} to bootstrap the agent",
+                            style("/nexus-init").bold()
+                        );
+                    }
+                }
+                println!(
+                    "  3. Run {} periodically to sync skills and agent files",
+                    style("nexus pull").bold()
+                );
+                println!();
+                println!(
+                    "   {} Local changes to agent files (AGENTS.md, CLAUDE.md, etc.)",
+                    style("!").bold().yellow()
+                );
+                println!("     will be overwritten by 'nexus pull'. These files are managed");
+                println!("     by the Nexus platform and cannot be pushed back yet.");
             }
         } else {
             println!(
@@ -684,28 +752,33 @@ fn write_mcp_configs(
     api_url: &str,
     token: &str,
     mcp_source: McpSource,
+    tool_flavor: Option<&str>,
 ) -> anyhow::Result<()> {
     let source_label = match mcp_source {
         McpSource::Npm => "npm (@mpowr/nexus-mcp)",
         McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
     };
 
+    let skip_opencode = matches!(tool_flavor, Some("claude-cli"));
+    let skip_claude = matches!(tool_flavor, Some("opencode"));
+
     // --- OpenCode config (opencode.json) ---
-    let opencode_path = target.join("opencode.json");
+    if !skip_opencode {
+        let opencode_path = target.join("opencode.json");
 
-    if opencode_path.exists() {
-        println!(
-            "   {} opencode.json already exists, skipping",
-            style("--").yellow()
-        );
-    } else {
-        let command_block = match mcp_source {
-            McpSource::Npm => r#""command": ["npx", "@mpowr/nexus-mcp"]"#,
-            McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
-        };
+        if opencode_path.exists() {
+            println!(
+                "   {} opencode.json already exists, skipping",
+                style("--").yellow()
+            );
+        } else {
+            let command_block = match mcp_source {
+                McpSource::Npm => r#""command": ["npx", "@mpowr/nexus-mcp"]"#,
+                McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
+            };
 
-        let opencode_json = format!(
-            r#"{{
+            let opencode_json = format!(
+                r#"{{
   "$schema": "https://opencode.ai/config.json",
   "mcp": {{
     "nexus": {{
@@ -719,35 +792,37 @@ fn write_mcp_configs(
   }}
 }}
 "#,
-            command_block = command_block,
-            api_url = api_url,
-            token = token,
-        );
+                command_block = command_block,
+                api_url = api_url,
+                token = token,
+            );
 
-        fs::write(&opencode_path, opencode_json)?;
-        println!(
-            "   {} opencode.json (MCP source: {})",
-            style("+").bold().green(),
-            source_label,
-        );
+            fs::write(&opencode_path, opencode_json)?;
+            println!(
+                "   {} opencode.json (MCP source: {})",
+                style("+").bold().green(),
+                source_label,
+            );
+        }
     }
 
     // --- Claude Code config (.claude/mcp.json) ---
-    let claude_mcp_path = target.join(".claude").join("mcp.json");
+    if !skip_claude {
+        let claude_mcp_path = target.join(".claude").join("mcp.json");
 
-    if claude_mcp_path.exists() {
-        println!(
-            "   {} .claude/mcp.json already exists, skipping",
-            style("--").yellow()
-        );
-    } else {
-        let (cmd, args) = match mcp_source {
-            McpSource::Npm => ("npx", r#""@mpowr/nexus-mcp""#),
-            McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
-        };
+        if claude_mcp_path.exists() {
+            println!(
+                "   {} .claude/mcp.json already exists, skipping",
+                style("--").yellow()
+            );
+        } else {
+            let (cmd, args) = match mcp_source {
+                McpSource::Npm => ("npx", r#""@mpowr/nexus-mcp""#),
+                McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
+            };
 
-        let claude_mcp_json = format!(
-            r#"{{
+            let claude_mcp_json = format!(
+                r#"{{
   "mcpServers": {{
     "nexus": {{
       "command": "{cmd}",
@@ -760,22 +835,23 @@ fn write_mcp_configs(
   }}
 }}
 "#,
-            cmd = cmd,
-            args = args,
-            api_url = api_url,
-            token = token,
-        );
+                cmd = cmd,
+                args = args,
+                api_url = api_url,
+                token = token,
+            );
 
-        // .claude/ directory should already exist from earlier init steps
-        if let Some(parent) = claude_mcp_path.parent() {
-            fs::create_dir_all(parent)?;
+            // .claude/ directory should already exist from earlier init steps
+            if let Some(parent) = claude_mcp_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&claude_mcp_path, claude_mcp_json)?;
+            println!(
+                "   {} .claude/mcp.json (MCP source: {})",
+                style("+").bold().green(),
+                source_label,
+            );
         }
-        fs::write(&claude_mcp_path, claude_mcp_json)?;
-        println!(
-            "   {} .claude/mcp.json (MCP source: {})",
-            style("+").bold().green(),
-            source_label,
-        );
     }
 
     Ok(())
@@ -1199,6 +1275,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             "nxs_pat_test-token-1234567890",
             McpSource::Npm,
+            None,
         )
         .unwrap();
 
@@ -1247,6 +1324,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             "nxs_pat_local-test-token",
             McpSource::Local,
+            None,
         )
         .unwrap();
 
@@ -1280,6 +1358,7 @@ mod tests {
             "https://nexus.mpowr.tech",
             "nxs_pat_skip-test-token",
             McpSource::Npm,
+            None,
         )
         .unwrap();
 

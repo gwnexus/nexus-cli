@@ -200,6 +200,8 @@ pub struct ProjectSummary {
     pub description: Option<String>,
     pub status: String,
     pub created_at: String,
+    /// Tool flavor: "opencode", "claude-cli", or "both".
+    pub agent_owner: Option<String>,
 }
 
 /// Wrapper for project list API response.
