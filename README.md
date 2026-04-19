@@ -1,6 +1,6 @@
 # nexus-cli
 
-Rust CLI for the [mpowr-nexus](https://nexus.mpowr.tech) platform. Provides
+Rust CLI for the [Gatewarden Nexus](https://nexus.gatewarden.eu) platform. Provides
 project scaffolding, authentication, environment preflight checks, and
 configuration management.
 
@@ -170,3 +170,9 @@ cargo test --workspace
 
 - [nexus](https://github.com/mpowr-it/nexus) — Backend + Frontend (Next.js/Supabase/Netlify)
 - [nexus-mcp](https://github.com/mpowr-it/nexus-mcp) — MCP server (38 tools, 4 layers)
+
+## License
+
+Gatewarden Nexus is a product of the Gatewarden product group, owned by
+RelicFrog Holding UG (haftungsbeschränkt). This repository is licensed to
+MPOWR IT GmbH under an enterprise whitelabel license.
