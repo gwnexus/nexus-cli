@@ -2,7 +2,7 @@
 # Nexus CLI installer
 #
 # Usage:
-#   curl -fsSL https://d8s0bu751uclb.cloudfront.net/cli/install.sh | bash
+#   curl -fsSL https://nexus.gatewarden.eu/install.sh | bash
 #
 # Options (via env vars):
 #   NEXUS_VERSION   Pin a specific version tag, e.g. "v0.1.1" (default: latest release)

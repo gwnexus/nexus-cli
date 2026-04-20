@@ -7,7 +7,7 @@ use console::style;
 use std::process::Command;
 
 /// CDN URL of the installer script.
-const INSTALL_URL: &str = "https://d8s0bu751uclb.cloudfront.net/cli/install.sh";
+const INSTALL_URL: &str = "https://nexus.gatewarden.eu/install.sh";
 
 /// Run the upgrade command.
 pub fn run() -> anyhow::Result<()> {

@@ -120,7 +120,7 @@ jobs:
 
           **One-liner (recommended):**
           \`\`\`bash
-          curl -fsSL https://d1187p3nik605m.cloudfront.net/cli/install.sh | bash
+          curl -fsSL https://nexus.gatewarden.eu/install.sh | bash
           \`\`\`
 
           **Manual download:**
