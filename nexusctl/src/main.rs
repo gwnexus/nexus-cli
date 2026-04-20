@@ -8,12 +8,12 @@ use tracing_subscriber::EnvFilter;
 
 mod cmd;
 
-/// Nexus CLI -- project scaffolding and platform tools for Gatewarden Nexus.
+/// Nexus CLI -- project scaffolding and platform tools for Nexus.
 #[derive(Debug, Parser)]
 #[command(
     name = "nexus",
     version = env!("CARGO_PKG_VERSION"),
-    about = "Nexus CLI — Gatewarden Nexus platform operations",
+    about = "Nexus CLI — Nexus platform operations",
 )]
 pub struct Cli {
     /// Nexus API base URL (overrides config file).
@@ -184,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
     // Build dynamic about string with version + copyright
     let version = env!("CARGO_PKG_VERSION");
     let about = format!(
-        "Nexus CLI v{version} \u{2014} Gatewarden Nexus platform operations\n(C) 2025-present RelicFrog Holding UG | Gatewarden Product Group"
+        "Nexus CLI v{version} \u{2014} Nexus platform operations\n(C) 2025-present RelicFrog Holding UG | Nexus Product Group"
     );
 
     let cli = Cli::from_arg_matches(&Cli::command().about(about).get_matches())?;

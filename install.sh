@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-REPO="mpowr-it/nexus-cli"
+REPO="gwnexus/nexus-cli"
 BINARY_NAME="nexus"
 
 # ── colours (disabled when piped) ──────────────────────────────────

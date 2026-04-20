@@ -5,7 +5,7 @@ use nexus_core::config::{Config, McpSource, OutputPreference};
 #[test]
 fn test_config_default_values() {
     let config = Config::default();
-    assert_eq!(config.api_url, "https://nexus.mpowr.tech");
+    assert_eq!(config.api_url, "https://nexus.gatewarden.eu");
     assert_eq!(config.default_output, OutputPreference::Table);
     assert!(!config.no_color);
     assert_eq!(config.mcp_source, McpSource::Npm);

@@ -12,7 +12,7 @@ use std::str::FromStr;
 use crate::Error;
 
 /// Default Nexus API base URL.
-const DEFAULT_API_URL: &str = "https://nexus.mpowr.tech";
+const DEFAULT_API_URL: &str = "https://nexus.gatewarden.eu";
 
 /// Output format preference, stored in config and resolved from CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -53,7 +53,7 @@ impl FromStr for OutputPreference {
 /// MCP server source preference.
 ///
 /// Controls whether `nexus init` generates MCP configs pointing to the
-/// published npm package (`npx @mpowr/nexus-mcp`) or a local checkout
+/// published npm package (`npx @gwdn/nexus-mcp`) or a local checkout
 /// (`node tools/nexus-mcp/dist/server.js`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

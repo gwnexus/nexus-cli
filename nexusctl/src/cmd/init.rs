@@ -774,7 +774,7 @@ fn capitalize(s: &str) -> String {
 /// - Variable substitution via `{env:VAR}` syntax
 ///
 /// When `mcp_source` is `Npm` (default), the command runs the published
-/// `@mpowr/nexus-mcp` package via npx. When `Local`, it points to the
+/// `@gwdn/nexus-mcp` package via npx. When `Local`, it points to the
 /// local checkout at `tools/nexus-mcp/dist/server.js`.
 ///
 /// Generates both `opencode.json` (OpenCode) and `.claude/mcp.json` (Claude Code).
@@ -788,7 +788,7 @@ fn write_mcp_configs(
     tool_flavor: Option<&str>,
 ) -> anyhow::Result<()> {
     let source_label = match mcp_source {
-        McpSource::Npm => "npm (@mpowr/nexus-mcp)",
+        McpSource::Npm => "npm (@gwdn/nexus-mcp)",
         McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
     };
 
@@ -806,7 +806,7 @@ fn write_mcp_configs(
             );
         } else {
             let command_block = match mcp_source {
-                McpSource::Npm => r#""command": ["npx", "@mpowr/nexus-mcp"]"#,
+                McpSource::Npm => r#""command": ["npx", "@gwdn/nexus-mcp"]"#,
                 McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
             };
 
@@ -850,7 +850,7 @@ fn write_mcp_configs(
             );
         } else {
             let (cmd, args) = match mcp_source {
-                McpSource::Npm => ("npx", r#""@mpowr/nexus-mcp""#),
+                McpSource::Npm => ("npx", r#""@gwdn/nexus-mcp""#),
                 McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
             };
 
@@ -953,7 +953,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("test-project"),
             None,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
             false,
@@ -993,7 +993,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("test-project"),
             Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"),
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
             false,
@@ -1017,7 +1017,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("test"),
             None,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
             false,
@@ -1038,7 +1038,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("reinit-test"),
             None,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             true,
             McpSource::Npm,
             false,
@@ -1060,7 +1060,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("test"),
             None,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
             false,
@@ -1086,7 +1086,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("test"),
             None,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
             false,
@@ -1111,7 +1111,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("fresh"),
             None,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             true,
             McpSource::Npm,
             false,
@@ -1134,7 +1134,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("test"),
             None,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
             false,
@@ -1147,7 +1147,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("test"),
             None,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             true,
             McpSource::Npm,
             false,
@@ -1180,7 +1180,7 @@ mod tests {
             dir.to_str().unwrap(),
             Some("test"),
             None,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
             true,
@@ -1305,7 +1305,7 @@ mod tests {
         write_mcp_configs(
             &dir,
             "test-proj",
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             "nxs_pat_test-token-1234567890",
             McpSource::Npm,
             None,
@@ -1315,7 +1315,7 @@ mod tests {
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(oc.contains("\"nexus\""));
         // Must use npx command for npm mode
-        assert!(oc.contains("@mpowr/nexus-mcp"));
+        assert!(oc.contains("@gwdn/nexus-mcp"));
         assert!(oc.contains("npx"));
         assert!(!oc.contains("tools/nexus-mcp/dist/server.js"));
         // Must use "mcp" key (not "mcpServers")
@@ -1327,7 +1327,7 @@ mod tests {
         // Must use "environment" (not "env")
         assert!(oc.contains("\"environment\""));
         // Must contain literal token and URL (not env var references)
-        assert!(oc.contains("https://nexus.mpowr.tech"));
+        assert!(oc.contains("https://nexus.gatewarden.eu"));
         assert!(oc.contains("nxs_pat_test-token-1234567890"));
         assert!(!oc.contains("{env:"));
 
@@ -1337,7 +1337,7 @@ mod tests {
         // .claude/mcp.json MUST be created
         let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
         assert!(cm.contains("\"mcpServers\""));
-        assert!(cm.contains("@mpowr/nexus-mcp"));
+        assert!(cm.contains("@gwdn/nexus-mcp"));
         assert!(cm.contains("nxs_pat_test-token-1234567890"));
         // Claude uses "command" + "args" format, not "command": [array]
         assert!(cm.contains("\"command\": \"npx\""));
@@ -1354,7 +1354,7 @@ mod tests {
         write_mcp_configs(
             &dir,
             "test-proj",
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             "nxs_pat_local-test-token",
             McpSource::Local,
             None,
@@ -1365,7 +1365,7 @@ mod tests {
         // Must use local command
         assert!(oc.contains("tools/nexus-mcp/dist/server.js"));
         assert!(!oc.contains("npx"));
-        assert!(!oc.contains("@mpowr/nexus-mcp"));
+        assert!(!oc.contains("@gwdn/nexus-mcp"));
 
         // .claude/mcp.json must also exist with local path
         let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
@@ -1388,7 +1388,7 @@ mod tests {
         write_mcp_configs(
             &dir,
             "test-proj",
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             "nxs_pat_skip-test-token",
             McpSource::Npm,
             None,

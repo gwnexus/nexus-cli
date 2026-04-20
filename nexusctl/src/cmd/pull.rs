@@ -548,13 +548,13 @@ fn write_mcp_configs_if_missing(
     }
 
     let source_label = match mcp_source {
-        McpSource::Npm => "npm (@mpowr/nexus-mcp)",
+        McpSource::Npm => "npm (@gwdn/nexus-mcp)",
         McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
     };
 
     if !skip_opencode && !opencode_path.exists() {
         let command_block = match mcp_source {
-            McpSource::Npm => r#""command": ["npx", "@mpowr/nexus-mcp"]"#,
+            McpSource::Npm => r#""command": ["npx", "@gwdn/nexus-mcp"]"#,
             McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
         };
 
@@ -588,7 +588,7 @@ fn write_mcp_configs_if_missing(
 
     if !skip_claude && !claude_mcp_path.exists() {
         let (cmd, args) = match mcp_source {
-            McpSource::Npm => ("npx", r#""@mpowr/nexus-mcp""#),
+            McpSource::Npm => ("npx", r#""@gwdn/nexus-mcp""#),
             McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
         };
 
@@ -1124,7 +1124,7 @@ mod tests {
 
         write_mcp_configs_if_missing(
             &dir,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             "nxs_pat_pull-test-token",
             McpSource::Npm,
             None,
@@ -1135,7 +1135,7 @@ mod tests {
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(oc.contains("\"nexus\""));
         assert!(oc.contains("nxs_pat_pull-test-token"));
-        assert!(oc.contains("https://nexus.mpowr.tech"));
+        assert!(oc.contains("https://nexus.gatewarden.eu"));
         assert!(oc.contains("npx"));
         assert!(!oc.contains("{env:"));
 
@@ -1157,7 +1157,7 @@ mod tests {
 
         write_mcp_configs_if_missing(
             &dir,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             "nxs_pat_should-not-appear",
             McpSource::Npm,
             None,
@@ -1186,7 +1186,7 @@ mod tests {
 
         write_mcp_configs_if_missing(
             &dir,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             "nxs_pat_partial-token",
             McpSource::Npm,
             None,
@@ -1211,7 +1211,7 @@ mod tests {
 
         write_mcp_configs_if_missing(
             &dir,
-            "https://nexus.mpowr.tech",
+            "https://nexus.gatewarden.eu",
             "nxs_pat_local-token",
             McpSource::Local,
             None,
