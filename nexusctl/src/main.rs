@@ -116,6 +116,23 @@ pub enum Command {
 
     /// Upgrade the Nexus CLI to the latest release version.
     Upgrade,
+
+    /// Shadow (hide) AI/agentic scaffold files from Git tracking.
+    Shadow {
+        #[command(subcommand)]
+        action: ShadowAction,
+    },
+}
+
+/// Shadow mode subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ShadowAction {
+    /// Enable shadow mode: exclude agentic files from Git tracking.
+    On,
+    /// Disable shadow mode: remove exclusions and re-track agentic files.
+    Off,
+    /// Show current shadow mode status.
+    Status,
 }
 
 /// Configuration subcommands.
@@ -544,5 +561,50 @@ mod tests {
     fn test_parse_upgrade() {
         let cli = Cli::try_parse_from(["nexus", "upgrade"]).unwrap();
         assert!(matches!(cli.command, Command::Upgrade));
+    }
+
+    #[test]
+    fn test_parse_shadow_on() {
+        let cli = Cli::try_parse_from(["nexus", "shadow", "on"]).unwrap();
+        match cli.command {
+            Command::Shadow {
+                action: ShadowAction::On,
+            } => {}
+            _ => panic!("expected Shadow On"),
+        }
+    }
+
+    #[test]
+    fn test_parse_shadow_off() {
+        let cli = Cli::try_parse_from(["nexus", "shadow", "off"]).unwrap();
+        match cli.command {
+            Command::Shadow {
+                action: ShadowAction::Off,
+            } => {}
+            _ => panic!("expected Shadow Off"),
+        }
+    }
+
+    #[test]
+    fn test_parse_shadow_status() {
+        let cli = Cli::try_parse_from(["nexus", "shadow", "status"]).unwrap();
+        match cli.command {
+            Command::Shadow {
+                action: ShadowAction::Status,
+            } => {}
+            _ => panic!("expected Shadow Status"),
+        }
+    }
+
+    #[test]
+    fn test_parse_shadow_no_subcommand_fails() {
+        let result = Cli::try_parse_from(["nexus", "shadow"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_shadow_invalid_subcommand_fails() {
+        let result = Cli::try_parse_from(["nexus", "shadow", "toggle"]);
+        assert!(result.is_err());
     }
 }

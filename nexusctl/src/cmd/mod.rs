@@ -7,10 +7,11 @@ mod init;
 mod link;
 mod preflight;
 mod pull;
+mod shadow;
 mod skills_cmd;
 mod upgrade;
 
-use crate::{Cli, Command, ConfigAction, SkillsAction};
+use crate::{Cli, Command, ConfigAction, ShadowAction, SkillsAction};
 
 /// Dispatch the parsed CLI command to the appropriate handler.
 pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
@@ -99,6 +100,11 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Upgrade => {
             upgrade::run()?;
         }
+        Command::Shadow { ref action } => match action {
+            ShadowAction::On => shadow::on()?,
+            ShadowAction::Off => shadow::off()?,
+            ShadowAction::Status => shadow::status()?,
+        },
     }
     Ok(())
 }
