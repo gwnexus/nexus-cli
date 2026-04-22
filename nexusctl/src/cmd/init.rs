@@ -13,11 +13,10 @@
 //! |   +-- commands/            # OpenCode command definitions (from skills)
 //! +-- opencode.json            # OpenCode MCP server configuration (git-ignored)
 //! +-- AGENTS.md                # Agent role definitions
-//! +-- .gitignore (appended)    # Nexus-specific ignores
 //! ```
 //!
 //! Both `opencode.json` and `.claude/CLAUDE.md` are user-managed files that
-//! must NOT be committed to the repository. They are added to `.gitignore`
+//! must NOT be committed to the repository. They are added to `.git/info/exclude`
 //! by this command and are only created if they do not already exist.
 //!
 //! When `--project-id` is provided and a valid token exists, the init command
@@ -404,7 +403,7 @@ id = "{id}"
 /// Create .claude/ directory with instruction template and skills folder.
 ///
 /// CLAUDE.md is only written if it does not already exist (it is user-managed
-/// and excluded from version control via .gitignore).
+/// and excluded from version control via .git/info/exclude).
 fn create_claude_dir(target: &Path, project_name: &str) -> anyhow::Result<()> {
     let claude_dir = target.join(".claude");
     fs::create_dir_all(claude_dir.join("skills"))?;
@@ -542,18 +541,29 @@ You are expected to:
     Ok(())
 }
 
-/// Append Nexus-specific entries to .gitignore if not already present.
+/// Append Nexus-specific entries to .git/info/exclude if not already present.
 ///
-/// When `shadowed_ai` is true, ALL AI scaffold files are added to .gitignore
+/// Uses `.git/info/exclude` (local, never committed) instead of `.gitignore`
+/// to avoid polluting the repository with tool-specific ignore rules.
+///
+/// When `shadowed_ai` is true, ALL AI scaffold files are excluded
 /// (AGENTS.md, .claude/, .opencode/, opencode.json). Without this flag, only
-/// sensitive/user-managed files are ignored (.env.local, credentials, opencode.json,
+/// sensitive/user-managed files are excluded (.env.local, credentials, opencode.json,
 /// CLAUDE.md).
 fn append_gitignore(target: &Path, shadowed_ai: bool) -> anyhow::Result<()> {
-    let gitignore_path = target.join(".gitignore");
+    let git_dir = target.join(".git");
+    if !git_dir.is_dir() {
+        // Not a git repo — skip silently
+        return Ok(());
+    }
+
+    let info_dir = git_dir.join("info");
+    fs::create_dir_all(&info_dir)?;
+    let exclude_path = info_dir.join("exclude");
     let marker = "# Nexus CLI";
 
-    if gitignore_path.exists() {
-        let content = fs::read_to_string(&gitignore_path)?;
+    if exclude_path.exists() {
+        let content = fs::read_to_string(&exclude_path)?;
         if content.contains(marker) {
             return Ok(());
         }
@@ -592,15 +602,15 @@ AGENTS.md
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&gitignore_path)?;
+        .open(&exclude_path)?;
 
     use std::io::Write;
     file.write_all(ignores.as_bytes())?;
 
     if shadowed_ai {
-        print_created(".gitignore (appended, --shadowed-ai: all AI files ignored)");
+        print_created(".git/info/exclude (appended, --shadowed-ai: all AI files excluded)");
     } else {
-        print_created(".gitignore (appended)");
+        print_created(".git/info/exclude (appended)");
     }
 
     Ok(())
@@ -938,11 +948,18 @@ mod tests {
     use std::fs;
 
     /// Helper to create a unique temp directory for testing init.
+    /// Initializes a bare git repo so .git/info/exclude can be tested.
     fn temp_project_dir(suffix: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("nexus-test-{}-{}", std::process::id(), suffix));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
+        // Initialize a git repo so append_gitignore can write to .git/info/exclude
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&dir)
+            .output()
+            .ok();
         dir
     }
 
@@ -966,7 +983,7 @@ mod tests {
         assert!(dir.join(".claude/skills").is_dir());
         assert!(dir.join(".opencode/commands").is_dir());
         assert!(dir.join("AGENTS.md").exists());
-        assert!(dir.join(".gitignore").exists());
+        assert!(dir.join(".git/info/exclude").exists());
 
         // Verify config content
         let config = fs::read_to_string(dir.join(".nexus/config.toml")).unwrap();
@@ -1155,18 +1172,18 @@ mod tests {
         .await
         .unwrap();
 
-        let gitignore = fs::read_to_string(dir.join(".gitignore")).unwrap();
-        let marker_count = gitignore.matches("# Nexus CLI").count();
-        assert_eq!(marker_count, 1, "gitignore marker should appear only once");
+        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        let marker_count = exclude.matches("# Nexus CLI").count();
+        assert_eq!(marker_count, 1, "exclude marker should appear only once");
 
-        // Verify that opencode.json and .claude/CLAUDE.md are in .gitignore
+        // Verify that opencode.json and .claude/CLAUDE.md are in .git/info/exclude
         assert!(
-            gitignore.contains("opencode.json"),
-            "opencode.json must be in .gitignore"
+            exclude.contains("opencode.json"),
+            "opencode.json must be in .git/info/exclude"
         );
         assert!(
-            gitignore.contains(".claude/CLAUDE.md"),
-            ".claude/CLAUDE.md must be in .gitignore"
+            exclude.contains(".claude/CLAUDE.md"),
+            ".claude/CLAUDE.md must be in .git/info/exclude"
         );
 
         // Cleanup
@@ -1174,7 +1191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_init_shadowed_ai_gitignore() {
+    async fn test_init_shadowed_ai_exclude() {
         let dir = temp_project_dir("shadowed-ai");
         run(
             dir.to_str().unwrap(),
@@ -1188,26 +1205,26 @@ mod tests {
         .await
         .unwrap();
 
-        let gitignore = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
         assert!(
-            gitignore.contains("AGENTS.md"),
-            "AGENTS.md must be in .gitignore with --shadowed-ai"
+            exclude.contains("AGENTS.md"),
+            "AGENTS.md must be in .git/info/exclude with --shadowed-ai"
         );
         assert!(
-            gitignore.contains(".claude/"),
-            ".claude/ must be in .gitignore with --shadowed-ai"
+            exclude.contains(".claude/"),
+            ".claude/ must be in .git/info/exclude with --shadowed-ai"
         );
         assert!(
-            gitignore.contains(".opencode/"),
-            ".opencode/ must be in .gitignore with --shadowed-ai"
+            exclude.contains(".opencode/"),
+            ".opencode/ must be in .git/info/exclude with --shadowed-ai"
         );
         assert!(
-            gitignore.contains(".nexus/"),
-            ".nexus/ must be in .gitignore with --shadowed-ai"
+            exclude.contains(".nexus/"),
+            ".nexus/ must be in .git/info/exclude with --shadowed-ai"
         );
         assert!(
-            gitignore.contains("opencode.json"),
-            "opencode.json must be in .gitignore with --shadowed-ai"
+            exclude.contains("opencode.json"),
+            "opencode.json must be in .git/info/exclude with --shadowed-ai"
         );
 
         // Cleanup

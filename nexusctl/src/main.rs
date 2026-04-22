@@ -57,7 +57,7 @@ pub enum Command {
         #[arg(short, long)]
         force: bool,
 
-        /// Shadow all AI scaffold files in .gitignore (AGENTS.md, .claude/, .opencode/, opencode.json).
+        /// Shadow all AI scaffold files via .git/info/exclude (AGENTS.md, .claude/, .opencode/, opencode.json).
         #[arg(long)]
         shadowed_ai: bool,
     },
