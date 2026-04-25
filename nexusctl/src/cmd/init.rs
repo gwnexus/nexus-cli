@@ -31,6 +31,8 @@ use nexus_core::McpSource;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::cmd::pull::{detect_agentic_conflicts, warn_agentic_conflicts};
+
 /// Run the init command.
 pub async fn run(
     path: &str,
@@ -131,10 +133,11 @@ pub async fn run(
     }
 
     create_nexus_dir(&target, project_name, resolved_pid.as_deref())?;
-    create_claude_dir(&target, project_name)?;
+    let default_agentic_root = ".claude";
+    create_claude_dir(&target, project_name, default_agentic_root)?;
     create_opencode_dir(&target)?;
-    create_agents_md(&target, project_name, force)?;
-    append_gitignore(&target, shadowed_ai)?;
+    create_agents_md(&target, project_name, force, default_agentic_root)?;
+    append_gitignore(&target, shadowed_ai, default_agentic_root)?;
 
     // -----------------------------------------------------------------------
     // Phase 2: Server-aware init (when project_id + token are available)
@@ -178,11 +181,27 @@ pub async fn run(
             }
 
             // Export skills for this project
-            let tool_flavor = client
-                .get_project(pid)
-                .await
-                .ok()
-                .and_then(|d| d.project.agent_owner);
+            let project_detail = client.get_project(pid).await.ok();
+            let tool_flavor = project_detail
+                .as_ref()
+                .and_then(|d| d.project.agent_owner.clone());
+            let agentic_root = project_detail
+                .as_ref()
+                .and_then(|d| d.project.agentic_root.clone())
+                .unwrap_or_else(|| ".claude".to_string());
+
+            // Agentic conflict detection (primary location per spec)
+            let conflicts = detect_agentic_conflicts(&target, &agentic_root);
+            if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
+                return Ok(());
+            }
+
+            // If agentic_root differs from default, create the alternate directory
+            if agentic_root != default_agentic_root {
+                create_claude_dir(&target, project_name, &agentic_root)?;
+                create_agents_md(&target, project_name, force, &agentic_root)?;
+                append_gitignore(&target, shadowed_ai, &agentic_root)?;
+            }
 
             match client.export_skills(pid).await {
                 Ok(export) => {
@@ -200,8 +219,8 @@ pub async fn run(
 
                     // Materialize skills
                     for skill in &export.skills {
-                        write_skill(&target, skill)?;
-                        write_command(&target, skill)?;
+                        write_skill(&target, skill, &agentic_root)?;
+                        write_command(&target, skill, &agentic_root)?;
                     }
                 }
                 Err(e) => {
@@ -227,6 +246,7 @@ pub async fn run(
                 tok,
                 mcp_source,
                 tool_flavor.as_deref(),
+                &agentic_root,
             )?;
 
             // Export directives for this project
@@ -238,7 +258,7 @@ pub async fn run(
                             style("--").yellow()
                         );
                     } else {
-                        write_directives(&target, &dir_export.directives)?;
+                        write_directives(&target, &dir_export.directives, &agentic_root)?;
                         println!(
                             "   {} {} directive(s) synced",
                             style("+").bold().green(),
@@ -404,15 +424,16 @@ id = "{id}"
 ///
 /// CLAUDE.md is only written if it does not already exist (it is user-managed
 /// and excluded from version control via .git/info/exclude).
-fn create_claude_dir(target: &Path, project_name: &str) -> anyhow::Result<()> {
-    let claude_dir = target.join(".claude");
+fn create_claude_dir(target: &Path, project_name: &str, agentic_root: &str) -> anyhow::Result<()> {
+    let claude_dir = target.join(agentic_root);
     fs::create_dir_all(claude_dir.join("skills"))?;
 
     let claude_md_path = claude_dir.join("CLAUDE.md");
     if claude_md_path.exists() {
         println!(
-            "   {} .claude/CLAUDE.md already exists, skipping",
-            style("--").yellow()
+            "   {} {}/CLAUDE.md already exists, skipping",
+            style("--").yellow(),
+            agentic_root
         );
     } else {
         let claude_md = format!(
@@ -454,10 +475,10 @@ NEVER:
         );
 
         fs::write(&claude_md_path, claude_md)?;
-        print_created(".claude/CLAUDE.md");
+        print_created(&format!("{}/CLAUDE.md", agentic_root));
     }
 
-    print_created(".claude/skills/");
+    print_created(&format!("{}/skills/", agentic_root));
 
     Ok(())
 }
@@ -482,8 +503,18 @@ fn is_nexus_dir_link_only(nexus_dir: &Path) -> bool {
 }
 
 /// Create AGENTS.md with a template agent definition.
-fn create_agents_md(target: &Path, project_name: &str, force: bool) -> anyhow::Result<()> {
-    let agents_path = target.join("AGENTS.md");
+fn create_agents_md(
+    target: &Path,
+    project_name: &str,
+    force: bool,
+    agentic_root: &str,
+) -> anyhow::Result<()> {
+    // When using alternate agentic root, AGENTS.md goes inside that directory
+    let agents_path = if agentic_root != ".claude" {
+        target.join(agentic_root).join("AGENTS.md")
+    } else {
+        target.join("AGENTS.md")
+    };
     if agents_path.exists() && !force {
         println!(
             "   {} AGENTS.md already exists, skipping",
@@ -536,7 +567,12 @@ You are expected to:
     );
 
     fs::write(&agents_path, agents_md)?;
-    print_created("AGENTS.md");
+    let label = if agentic_root != ".claude" {
+        format!("{}/AGENTS.md", agentic_root)
+    } else {
+        "AGENTS.md".to_string()
+    };
+    print_created(&label);
 
     Ok(())
 }
@@ -550,7 +586,7 @@ You are expected to:
 /// (AGENTS.md, .claude/, .opencode/, opencode.json). Without this flag, only
 /// sensitive/user-managed files are excluded (.env.local, credentials, opencode.json,
 /// CLAUDE.md).
-fn append_gitignore(target: &Path, shadowed_ai: bool) -> anyhow::Result<()> {
+fn append_gitignore(target: &Path, shadowed_ai: bool, agentic_root: &str) -> anyhow::Result<()> {
     let git_dir = target.join(".git");
     if !git_dir.is_dir() {
         // Not a git repo — skip silently
@@ -575,9 +611,10 @@ fn append_gitignore(target: &Path, shadowed_ai: bool) -> anyhow::Result<()> {
 .env.local
 .nexus/credentials.toml
 opencode.json
-.claude/CLAUDE.md
+{agentic_root}/CLAUDE.md
 "#,
         marker = marker,
+        agentic_root = agentic_root,
     );
 
     let shadow_ignores = format!(
@@ -585,12 +622,13 @@ opencode.json
 {marker}
 .env.local
 .nexus/
-.claude/
+{agentic_root}/
 .opencode/
 opencode.json
 AGENTS.md
 "#,
         marker = marker,
+        agentic_root = agentic_root,
     );
 
     let ignores = if shadowed_ai {
@@ -621,8 +659,15 @@ AGENTS.md
 // ---------------------------------------------------------------------------
 
 /// Write a skill definition to `.claude/skills/<skill_id>/SKILL.md`.
-fn write_skill(target: &Path, skill: &nexus_core::api::ExportedSkill) -> anyhow::Result<()> {
-    let skill_dir = target.join(".claude").join("skills").join(&skill.skill_id);
+fn write_skill(
+    target: &Path,
+    skill: &nexus_core::api::ExportedSkill,
+    agentic_root: &str,
+) -> anyhow::Result<()> {
+    let skill_dir = target
+        .join(agentic_root)
+        .join("skills")
+        .join(&skill.skill_id);
     fs::create_dir_all(&skill_dir)?;
 
     let body = skill
@@ -650,13 +695,20 @@ source: nexus-platform
 
     let path = skill_dir.join("SKILL.md");
     fs::write(&path, content)?;
-    print_created(&format!(".claude/skills/{}/SKILL.md", skill.skill_id));
+    print_created(&format!(
+        "{}/skills/{}/SKILL.md",
+        agentic_root, skill.skill_id
+    ));
 
     Ok(())
 }
 
 /// Write an OpenCode command for a skill to `.opencode/commands/<slug>.md`.
-fn write_command(target: &Path, skill: &nexus_core::api::ExportedSkill) -> anyhow::Result<()> {
+fn write_command(
+    target: &Path,
+    skill: &nexus_core::api::ExportedSkill,
+    agentic_root: &str,
+) -> anyhow::Result<()> {
     let slug = match skill.command_slug.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => return Ok(()), // No command slug, skip
@@ -673,11 +725,12 @@ version: {version}
 source: nexus-platform
 ---
 
-Load the skill file at `.claude/skills/{skill_id}/SKILL.md` and follow its instructions.
+Load the skill file at `{agentic_root}/skills/{skill_id}/SKILL.md` and follow its instructions.
 "#,
         name = skill.name,
         skill_id = skill.skill_id,
         version = skill.version,
+        agentic_root = agentic_root,
     );
 
     let path = commands_dir.join(format!("{}.md", slug));
@@ -693,9 +746,10 @@ Load the skill file at `.claude/skills/{skill_id}/SKILL.md` and follow its instr
 fn write_directives(
     target: &Path,
     directives: &[nexus_core::api::ExportedDirective],
+    agentic_root: &str,
 ) -> anyhow::Result<()> {
-    let claude_dir = target.join(".claude");
-    fs::create_dir_all(&claude_dir)?;
+    let dir = target.join(agentic_root);
+    fs::create_dir_all(&dir)?;
 
     let mut content = String::from(
         "---\ntype: project-directives\nsource: nexus-platform\n---\n\n# Project Directives\n\n",
@@ -730,9 +784,9 @@ fn write_directives(
         }
     }
 
-    let path = claude_dir.join("directives.md");
+    let path = dir.join("directives.md");
     fs::write(&path, format!("{}\n", content.trim_end()))?;
-    print_created(".claude/directives.md");
+    print_created(&format!("{}/directives.md", agentic_root));
 
     Ok(())
 }
@@ -796,6 +850,7 @@ fn write_mcp_configs(
     token: &str,
     mcp_source: McpSource,
     tool_flavor: Option<&str>,
+    agentic_root: &str,
 ) -> anyhow::Result<()> {
     let source_label = match mcp_source {
         McpSource::Npm => "npm (@gwdn/nexus-mcp)",
@@ -849,14 +904,15 @@ fn write_mcp_configs(
         }
     }
 
-    // --- Claude Code config (.claude/mcp.json) ---
+    // --- Claude Code config ({agentic_root}/mcp.json) ---
     if !skip_claude {
-        let claude_mcp_path = target.join(".claude").join("mcp.json");
+        let claude_mcp_path = target.join(agentic_root).join("mcp.json");
 
         if claude_mcp_path.exists() {
             println!(
-                "   {} .claude/mcp.json already exists, skipping",
-                style("--").yellow()
+                "   {} {}/mcp.json already exists, skipping",
+                style("--").yellow(),
+                agentic_root
             );
         } else {
             let (cmd, args) = match mcp_source {
@@ -890,8 +946,9 @@ fn write_mcp_configs(
             }
             fs::write(&claude_mcp_path, claude_mcp_json)?;
             println!(
-                "   {} .claude/mcp.json (MCP source: {})",
+                "   {} {}/mcp.json (MCP source: {})",
                 style("+").bold().green(),
+                agentic_root,
                 source_label,
             );
         }
@@ -1246,7 +1303,7 @@ mod tests {
             pinned: false,
         };
 
-        write_skill(&dir, &skill).unwrap();
+        write_skill(&dir, &skill, ".claude").unwrap();
 
         let path = dir.join(".claude/skills/nx-test-skill/SKILL.md");
         assert!(path.exists());
@@ -1275,7 +1332,7 @@ mod tests {
             pinned: false,
         };
 
-        write_command(&dir, &skill).unwrap();
+        write_command(&dir, &skill, ".claude").unwrap();
 
         let path = dir.join(".opencode/commands/nexus-test-skill.md");
         assert!(path.exists());
@@ -1303,7 +1360,7 @@ mod tests {
             pinned: false,
         };
 
-        write_command(&dir, &skill).unwrap();
+        write_command(&dir, &skill, ".claude").unwrap();
 
         // No file should be created
         let entries: Vec<_> = fs::read_dir(dir.join(".opencode/commands"))
@@ -1326,6 +1383,7 @@ mod tests {
             "nxs_pat_test-token-1234567890",
             McpSource::Npm,
             None,
+            ".claude",
         )
         .unwrap();
 
@@ -1375,6 +1433,7 @@ mod tests {
             "nxs_pat_local-test-token",
             McpSource::Local,
             None,
+            ".claude",
         )
         .unwrap();
 
@@ -1409,6 +1468,7 @@ mod tests {
             "nxs_pat_skip-test-token",
             McpSource::Npm,
             None,
+            ".claude",
         )
         .unwrap();
 

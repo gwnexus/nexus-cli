@@ -6,7 +6,7 @@ mod deinit;
 mod init;
 mod link;
 mod preflight;
-mod pull;
+pub(crate) mod pull;
 mod shadow;
 mod skills_cmd;
 mod upgrade;

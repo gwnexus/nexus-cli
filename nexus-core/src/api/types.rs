@@ -185,6 +185,14 @@ pub struct AgentFileExportResponse {
     pub project_name: String,
     pub agent_files: Vec<ExportedAgentFile>,
     pub count: usize,
+    /// The agentic root directory for this project (e.g. ".claude" or ".nexus").
+    /// Defaults to ".claude" if not present in the server response.
+    #[serde(default = "default_agentic_root")]
+    pub agentic_root: String,
+}
+
+fn default_agentic_root() -> String {
+    ".claude".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +210,8 @@ pub struct ProjectSummary {
     pub created_at: String,
     /// Tool flavor: "opencode", "claude-cli", or "both".
     pub agent_owner: Option<String>,
+    /// Agentic root directory (e.g. ".claude" or ".nexus").
+    pub agentic_root: Option<String>,
 }
 
 /// Wrapper for project list API response.

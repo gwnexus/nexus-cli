@@ -85,6 +85,24 @@ pub async fn run(
         style(&identity.email).bold()
     );
 
+    // Default agentic root; may be updated from af_export response later
+    let mut agentic_root = ".claude".to_string();
+
+    // Try to get agentic_root early from af_export (before any file writes)
+    let af_export_result = client.export_agent_files(&project_id).await;
+    if let Ok(ref af_export) = af_export_result {
+        if !af_export.agentic_root.is_empty() {
+            agentic_root = af_export.agentic_root.clone();
+        }
+    }
+
+    // Agentic conflict detection: warn if workspace has existing non-Nexus
+    // agentic files and agentic_root is still ".claude"
+    let conflicts = detect_agentic_conflicts(&workspace, &agentic_root);
+    if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
+        return Ok(());
+    }
+
     // Export skills
     let export = client.export_skills(&project_id).await?;
     let project_name = export.project.name.clone();
@@ -103,7 +121,7 @@ pub async fn run(
         );
     } else {
         // Check for existing files and prompt if not forced
-        let existing = detect_existing_files(&workspace, &export.skills);
+        let existing = detect_existing_files(&workspace, &export.skills, &agentic_root);
         if !existing.is_empty() && !force {
             println!();
             println!(
@@ -125,14 +143,14 @@ pub async fn run(
         }
 
         // Ensure directories exist
-        fs::create_dir_all(workspace.join(".claude/skills"))?;
+        fs::create_dir_all(workspace.join(&agentic_root).join("skills"))?;
         fs::create_dir_all(workspace.join(".opencode/commands"))?;
 
         // Write skills and commands
         let mut written = 0;
         for skill in &export.skills {
-            write_skill(&workspace, skill)?;
-            write_command(&workspace, skill)?;
+            write_skill(&workspace, skill, &agentic_root)?;
+            write_command(&workspace, skill, &agentic_root)?;
             written += 1;
         }
 
@@ -154,16 +172,17 @@ pub async fn run(
                 false
             } else {
                 // Check for existing directives file
-                let directives_path = workspace.join(".claude/directives.md");
+                let directives_path = workspace.join(&agentic_root).join("directives.md");
                 if directives_path.exists() && !force {
                     if !is_managed_file(&directives_path) {
                         println!(
-                            "   {} .claude/directives.md is user-managed (no nexus-platform marker), skipping",
-                            style("--").yellow()
+                            "   {} {}/directives.md is user-managed (no nexus-platform marker), skipping",
+                            style("--").yellow(),
+                            agentic_root
                         );
                     } else {
                         // Managed file, overwrite silently on pull
-                        write_directives(&workspace, &dir_export.directives)?;
+                        write_directives(&workspace, &dir_export.directives, &agentic_root)?;
                         println!(
                             "   {} {} directive(s) synced",
                             style("+").bold().green(),
@@ -171,7 +190,7 @@ pub async fn run(
                         );
                     }
                 } else {
-                    write_directives(&workspace, &dir_export.directives)?;
+                    write_directives(&workspace, &dir_export.directives, &agentic_root)?;
                     println!(
                         "   {} {} directive(s) synced",
                         style("+").bold().green(),
@@ -192,8 +211,9 @@ pub async fn run(
     };
 
     // Export agent files (AGENTS.md, CLAUDE.md, etc.) from platform
-    match client.export_agent_files(&project_id).await {
-        Ok(af_export) => {
+    // Reuse the af_export result fetched earlier (avoids duplicate API call)
+    match af_export_result {
+        Ok(ref af_export) => {
             if af_export.agent_files.is_empty() {
                 println!(
                     "   {} No agent files configured for this project.",
@@ -226,15 +246,21 @@ pub async fn run(
                 }
             }
         }
-        Err(e) => {
+        Err(ref e) => {
             // Fallback to hardcoded templates when af_export is unavailable
             println!(
                 "   {} Agent file export not available ({}), using local templates",
                 style("!").bold().yellow(),
                 e
             );
-            sync_claude_md(&workspace, &project_name, has_directives, force)?;
-            sync_agents_md(&workspace, &project_name, force)?;
+            sync_claude_md(
+                &workspace,
+                &project_name,
+                has_directives,
+                force,
+                &agentic_root,
+            )?;
+            sync_agents_md(&workspace, &project_name, force, &agentic_root)?;
         }
     }
 
@@ -252,6 +278,7 @@ pub async fn run(
         &token,
         mcp_source,
         tool_flavor.as_deref(),
+        &agentic_root,
     )?;
 
     println!();
@@ -276,6 +303,121 @@ pub fn is_managed_file(path: &Path) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Agentic conflict detection
+// ---------------------------------------------------------------------------
+
+/// Check if the workspace contains existing agentic files that were NOT created
+/// by Nexus (no `source: nexus-platform` marker). When `agentic_root` is
+/// `.claude`, this means Nexus would write into the same directory as existing
+/// customer/user configurations — which is a conflict risk.
+///
+/// Returns a list of conflicting file paths (relative to workspace).
+pub fn detect_agentic_conflicts(workspace: &Path, agentic_root: &str) -> Vec<String> {
+    // Only relevant when agentic_root is ".claude" (the default).
+    // When the project uses an alternate root (e.g. ".nexus"), Nexus files
+    // go into a separate directory and cannot conflict with existing configs.
+    if agentic_root != ".claude" {
+        return Vec::new();
+    }
+
+    let candidates = [
+        ".claude/CLAUDE.md",
+        ".claude/settings.json",
+        ".claude/mcp.json",
+        ".claude/commands.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+    ];
+
+    let mut conflicts = Vec::new();
+    for rel in &candidates {
+        let path = workspace.join(rel);
+        if path.exists() && !is_managed_file(&path) {
+            conflicts.push(rel.to_string());
+        }
+    }
+
+    // Also check for any existing skills not created by Nexus
+    let skills_dir = workspace.join(".claude/skills");
+    if skills_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&skills_dir) {
+            for entry in entries.flatten() {
+                let skill_md = entry.path().join("SKILL.md");
+                if skill_md.exists() && !is_managed_file(&skill_md) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    conflicts.push(format!(".claude/skills/{}/SKILL.md", name));
+                }
+            }
+        }
+    }
+
+    conflicts
+}
+
+/// Print the agentic conflict warning and return `true` if the user wants to
+/// continue (or if `force` is set). Returns `false` if the user aborts.
+pub fn warn_agentic_conflicts(conflicts: &[String], force: bool) -> anyhow::Result<bool> {
+    if conflicts.is_empty() {
+        return Ok(true);
+    }
+
+    println!();
+    println!(
+        "   {} Existing agentic configuration detected!",
+        style("!").bold().red()
+    );
+    println!();
+    println!("   The following files exist in this workspace but were NOT created");
+    println!("   by Nexus (no '{}' marker):", MANAGED_MARKER);
+    println!();
+    for path in conflicts {
+        println!("      {} {}", style("-").dim(), style(path).yellow());
+    }
+    println!();
+    println!(
+        "   Running Nexus with agentic_root = {} will write into the",
+        style(".claude").bold()
+    );
+    println!(
+        "   same directory and may {} these files.",
+        style("overwrite or conflict with").bold().red()
+    );
+    println!();
+    println!("   Recommended actions:");
+    println!(
+        "     1. Set the project's {} to {} in the Nexus UI",
+        style("agentic_root").bold().cyan(),
+        style(".nexus").bold().cyan()
+    );
+    println!("        to keep Nexus files separate from existing configurations.");
+    println!(
+        "     2. Or use {} to proceed anyway.",
+        style("--force").bold()
+    );
+    println!();
+
+    if force {
+        println!("   {} Continuing (--force)", style(">>").bold().yellow());
+        return Ok(true);
+    }
+
+    // Prompt user
+    print!("   {} Continue anyway? [y/N] ", style("?").bold().cyan());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_lowercase();
+
+    if answer == "y" || answer == "yes" {
+        Ok(true)
+    } else {
+        println!("   Aborted. No files were modified.");
+        Ok(false)
+    }
+}
+
 /// Sync `.claude/CLAUDE.md` — the agent bootstrap file.
 ///
 /// - If the file does not exist → create it
@@ -286,23 +428,25 @@ fn sync_claude_md(
     project_name: &str,
     has_directives: bool,
     force: bool,
+    agentic_root: &str,
 ) -> anyhow::Result<()> {
-    let claude_dir = workspace.join(".claude");
+    let claude_dir = workspace.join(agentic_root);
     fs::create_dir_all(&claude_dir)?;
 
     let path = claude_dir.join("CLAUDE.md");
 
     if path.exists() && !force && !is_managed_file(&path) {
         println!(
-            "   {} .claude/CLAUDE.md is user-managed, skipping (use --force to overwrite)",
-            style("--").yellow()
+            "   {} {}/CLAUDE.md is user-managed, skipping (use --force to overwrite)",
+            style("--").yellow(),
+            agentic_root
         );
         return Ok(());
     }
 
-    let content = render_claude_md(project_name, has_directives);
+    let content = render_claude_md(project_name, has_directives, agentic_root);
     fs::write(&path, content)?;
-    print_synced(".claude/CLAUDE.md");
+    print_synced(&format!("{}/CLAUDE.md", agentic_root));
 
     Ok(())
 }
@@ -312,8 +456,18 @@ fn sync_claude_md(
 /// - If the file does not exist → create it
 /// - If it exists and has the nexus-platform marker → overwrite
 /// - If it exists without the marker → user-managed, skip (warn)
-fn sync_agents_md(workspace: &Path, project_name: &str, force: bool) -> anyhow::Result<()> {
-    let path = workspace.join("AGENTS.md");
+fn sync_agents_md(
+    workspace: &Path,
+    project_name: &str,
+    force: bool,
+    agentic_root: &str,
+) -> anyhow::Result<()> {
+    // When using alternate agentic root, AGENTS.md goes inside that directory
+    let path = if agentic_root != ".claude" {
+        workspace.join(agentic_root).join("AGENTS.md")
+    } else {
+        workspace.join("AGENTS.md")
+    };
 
     if path.exists() && !force && !is_managed_file(&path) {
         println!(
@@ -325,7 +479,12 @@ fn sync_agents_md(workspace: &Path, project_name: &str, force: bool) -> anyhow::
 
     let content = render_agents_md(project_name);
     fs::write(&path, content)?;
-    print_synced("AGENTS.md");
+    let label = if agentic_root != ".claude" {
+        format!("{}/AGENTS.md", agentic_root)
+    } else {
+        "AGENTS.md".to_string()
+    };
+    print_synced(&label);
 
     Ok(())
 }
@@ -373,11 +532,14 @@ pub fn write_agent_file(
 ///
 /// When `has_directives` is true, a step to load directives is included
 /// in the bootstrap sequence.
-pub fn render_claude_md(project_name: &str, has_directives: bool) -> String {
+pub fn render_claude_md(project_name: &str, has_directives: bool, agentic_root: &str) -> String {
     let directives_step = if has_directives {
-        "\n3. Load project directives from `.claude/directives.md`"
+        format!(
+            "\n3. Load project directives from `{}/directives.md`",
+            agentic_root
+        )
     } else {
-        ""
+        String::new()
     };
 
     // Adjust step numbering based on whether directives are included
@@ -484,15 +646,20 @@ You are expected to:
 fn detect_existing_files(
     workspace: &Path,
     skills: &[nexus_core::api::ExportedSkill],
+    agentic_root: &str,
 ) -> Vec<String> {
     let mut existing = Vec::new();
     for skill in skills {
         let skill_path = workspace
-            .join(".claude/skills")
+            .join(agentic_root)
+            .join("skills")
             .join(&skill.skill_id)
             .join("SKILL.md");
         if skill_path.exists() {
-            existing.push(format!(".claude/skills/{}/SKILL.md", skill.skill_id));
+            existing.push(format!(
+                "{}/skills/{}/SKILL.md",
+                agentic_root, skill.skill_id
+            ));
         }
         if let Some(ref slug) = skill.command_slug {
             if !slug.is_empty() {
@@ -533,9 +700,10 @@ fn write_mcp_configs_if_missing(
     token: &str,
     mcp_source: McpSource,
     tool_flavor: Option<&str>,
+    agentic_root: &str,
 ) -> anyhow::Result<()> {
     let opencode_path = workspace.join("opencode.json");
-    let claude_mcp_path = workspace.join(".claude").join("mcp.json");
+    let claude_mcp_path = workspace.join(agentic_root).join("mcp.json");
 
     let skip_opencode = matches!(tool_flavor, Some("claude-cli"));
     let skip_claude = matches!(tool_flavor, Some("opencode"));
@@ -617,8 +785,9 @@ fn write_mcp_configs_if_missing(
         }
         fs::write(&claude_mcp_path, claude_mcp_json)?;
         println!(
-            "   {} .claude/mcp.json (MCP source: {})",
+            "   {} {}/mcp.json (MCP source: {})",
             style("+").bold().green(),
+            agentic_root,
             source_label,
         );
     }
@@ -630,9 +799,16 @@ fn write_mcp_configs_if_missing(
 // File writers
 // ---------------------------------------------------------------------------
 
-/// Write a skill definition to `.claude/skills/<skill_id>/SKILL.md`.
-fn write_skill(target: &Path, skill: &nexus_core::api::ExportedSkill) -> anyhow::Result<()> {
-    let skill_dir = target.join(".claude").join("skills").join(&skill.skill_id);
+/// Write a skill definition to `<agentic_root>/skills/<skill_id>/SKILL.md`.
+fn write_skill(
+    target: &Path,
+    skill: &nexus_core::api::ExportedSkill,
+    agentic_root: &str,
+) -> anyhow::Result<()> {
+    let skill_dir = target
+        .join(agentic_root)
+        .join("skills")
+        .join(&skill.skill_id);
     fs::create_dir_all(&skill_dir)?;
 
     let body = skill
@@ -659,13 +835,20 @@ source: nexus-platform
     );
 
     fs::write(skill_dir.join("SKILL.md"), content)?;
-    print_synced(&format!(".claude/skills/{}/SKILL.md", skill.skill_id));
+    print_synced(&format!(
+        "{}/skills/{}/SKILL.md",
+        agentic_root, skill.skill_id
+    ));
 
     Ok(())
 }
 
 /// Write an OpenCode command for a skill to `.opencode/commands/<slug>.md`.
-fn write_command(target: &Path, skill: &nexus_core::api::ExportedSkill) -> anyhow::Result<()> {
+fn write_command(
+    target: &Path,
+    skill: &nexus_core::api::ExportedSkill,
+    agentic_root: &str,
+) -> anyhow::Result<()> {
     let slug = match skill.command_slug.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => return Ok(()),
@@ -682,11 +865,12 @@ version: {version}
 source: nexus-platform
 ---
 
-Load the skill file at `.claude/skills/{skill_id}/SKILL.md` and follow its instructions.
+Load the skill file at `{agentic_root}/skills/{skill_id}/SKILL.md` and follow its instructions.
 "#,
         name = skill.name,
         skill_id = skill.skill_id,
         version = skill.version,
+        agentic_root = agentic_root,
     );
 
     fs::write(commands_dir.join(format!("{}.md", slug)), content)?;
@@ -706,15 +890,16 @@ fn print_synced(path: &str) {
 pub fn write_directives(
     target: &Path,
     directives: &[nexus_core::api::ExportedDirective],
+    agentic_root: &str,
 ) -> anyhow::Result<()> {
-    let claude_dir = target.join(".claude");
-    fs::create_dir_all(&claude_dir)?;
+    let dir = target.join(agentic_root);
+    fs::create_dir_all(&dir)?;
 
     let content = render_directives_markdown(directives);
 
-    let path = claude_dir.join("directives.md");
+    let path = dir.join("directives.md");
     fs::write(&path, content)?;
-    print_synced(".claude/directives.md");
+    print_synced(&format!("{}/directives.md", agentic_root));
 
     Ok(())
 }
@@ -893,7 +1078,7 @@ mod tests {
             pinned: false,
         }];
 
-        let existing = detect_existing_files(&tmp, &skills);
+        let existing = detect_existing_files(&tmp, &skills, ".claude");
         assert!(existing.is_empty());
 
         let _ = fs::remove_dir_all(&tmp);
@@ -918,7 +1103,7 @@ mod tests {
             pinned: false,
         }];
 
-        let existing = detect_existing_files(&tmp, &skills);
+        let existing = detect_existing_files(&tmp, &skills, ".claude");
         assert_eq!(existing.len(), 2);
         assert!(existing.contains(&".claude/skills/nx-test/SKILL.md".to_string()));
         assert!(existing.contains(&".opencode/commands/test-cmd.md".to_string()));
@@ -940,7 +1125,7 @@ mod tests {
             priority: "high".into(),
         }];
 
-        write_directives(&tmp, &directives).unwrap();
+        write_directives(&tmp, &directives, ".claude").unwrap();
 
         let path = tmp.join(".claude/directives.md");
         assert!(path.exists());
@@ -955,7 +1140,7 @@ mod tests {
 
     #[test]
     fn test_render_claude_md_with_directives() {
-        let md = render_claude_md("MyProject", true);
+        let md = render_claude_md("MyProject", true, ".claude");
         assert!(md.contains("source: nexus-platform"));
         assert!(md.contains("project: MyProject"));
         assert!(md.contains("Load project directives from `.claude/directives.md`"));
@@ -968,7 +1153,7 @@ mod tests {
 
     #[test]
     fn test_render_claude_md_without_directives() {
-        let md = render_claude_md("MyProject", false);
+        let md = render_claude_md("MyProject", false, ".claude");
         assert!(md.contains("source: nexus-platform"));
         assert!(!md.contains("directives"));
         assert!(md.contains("3. Review active planning"));
@@ -977,7 +1162,7 @@ mod tests {
 
     #[test]
     fn test_render_claude_md_environment_section() {
-        let md = render_claude_md("Test", true);
+        let md = render_claude_md("Test", true, ".claude");
         assert!(md.contains("Read secrets only from `.env.local`"));
         assert!(md.contains("NEVER:"));
         assert!(md.contains("- print secrets"));
@@ -1106,9 +1291,164 @@ mod tests {
         assert_eq!(resp.agent_files[0].target_path, "AGENTS.md");
         assert_eq!(resp.agent_files[0].version, 1);
         assert_eq!(resp.count, 1);
+        // agentic_root defaults to ".claude" when not in JSON
+        assert_eq!(resp.agentic_root, ".claude");
     }
 
-    // ── MCP config generation tests ────────────────────────────────────────
+    #[test]
+    fn test_agent_file_export_response_with_agentic_root() {
+        let json = r##"{
+            "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "project_name": "NEXUS-APP",
+            "agent_files": [],
+            "count": 0,
+            "agentic_root": ".nexus"
+        }"##;
+
+        let resp: nexus_core::api::AgentFileExportResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.agentic_root, ".nexus");
+    }
+
+    // ── Agentic conflict detection tests ───────────────────────────────────
+
+    #[test]
+    fn test_detect_agentic_conflicts_empty_workspace() {
+        let tmp = std::env::temp_dir().join("nexus_test_conflicts_empty");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let conflicts = detect_agentic_conflicts(&tmp, ".claude");
+        assert!(conflicts.is_empty());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_detect_agentic_conflicts_with_user_files() {
+        let tmp = std::env::temp_dir().join("nexus_test_conflicts_user");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join(".claude")).unwrap();
+        // User-managed file (no nexus marker)
+        fs::write(tmp.join(".claude/CLAUDE.md"), "# My custom config").unwrap();
+        fs::write(tmp.join("AGENTS.md"), "# My agents").unwrap();
+
+        let conflicts = detect_agentic_conflicts(&tmp, ".claude");
+        assert!(conflicts.contains(&".claude/CLAUDE.md".to_string()));
+        assert!(conflicts.contains(&"AGENTS.md".to_string()));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_detect_agentic_conflicts_skips_managed_files() {
+        let tmp = std::env::temp_dir().join("nexus_test_conflicts_managed");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join(".claude")).unwrap();
+        // Nexus-managed file
+        fs::write(
+            tmp.join(".claude/CLAUDE.md"),
+            "---\nsource: nexus-platform\n---\n# Managed",
+        )
+        .unwrap();
+
+        let conflicts = detect_agentic_conflicts(&tmp, ".claude");
+        assert!(conflicts.is_empty());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_detect_agentic_conflicts_skipped_for_alternate_root() {
+        let tmp = std::env::temp_dir().join("nexus_test_conflicts_alt");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join(".claude")).unwrap();
+        fs::write(tmp.join(".claude/CLAUDE.md"), "# User file").unwrap();
+
+        // Alternate root means no conflicts
+        let conflicts = detect_agentic_conflicts(&tmp, ".nexus");
+        assert!(conflicts.is_empty());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ── Alternate agentic root tests ───────────────────────────────────────
+
+    #[test]
+    fn test_render_claude_md_alternate_root() {
+        let md = render_claude_md("MyProject", true, ".nexus");
+        assert!(md.contains("Load project directives from `.nexus/directives.md`"));
+    }
+
+    #[test]
+    fn test_detect_existing_files_alternate_root() {
+        let tmp = std::env::temp_dir().join("nexus_test_detect_alt_root");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join(".nexus/skills/nx-test")).unwrap();
+        fs::write(tmp.join(".nexus/skills/nx-test/SKILL.md"), "old").unwrap();
+
+        let skills = vec![nexus_core::api::ExportedSkill {
+            skill_id: "nx-test".into(),
+            name: "Test".into(),
+            description: None,
+            version: 1,
+            body: None,
+            command_slug: None,
+            pinned: false,
+        }];
+
+        let existing = detect_existing_files(&tmp, &skills, ".nexus");
+        assert_eq!(existing.len(), 1);
+        assert!(existing.contains(&".nexus/skills/nx-test/SKILL.md".to_string()));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_write_directives_alternate_root() {
+        let tmp = std::env::temp_dir().join("nexus_test_write_dir_alt");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let directives = vec![ExportedDirective {
+            id: "d1".into(),
+            title: "Alt root directive".into(),
+            body: Some("Under .nexus".into()),
+            category: "testing".into(),
+            priority: "high".into(),
+        }];
+
+        write_directives(&tmp, &directives, ".nexus").unwrap();
+
+        let path = tmp.join(".nexus/directives.md");
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("### Alt root directive [HIGH]"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_alternate_root() {
+        let dir = temp_pull_dir("mcp-alt-root");
+
+        write_mcp_configs_if_missing(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_alt-token",
+            McpSource::Npm,
+            None,
+            ".nexus",
+        )
+        .unwrap();
+
+        // opencode.json should still be at root
+        assert!(dir.join("opencode.json").exists());
+        // mcp.json should be under .nexus/, not .claude/
+        assert!(dir.join(".nexus/mcp.json").exists());
+        assert!(!dir.join(".claude/mcp.json").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn temp_pull_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("nexus-pull-test-{}", name));
@@ -1128,6 +1468,7 @@ mod tests {
             "nxs_pat_pull-test-token",
             McpSource::Npm,
             None,
+            ".claude",
         )
         .unwrap();
 
@@ -1161,6 +1502,7 @@ mod tests {
             "nxs_pat_should-not-appear",
             McpSource::Npm,
             None,
+            ".claude",
         )
         .unwrap();
 
@@ -1190,6 +1532,7 @@ mod tests {
             "nxs_pat_partial-token",
             McpSource::Npm,
             None,
+            ".claude",
         )
         .unwrap();
 
@@ -1215,6 +1558,7 @@ mod tests {
             "nxs_pat_local-token",
             McpSource::Local,
             None,
+            ".claude",
         )
         .unwrap();
 
