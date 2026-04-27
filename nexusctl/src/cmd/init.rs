@@ -179,6 +179,10 @@ pub async fn run(
                     // Fall back to default .claude/ scaffold since we cannot
                     // determine the server-configured agentic_root.
                     let default_agentic_root = ".claude";
+                    let conflicts = detect_agentic_conflicts(&target, default_agentic_root);
+                    if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
+                        return Ok(());
+                    }
                     create_claude_dir(&target, project_name, default_agentic_root)?;
                     create_agents_md(&target, project_name, force, default_agentic_root)?;
                     append_gitignore(&target, shadowed_ai, default_agentic_root)?;
@@ -362,6 +366,10 @@ pub async fn run(
         } else {
             // No token — fall back to default .claude/ scaffold
             let default_agentic_root = ".claude";
+            let conflicts = detect_agentic_conflicts(&target, default_agentic_root);
+            if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
+                return Ok(());
+            }
             create_claude_dir(&target, project_name, default_agentic_root)?;
             create_agents_md(&target, project_name, force, default_agentic_root)?;
             append_gitignore(&target, shadowed_ai, default_agentic_root)?;
@@ -378,6 +386,10 @@ pub async fn run(
         // No project linked — create default .claude/ scaffold so the
         // workspace is immediately usable with coding agents.
         let default_agentic_root = ".claude";
+        let conflicts = detect_agentic_conflicts(&target, default_agentic_root);
+        if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
+            return Ok(());
+        }
         create_claude_dir(&target, project_name, default_agentic_root)?;
         create_agents_md(&target, project_name, force, default_agentic_root)?;
         append_gitignore(&target, shadowed_ai, default_agentic_root)?;
