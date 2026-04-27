@@ -665,19 +665,43 @@ opencode.json
         agentic_root = agentic_root,
     );
 
-    let shadow_ignores = format!(
-        r#"
+    // Build shadow ignores: exclude all Nexus-managed AI scaffold files.
+    // When using an alternate agentic_root (e.g. ".nexus"), we must NOT
+    // exclude .claude/ — that belongs to the customer's existing config.
+    let shadow_ignores = if agentic_root == ".claude" {
+        format!(
+            r#"
 {marker}
 .env.local
 .nexus/
-{agentic_root}/
+.claude/
 .opencode/
 opencode.json
 AGENTS.md
 "#,
-        marker = marker,
-        agentic_root = agentic_root,
-    );
+            marker = marker,
+        )
+    } else {
+        // Alternate root: exclude .nexus/ (config) + agentic_root/ + .opencode/
+        // but NOT .claude/ (customer-owned) and NOT root AGENTS.md (may be customer-owned)
+        let mut entries = format!(
+            r#"
+{marker}
+.env.local
+.nexus/
+.opencode/
+opencode.json
+"#,
+            marker = marker,
+        );
+        // Only add agentic_root if it differs from .nexus (avoid duplicate)
+        if agentic_root != ".nexus" {
+            entries.push_str(&format!("{}/\n", agentic_root));
+        }
+        // AGENTS.md lives inside the agentic root for alternate paths
+        entries.push_str(&format!("{}/AGENTS.md\n", agentic_root));
+        entries
+    };
 
     let ignores = if shadowed_ai {
         shadow_ignores
@@ -1333,6 +1357,122 @@ mod tests {
         );
 
         // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_shadow_exclude_default_claude_root() {
+        let dir = temp_project_dir("shadow-claude-root");
+
+        append_gitignore(&dir, true, ".claude").unwrap();
+
+        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        assert!(
+            exclude.contains(".claude/"),
+            ".claude/ must be excluded in shadow mode with default root"
+        );
+        assert!(
+            exclude.contains(".nexus/"),
+            ".nexus/ must be excluded in shadow mode"
+        );
+        assert!(
+            exclude.contains(".opencode/"),
+            ".opencode/ must be excluded in shadow mode"
+        );
+        assert!(
+            exclude.contains("AGENTS.md"),
+            "root AGENTS.md must be excluded in shadow mode with default root"
+        );
+        assert!(
+            exclude.contains("opencode.json"),
+            "opencode.json must be excluded in shadow mode"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_shadow_exclude_alternate_nexus_root() {
+        let dir = temp_project_dir("shadow-nexus-root");
+
+        append_gitignore(&dir, true, ".nexus").unwrap();
+
+        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        assert!(
+            exclude.contains(".nexus/"),
+            ".nexus/ must be excluded in shadow mode"
+        );
+        assert!(
+            exclude.contains(".opencode/"),
+            ".opencode/ must be excluded in shadow mode"
+        );
+        assert!(
+            exclude.contains("opencode.json"),
+            "opencode.json must be excluded in shadow mode"
+        );
+        assert!(
+            exclude.contains(".nexus/AGENTS.md"),
+            ".nexus/AGENTS.md must be excluded in shadow mode with alternate root"
+        );
+        // .claude/ must NOT be excluded — it belongs to the customer
+        assert!(
+            !exclude.contains(".claude/"),
+            ".claude/ must NOT be excluded in shadow mode with alternate root"
+        );
+        // Root-level AGENTS.md must NOT be excluded (may be customer-owned)
+        let standalone_agents = exclude.lines().any(|l| l.trim() == "AGENTS.md");
+        assert!(
+            !standalone_agents,
+            "root AGENTS.md must NOT be excluded in shadow mode with alternate root"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_shadow_exclude_custom_alternate_root() {
+        let dir = temp_project_dir("shadow-custom-root");
+
+        append_gitignore(&dir, true, ".myagent").unwrap();
+
+        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        assert!(exclude.contains(".nexus/"), ".nexus/ must be excluded");
+        assert!(
+            exclude.contains(".myagent/"),
+            "custom agentic root must be excluded"
+        );
+        assert!(
+            exclude.contains(".myagent/AGENTS.md"),
+            "AGENTS.md inside custom root must be excluded"
+        );
+        assert!(
+            !exclude.contains(".claude/"),
+            ".claude/ must NOT be excluded with custom alternate root"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_base_exclude_alternate_root() {
+        let dir = temp_project_dir("base-nexus-root");
+
+        append_gitignore(&dir, false, ".nexus").unwrap();
+
+        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        assert!(
+            exclude.contains(".nexus/CLAUDE.md"),
+            "agentic_root/CLAUDE.md must be excluded in base mode"
+        );
+        assert!(
+            exclude.contains("opencode.json"),
+            "opencode.json must be excluded in base mode"
+        );
+        assert!(
+            !exclude.contains(".claude/"),
+            ".claude/ must NOT be in base excludes with alternate root"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 
