@@ -134,14 +134,12 @@ pub fn run(force: bool) -> anyhow::Result<()> {
     // Clean up empty .claude/ directory after removing managed files
     if agentic_root != ".claude" {
         let claude_dir = cwd.join(".claude");
-        if claude_dir.is_dir() {
-            if is_dir_empty(&claude_dir) {
-                fs::remove_dir_all(&claude_dir)?;
-                println!(
-                    "   {} .claude/ (empty after cleanup)",
-                    style("x").bold().red()
-                );
-            }
+        if claude_dir.is_dir() && is_dir_empty(&claude_dir) {
+            fs::remove_dir_all(&claude_dir)?;
+            println!(
+                "   {} .claude/ (empty after cleanup)",
+                style("x").bold().red()
+            );
         }
     }
 
