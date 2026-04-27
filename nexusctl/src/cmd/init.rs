@@ -31,7 +31,9 @@ use nexus_core::McpSource;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cmd::pull::{detect_agentic_conflicts, warn_agentic_conflicts};
+use crate::cmd::pull::{
+    detect_agentic_conflicts, notify_agentic_coexistence, warn_agentic_conflicts,
+};
 
 /// Run the init command.
 pub async fn run(
@@ -179,7 +181,7 @@ pub async fn run(
                     // Fall back to default .claude/ scaffold since we cannot
                     // determine the server-configured agentic_root.
                     let default_agentic_root = ".claude";
-                    let conflicts = detect_agentic_conflicts(&target, default_agentic_root);
+                    let conflicts = detect_agentic_conflicts(&target);
                     if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
                         return Ok(());
                     }
@@ -192,20 +194,35 @@ pub async fn run(
                 }
             }
 
-            // Export skills for this project
+            // Fetch project detail and agent file export for agentic_root.
+            // get_project provides agentic_root directly; export_agent_files
+            // is used as fallback (it also returns agentic_root on the envelope).
             let project_detail = client.get_project(pid).await.ok();
+            let af_export_result = client.export_agent_files(pid).await;
+
             let tool_flavor = project_detail
                 .as_ref()
                 .and_then(|d| d.project.agent_owner.clone());
             let agentic_root = project_detail
                 .as_ref()
                 .and_then(|d| d.project.agentic_root.clone())
+                .or_else(|| {
+                    af_export_result
+                        .as_ref()
+                        .ok()
+                        .map(|af| af.agentic_root.clone())
+                        .filter(|r| !r.is_empty())
+                })
                 .unwrap_or_else(|| ".claude".to_string());
 
-            // Agentic conflict detection (primary location per spec)
-            let conflicts = detect_agentic_conflicts(&target, &agentic_root);
-            if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
-                return Ok(());
+            // Agentic conflict detection / coexistence notice
+            if agentic_root == ".claude" {
+                let conflicts = detect_agentic_conflicts(&target);
+                if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
+                    return Ok(());
+                }
+            } else {
+                notify_agentic_coexistence(&target, &agentic_root);
             }
 
             // Create the agentic root directory (.claude/ or .nexus/ etc.)
@@ -287,8 +304,9 @@ pub async fn run(
 
             // Export agent files (AGENTS.md, CLAUDE.md, etc.) from platform
             // Overwrites the Phase 1 local templates with server-managed content.
-            match client.export_agent_files(pid).await {
-                Ok(af_export) => {
+            // Re-uses the already-fetched af_export_result from above.
+            match af_export_result {
+                Ok(ref af_export) => {
                     if !af_export.agent_files.is_empty() {
                         for af in &af_export.agent_files {
                             write_agent_file(&target, af)?;
@@ -366,7 +384,7 @@ pub async fn run(
         } else {
             // No token — fall back to default .claude/ scaffold
             let default_agentic_root = ".claude";
-            let conflicts = detect_agentic_conflicts(&target, default_agentic_root);
+            let conflicts = detect_agentic_conflicts(&target);
             if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
                 return Ok(());
             }
@@ -386,7 +404,7 @@ pub async fn run(
         // No project linked — create default .claude/ scaffold so the
         // workspace is immediately usable with coding agents.
         let default_agentic_root = ".claude";
-        let conflicts = detect_agentic_conflicts(&target, default_agentic_root);
+        let conflicts = detect_agentic_conflicts(&target);
         if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
             return Ok(());
         }

@@ -96,11 +96,14 @@ pub async fn run(
         }
     }
 
-    // Agentic conflict detection: warn if workspace has existing non-Nexus
-    // agentic files and agentic_root is still ".claude"
-    let conflicts = detect_agentic_conflicts(&workspace, &agentic_root);
-    if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
-        return Ok(());
+    // Agentic conflict detection / coexistence notice
+    if agentic_root == ".claude" {
+        let conflicts = detect_agentic_conflicts(&workspace);
+        if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
+            return Ok(());
+        }
+    } else {
+        notify_agentic_coexistence(&workspace, &agentic_root);
     }
 
     // Export skills
@@ -313,14 +316,7 @@ pub fn is_managed_file(path: &Path) -> bool {
 /// customer/user configurations — which is a conflict risk.
 ///
 /// Returns a list of conflicting file paths (relative to workspace).
-pub fn detect_agentic_conflicts(workspace: &Path, agentic_root: &str) -> Vec<String> {
-    // Only relevant when agentic_root is ".claude" (the default).
-    // When the project uses an alternate root (e.g. ".nexus"), Nexus files
-    // go into a separate directory and cannot conflict with existing configs.
-    if agentic_root != ".claude" {
-        return Vec::new();
-    }
-
+pub fn detect_agentic_conflicts(workspace: &Path) -> Vec<String> {
     let candidates = [
         ".claude/CLAUDE.md",
         ".claude/settings.json",
@@ -355,8 +351,44 @@ pub fn detect_agentic_conflicts(workspace: &Path, agentic_root: &str) -> Vec<Str
     conflicts
 }
 
+/// Print an informational notice when the project uses an alternate agentic
+/// root (e.g. ".nexus") but existing non-Nexus agentic files are present in
+/// `.claude/`. This is not a conflict — Nexus writes to a separate directory —
+/// but the user should be aware of the coexistence.
+pub fn notify_agentic_coexistence(workspace: &Path, agentic_root: &str) {
+    if agentic_root == ".claude" {
+        return;
+    }
+
+    let existing = detect_agentic_conflicts(workspace);
+    if existing.is_empty() {
+        return;
+    }
+
+    println!();
+    println!(
+        "   {} Existing agentic files detected in .claude/",
+        style("i").bold().blue()
+    );
+    println!();
+    for path in &existing {
+        println!("      {} {}", style("-").dim(), style(path).dim());
+    }
+    println!();
+    println!(
+        "   This project uses {} as agentic root — no conflict.",
+        style(agentic_root).bold().cyan()
+    );
+    println!("   Nexus files are kept separate from existing .claude/ configurations.");
+    println!();
+}
+
 /// Print the agentic conflict warning and return `true` if the user wants to
 /// continue (or if `force` is set). Returns `false` if the user aborts.
+///
+/// This warning is only shown when `agentic_root` is `.claude` and there are
+/// existing non-Nexus files that would be overwritten. When the project uses
+/// an alternate root, call [`notify_agentic_coexistence`] instead.
 pub fn warn_agentic_conflicts(conflicts: &[String], force: bool) -> anyhow::Result<bool> {
     if conflicts.is_empty() {
         return Ok(true);
@@ -1317,7 +1349,7 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 
-        let conflicts = detect_agentic_conflicts(&tmp, ".claude");
+        let conflicts = detect_agentic_conflicts(&tmp);
         assert!(conflicts.is_empty());
 
         let _ = fs::remove_dir_all(&tmp);
@@ -1332,7 +1364,7 @@ mod tests {
         fs::write(tmp.join(".claude/CLAUDE.md"), "# My custom config").unwrap();
         fs::write(tmp.join("AGENTS.md"), "# My agents").unwrap();
 
-        let conflicts = detect_agentic_conflicts(&tmp, ".claude");
+        let conflicts = detect_agentic_conflicts(&tmp);
         assert!(conflicts.contains(&".claude/CLAUDE.md".to_string()));
         assert!(conflicts.contains(&"AGENTS.md".to_string()));
 
@@ -1351,22 +1383,25 @@ mod tests {
         )
         .unwrap();
 
-        let conflicts = detect_agentic_conflicts(&tmp, ".claude");
+        let conflicts = detect_agentic_conflicts(&tmp);
         assert!(conflicts.is_empty());
 
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn test_detect_agentic_conflicts_skipped_for_alternate_root() {
+    fn test_detect_agentic_conflicts_found_for_alternate_root() {
         let tmp = std::env::temp_dir().join("nexus_test_conflicts_alt");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join(".claude")).unwrap();
         fs::write(tmp.join(".claude/CLAUDE.md"), "# User file").unwrap();
 
-        // Alternate root means no conflicts
-        let conflicts = detect_agentic_conflicts(&tmp, ".nexus");
-        assert!(conflicts.is_empty());
+        // detect_agentic_conflicts always returns existing non-Nexus files;
+        // the caller decides whether to warn (hard) or notify (info) based
+        // on whether the project uses an alternate agentic root.
+        let conflicts = detect_agentic_conflicts(&tmp);
+        assert!(!conflicts.is_empty());
+        assert!(conflicts.contains(&".claude/CLAUDE.md".to_string()));
 
         let _ = fs::remove_dir_all(&tmp);
     }
