@@ -115,8 +115,12 @@ pub async fn run(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 1: Local scaffolding
+    // Phase 1: Local scaffolding (server-agnostic — only .nexus/ + .opencode/)
     // -----------------------------------------------------------------------
+    // NOTE: agentic root directory (.claude/ or .nexus/) is NOT created here.
+    // It is deferred to Phase 2 where the server-configured agentic_root is
+    // known. This prevents writing into .claude/ when the project is configured
+    // to use .nexus/ as its agentic root.
 
     // Warn if npx is not available (needed for MCP server)
     if std::process::Command::new("npx")
@@ -133,11 +137,7 @@ pub async fn run(
     }
 
     create_nexus_dir(&target, project_name, resolved_pid.as_deref())?;
-    let default_agentic_root = ".claude";
-    create_claude_dir(&target, project_name, default_agentic_root)?;
     create_opencode_dir(&target)?;
-    create_agents_md(&target, project_name, force, default_agentic_root)?;
-    append_gitignore(&target, shadowed_ai, default_agentic_root)?;
 
     // -----------------------------------------------------------------------
     // Phase 2: Server-aware init (when project_id + token are available)
@@ -175,6 +175,14 @@ pub async fn run(
                         e
                     );
                     println!("   Skipping server-aware setup. Run 'nexus login' first.");
+
+                    // Fall back to default .claude/ scaffold since we cannot
+                    // determine the server-configured agentic_root.
+                    let default_agentic_root = ".claude";
+                    create_claude_dir(&target, project_name, default_agentic_root)?;
+                    create_agents_md(&target, project_name, force, default_agentic_root)?;
+                    append_gitignore(&target, shadowed_ai, default_agentic_root)?;
+
                     print_done();
                     return Ok(());
                 }
@@ -196,12 +204,10 @@ pub async fn run(
                 return Ok(());
             }
 
-            // If agentic_root differs from default, create the alternate directory
-            if agentic_root != default_agentic_root {
-                create_claude_dir(&target, project_name, &agentic_root)?;
-                create_agents_md(&target, project_name, force, &agentic_root)?;
-                append_gitignore(&target, shadowed_ai, &agentic_root)?;
-            }
+            // Create the agentic root directory (.claude/ or .nexus/ etc.)
+            create_claude_dir(&target, project_name, &agentic_root)?;
+            create_agents_md(&target, project_name, force, &agentic_root)?;
+            append_gitignore(&target, shadowed_ai, &agentic_root)?;
 
             match client.export_skills(pid).await {
                 Ok(export) => {
@@ -354,6 +360,11 @@ pub async fn run(
                 println!("     by the Nexus platform and cannot be pushed back yet.");
             }
         } else {
+            // No token — fall back to default .claude/ scaffold
+            let default_agentic_root = ".claude";
+            create_claude_dir(&target, project_name, default_agentic_root)?;
+            create_agents_md(&target, project_name, force, default_agentic_root)?;
+            append_gitignore(&target, shadowed_ai, default_agentic_root)?;
             println!(
                 "   {} No token found. Skipping server sync.",
                 style("--").yellow()
@@ -363,6 +374,13 @@ pub async fn run(
                 pid
             );
         }
+    } else {
+        // No project linked — create default .claude/ scaffold so the
+        // workspace is immediately usable with coding agents.
+        let default_agentic_root = ".claude";
+        create_claude_dir(&target, project_name, default_agentic_root)?;
+        create_agents_md(&target, project_name, force, default_agentic_root)?;
+        append_gitignore(&target, shadowed_ai, default_agentic_root)?;
     }
 
     print_done();
