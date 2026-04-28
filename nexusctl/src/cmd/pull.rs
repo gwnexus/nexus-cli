@@ -12,10 +12,12 @@
 //! unless `--force` or `-y` is passed.
 
 use console::style;
+use nexus_core::api::McpServerConfig;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::resolve_token;
 use nexus_core::config;
 use nexus_core::McpSource;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -267,21 +269,39 @@ pub async fn run(
         }
     }
 
-    // Resolve tool flavor from project details
-    let tool_flavor = client
-        .get_project(&project_id)
-        .await
+    // Resolve tool flavor and plugin MCP servers from af_export response
+    let tool_flavor = match af_export_result
+        .as_ref()
         .ok()
-        .and_then(|d| d.project.agent_owner);
+        .and_then(|r| r.agent_owner.clone())
+    {
+        Some(owner) => Some(owner),
+        None => {
+            // Fallback: fetch from project details API
+            client
+                .get_project(&project_id)
+                .await
+                .ok()
+                .and_then(|d| d.project.agent_owner)
+        }
+    };
 
-    // Write MCP server configs if they don't exist yet
-    write_mcp_configs_if_missing(
+    let plugin_mcp_servers = af_export_result
+        .as_ref()
+        .ok()
+        .map(|r| r.mcp_servers.clone())
+        .unwrap_or_default();
+
+    // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
+    write_mcp_configs(
         &workspace,
         api_url,
         &token,
         mcp_source,
         tool_flavor.as_deref(),
         &agentic_root,
+        &plugin_mcp_servers,
+        force,
     )?;
 
     println!();
@@ -723,16 +743,25 @@ fn confirm_overwrite() -> anyhow::Result<bool> {
 // MCP config generation
 // ---------------------------------------------------------------------------
 
-/// Write MCP server configs (`opencode.json`, `.claude/mcp.json`) if they
-/// don't already exist. This ensures `nexus pull` can bootstrap a workspace
-/// that was initialized before MCP config generation was added.
-fn write_mcp_configs_if_missing(
+/// Write MCP server configs (`opencode.json`, `<agentic_root>/mcp.json`).
+///
+/// Behavior:
+/// - If the file does not exist: create it with the nexus MCP server + any
+///   plugin servers from the platform.
+/// - If the file exists and `force` is set: rewrite it, merging the nexus
+///   server with plugin servers from the platform.
+/// - If the file exists and `force` is NOT set but new plugin servers need
+///   to be added: merge them into the existing config (additive only).
+#[allow(clippy::too_many_arguments)]
+fn write_mcp_configs(
     workspace: &Path,
     api_url: &str,
     token: &str,
     mcp_source: McpSource,
     tool_flavor: Option<&str>,
     agentic_root: &str,
+    plugin_mcp_servers: &HashMap<String, McpServerConfig>,
+    force: bool,
 ) -> anyhow::Result<()> {
     let opencode_path = workspace.join("opencode.json");
     let claude_mcp_path = workspace.join(agentic_root).join("mcp.json");
@@ -740,88 +769,197 @@ fn write_mcp_configs_if_missing(
     let skip_opencode = matches!(tool_flavor, Some("claude-cli"));
     let skip_claude = matches!(tool_flavor, Some("opencode"));
 
-    // Nothing to do if all relevant configs already exist
-    let opencode_done = skip_opencode || opencode_path.exists();
-    let claude_done = skip_claude || claude_mcp_path.exists();
-    if opencode_done && claude_done {
-        return Ok(());
-    }
-
     let source_label = match mcp_source {
         McpSource::Npm => "npm (@gwdn/nexus-mcp)",
         McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
     };
 
-    if !skip_opencode && !opencode_path.exists() {
-        let command_block = match mcp_source {
-            McpSource::Npm => r#""command": ["npx", "--yes", "@gwdn/nexus-mcp@latest"]"#,
-            McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
-        };
+    // ── opencode.json ──────────────────────────────────────────────────────
+    if !skip_opencode {
+        let exists = opencode_path.exists();
+        let needs_write = !exists || force || !plugin_mcp_servers.is_empty();
 
-        let opencode_json = format!(
-            r#"{{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {{
-    "nexus": {{
-      "type": "local",
-      {command_block},
-      "environment": {{
-        "NEXUS_API_URL": "{api_url}",
-        "NEXUS_PRIVATE_TOKEN": "{token}"
-      }}
-    }}
-  }}
-}}
-"#,
-            command_block = command_block,
-            api_url = api_url,
-            token = token,
-        );
+        if needs_write {
+            let mut mcp_block: serde_json::Map<String, serde_json::Value> = if exists && !force {
+                // Additive merge: load existing config
+                let content = fs::read_to_string(&opencode_path).unwrap_or_default();
+                let parsed: serde_json::Value = serde_json::from_str(&content)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                parsed
+                    .get("mcp")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                serde_json::Map::new()
+            };
 
-        fs::write(&opencode_path, opencode_json)?;
-        println!(
-            "   {} opencode.json (MCP source: {})",
-            style("+").bold().green(),
-            source_label,
-        );
+            // Nexus server (always present)
+            let nexus_command = match mcp_source {
+                McpSource::Npm => serde_json::json!(["npx", "--yes", "@gwdn/nexus-mcp@latest"]),
+                McpSource::Local => {
+                    serde_json::json!(["node", "tools/nexus-mcp/dist/server.js"])
+                }
+            };
+            mcp_block.insert(
+                "nexus".to_string(),
+                serde_json::json!({
+                    "type": "local",
+                    "command": nexus_command,
+                    "environment": {
+                        "NEXUS_API_URL": api_url,
+                        "NEXUS_PRIVATE_TOKEN": token
+                    }
+                }),
+            );
+
+            // Plugin servers from platform
+            for (name, cfg) in plugin_mcp_servers {
+                // Build env object: map env_keys to resolved values from shell env
+                let env: serde_json::Map<String, serde_json::Value> = cfg
+                    .env_keys
+                    .iter()
+                    .map(|k: &String| {
+                        let val = std::env::var(k).unwrap_or_default();
+                        (k.clone(), serde_json::Value::String(val))
+                    })
+                    .collect();
+
+                mcp_block.insert(
+                    name.to_string(),
+                    serde_json::json!({
+                        "type": "local",
+                        "command": std::iter::once(cfg.command.clone())
+                            .chain(cfg.args.iter().cloned())
+                            .collect::<Vec<_>>(),
+                        "environment": env
+                    }),
+                );
+            }
+
+            let opencode_json = serde_json::json!({
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": mcp_block
+            });
+
+            fs::write(
+                &opencode_path,
+                serde_json::to_string_pretty(&opencode_json)? + "\n",
+            )?;
+
+            let verb = if exists { "updated" } else { "created" };
+            println!(
+                "   {} opencode.json {} (MCP source: {}{})",
+                style("+").bold().green(),
+                verb,
+                source_label,
+                if plugin_mcp_servers.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", plugins: {}",
+                        plugin_mcp_servers
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                },
+            );
+        }
     }
 
-    if !skip_claude && !claude_mcp_path.exists() {
-        let (cmd, args) = match mcp_source {
-            McpSource::Npm => ("npx", r#""--yes", "@gwdn/nexus-mcp@latest""#),
-            McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
-        };
+    // ── <agentic_root>/mcp.json ────────────────────────────────────────────
+    if !skip_claude {
+        let exists = claude_mcp_path.exists();
+        let needs_write = !exists || force || !plugin_mcp_servers.is_empty();
 
-        let claude_mcp_json = format!(
-            r#"{{
-  "mcpServers": {{
-    "nexus": {{
-      "command": "{cmd}",
-      "args": [{args}],
-      "env": {{
-        "NEXUS_API_URL": "{api_url}",
-        "NEXUS_PRIVATE_TOKEN": "{token}"
-      }}
-    }}
-  }}
-}}
-"#,
-            cmd = cmd,
-            args = args,
-            api_url = api_url,
-            token = token,
-        );
+        if needs_write {
+            let mut servers_block: serde_json::Map<String, serde_json::Value> = if exists && !force
+            {
+                let content = fs::read_to_string(&claude_mcp_path).unwrap_or_default();
+                let parsed: serde_json::Value = serde_json::from_str(&content)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                parsed
+                    .get("mcpServers")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                serde_json::Map::new()
+            };
 
-        if let Some(parent) = claude_mcp_path.parent() {
-            fs::create_dir_all(parent)?;
+            // Nexus server
+            let (cmd, args) = match mcp_source {
+                McpSource::Npm => ("npx", vec!["--yes", "@gwdn/nexus-mcp@latest"]),
+                McpSource::Local => ("node", vec!["tools/nexus-mcp/dist/server.js"]),
+            };
+            servers_block.insert(
+                "nexus".to_string(),
+                serde_json::json!({
+                    "command": cmd,
+                    "args": args,
+                    "env": {
+                        "NEXUS_API_URL": api_url,
+                        "NEXUS_PRIVATE_TOKEN": token
+                    }
+                }),
+            );
+
+            // Plugin servers
+            for (name, cfg) in plugin_mcp_servers {
+                let env: serde_json::Map<String, serde_json::Value> = cfg
+                    .env_keys
+                    .iter()
+                    .map(|k: &String| {
+                        let val = std::env::var(k).unwrap_or_default();
+                        (k.clone(), serde_json::Value::String(val))
+                    })
+                    .collect();
+
+                servers_block.insert(
+                    name.to_string(),
+                    serde_json::json!({
+                        "command": cfg.command,
+                        "args": cfg.args,
+                        "env": env
+                    }),
+                );
+            }
+
+            let claude_mcp_json = serde_json::json!({
+                "mcpServers": servers_block
+            });
+
+            if let Some(parent) = claude_mcp_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(
+                &claude_mcp_path,
+                serde_json::to_string_pretty(&claude_mcp_json)? + "\n",
+            )?;
+
+            let verb = if exists { "updated" } else { "created" };
+            println!(
+                "   {} {}/mcp.json {} (MCP source: {}{})",
+                style("+").bold().green(),
+                agentic_root,
+                verb,
+                source_label,
+                if plugin_mcp_servers.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", plugins: {}",
+                        plugin_mcp_servers
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                },
+            );
         }
-        fs::write(&claude_mcp_path, claude_mcp_json)?;
-        println!(
-            "   {} {}/mcp.json (MCP source: {})",
-            style("+").bold().green(),
-            agentic_root,
-            source_label,
-        );
     }
 
     Ok(())
@@ -1466,13 +1604,15 @@ mod tests {
     fn test_write_mcp_configs_alternate_root() {
         let dir = temp_pull_dir("mcp-alt-root");
 
-        write_mcp_configs_if_missing(
+        write_mcp_configs(
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_alt-token",
             McpSource::Npm,
             None,
             ".nexus",
+            &HashMap::new(),
+            false,
         )
         .unwrap();
 
@@ -1497,13 +1637,15 @@ mod tests {
     fn test_write_mcp_configs_if_missing_creates_both() {
         let dir = temp_pull_dir("mcp-creates");
 
-        write_mcp_configs_if_missing(
+        write_mcp_configs(
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_pull-test-token",
             McpSource::Npm,
             None,
             ".claude",
+            &HashMap::new(),
+            false,
         )
         .unwrap();
 
@@ -1531,17 +1673,19 @@ mod tests {
         fs::write(dir.join("opencode.json"), "existing-oc").unwrap();
         fs::write(dir.join(".claude/mcp.json"), "existing-cm").unwrap();
 
-        write_mcp_configs_if_missing(
+        write_mcp_configs(
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_should-not-appear",
             McpSource::Npm,
             None,
             ".claude",
+            &HashMap::new(),
+            false,
         )
         .unwrap();
 
-        // Must NOT overwrite
+        // Must NOT overwrite (no plugin servers, no force)
         assert_eq!(
             fs::read_to_string(dir.join("opencode.json")).unwrap(),
             "existing-oc"
@@ -1561,17 +1705,19 @@ mod tests {
         // Only opencode.json exists
         fs::write(dir.join("opencode.json"), "existing-oc").unwrap();
 
-        write_mcp_configs_if_missing(
+        write_mcp_configs(
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_partial-token",
             McpSource::Npm,
             None,
             ".claude",
+            &HashMap::new(),
+            false,
         )
         .unwrap();
 
-        // opencode.json untouched
+        // opencode.json untouched (no plugins, no force)
         assert_eq!(
             fs::read_to_string(dir.join("opencode.json")).unwrap(),
             "existing-oc"
@@ -1587,13 +1733,15 @@ mod tests {
     fn test_write_mcp_configs_if_missing_local_mode() {
         let dir = temp_pull_dir("mcp-local");
 
-        write_mcp_configs_if_missing(
+        write_mcp_configs(
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_local-token",
             McpSource::Local,
             None,
             ".claude",
+            &HashMap::new(),
+            false,
         )
         .unwrap();
 

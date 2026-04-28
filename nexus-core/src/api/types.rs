@@ -1,6 +1,7 @@
 //! API response types for the Nexus platform.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Identity (GET /api/mcp/identity)
@@ -166,6 +167,16 @@ pub struct DirectiveExportResponse {
 // Agent file export (POST /api/mcp/agent-files  action=af_export)
 // ---------------------------------------------------------------------------
 
+/// MCP server configuration for a plugin (e.g. task-master-ai).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env_keys: Vec<String>,
+}
+
 /// A single exported agent file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedAgentFile {
@@ -189,6 +200,15 @@ pub struct AgentFileExportResponse {
     /// Defaults to ".claude" if not present in the server response.
     #[serde(default = "default_agentic_root")]
     pub agentic_root: String,
+    /// Tool flavor: "opencode", "claude-cli", or "both".
+    #[serde(default)]
+    pub agent_owner: Option<String>,
+    /// Active plugins for this project (e.g. ["taskmaster-ai"]).
+    #[serde(default)]
+    pub plugins: Vec<String>,
+    /// Plugin MCP server configs keyed by server name (e.g. "task-master-ai").
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 fn default_agentic_root() -> String {
