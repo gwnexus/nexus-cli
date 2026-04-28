@@ -943,7 +943,7 @@ fn write_mcp_configs(
             );
         } else {
             let command_block = match mcp_source {
-                McpSource::Npm => r#""command": ["npx", "@gwdn/nexus-mcp"]"#,
+                McpSource::Npm => r#""command": ["npx", "--yes", "@gwdn/nexus-mcp@latest"]"#,
                 McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
             };
 
@@ -988,7 +988,7 @@ fn write_mcp_configs(
             );
         } else {
             let (cmd, args) = match mcp_source {
-                McpSource::Npm => ("npx", r#""@gwdn/nexus-mcp""#),
+                McpSource::Npm => ("npx", r#""--yes", "@gwdn/nexus-mcp@latest""#),
                 McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
             };
 

@@ -754,7 +754,7 @@ fn write_mcp_configs_if_missing(
 
     if !skip_opencode && !opencode_path.exists() {
         let command_block = match mcp_source {
-            McpSource::Npm => r#""command": ["npx", "@gwdn/nexus-mcp"]"#,
+            McpSource::Npm => r#""command": ["npx", "--yes", "@gwdn/nexus-mcp@latest"]"#,
             McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
         };
 
@@ -788,7 +788,7 @@ fn write_mcp_configs_if_missing(
 
     if !skip_claude && !claude_mcp_path.exists() {
         let (cmd, args) = match mcp_source {
-            McpSource::Npm => ("npx", r#""@gwdn/nexus-mcp""#),
+            McpSource::Npm => ("npx", r#""--yes", "@gwdn/nexus-mcp@latest""#),
             McpSource::Local => ("node", r#""tools/nexus-mcp/dist/server.js""#),
         };
 
