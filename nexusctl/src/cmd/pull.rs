@@ -731,13 +731,14 @@ fn write_mcp_configs(
 
             // Plugin servers from platform
             for (name, cfg) in plugin_mcp_servers {
-                // Build env object: map env_keys to resolved values from shell env
+                // Build env object: map env_keys to OpenCode template variables {env:KEY}
+                // so secrets are resolved at runtime, never persisted to disk.
                 let env: serde_json::Map<String, serde_json::Value> = cfg
                     .env_keys
                     .iter()
                     .map(|k: &String| {
-                        let val = std::env::var(k).unwrap_or_default();
-                        (k.clone(), serde_json::Value::String(val))
+                        let template = format!("{{env:{}}}", k);
+                        (k.clone(), serde_json::Value::String(template))
                     })
                     .collect();
 
@@ -824,12 +825,14 @@ fn write_mcp_configs(
 
             // Plugin servers
             for (name, cfg) in plugin_mcp_servers {
+                // Build env object: map env_keys to shell-style template variables ${KEY}
+                // so secrets are resolved at runtime, never persisted to disk.
                 let env: serde_json::Map<String, serde_json::Value> = cfg
                     .env_keys
                     .iter()
                     .map(|k: &String| {
-                        let val = std::env::var(k).unwrap_or_default();
-                        (k.clone(), serde_json::Value::String(val))
+                        let template = format!("${{{}}}", k);
+                        (k.clone(), serde_json::Value::String(template))
                     })
                     .collect();
 
