@@ -3,6 +3,7 @@
 mod auth;
 mod config_cmd;
 mod deinit;
+pub(crate) mod import;
 mod init;
 mod link;
 mod preflight;
@@ -105,6 +106,11 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             ShadowAction::Off => shadow::off()?,
             ShadowAction::Status => shadow::status()?,
         },
+        Command::Import { dry_run } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            import::run(&api_url, dry_run, cli.yes).await?;
+        }
     }
     Ok(())
 }

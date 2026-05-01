@@ -144,6 +144,16 @@ impl NexusClient {
         self.post("/api/mcp/agent-files", &body).await
     }
 
+    /// Import agentic files, directives, and referenced docs into a project.
+    ///
+    /// Calls `POST /api/mcp/import` with the full import payload.
+    pub async fn import(
+        &self,
+        payload: &crate::api::types::ImportPayload,
+    ) -> Result<crate::api::types::ImportResponse, Error> {
+        self.post("/api/mcp/import", payload).await
+    }
+
     /// List all projects accessible to the authenticated user.
     pub async fn list_projects(&self) -> Result<ProjectListResponse, Error> {
         self.get("/api/mcp/projects").await

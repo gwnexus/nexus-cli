@@ -256,6 +256,66 @@ pub struct ProjectDetailResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Import (POST /api/mcp/import  action=import)
+// ---------------------------------------------------------------------------
+
+/// A detected agentic file to import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportAgenticFile {
+    pub file_key: String,
+    pub target_path: String,
+    pub body: String,
+    pub category: String,
+}
+
+/// A directive extracted from an agentic file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportDirective {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub category: String,
+    pub priority: String,
+    pub source_file: String,
+}
+
+/// A referenced document resolved from Markdown links.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportReferencedDoc {
+    pub title: String,
+    pub body: String,
+    pub source_path: String,
+}
+
+/// Request payload for `POST /api/mcp/import`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportPayload {
+    pub action: String,
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    pub agentic_files: Vec<ImportAgenticFile>,
+    pub directives: Vec<ImportDirective>,
+    pub referenced_docs: Vec<ImportReferencedDoc>,
+}
+
+/// Summary counts returned by the import endpoint.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportSummary {
+    pub agentic_files_ingested: u32,
+    pub directives_created: u32,
+    pub docs_ingested: u32,
+}
+
+/// Response from the import endpoint.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportResponse {
+    pub action: String,
+    pub project_id: String,
+    pub summary: ImportSummary,
+}
+
+// ---------------------------------------------------------------------------
 // Generic error
 // ---------------------------------------------------------------------------
 

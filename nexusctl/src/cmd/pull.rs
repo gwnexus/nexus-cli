@@ -380,7 +380,7 @@ pub fn detect_importable_files(workspace: &Path) {
     }
     println!();
     println!(
-        "   These can be imported into your Nexus project with {} (v0.7.0).",
+        "   These can be imported into your Nexus project with {}.",
         style("nexus import").bold().cyan()
     );
     println!();

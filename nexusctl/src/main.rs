@@ -122,6 +122,13 @@ pub enum Command {
         #[command(subcommand)]
         action: ShadowAction,
     },
+
+    /// Import existing agentic files (CLAUDE.md, AGENTS.md, .cursorrules, etc.) into the linked Nexus project.
+    Import {
+        /// Only detect files, don't import.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Shadow mode subcommands.
