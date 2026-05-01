@@ -118,6 +118,13 @@ pub struct SkillExportProject {
     pub name: String,
 }
 
+/// A single skill resource file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillResource {
+    pub filename: String,
+    pub body: String,
+}
+
 /// A single exported skill.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedSkill {
@@ -129,6 +136,8 @@ pub struct ExportedSkill {
     pub command_slug: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub resources: Vec<SkillResource>,
 }
 
 /// Response from `sk_export` action.

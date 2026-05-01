@@ -1010,6 +1010,20 @@ source: nexus-platform
         agentic_root, skill.skill_id
     ));
 
+    // Write resource files alongside SKILL.md
+    for res in &skill.resources {
+        // Sanitise filename: prevent directory traversal
+        let filename = res.filename.replace(['/', '\\'], "_");
+        if filename.is_empty() || filename == "SKILL.md" {
+            continue;
+        }
+        fs::write(skill_dir.join(&filename), &res.body)?;
+        print_synced(&format!(
+            "{}/skills/{}/{}",
+            agentic_root, skill.skill_id, filename
+        ));
+    }
+
     Ok(())
 }
 
