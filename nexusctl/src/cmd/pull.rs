@@ -337,10 +337,12 @@ pub fn is_managed_file(path: &Path) -> bool {
 ///
 /// Returns a list of conflicting file paths (relative to workspace).
 pub fn detect_agentic_conflicts(workspace: &Path) -> Vec<String> {
+    // Only check content/policy files that can carry YAML frontmatter.
+    // Infrastructure files like mcp.json and settings.json are managed by
+    // `nexus pull` itself and cannot contain the `source: nexus-platform`
+    // text marker — they must NOT be treated as agentic conflicts.
     let candidates = [
         ".claude/CLAUDE.md",
-        ".claude/settings.json",
-        ".claude/mcp.json",
         ".claude/commands.md",
         "AGENTS.md",
         "CLAUDE.md",
