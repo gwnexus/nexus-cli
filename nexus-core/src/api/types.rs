@@ -221,7 +221,7 @@ pub struct AgentFileExportResponse {
 }
 
 fn default_agentic_root() -> String {
-    ".claude".to_string()
+    ".nexus".to_string()
 }
 
 // ---------------------------------------------------------------------------

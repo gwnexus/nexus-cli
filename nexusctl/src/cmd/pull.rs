@@ -88,7 +88,7 @@ pub async fn run(
     );
 
     // Default agentic root; may be updated from af_export response later
-    let mut agentic_root = ".claude".to_string();
+    let mut agentic_root = ".nexus".to_string();
 
     // Try to get agentic_root early from af_export (before any file writes)
     let af_export_result = client.export_agent_files(&project_id).await;
@@ -98,15 +98,8 @@ pub async fn run(
         }
     }
 
-    // Agentic conflict detection / coexistence notice
-    if agentic_root == ".claude" {
-        let conflicts = detect_agentic_conflicts(&workspace);
-        if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
-            return Ok(());
-        }
-    } else {
-        notify_agentic_coexistence(&workspace, &agentic_root);
-    }
+    // Detect existing .claude/ files and hint at import (v0.7.0)
+    detect_importable_files(&workspace);
 
     // Export skills
     let export = client.export_skills(&project_id).await?;
@@ -327,149 +320,70 @@ pub fn is_managed_file(path: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Agentic conflict detection
+// Importable .claude/ file detection (replaces conflict detection per ADR-0027)
 // ---------------------------------------------------------------------------
 
-/// Check if the workspace contains existing agentic files that were NOT created
-/// by Nexus (no `source: nexus-platform` marker). When `agentic_root` is
-/// `.claude`, this means Nexus would write into the same directory as existing
-/// customer/user configurations — which is a conflict risk.
+/// Scan the workspace for existing `.claude/` files that could be imported into
+/// the Nexus project. This is a purely informational notice — no files are
+/// modified, no confirmation is required.
 ///
-/// Returns a list of conflicting file paths (relative to workspace).
-pub fn detect_agentic_conflicts(workspace: &Path) -> Vec<String> {
-    // Only check content/policy files that can carry YAML frontmatter.
-    // Infrastructure files like mcp.json and settings.json are managed by
-    // `nexus pull` itself and cannot contain the `source: nexus-platform`
-    // text marker — they must NOT be treated as agentic conflicts.
-    let candidates = [
-        ".claude/CLAUDE.md",
-        ".claude/commands.md",
-        "AGENTS.md",
-        "CLAUDE.md",
-    ];
+/// Replaces the old `detect_agentic_conflicts` + `warn_agentic_conflicts` flow
+/// from ADR-0024. Since `.nexus` is now the exclusive agentic root (ADR-0027),
+/// any `.claude/` content is by definition customer-owned and importable.
+pub fn detect_importable_files(workspace: &Path) {
+    let claude_dir = workspace.join(".claude");
+    if !claude_dir.is_dir() {
+        return;
+    }
 
-    let mut conflicts = Vec::new();
-    for rel in &candidates {
-        let path = workspace.join(rel);
-        if path.exists() && !is_managed_file(&path) {
-            conflicts.push(rel.to_string());
+    let mut found: Vec<String> = Vec::new();
+
+    // Check known agentic files
+    for name in &["CLAUDE.md", "settings.json", "mcp.json", "commands.md"] {
+        if claude_dir.join(name).exists() {
+            found.push(format!(".claude/{}", name));
         }
     }
 
-    // Also check for any existing skills not created by Nexus
-    let skills_dir = workspace.join(".claude/skills");
+    // Check root-level AGENTS.md and CLAUDE.md
+    if workspace.join("AGENTS.md").exists() {
+        found.push("AGENTS.md".to_string());
+    }
+    if workspace.join("CLAUDE.md").exists() {
+        found.push("CLAUDE.md".to_string());
+    }
+
+    // Check for skills
+    let skills_dir = claude_dir.join("skills");
     if skills_dir.is_dir() {
         if let Ok(entries) = fs::read_dir(&skills_dir) {
             for entry in entries.flatten() {
-                let skill_md = entry.path().join("SKILL.md");
-                if skill_md.exists() && !is_managed_file(&skill_md) {
+                if entry.path().join("SKILL.md").exists() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    conflicts.push(format!(".claude/skills/{}/SKILL.md", name));
+                    found.push(format!(".claude/skills/{}/", name));
                 }
             }
         }
     }
 
-    conflicts
-}
-
-/// Print an informational notice when the project uses an alternate agentic
-/// root (e.g. ".nexus") but existing non-Nexus agentic files are present in
-/// `.claude/`. This is not a conflict — Nexus writes to a separate directory —
-/// but the user should be aware of the coexistence.
-pub fn notify_agentic_coexistence(workspace: &Path, agentic_root: &str) {
-    if agentic_root == ".claude" {
-        return;
-    }
-
-    let existing = detect_agentic_conflicts(workspace);
-    if existing.is_empty() {
+    if found.is_empty() {
         return;
     }
 
     println!();
     println!(
-        "   {} Existing agentic files detected in .claude/",
+        "   {} Existing .claude/ files detected:",
         style("i").bold().blue()
     );
-    println!();
-    for path in &existing {
+    for path in &found {
         println!("      {} {}", style("-").dim(), style(path).dim());
     }
     println!();
     println!(
-        "   This project uses {} as agentic root — no conflict.",
-        style(agentic_root).bold().cyan()
-    );
-    println!("   Nexus files are kept separate from existing .claude/ configurations.");
-    println!();
-}
-
-/// Print the agentic conflict warning and return `true` if the user wants to
-/// continue (or if `force` is set). Returns `false` if the user aborts.
-///
-/// This warning is only shown when `agentic_root` is `.claude` and there are
-/// existing non-Nexus files that would be overwritten. When the project uses
-/// an alternate root, call [`notify_agentic_coexistence`] instead.
-pub fn warn_agentic_conflicts(conflicts: &[String], force: bool) -> anyhow::Result<bool> {
-    if conflicts.is_empty() {
-        return Ok(true);
-    }
-
-    println!();
-    println!(
-        "   {} Existing agentic configuration detected!",
-        style("!").bold().red()
+        "   These can be imported into your Nexus project with {} (v0.7.0).",
+        style("nexus import").bold().cyan()
     );
     println!();
-    println!("   The following files exist in this workspace but were NOT created");
-    println!("   by Nexus (no '{}' marker):", MANAGED_MARKER);
-    println!();
-    for path in conflicts {
-        println!("      {} {}", style("-").dim(), style(path).yellow());
-    }
-    println!();
-    println!(
-        "   Running Nexus with agentic_root = {} will write into the",
-        style(".claude").bold()
-    );
-    println!(
-        "   same directory and may {} these files.",
-        style("overwrite or conflict with").bold().red()
-    );
-    println!();
-    println!("   Recommended actions:");
-    println!(
-        "     1. Set the project's {} to {} in the Nexus UI",
-        style("agentic_root").bold().cyan(),
-        style(".nexus").bold().cyan()
-    );
-    println!("        to keep Nexus files separate from existing configurations.");
-    println!(
-        "     2. Or use {} to proceed anyway.",
-        style("--force").bold()
-    );
-    println!();
-
-    if force {
-        println!("   {} Continuing (--force)", style(">>").bold().yellow());
-        return Ok(true);
-    }
-
-    // Prompt user
-    print!("   {} Continue anyway? [y/N] ", style("?").bold().cyan());
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let answer = input.trim().to_lowercase();
-
-    if answer == "y" || answer == "yes" {
-        Ok(true)
-    } else {
-        println!("   Aborted. No files were modified.");
-        Ok(false)
-    }
 }
 
 /// Sync `.claude/CLAUDE.md` — the agent bootstrap file.
@@ -1479,8 +1393,8 @@ mod tests {
         assert_eq!(resp.agent_files[0].target_path, "AGENTS.md");
         assert_eq!(resp.agent_files[0].version, 1);
         assert_eq!(resp.count, 1);
-        // agentic_root defaults to ".claude" when not in JSON
-        assert_eq!(resp.agentic_root, ".claude");
+        // agentic_root defaults to ".nexus" when not in JSON (ADR-0027)
+        assert_eq!(resp.agentic_root, ".nexus");
     }
 
     #[test]
@@ -1498,6 +1412,37 @@ mod tests {
     }
 
     // ── Agentic conflict detection tests ───────────────────────────────────
+
+    /// Legacy helper kept for test coverage only (removed from production code
+    /// by ADR-0027). Scans .claude/ for non-Nexus files.
+    fn detect_agentic_conflicts(workspace: &Path) -> Vec<String> {
+        let candidates = [
+            ".claude/CLAUDE.md",
+            ".claude/commands.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+        ];
+        let mut conflicts = Vec::new();
+        for rel in &candidates {
+            let path = workspace.join(rel);
+            if path.exists() && !is_managed_file(&path) {
+                conflicts.push(rel.to_string());
+            }
+        }
+        let skills_dir = workspace.join(".claude/skills");
+        if skills_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&skills_dir) {
+                for entry in entries.flatten() {
+                    let skill_md = entry.path().join("SKILL.md");
+                    if skill_md.exists() && !is_managed_file(&skill_md) {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        conflicts.push(format!(".claude/skills/{}/SKILL.md", name));
+                    }
+                }
+            }
+        }
+        conflicts
+    }
 
     #[test]
     fn test_detect_agentic_conflicts_empty_workspace() {

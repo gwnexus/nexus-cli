@@ -31,9 +31,7 @@ use nexus_core::McpSource;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cmd::pull::{
-    detect_agentic_conflicts, notify_agentic_coexistence, warn_agentic_conflicts,
-};
+use crate::cmd::pull::detect_importable_files;
 
 /// Run the init command.
 pub async fn run(
@@ -178,13 +176,9 @@ pub async fn run(
                     );
                     println!("   Skipping server-aware setup. Run 'nexus login' first.");
 
-                    // Fall back to default .claude/ scaffold since we cannot
+                    // Fall back to default .nexus/ scaffold since we cannot
                     // determine the server-configured agentic_root.
-                    let default_agentic_root = ".claude";
-                    let conflicts = detect_agentic_conflicts(&target);
-                    if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
-                        return Ok(());
-                    }
+                    let default_agentic_root = ".nexus";
                     create_claude_dir(&target, project_name, default_agentic_root)?;
                     create_agents_md(&target, project_name, force, default_agentic_root)?;
                     append_gitignore(&target, shadowed_ai, default_agentic_root)?;
@@ -213,17 +207,10 @@ pub async fn run(
                         .map(|af| af.agentic_root.clone())
                         .filter(|r| !r.is_empty())
                 })
-                .unwrap_or_else(|| ".claude".to_string());
+                .unwrap_or_else(|| ".nexus".to_string());
 
-            // Agentic conflict detection / coexistence notice
-            if agentic_root == ".claude" {
-                let conflicts = detect_agentic_conflicts(&target);
-                if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
-                    return Ok(());
-                }
-            } else {
-                notify_agentic_coexistence(&target, &agentic_root);
-            }
+            // Detect existing .claude/ files and hint at import (v0.7.0)
+            detect_importable_files(&target);
 
             // Create the agentic root directory (.claude/ or .nexus/ etc.)
             create_claude_dir(&target, project_name, &agentic_root)?;
@@ -382,12 +369,9 @@ pub async fn run(
                 println!("     by the Nexus platform and cannot be pushed back yet.");
             }
         } else {
-            // No token — fall back to default .claude/ scaffold
-            let default_agentic_root = ".claude";
-            let conflicts = detect_agentic_conflicts(&target);
-            if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
-                return Ok(());
-            }
+            // No token — fall back to default .nexus/ scaffold
+            let default_agentic_root = ".nexus";
+            detect_importable_files(&target);
             create_claude_dir(&target, project_name, default_agentic_root)?;
             create_agents_md(&target, project_name, force, default_agentic_root)?;
             append_gitignore(&target, shadowed_ai, default_agentic_root)?;
@@ -401,13 +385,10 @@ pub async fn run(
             );
         }
     } else {
-        // No project linked — create default .claude/ scaffold so the
+        // No project linked — create default .nexus/ scaffold so the
         // workspace is immediately usable with coding agents.
-        let default_agentic_root = ".claude";
-        let conflicts = detect_agentic_conflicts(&target);
-        if !conflicts.is_empty() && !warn_agentic_conflicts(&conflicts, force)? {
-            return Ok(());
-        }
+        let default_agentic_root = ".nexus";
+        detect_importable_files(&target);
         create_claude_dir(&target, project_name, default_agentic_root)?;
         create_agents_md(&target, project_name, force, default_agentic_root)?;
         append_gitignore(&target, shadowed_ai, default_agentic_root)?;
@@ -1108,10 +1089,10 @@ mod tests {
         .unwrap();
 
         assert!(dir.join(".nexus/config.toml").exists());
-        assert!(dir.join(".claude/CLAUDE.md").exists());
-        assert!(dir.join(".claude/skills").is_dir());
+        assert!(dir.join(".nexus/CLAUDE.md").exists());
+        assert!(dir.join(".nexus/skills").is_dir());
         assert!(dir.join(".opencode/commands").is_dir());
-        assert!(dir.join("AGENTS.md").exists());
+        assert!(dir.join(".nexus/AGENTS.md").exists());
         assert!(dir.join(".git/info/exclude").exists());
 
         // Verify config content
@@ -1120,7 +1101,7 @@ mod tests {
         assert!(config.contains("# id ="));
 
         // Verify AGENTS.md content
-        let agents = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+        let agents = fs::read_to_string(dir.join(".nexus/AGENTS.md")).unwrap();
         assert!(agents.contains("test-project"));
 
         // Should NOT have opencode.json (no project_id, so no server-aware phase)
@@ -1265,7 +1246,7 @@ mod tests {
         .await
         .unwrap();
 
-        let agents = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+        let agents = fs::read_to_string(dir.join(".nexus/AGENTS.md")).unwrap();
         assert!(agents.contains("fresh"));
         assert!(!agents.contains("old content"));
 
@@ -1305,14 +1286,14 @@ mod tests {
         let marker_count = exclude.matches("# Nexus CLI").count();
         assert_eq!(marker_count, 1, "exclude marker should appear only once");
 
-        // Verify that opencode.json and .claude/CLAUDE.md are in .git/info/exclude
+        // Verify that opencode.json and .nexus/CLAUDE.md are in .git/info/exclude
         assert!(
             exclude.contains("opencode.json"),
             "opencode.json must be in .git/info/exclude"
         );
         assert!(
-            exclude.contains(".claude/CLAUDE.md"),
-            ".claude/CLAUDE.md must be in .git/info/exclude"
+            exclude.contains(".nexus/CLAUDE.md"),
+            ".nexus/CLAUDE.md must be in .git/info/exclude"
         );
 
         // Cleanup
@@ -1335,13 +1316,15 @@ mod tests {
         .unwrap();
 
         let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        // With .nexus as agentic root, AGENTS.md lives inside .nexus/
         assert!(
-            exclude.contains("AGENTS.md"),
-            "AGENTS.md must be in .git/info/exclude with --shadowed-ai"
+            exclude.contains(".nexus/AGENTS.md"),
+            ".nexus/AGENTS.md must be in .git/info/exclude with --shadowed-ai"
         );
+        // .claude/ is NOT excluded — it belongs to the customer
         assert!(
-            exclude.contains(".claude/"),
-            ".claude/ must be in .git/info/exclude with --shadowed-ai"
+            !exclude.contains(".claude/"),
+            ".claude/ must NOT be in .git/info/exclude when agentic_root is .nexus"
         );
         assert!(
             exclude.contains(".opencode/"),
