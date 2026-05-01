@@ -268,7 +268,7 @@ pub async fn run(
             // Apply extra MCP servers and plugins from .nexus/config.toml
             if let Ok(Some(proj_config)) = config::load_project_config(Some(&target)) {
                 if let Some(ref extras) = proj_config.mcp_extra {
-                    merge_extra_mcp_servers(&target, extras)?;
+                    merge_extra_mcp_servers(&target, extras, &agentic_root)?;
                 }
                 if let Some(ref plugins) = proj_config.plugins {
                     install_plugins(&target, plugins).await?;
@@ -1058,79 +1058,209 @@ fn write_mcp_configs(
 // Utilities
 // ---------------------------------------------------------------------------
 
-/// Merge extra MCP servers from `[mcp_extra]` config into `opencode.json`.
+/// Merge extra MCP servers from `[mcp_extra]` config into `opencode.json`
+/// and `{agentic_root}/mcp.json` (Claude Code format).
 ///
-/// Reads the existing `opencode.json`, adds entries under `mcp`, and writes back.
+/// Environment values containing `${env:VAR}` are resolved from the process
+/// environment first, then from `.env.local` in the project root as a
+/// fallback.  Unresolvable references are replaced with an empty string and
+/// a warning is printed.
 fn merge_extra_mcp_servers(
     target: &Path,
     extras: &HashMap<String, ExtraMcpServer>,
+    agentic_root: &str,
 ) -> anyhow::Result<()> {
     if extras.is_empty() {
         return Ok(());
     }
 
+    // Pre-load .env.local so we can resolve ${env:VAR} references.
+    let dotenv = load_dotenv(target);
+
+    // --- OpenCode (opencode.json) ---
     let opencode_path = target.join("opencode.json");
-    if !opencode_path.exists() {
-        return Ok(());
+    if opencode_path.exists() {
+        let content = fs::read_to_string(&opencode_path)?;
+        let mut doc: serde_json::Value = serde_json::from_str(&content)?;
+
+        if let Some(mcp) = doc
+            .as_object_mut()
+            .and_then(|o| o.get_mut("mcp"))
+            .and_then(|v| v.as_object_mut())
+        {
+            for (name, server) in extras {
+                if mcp.contains_key(name) {
+                    continue;
+                }
+                let entry = build_opencode_entry(server, &dotenv);
+                mcp.insert(name.clone(), serde_json::Value::Object(entry));
+                println!(
+                    "   {} opencode.json: added MCP server '{}'",
+                    style("+").bold().green(),
+                    name,
+                );
+            }
+
+            let output = serde_json::to_string_pretty(&doc)?;
+            fs::write(&opencode_path, format!("{}\n", output))?;
+        }
     }
 
-    let content = fs::read_to_string(&opencode_path)?;
-    let mut doc: serde_json::Value = serde_json::from_str(&content)?;
+    // --- Claude Code ({agentic_root}/mcp.json) ---
+    let claude_mcp_path = target.join(agentic_root).join("mcp.json");
+    if claude_mcp_path.exists() {
+        let content = fs::read_to_string(&claude_mcp_path)?;
+        let mut doc: serde_json::Value = serde_json::from_str(&content)?;
 
-    let mcp = doc
-        .as_object_mut()
-        .and_then(|o| o.get_mut("mcp"))
-        .and_then(|v| v.as_object_mut());
+        if let Some(servers) = doc
+            .as_object_mut()
+            .and_then(|o| o.get_mut("mcpServers"))
+            .and_then(|v| v.as_object_mut())
+        {
+            for (name, server) in extras {
+                if servers.contains_key(name) {
+                    continue;
+                }
+                let entry = build_claude_entry(server, &dotenv);
+                servers.insert(name.clone(), serde_json::Value::Object(entry));
+                println!(
+                    "   {} {}/mcp.json: added MCP server '{}'",
+                    style("+").bold().green(),
+                    agentic_root,
+                    name,
+                );
+            }
 
-    let mcp = match mcp {
-        Some(m) => m,
-        None => return Ok(()),
-    };
-
-    for (name, server) in extras {
-        if mcp.contains_key(name) {
-            continue; // Don't overwrite existing entries
+            let output = serde_json::to_string_pretty(&doc)?;
+            fs::write(&claude_mcp_path, format!("{}\n", output))?;
         }
+    }
 
-        let mut entry = serde_json::Map::new();
+    Ok(())
+}
+
+/// Build an OpenCode-format MCP entry (`type`, `command`, `environment`).
+fn build_opencode_entry(
+    server: &ExtraMcpServer,
+    dotenv: &HashMap<String, String>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "type".to_string(),
+        serde_json::Value::String("local".to_string()),
+    );
+    entry.insert(
+        "command".to_string(),
+        serde_json::Value::Array(
+            server
+                .command
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        ),
+    );
+    if let Some(ref env) = server.environment {
+        let env_obj: serde_json::Map<String, serde_json::Value> = env
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    serde_json::Value::String(resolve_env_ref(v, dotenv)),
+                )
+            })
+            .collect();
         entry.insert(
-            "type".to_string(),
-            serde_json::Value::String("local".to_string()),
+            "environment".to_string(),
+            serde_json::Value::Object(env_obj),
         );
+    }
+    entry
+}
+
+/// Build a Claude Code-format MCP entry (`command`, `args`, `env`).
+fn build_claude_entry(
+    server: &ExtraMcpServer,
+    dotenv: &HashMap<String, String>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut entry = serde_json::Map::new();
+    if let Some(cmd) = server.command.first() {
         entry.insert(
             "command".to_string(),
+            serde_json::Value::String(cmd.clone()),
+        );
+    }
+    if server.command.len() > 1 {
+        entry.insert(
+            "args".to_string(),
             serde_json::Value::Array(
-                server
-                    .command
+                server.command[1..]
                     .iter()
                     .map(|s| serde_json::Value::String(s.clone()))
                     .collect(),
             ),
         );
-
-        if let Some(ref env) = server.environment {
-            let env_obj: serde_json::Map<String, serde_json::Value> = env
-                .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                .collect();
-            entry.insert(
-                "environment".to_string(),
-                serde_json::Value::Object(env_obj),
-            );
-        }
-
-        mcp.insert(name.clone(), serde_json::Value::Object(entry));
-        println!(
-            "   {} opencode.json: added MCP server '{}'",
-            style("+").bold().green(),
-            name,
-        );
     }
+    if let Some(ref env) = server.environment {
+        let env_obj: serde_json::Map<String, serde_json::Value> = env
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    serde_json::Value::String(resolve_env_ref(v, dotenv)),
+                )
+            })
+            .collect();
+        entry.insert("env".to_string(), serde_json::Value::Object(env_obj));
+    }
+    entry
+}
 
-    let output = serde_json::to_string_pretty(&doc)?;
-    fs::write(&opencode_path, format!("{}\n", output))?;
+/// Resolve `${env:VAR_NAME}` references in a string value.
+///
+/// Lookup order: OS environment -> `.env.local` entries.
+/// Unresolvable references are replaced with `""` and a warning is printed.
+fn resolve_env_ref(value: &str, dotenv: &HashMap<String, String>) -> String {
+    let re = regex::Regex::new(r"\$\{env:([^}]+)\}").unwrap();
+    re.replace_all(value, |caps: &regex::Captures| {
+        let var = &caps[1];
+        if let Ok(val) = std::env::var(var) {
+            val
+        } else if let Some(val) = dotenv.get(var) {
+            val.clone()
+        } else {
+            eprintln!(
+                "   {} env ref ${{env:{}}} not found in environment or .env.local",
+                style("!").bold().yellow(),
+                var,
+            );
+            String::new()
+        }
+    })
+    .into_owned()
+}
 
-    Ok(())
+/// Parse a `.env.local` file (KEY=VALUE lines, # comments, empty lines).
+fn load_dotenv(target: &Path) -> HashMap<String, String> {
+    let dotenv_path = target.join(".env.local");
+    let mut map = HashMap::new();
+    if let Ok(content) = fs::read_to_string(&dotenv_path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                let key = key.trim().to_string();
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                map.insert(key, value);
+            }
+        }
+    }
+    map
 }
 
 /// Install plugins from `[plugins]` config into `.opencode/plugins/`.
@@ -1909,7 +2039,7 @@ mod tests {
             },
         );
 
-        merge_extra_mcp_servers(&dir, &extras).unwrap();
+        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
 
         let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(
@@ -1963,7 +2093,7 @@ mod tests {
             },
         );
 
-        merge_extra_mcp_servers(&dir, &extras).unwrap();
+        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
 
         let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
         // Must preserve the existing version, not overwrite with @latest
@@ -2008,7 +2138,7 @@ mod tests {
             },
         );
 
-        merge_extra_mcp_servers(&dir, &extras).unwrap();
+        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
 
         let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(result.contains("my-server"), "new server must be added");

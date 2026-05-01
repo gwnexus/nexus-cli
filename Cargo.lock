@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dirs",
  "open",
@@ -729,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-tests"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "nexus-core",
@@ -740,12 +740,13 @@ dependencies = [
 
 [[package]]
 name = "nexusctl"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
  "console",
  "nexus-core",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -977,6 +978,18 @@ dependencies = [
  "getrandom 0.2.17",
  "libredox",
  "thiserror",
+]
+
+[[package]]
+name = "regex"
+version = "1.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
