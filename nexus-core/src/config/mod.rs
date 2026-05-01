@@ -220,6 +220,41 @@ pub struct ProjectInfo {
     pub slug: String,
 }
 
+/// Extra MCP server definition for `[mcp_extra.<name>]` in config.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraMcpServer {
+    /// Command array, e.g. ["npx", "-y", "task-master-ai@latest"]
+    pub command: Vec<String>,
+
+    /// Optional environment variables for this MCP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<std::collections::HashMap<String, String>>,
+}
+
+/// Plugin definition for `[plugins.<name>]` in config.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginDef {
+    /// Source type: "github-raw", "local"
+    #[serde(default = "default_plugin_source")]
+    pub source: String,
+
+    /// URL to download the plugin from (for github-raw source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    /// Local path to copy from (for local source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+
+    /// Target filename inside .opencode/plugins/ (derived from URL if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+}
+
+fn default_plugin_source() -> String {
+    "github-raw".to_string()
+}
+
 /// The full `.nexus/config.toml` file structure.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectConfig {
@@ -228,6 +263,14 @@ pub struct ProjectConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<toml::Value>,
+
+    /// Extra MCP servers to merge into opencode.json on init.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_extra: Option<std::collections::HashMap<String, ExtraMcpServer>>,
+
+    /// Plugins to install into .opencode/plugins/ on init.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<std::collections::HashMap<String, PluginDef>>,
 }
 
 /// Returns the path to the project-local `.nexus/config.toml`,

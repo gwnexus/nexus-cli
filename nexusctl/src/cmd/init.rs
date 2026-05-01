@@ -27,7 +27,9 @@ use console::style;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::resolve_token;
 use nexus_core::config;
+use nexus_core::config::{ExtraMcpServer, PluginDef};
 use nexus_core::McpSource;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -263,6 +265,16 @@ pub async fn run(
                 &agentic_root,
             )?;
 
+            // Apply extra MCP servers and plugins from .nexus/config.toml
+            if let Ok(Some(proj_config)) = config::load_project_config(Some(&target)) {
+                if let Some(ref extras) = proj_config.mcp_extra {
+                    merge_extra_mcp_servers(&target, extras)?;
+                }
+                if let Some(ref plugins) = proj_config.plugins {
+                    install_plugins(&target, plugins).await?;
+                }
+            }
+
             // Export directives for this project
             match client.export_directives(pid).await {
                 Ok(dir_export) => {
@@ -403,6 +415,10 @@ pub async fn run(
 // ---------------------------------------------------------------------------
 
 /// Create .nexus/ directory with project-local config.
+///
+/// If `config.toml` already exists (e.g. preserved from deinit), it is NOT
+/// overwritten — user-configured `[mcp_extra]` and `[plugins]` sections
+/// would be lost. Only updates `[project]` section if needed.
 fn create_nexus_dir(
     target: &Path,
     project_name: &str,
@@ -410,6 +426,34 @@ fn create_nexus_dir(
 ) -> anyhow::Result<()> {
     let nexus_dir = target.join(".nexus");
     fs::create_dir_all(&nexus_dir)?;
+
+    let config_path = nexus_dir.join("config.toml");
+    if config_path.exists() {
+        // Config exists — preserve it but ensure [project] section is current
+        if let Some(id) = project_id {
+            if let Ok(Some(mut existing)) = config::load_project_config(Some(target)) {
+                let needs_update = existing
+                    .project
+                    .as_ref()
+                    .map(|p| p.id != id || p.name != project_name)
+                    .unwrap_or(true);
+
+                if needs_update {
+                    existing.project = Some(config::ProjectInfo {
+                        id: id.to_string(),
+                        name: project_name.to_string(),
+                        slug: String::new(),
+                    });
+                    config::save_project_config(Some(target), &existing)?;
+                }
+            }
+        }
+        println!(
+            "   {} .nexus/config.toml already exists, preserved",
+            style("--").yellow()
+        );
+        return Ok(());
+    }
 
     let project_section = match project_id {
         Some(id) => format!(
@@ -1013,6 +1057,181 @@ fn write_mcp_configs(
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+/// Merge extra MCP servers from `[mcp_extra]` config into `opencode.json`.
+///
+/// Reads the existing `opencode.json`, adds entries under `mcp`, and writes back.
+fn merge_extra_mcp_servers(
+    target: &Path,
+    extras: &HashMap<String, ExtraMcpServer>,
+) -> anyhow::Result<()> {
+    if extras.is_empty() {
+        return Ok(());
+    }
+
+    let opencode_path = target.join("opencode.json");
+    if !opencode_path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&opencode_path)?;
+    let mut doc: serde_json::Value = serde_json::from_str(&content)?;
+
+    let mcp = doc
+        .as_object_mut()
+        .and_then(|o| o.get_mut("mcp"))
+        .and_then(|v| v.as_object_mut());
+
+    let mcp = match mcp {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+
+    for (name, server) in extras {
+        if mcp.contains_key(name) {
+            continue; // Don't overwrite existing entries
+        }
+
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "type".to_string(),
+            serde_json::Value::String("local".to_string()),
+        );
+        entry.insert(
+            "command".to_string(),
+            serde_json::Value::Array(
+                server
+                    .command
+                    .iter()
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect(),
+            ),
+        );
+
+        if let Some(ref env) = server.environment {
+            let env_obj: serde_json::Map<String, serde_json::Value> = env
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+            entry.insert(
+                "environment".to_string(),
+                serde_json::Value::Object(env_obj),
+            );
+        }
+
+        mcp.insert(name.clone(), serde_json::Value::Object(entry));
+        println!(
+            "   {} opencode.json: added MCP server '{}'",
+            style("+").bold().green(),
+            name,
+        );
+    }
+
+    let output = serde_json::to_string_pretty(&doc)?;
+    fs::write(&opencode_path, format!("{}\n", output))?;
+
+    Ok(())
+}
+
+/// Install plugins from `[plugins]` config into `.opencode/plugins/`.
+///
+/// Supports `source = "github-raw"` (downloads via HTTP) and
+/// `source = "local"` (copies from a local path).
+async fn install_plugins(
+    target: &Path,
+    plugins: &HashMap<String, PluginDef>,
+) -> anyhow::Result<()> {
+    if plugins.is_empty() {
+        return Ok(());
+    }
+
+    let plugins_dir = target.join(".opencode").join("plugins");
+    fs::create_dir_all(&plugins_dir)?;
+
+    for (name, def) in plugins {
+        let filename = def.filename.clone().unwrap_or_else(|| {
+            // Derive filename from URL or name
+            if let Some(ref url) = def.url {
+                url.rsplit('/').next().unwrap_or(name).to_string()
+            } else {
+                format!("{}.ts", name)
+            }
+        });
+
+        let dest = plugins_dir.join(&filename);
+
+        match def.source.as_str() {
+            "github-raw" => {
+                if let Some(ref url) = def.url {
+                    let client = reqwest::Client::new();
+                    match client.get(url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            let body = resp.text().await.unwrap_or_default();
+                            fs::write(&dest, &body)?;
+                            println!(
+                                "   {} .opencode/plugins/{} (downloaded)",
+                                style("+").bold().green(),
+                                filename,
+                            );
+                        }
+                        Ok(resp) => {
+                            println!(
+                                "   {} Plugin '{}' download failed: HTTP {}",
+                                style("!").bold().yellow(),
+                                name,
+                                resp.status(),
+                            );
+                        }
+                        Err(e) => {
+                            println!(
+                                "   {} Plugin '{}' download failed: {}",
+                                style("!").bold().yellow(),
+                                name,
+                                e,
+                            );
+                        }
+                    }
+                } else {
+                    println!(
+                        "   {} Plugin '{}': no url specified for github-raw source",
+                        style("!").bold().yellow(),
+                        name,
+                    );
+                }
+            }
+            "local" => {
+                if let Some(ref path) = def.path {
+                    let src = PathBuf::from(path);
+                    if src.exists() {
+                        fs::copy(&src, &dest)?;
+                        println!(
+                            "   {} .opencode/plugins/{} (copied from local)",
+                            style("+").bold().green(),
+                            filename,
+                        );
+                    } else {
+                        println!(
+                            "   {} Plugin '{}': local path not found: {}",
+                            style("!").bold().yellow(),
+                            name,
+                            path,
+                        );
+                    }
+                }
+            }
+            other => {
+                println!(
+                    "   {} Plugin '{}': unknown source type '{}'",
+                    style("!").bold().yellow(),
+                    name,
+                    other,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Prompt the user for input with a default value. Returns default on empty input.
 fn prompt_with_default(label: &str, default: &str) -> anyhow::Result<String> {
@@ -1651,6 +1870,252 @@ mod tests {
         assert_eq!(oc, "user-managed content");
         let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
         assert_eq!(cm, "user-managed claude");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_extra_mcp_servers() {
+        let dir = temp_project_dir("merge-extra-mcp");
+
+        // Create a minimal opencode.json
+        let initial = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "nexus": {
+      "type": "local",
+      "command": ["npx", "--yes", "@gwdn/nexus-mcp@latest"],
+      "environment": {
+        "NEXUS_API_URL": "https://nexus.gatewarden.eu",
+        "NEXUS_PRIVATE_TOKEN": "nxs_pat_test"
+      }
+    }
+  }
+}
+"#;
+        fs::write(dir.join("opencode.json"), initial).unwrap();
+
+        let mut extras = HashMap::new();
+        extras.insert(
+            "taskmaster-ai".to_string(),
+            ExtraMcpServer {
+                command: vec![
+                    "npx".to_string(),
+                    "-y".to_string(),
+                    "task-master-ai@latest".to_string(),
+                ],
+                environment: None,
+            },
+        );
+
+        merge_extra_mcp_servers(&dir, &extras).unwrap();
+
+        let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        assert!(
+            result.contains("taskmaster-ai"),
+            "extra MCP server must be added"
+        );
+        assert!(
+            result.contains("task-master-ai@latest"),
+            "command must be present"
+        );
+        assert!(
+            result.contains("nexus"),
+            "original nexus entry must be preserved"
+        );
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_extra_mcp_servers_does_not_overwrite_existing() {
+        let dir = temp_project_dir("merge-extra-no-overwrite");
+
+        // Create opencode.json that already has taskmaster-ai
+        let initial = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "nexus": {
+      "type": "local",
+      "command": ["npx", "--yes", "@gwdn/nexus-mcp@latest"]
+    },
+    "taskmaster-ai": {
+      "type": "local",
+      "command": ["npx", "-y", "task-master-ai@0.1.0"]
+    }
+  }
+}
+"#;
+        fs::write(dir.join("opencode.json"), initial).unwrap();
+
+        let mut extras = HashMap::new();
+        extras.insert(
+            "taskmaster-ai".to_string(),
+            ExtraMcpServer {
+                command: vec![
+                    "npx".to_string(),
+                    "-y".to_string(),
+                    "task-master-ai@latest".to_string(),
+                ],
+                environment: None,
+            },
+        );
+
+        merge_extra_mcp_servers(&dir, &extras).unwrap();
+
+        let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        // Must preserve the existing version, not overwrite with @latest
+        assert!(
+            result.contains("task-master-ai@0.1.0"),
+            "existing entry must NOT be overwritten"
+        );
+        assert!(
+            !result.contains("task-master-ai@latest"),
+            "new version must NOT replace existing"
+        );
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_extra_mcp_servers_with_environment() {
+        let dir = temp_project_dir("merge-extra-env");
+
+        let initial = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "nexus": {
+      "type": "local",
+      "command": ["npx", "--yes", "@gwdn/nexus-mcp@latest"]
+    }
+  }
+}
+"#;
+        fs::write(dir.join("opencode.json"), initial).unwrap();
+
+        let mut env = std::collections::HashMap::new();
+        env.insert("API_KEY".to_string(), "secret123".to_string());
+
+        let mut extras = HashMap::new();
+        extras.insert(
+            "my-server".to_string(),
+            ExtraMcpServer {
+                command: vec!["node".to_string(), "server.js".to_string()],
+                environment: Some(env),
+            },
+        );
+
+        merge_extra_mcp_servers(&dir, &extras).unwrap();
+
+        let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        assert!(result.contains("my-server"), "new server must be added");
+        assert!(result.contains("API_KEY"), "environment must be present");
+        assert!(result.contains("secret123"), "env value must be present");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_install_plugins_local_source() {
+        let dir = temp_project_dir("install-plugins-local");
+        let plugins_dir = dir.join(".opencode").join("plugins");
+        fs::create_dir_all(&plugins_dir).unwrap();
+
+        // Create a fake plugin source file
+        let source_file = dir.join("my-plugin.ts");
+        fs::write(&source_file, "// plugin content").unwrap();
+
+        let mut plugins = HashMap::new();
+        plugins.insert(
+            "my-plugin".to_string(),
+            nexus_core::config::PluginDef {
+                source: "local".to_string(),
+                url: None,
+                path: Some(source_file.to_str().unwrap().to_string()),
+                filename: Some("my-plugin.ts".to_string()),
+            },
+        );
+
+        install_plugins(&dir, &plugins).await.unwrap();
+
+        let dest = plugins_dir.join("my-plugin.ts");
+        assert!(dest.exists(), "plugin must be copied to .opencode/plugins/");
+        let content = fs::read_to_string(&dest).unwrap();
+        assert_eq!(content, "// plugin content");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_install_plugins_local_missing_path() {
+        let dir = temp_project_dir("install-plugins-missing");
+        fs::create_dir_all(dir.join(".opencode/plugins")).unwrap();
+
+        let mut plugins = HashMap::new();
+        plugins.insert(
+            "missing-plugin".to_string(),
+            nexus_core::config::PluginDef {
+                source: "local".to_string(),
+                url: None,
+                path: Some("/nonexistent/path/plugin.ts".to_string()),
+                filename: Some("plugin.ts".to_string()),
+            },
+        );
+
+        // Should not error, just warn
+        install_plugins(&dir, &plugins).await.unwrap();
+
+        let dest = dir.join(".opencode/plugins/plugin.ts");
+        assert!(
+            !dest.exists(),
+            "plugin must NOT be created from missing source"
+        );
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_create_nexus_dir_preserves_existing_config() {
+        let dir = temp_project_dir("preserve-config");
+        let nexus_dir = dir.join(".nexus");
+        fs::create_dir_all(&nexus_dir).unwrap();
+
+        // Write a config with mcp_extra and plugins
+        let config_content = r#"[project]
+name = "test"
+id = "fdc7a78c-d0b9-46fd-8206-9fc57301de2d"
+
+[mcp_extra.taskmaster-ai]
+command = ["npx", "-y", "task-master-ai@latest"]
+
+[plugins.compaction-plus]
+source = "github-raw"
+url = "https://example.com/plugin.ts"
+"#;
+        fs::write(nexus_dir.join("config.toml"), config_content).unwrap();
+
+        // Run create_nexus_dir — it should NOT overwrite the config
+        create_nexus_dir(&dir, "test", Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")).unwrap();
+
+        let result = fs::read_to_string(nexus_dir.join("config.toml")).unwrap();
+        assert!(
+            result.contains("mcp_extra"),
+            "mcp_extra section must be preserved"
+        );
+        assert!(
+            result.contains("plugins"),
+            "plugins section must be preserved"
+        );
+        assert!(
+            result.contains("taskmaster-ai"),
+            "extra server name must be preserved"
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);

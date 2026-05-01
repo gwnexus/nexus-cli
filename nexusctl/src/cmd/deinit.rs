@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use crate::cmd::pull::is_managed_file;
 
 /// Nexus-owned scaffold entries that are always safe to remove.
-const NEXUS_OWNED_ENTRIES: &[&str] = &[".nexus", ".opencode", "opencode.json", "opencode.jsonc"];
+/// NOTE: .nexus/ is handled specially — config.toml is preserved.
+const NEXUS_OWNED_ENTRIES: &[&str] = &[".opencode", "opencode.json", "opencode.jsonc"];
 
 /// Run the `nexus deinit` command.
 pub fn run(force: bool) -> anyhow::Result<()> {
@@ -33,6 +34,19 @@ pub fn run(force: bool) -> anyhow::Result<()> {
         let path = cwd.join(entry);
         if path.exists() {
             to_remove.push((path, RemovalKind::Full));
+        }
+    }
+
+    // .nexus/ — remove all contents EXCEPT config.toml (user-managed project config)
+    let nexus_dir = cwd.join(".nexus");
+    if nexus_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&nexus_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name != "config.toml" {
+                    to_remove.push((entry.path(), RemovalKind::Full));
+                }
+            }
         }
     }
 
@@ -145,6 +159,12 @@ pub fn run(force: bool) -> anyhow::Result<()> {
 
     println!();
     println!("{} Nexus scaffold removed.", style("OK").bold().green());
+    if cwd.join(".nexus").join("config.toml").exists() {
+        println!(
+            "   {} .nexus/config.toml preserved (project binding + extras config)",
+            style("i").bold().blue()
+        );
+    }
 
     Ok(())
 }

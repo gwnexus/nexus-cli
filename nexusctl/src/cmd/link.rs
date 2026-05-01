@@ -92,6 +92,8 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
     let mut project_config = config::load_project_config(None)?.unwrap_or(ProjectConfig {
         project: None,
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     });
     project_config.project = Some(project_info);
     config::save_project_config(None, &project_config)?;

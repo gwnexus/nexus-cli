@@ -9,7 +9,9 @@ use std::fs;
 use std::path::PathBuf;
 
 /// The scaffold entries that `nexus deinit` targets.
-/// Kept in sync with `nexusctl/src/cmd/deinit.rs::SCAFFOLD_ENTRIES`.
+/// Kept in sync with `nexusctl/src/cmd/deinit.rs::NEXUS_OWNED_ENTRIES`.
+/// NOTE: .nexus/ is handled specially — config.toml is preserved.
+/// This test list still includes .nexus for the simplified removal model.
 const SCAFFOLD_ENTRIES: &[&str] = &[
     ".nexus",
     ".claude",

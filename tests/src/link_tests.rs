@@ -35,6 +35,8 @@ fn test_save_and_load_project_config() {
             slug: "my-nexus-project".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
 
     // Save
@@ -72,6 +74,8 @@ fn test_save_project_config_creates_nexus_dir() {
             slug: "test".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
 
     save_project_config(Some(&dir), &config).unwrap();
@@ -112,6 +116,8 @@ fn test_remove_project_section() {
             slug: "removal-target".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -140,6 +146,8 @@ fn test_remove_project_section_returns_false_when_no_project() {
     let config = ProjectConfig {
         project: None,
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -184,6 +192,8 @@ fn test_resolve_project_id_from_config() {
             slug: "test-project".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -207,6 +217,8 @@ fn test_resolve_project_id_with_flag_override() {
             slug: "config-proj".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -252,6 +264,8 @@ fn test_resolve_project_id_skips_empty_cli_flag() {
             slug: "real".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -275,6 +289,8 @@ fn test_resolve_project_id_skips_empty_config_id() {
             slug: "empty".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -301,6 +317,8 @@ fn test_project_config_toml_content() {
             slug: "content-check".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -332,6 +350,8 @@ fn test_save_overwrites_existing_config() {
             slug: "first".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
     save_project_config(Some(&dir), &config1).unwrap();
 
@@ -343,6 +363,8 @@ fn test_save_overwrites_existing_config() {
             slug: "second".to_string(),
         }),
         mcp: None,
+        mcp_extra: None,
+        plugins: None,
     };
     save_project_config(Some(&dir), &config2).unwrap();
 
