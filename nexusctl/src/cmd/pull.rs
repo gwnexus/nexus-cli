@@ -1260,6 +1260,7 @@ mod tests {
             body: None,
             command_slug: Some("test-cmd".into()),
             pinned: false,
+            resources: vec![],
         }];
 
         let existing = detect_existing_files(&tmp, &skills, ".claude");
@@ -1285,6 +1286,7 @@ mod tests {
             body: None,
             command_slug: Some("test-cmd".into()),
             pinned: false,
+            resources: vec![],
         }];
 
         let existing = detect_existing_files(&tmp, &skills, ".claude");
@@ -1581,6 +1583,7 @@ mod tests {
             body: None,
             command_slug: None,
             pinned: false,
+            resources: vec![],
         }];
 
         let existing = detect_existing_files(&tmp, &skills, ".nexus");

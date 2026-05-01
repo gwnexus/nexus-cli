@@ -1489,6 +1489,7 @@ mod tests {
             body: Some("Do the thing.".to_string()),
             command_slug: Some("nexus-test-skill".to_string()),
             pinned: false,
+            resources: vec![],
         };
 
         write_skill(&dir, &skill, ".claude").unwrap();
@@ -1518,6 +1519,7 @@ mod tests {
             body: Some("Instructions here.".to_string()),
             command_slug: Some("nexus-test-skill".to_string()),
             pinned: false,
+            resources: vec![],
         };
 
         write_command(&dir, &skill, ".claude").unwrap();
@@ -1546,6 +1548,7 @@ mod tests {
             body: None,
             command_slug: None,
             pinned: false,
+            resources: vec![],
         };
 
         write_command(&dir, &skill, ".claude").unwrap();
