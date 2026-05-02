@@ -271,7 +271,7 @@ pub fn scan_agentic_files(workspace: &Path) -> Vec<ImportAgenticFile> {
         if let Ok(entries) = fs::read_dir(&windsurf_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "md") {
+                if path.extension().is_some_and(|ext| ext == "md") {
                     if let Ok(body) = fs::read_to_string(&path) {
                         if body.trim().is_empty() {
                             continue;
