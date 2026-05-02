@@ -22,6 +22,7 @@ pub struct NexusClient {
     client: reqwest::Client,
     base_url: String,
     token: Option<String>,
+    machine_id: Option<String>,
 }
 
 impl std::fmt::Debug for NexusClient {
@@ -29,6 +30,7 @@ impl std::fmt::Debug for NexusClient {
         f.debug_struct("NexusClient")
             .field("base_url", &self.base_url)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("machine_id", &self.machine_id)
             .finish()
     }
 }
@@ -61,6 +63,7 @@ impl NexusClient {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
+            machine_id: crate::machine::resolve_machine_id().ok(),
         })
     }
 
@@ -194,6 +197,9 @@ impl NexusClient {
         if let Some(ref token) = self.token {
             req = req.bearer_auth(token);
         }
+        if let Some(ref mid) = self.machine_id {
+            req = req.header("X-Nexus-Machine-Id", mid);
+        }
 
         let resp = req.send().await?;
         self.handle_response(resp).await
@@ -211,6 +217,9 @@ impl NexusClient {
         let mut req = self.client.post(&url).json(body);
         if let Some(ref token) = self.token {
             req = req.bearer_auth(token);
+        }
+        if let Some(ref mid) = self.machine_id {
+            req = req.header("X-Nexus-Machine-Id", mid);
         }
 
         let resp = req.send().await?;

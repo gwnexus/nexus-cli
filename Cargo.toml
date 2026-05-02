@@ -3,7 +3,7 @@ members = ["nexusctl", "nexus-core", "tests"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 authors = ["RelicFrog Holding UG <post@relicfrog.rocks>"]
 edition = "2021"
 rust-version = "1.85"
@@ -26,6 +26,7 @@ dirs = "6"
 anyhow = "1"
 sha2 = "0.10"
 open = "5"
+uuid = { version = "1", features = ["v4"] }
 regex = "1"
 
 [profile.release]

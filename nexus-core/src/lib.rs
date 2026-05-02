@@ -5,11 +5,13 @@
 //! - `auth` -- Credential storage and token validation
 //! - `config` -- CLI configuration management
 //! - `error` -- Unified error types
+//! - `machine` -- Persistent machine identity
 
 pub mod api;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod machine;
 
 // Re-exports for convenience
 pub use config::ExtraMcpServer;

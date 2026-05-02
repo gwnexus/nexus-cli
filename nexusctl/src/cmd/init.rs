@@ -141,6 +141,24 @@ pub async fn run(
     create_nexus_dir(&target, project_name, resolved_pid.as_deref())?;
     create_opencode_dir(&target)?;
 
+    // Ensure a persistent machine identity exists
+    match nexus_core::machine::MachineIdentity::load_or_create() {
+        Ok(identity) => {
+            println!(
+                "   {} Machine ID: {}",
+                style("+").bold().green(),
+                style(identity.id()).dim()
+            );
+        }
+        Err(e) => {
+            println!(
+                "   {} Could not create machine ID: {}",
+                style("!").yellow(),
+                e
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Phase 2: Server-aware init (when project_id + token are available)
     // -----------------------------------------------------------------------
