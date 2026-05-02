@@ -43,7 +43,6 @@ pub async fn run(
     api_url: &str,
     force: bool,
     mcp_source: McpSource,
-    shadowed_ai: bool,
 ) -> anyhow::Result<()> {
     let target = PathBuf::from(path).canonicalize().unwrap_or_else(|_| {
         // Path doesn't exist yet; resolve relative to cwd
@@ -201,7 +200,7 @@ pub async fn run(
                     let default_agentic_root = ".nexus";
                     create_claude_dir(&target, project_name, default_agentic_root)?;
                     create_agents_md(&target, project_name, force, default_agentic_root)?;
-                    append_gitignore(&target, shadowed_ai, default_agentic_root)?;
+                    append_gitignore(&target)?;
 
                     print_done();
                     return Ok(());
@@ -235,7 +234,7 @@ pub async fn run(
             // Create the agentic root directory (.claude/ or .nexus/ etc.)
             create_claude_dir(&target, project_name, &agentic_root)?;
             create_agents_md(&target, project_name, force, &agentic_root)?;
-            append_gitignore(&target, shadowed_ai, &agentic_root)?;
+            append_gitignore(&target)?;
 
             match client.export_skills(pid).await {
                 Ok(export) => {
@@ -404,7 +403,7 @@ pub async fn run(
             detect_importable_files(&target);
             create_claude_dir(&target, project_name, default_agentic_root)?;
             create_agents_md(&target, project_name, force, default_agentic_root)?;
-            append_gitignore(&target, shadowed_ai, default_agentic_root)?;
+            append_gitignore(&target)?;
             println!(
                 "   {} No token found. Skipping server sync.",
                 style("--").yellow()
@@ -421,7 +420,7 @@ pub async fn run(
         detect_importable_files(&target);
         create_claude_dir(&target, project_name, default_agentic_root)?;
         create_agents_md(&target, project_name, force, default_agentic_root)?;
-        append_gitignore(&target, shadowed_ai, default_agentic_root)?;
+        append_gitignore(&target)?;
     }
 
     print_done();
@@ -673,11 +672,9 @@ You are expected to:
 /// Uses `.git/info/exclude` (local, never committed) instead of `.gitignore`
 /// to avoid polluting the repository with tool-specific ignore rules.
 ///
-/// When `shadowed_ai` is true, ALL AI scaffold files are excluded
-/// (AGENTS.md, .claude/, .opencode/, opencode.json). Without this flag, only
-/// sensitive/user-managed files are excluded (.env.local, credentials, opencode.json,
-/// CLAUDE.md).
-fn append_gitignore(target: &Path, shadowed_ai: bool, agentic_root: &str) -> anyhow::Result<()> {
+/// Always writes a unified block of entries regardless of agentic_root
+/// configuration (ADR-0029).
+fn append_gitignore(target: &Path) -> anyhow::Result<()> {
     let git_dir = target.join(".git");
     if !git_dir.is_dir() {
         // Not a git repo — skip silently
@@ -696,61 +693,16 @@ fn append_gitignore(target: &Path, shadowed_ai: bool, agentic_root: &str) -> any
         }
     }
 
-    let base_ignores = format!(
-        r#"
-{marker}
-.env.local
-.nexus/credentials.toml
-opencode.json
-{agentic_root}/CLAUDE.md
-"#,
-        marker = marker,
-        agentic_root = agentic_root,
-    );
+    // Migrate: if .gitignore contains any of these entries, remove them
+    migrate_gitignore_entries(target);
 
-    // Build shadow ignores: exclude all Nexus-managed AI scaffold files.
-    // When using an alternate agentic_root (e.g. ".nexus"), we must NOT
-    // exclude .claude/ — that belongs to the customer's existing config.
-    let shadow_ignores = if agentic_root == ".claude" {
-        format!(
-            r#"
-{marker}
-.env.local
-.nexus/
-.claude/
-.opencode/
-opencode.json
-AGENTS.md
-"#,
-            marker = marker,
-        )
-    } else {
-        // Alternate root: exclude .nexus/ (config) + agentic_root/ + .opencode/
-        // but NOT .claude/ (customer-owned) and NOT root AGENTS.md (may be customer-owned)
-        let mut entries = format!(
-            r#"
-{marker}
-.env.local
+    let ignores = r#"
+# Nexus CLI — local workspace (ADR-0029)
 .nexus/
 .opencode/
 opencode.json
-"#,
-            marker = marker,
-        );
-        // Only add agentic_root if it differs from .nexus (avoid duplicate)
-        if agentic_root != ".nexus" {
-            entries.push_str(&format!("{}/\n", agentic_root));
-        }
-        // AGENTS.md lives inside the agentic root for alternate paths
-        entries.push_str(&format!("{}/AGENTS.md\n", agentic_root));
-        entries
-    };
-
-    let ignores = if shadowed_ai {
-        shadow_ignores
-    } else {
-        base_ignores
-    };
+.env.local
+"#;
 
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -760,13 +712,53 @@ opencode.json
     use std::io::Write;
     file.write_all(ignores.as_bytes())?;
 
-    if shadowed_ai {
-        print_created(".git/info/exclude (appended, --shadowed-ai: all AI files excluded)");
-    } else {
-        print_created(".git/info/exclude (appended)");
-    }
+    print_created(".git/info/exclude (appended)");
 
     Ok(())
+}
+
+/// Migrate entries from `.gitignore` to `.git/info/exclude`.
+///
+/// If `.gitignore` contains any of the unified exclude entries, remove them
+/// and print an info message.
+fn migrate_gitignore_entries(target: &Path) {
+    let gitignore_path = target.join(".gitignore");
+    if !gitignore_path.exists() {
+        return;
+    }
+
+    let entries_to_remove = [".nexus/", ".opencode/", "opencode.json", ".env.local"];
+
+    let Ok(content) = fs::read_to_string(&gitignore_path) else {
+        return;
+    };
+
+    let mut removed = Vec::new();
+    let mut new_lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if entries_to_remove.contains(&trimmed) {
+            removed.push(trimmed.to_string());
+        } else {
+            new_lines.push(line);
+        }
+    }
+
+    if !removed.is_empty() {
+        // Write back the cleaned .gitignore
+        let new_content = new_lines.join("\n");
+        let new_content = if new_content.ends_with('\n') {
+            new_content
+        } else {
+            format!("{}\n", new_content)
+        };
+        let _ = fs::write(&gitignore_path, new_content);
+        println!(
+            "   {} Migrated {} entries from .gitignore to .git/info/exclude",
+            style("i").bold().blue(),
+            removed.len()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,7 +1490,6 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
-            false,
         )
         .await
         .unwrap();
@@ -1538,7 +1529,6 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
-            false,
         )
         .await
         .unwrap();
@@ -1562,7 +1552,6 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
-            false,
         )
         .await;
         assert!(result.is_err());
@@ -1583,7 +1572,6 @@ mod tests {
             "https://nexus.gatewarden.eu",
             true,
             McpSource::Npm,
-            false,
         )
         .await;
         assert!(result.is_ok());
@@ -1605,7 +1593,6 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
-            false,
         )
         .await
         .unwrap();
@@ -1631,7 +1618,6 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
-            false,
         )
         .await
         .unwrap();
@@ -1656,7 +1642,6 @@ mod tests {
             "https://nexus.gatewarden.eu",
             true,
             McpSource::Npm,
-            false,
         )
         .await
         .unwrap();
@@ -1679,7 +1664,6 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
-            false,
         )
         .await
         .unwrap();
@@ -1692,7 +1676,6 @@ mod tests {
             "https://nexus.gatewarden.eu",
             true,
             McpSource::Npm,
-            false,
         )
         .await
         .unwrap();
@@ -1701,14 +1684,14 @@ mod tests {
         let marker_count = exclude.matches("# Nexus CLI").count();
         assert_eq!(marker_count, 1, "exclude marker should appear only once");
 
-        // Verify that opencode.json and .nexus/CLAUDE.md are in .git/info/exclude
+        // Verify that opencode.json and .nexus/ are in .git/info/exclude
         assert!(
             exclude.contains("opencode.json"),
             "opencode.json must be in .git/info/exclude"
         );
         assert!(
-            exclude.contains(".nexus/CLAUDE.md"),
-            ".nexus/CLAUDE.md must be in .git/info/exclude"
+            exclude.contains(".nexus/"),
+            ".nexus/ must be in .git/info/exclude"
         );
 
         // Cleanup
@@ -1716,8 +1699,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_init_shadowed_ai_exclude() {
-        let dir = temp_project_dir("shadowed-ai");
+    async fn test_init_exclude_unified() {
+        let dir = temp_project_dir("exclude-unified");
         run(
             dir.to_str().unwrap(),
             Some("test"),
@@ -1725,33 +1708,30 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
-            true,
         )
         .await
         .unwrap();
 
         let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
-        // With .nexus as agentic root, AGENTS.md lives inside .nexus/
         assert!(
-            exclude.contains(".nexus/AGENTS.md"),
-            ".nexus/AGENTS.md must be in .git/info/exclude with --shadowed-ai"
-        );
-        // .claude/ is NOT excluded — it belongs to the customer
-        assert!(
-            !exclude.contains(".claude/"),
-            ".claude/ must NOT be in .git/info/exclude when agentic_root is .nexus"
+            exclude.contains(".nexus/"),
+            ".nexus/ must be in .git/info/exclude"
         );
         assert!(
             exclude.contains(".opencode/"),
-            ".opencode/ must be in .git/info/exclude with --shadowed-ai"
-        );
-        assert!(
-            exclude.contains(".nexus/"),
-            ".nexus/ must be in .git/info/exclude with --shadowed-ai"
+            ".opencode/ must be in .git/info/exclude"
         );
         assert!(
             exclude.contains("opencode.json"),
-            "opencode.json must be in .git/info/exclude with --shadowed-ai"
+            "opencode.json must be in .git/info/exclude"
+        );
+        assert!(
+            exclude.contains(".env.local"),
+            ".env.local must be in .git/info/exclude"
+        );
+        assert!(
+            exclude.contains("ADR-0029"),
+            "ADR-0029 marker must be in .git/info/exclude"
         );
 
         // Cleanup
@@ -1759,117 +1739,35 @@ mod tests {
     }
 
     #[test]
-    fn test_shadow_exclude_default_claude_root() {
-        let dir = temp_project_dir("shadow-claude-root");
+    fn test_unified_exclude_block() {
+        let dir = temp_project_dir("unified-block");
 
-        append_gitignore(&dir, true, ".claude").unwrap();
-
-        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
-        assert!(
-            exclude.contains(".claude/"),
-            ".claude/ must be excluded in shadow mode with default root"
-        );
-        assert!(
-            exclude.contains(".nexus/"),
-            ".nexus/ must be excluded in shadow mode"
-        );
-        assert!(
-            exclude.contains(".opencode/"),
-            ".opencode/ must be excluded in shadow mode"
-        );
-        assert!(
-            exclude.contains("AGENTS.md"),
-            "root AGENTS.md must be excluded in shadow mode with default root"
-        );
-        assert!(
-            exclude.contains("opencode.json"),
-            "opencode.json must be excluded in shadow mode"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_shadow_exclude_alternate_nexus_root() {
-        let dir = temp_project_dir("shadow-nexus-root");
-
-        append_gitignore(&dir, true, ".nexus").unwrap();
+        append_gitignore(&dir).unwrap();
 
         let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
         assert!(
             exclude.contains(".nexus/"),
-            ".nexus/ must be excluded in shadow mode"
+            ".nexus/ must be in unified exclude block"
         );
         assert!(
             exclude.contains(".opencode/"),
-            ".opencode/ must be excluded in shadow mode"
+            ".opencode/ must be in unified exclude block"
         );
         assert!(
             exclude.contains("opencode.json"),
-            "opencode.json must be excluded in shadow mode"
+            "opencode.json must be in unified exclude block"
         );
         assert!(
-            exclude.contains(".nexus/AGENTS.md"),
-            ".nexus/AGENTS.md must be excluded in shadow mode with alternate root"
+            exclude.contains(".env.local"),
+            ".env.local must be in unified exclude block"
         );
-        // .claude/ must NOT be excluded — it belongs to the customer
-        assert!(
-            !exclude.contains(".claude/"),
-            ".claude/ must NOT be excluded in shadow mode with alternate root"
-        );
-        // Root-level AGENTS.md must NOT be excluded (may be customer-owned)
-        let standalone_agents = exclude.lines().any(|l| l.trim() == "AGENTS.md");
-        assert!(
-            !standalone_agents,
-            "root AGENTS.md must NOT be excluded in shadow mode with alternate root"
-        );
+        assert!(exclude.contains("# Nexus CLI"), "marker must be present");
 
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_shadow_exclude_custom_alternate_root() {
-        let dir = temp_project_dir("shadow-custom-root");
-
-        append_gitignore(&dir, true, ".myagent").unwrap();
-
-        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
-        assert!(exclude.contains(".nexus/"), ".nexus/ must be excluded");
-        assert!(
-            exclude.contains(".myagent/"),
-            "custom agentic root must be excluded"
-        );
-        assert!(
-            exclude.contains(".myagent/AGENTS.md"),
-            "AGENTS.md inside custom root must be excluded"
-        );
-        assert!(
-            !exclude.contains(".claude/"),
-            ".claude/ must NOT be excluded with custom alternate root"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_base_exclude_alternate_root() {
-        let dir = temp_project_dir("base-nexus-root");
-
-        append_gitignore(&dir, false, ".nexus").unwrap();
-
-        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
-        assert!(
-            exclude.contains(".nexus/CLAUDE.md"),
-            "agentic_root/CLAUDE.md must be excluded in base mode"
-        );
-        assert!(
-            exclude.contains("opencode.json"),
-            "opencode.json must be excluded in base mode"
-        );
-        assert!(
-            !exclude.contains(".claude/"),
-            ".claude/ must NOT be in base excludes with alternate root"
-        );
+        // Idempotency: calling again should not duplicate
+        append_gitignore(&dir).unwrap();
+        let exclude2 = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        let marker_count = exclude2.matches("# Nexus CLI").count();
+        assert_eq!(marker_count, 1, "marker should appear only once");
 
         let _ = fs::remove_dir_all(&dir);
     }

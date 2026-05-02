@@ -57,8 +57,8 @@ pub enum Command {
         #[arg(short, long)]
         force: bool,
 
-        /// Shadow all AI scaffold files via .git/info/exclude (AGENTS.md, .claude/, .opencode/, opencode.json).
-        #[arg(long)]
+        /// [DEPRECATED] Shadow flag is no longer needed; .nexus/ is always excluded via .git/info/exclude.
+        #[arg(long, hide = true)]
         shadowed_ai: bool,
     },
 
@@ -117,7 +117,8 @@ pub enum Command {
     /// Upgrade the Nexus CLI to the latest release version.
     Upgrade,
 
-    /// Shadow (hide) AI/agentic scaffold files from Git tracking.
+    /// [DEPRECATED] Shadow (hide) AI/agentic scaffold files from Git tracking.
+    #[command(hide = true)]
     Shadow {
         #[command(subcommand)]
         action: ShadowAction,

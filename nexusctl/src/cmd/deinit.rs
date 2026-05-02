@@ -166,7 +166,91 @@ pub fn run(force: bool) -> anyhow::Result<()> {
         );
     }
 
+    // Clean up .git/info/exclude entries added by nexus init / nexus shadow
+    cleanup_git_exclude(&cwd);
+
     Ok(())
+}
+
+/// Clean up Nexus-managed entries from `.git/info/exclude`.
+///
+/// Removes:
+/// - Lines between a `# Nexus CLI` marker and the next blank line (or EOF)
+/// - Any `# >>> nexus shadow` / `# <<< nexus shadow` blocks
+fn cleanup_git_exclude(target: &Path) {
+    let exclude_path = target.join(".git").join("info").join("exclude");
+    if !exclude_path.exists() {
+        return;
+    }
+
+    let Ok(content) = fs::read_to_string(&exclude_path) else {
+        return;
+    };
+
+    let nexus_marker = "# Nexus CLI";
+    let shadow_start = "# >>> nexus shadow";
+    let shadow_end = "# <<< nexus shadow";
+
+    if !content.contains(nexus_marker) && !content.contains(shadow_start) {
+        return;
+    }
+
+    let mut result = String::with_capacity(content.len());
+    let mut skip_nexus_block = false;
+    let mut skip_shadow_block = false;
+    let mut cleaned_something = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Handle shadow block
+        if trimmed == shadow_start {
+            skip_shadow_block = true;
+            cleaned_something = true;
+            continue;
+        }
+        if trimmed == shadow_end {
+            skip_shadow_block = false;
+            continue;
+        }
+        if skip_shadow_block {
+            continue;
+        }
+
+        // Handle Nexus CLI block (marker line to next blank line or EOF)
+        if trimmed.starts_with(nexus_marker) {
+            skip_nexus_block = true;
+            cleaned_something = true;
+            continue;
+        }
+        if skip_nexus_block {
+            if trimmed.is_empty() {
+                skip_nexus_block = false;
+                // Skip the blank line separator too
+                continue;
+            }
+            continue;
+        }
+
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    // Trim trailing blank lines
+    let trimmed = result.trim_end_matches('\n');
+    let final_content = if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\n")
+    };
+
+    if cleaned_something {
+        let _ = fs::write(&exclude_path, final_content);
+        println!(
+            "   {} .git/info/exclude cleaned (Nexus entries removed)",
+            style("i").bold().blue()
+        );
+    }
 }
 
 /// Detect the agentic_root for this workspace by checking if the project

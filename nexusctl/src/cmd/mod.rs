@@ -13,6 +13,7 @@ mod skills_cmd;
 mod upgrade;
 
 use crate::{Cli, Command, ConfigAction, ShadowAction, SkillsAction};
+use console::style;
 
 /// Dispatch the parsed CLI command to the appropriate handler.
 pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
@@ -22,7 +23,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             ref name,
             ref project_id,
             force,
-            shadowed_ai,
+            ..
         } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
@@ -33,7 +34,6 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 &api_url,
                 force || cli.yes,
                 config.mcp_source,
-                shadowed_ai,
             )
             .await?;
         }
@@ -101,11 +101,22 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Upgrade => {
             upgrade::run()?;
         }
-        Command::Shadow { ref action } => match action {
-            ShadowAction::On => shadow::on()?,
-            ShadowAction::Off => shadow::off()?,
-            ShadowAction::Status => shadow::status()?,
-        },
+        Command::Shadow { ref action } => {
+            eprintln!(
+                "{} {} The 'nexus shadow' command is deprecated and will be removed in v0.8.0.",
+                style("!").bold().yellow(),
+                style("[DEPRECATED]").bold().yellow(),
+            );
+            eprintln!(
+                "  .nexus/ is now always excluded via .git/info/exclude during 'nexus init'."
+            );
+            eprintln!();
+            match action {
+                ShadowAction::On => shadow::on()?,
+                ShadowAction::Off => shadow::off()?,
+                ShadowAction::Status => shadow::status()?,
+            }
+        }
         Command::Import { dry_run } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);

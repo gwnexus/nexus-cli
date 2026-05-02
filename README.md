@@ -33,7 +33,6 @@ cargo install --git https://github.com/gwnexus/nexus-cli.git nexusctl
 
 ```
 nexus init [path]                       Initialize a Nexus project workspace
-nexus init [path] --shadowed-ai         Init and add all AI files to .gitignore
 nexus login                             Authenticate with the Nexus platform
 nexus logout                            Remove stored credentials
 nexus status                            Show auth, project, and workspace status
@@ -62,7 +61,6 @@ nexus upgrade                           Upgrade CLI to latest release version
 
 | Command         | Flag             | Description                                    |
 | --------------- | ---------------- | ---------------------------------------------- |
-| `nexus init`    | `--shadowed-ai`  | Append all AI scaffold files to `.gitignore`   |
 | `nexus init`    | `--yes`          | Skip interactive project selection             |
 | `nexus deinit`  | `--force`        | Skip confirmation prompt                       |
 | `nexus deinit`  | `--yes`          | Auto-confirm removal                           |

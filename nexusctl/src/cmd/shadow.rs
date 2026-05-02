@@ -56,8 +56,20 @@ const MARKER_END: &str = "# <<< nexus shadow";
 // Public entry points
 // ---------------------------------------------------------------------------
 
+/// Print deprecation warning for shadow commands.
+fn print_deprecation_warning() {
+    eprintln!(
+        "{} {} The 'nexus shadow' command is deprecated and will be removed in v0.8.0.",
+        style("!").bold().yellow(),
+        style("[DEPRECATED]").bold().yellow(),
+    );
+    eprintln!("  .nexus/ is now always excluded via .git/info/exclude during 'nexus init'.");
+    eprintln!();
+}
+
 /// Enable shadow mode.
 pub fn on() -> anyhow::Result<()> {
+    print_deprecation_warning();
     let git_dir = find_git_dir()?;
     let exclude_path = git_dir.join("info").join("exclude");
 
@@ -124,6 +136,7 @@ pub fn on() -> anyhow::Result<()> {
 
 /// Disable shadow mode.
 pub fn off() -> anyhow::Result<()> {
+    print_deprecation_warning();
     let git_dir = find_git_dir()?;
     let exclude_path = git_dir.join("info").join("exclude");
 
@@ -155,6 +168,7 @@ pub fn off() -> anyhow::Result<()> {
 
 /// Show current shadow mode status.
 pub fn status() -> anyhow::Result<()> {
+    print_deprecation_warning();
     let git_dir = find_git_dir()?;
     let exclude_path = git_dir.join("info").join("exclude");
 
