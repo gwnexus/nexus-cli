@@ -1110,6 +1110,26 @@ fn merge_extra_mcp_servers(
                 if mcp.contains_key(name) {
                     continue;
                 }
+                // Check for duplicate: same command array under a different key.
+                let cmd_json = serde_json::Value::Array(
+                    server
+                        .command
+                        .iter()
+                        .map(|s| serde_json::Value::String(s.clone()))
+                        .collect(),
+                );
+                let duplicate_key = mcp
+                    .iter()
+                    .find(|(_, v)| v.get("command").is_some_and(|c| *c == cmd_json));
+                if let Some((existing_key, _)) = duplicate_key {
+                    println!(
+                        "   {} opencode.json: skipping '{}' — duplicate of existing '{}' (same command)",
+                        style("!").bold().yellow(),
+                        name,
+                        existing_key,
+                    );
+                    continue;
+                }
                 let entry = build_opencode_entry(server, &dotenv);
                 mcp.insert(name.clone(), serde_json::Value::Object(entry));
                 println!(
@@ -1139,6 +1159,23 @@ fn merge_extra_mcp_servers(
                 if servers.contains_key(name) {
                     continue;
                 }
+                // Check for duplicate: same command under a different key.
+                let cmd_str = server.command.first().cloned().unwrap_or_default();
+                let duplicate_key = servers.iter().find(|(_, v)| {
+                    v.get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| c == cmd_str)
+                });
+                if let Some((existing_key, _)) = duplicate_key {
+                    println!(
+                        "   {} {}/mcp.json: skipping '{}' — duplicate of existing '{}' (same command)",
+                        style("!").bold().yellow(),
+                        agentic_root,
+                        name,
+                        existing_key,
+                    );
+                    continue;
+                }
                 let entry = build_claude_entry(server, &dotenv);
                 servers.insert(name.clone(), serde_json::Value::Object(entry));
                 println!(
@@ -1158,9 +1195,13 @@ fn merge_extra_mcp_servers(
 }
 
 /// Build an OpenCode-format MCP entry (`type`, `command`, `environment`).
+///
+/// Environment values containing `${env:VAR}` are **translated** to
+/// OpenCode's native `{env:VAR}` syntax instead of being resolved to their
+/// actual values.  This avoids leaking secrets into `opencode.json`.
 fn build_opencode_entry(
     server: &ExtraMcpServer,
-    dotenv: &HashMap<String, String>,
+    _dotenv: &HashMap<String, String>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut entry = serde_json::Map::new();
     entry.insert(
@@ -1183,7 +1224,7 @@ fn build_opencode_entry(
             .map(|(k, v)| {
                 (
                     k.clone(),
-                    serde_json::Value::String(resolve_env_ref(v, dotenv)),
+                    serde_json::Value::String(translate_env_ref_to_opencode(v)),
                 )
             })
             .collect();
@@ -1231,6 +1272,13 @@ fn build_claude_entry(
         entry.insert("env".to_string(), serde_json::Value::Object(env_obj));
     }
     entry
+}
+
+/// Translate `${env:VAR_NAME}` references to OpenCode's native `{env:VAR_NAME}`
+/// syntax.  Values without env references are passed through unchanged.
+fn translate_env_ref_to_opencode(value: &str) -> String {
+    let re = regex::Regex::new(r"\$\{env:([^}]+)\}").unwrap();
+    re.replace_all(value, "{env:$1}").into_owned()
 }
 
 /// Resolve `${env:VAR_NAME}` references in a string value.
@@ -2161,7 +2209,103 @@ mod tests {
         let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(result.contains("my-server"), "new server must be added");
         assert!(result.contains("API_KEY"), "environment must be present");
-        assert!(result.contains("secret123"), "env value must be present");
+        assert!(
+            result.contains("secret123"),
+            "plain env value must be present"
+        );
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_extra_mcp_servers_translates_env_refs() {
+        let dir = temp_project_dir("merge-extra-env-ref");
+
+        let initial = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "nexus": {
+      "type": "local",
+      "command": ["npx", "--yes", "@gwdn/nexus-mcp@latest"]
+    }
+  }
+}
+"#;
+        fs::write(dir.join("opencode.json"), initial).unwrap();
+
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "MY_API_KEY".to_string(),
+            "${env:NEXUS_SEC_MY_API_KEY}".to_string(),
+        );
+
+        let mut extras = HashMap::new();
+        extras.insert(
+            "my-server".to_string(),
+            ExtraMcpServer {
+                command: vec!["node".to_string(), "server.js".to_string()],
+                environment: Some(env),
+            },
+        );
+
+        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
+
+        let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        assert!(
+            result.contains("{env:NEXUS_SEC_MY_API_KEY}"),
+            "env ref must be translated to OpenCode syntax, got: {}",
+            result,
+        );
+        assert!(
+            !result.contains("${env:"),
+            "config.toml syntax must not appear in opencode.json",
+        );
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_extra_mcp_servers_dedup_by_command() {
+        let dir = temp_project_dir("merge-extra-dedup");
+
+        let initial = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "task-master-ai": {
+      "type": "local",
+      "command": ["npx", "-y", "task-master-ai@latest"]
+    }
+  }
+}
+"#;
+        fs::write(dir.join("opencode.json"), initial).unwrap();
+
+        let mut extras = HashMap::new();
+        extras.insert(
+            "taskmaster-ai".to_string(),
+            ExtraMcpServer {
+                command: vec![
+                    "npx".to_string(),
+                    "-y".to_string(),
+                    "task-master-ai@latest".to_string(),
+                ],
+                environment: None,
+            },
+        );
+
+        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
+
+        let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        assert!(
+            result.contains("task-master-ai"),
+            "original entry must remain"
+        );
+        assert!(
+            !result.contains("taskmaster-ai"),
+            "duplicate must NOT be added"
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
