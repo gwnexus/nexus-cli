@@ -12,7 +12,7 @@ use tracing::debug;
 use crate::api::types::{
     AgentFileExportResponse, ApiError, AuthStatus, AuthStatusResponse, DirectiveExportResponse,
     IdentityResponse, ProjectDetailResponse, ProjectListResponse, SkillExportResponse,
-    SkillListResponse,
+    SkillListResponse, TaskListResponse,
 };
 use crate::Error;
 
@@ -157,6 +157,26 @@ impl NexusClient {
     /// List all projects accessible to the authenticated user.
     pub async fn list_projects(&self) -> Result<ProjectListResponse, Error> {
         self.get("/api/mcp/projects").await
+    }
+
+    /// List tasks for a project via `POST /api/mcp/tasks` with `task_list` action.
+    ///
+    /// By default fetches open/in-progress/blocked tasks (non-terminal).
+    /// Pass `status_filter` to override.
+    pub async fn list_tasks(
+        &self,
+        project_id: &str,
+        status_filter: Option<&[&str]>,
+    ) -> Result<TaskListResponse, Error> {
+        let mut body = json!({
+            "action": "task_list",
+            "project_id": project_id,
+            "limit": 100
+        });
+        if let Some(statuses) = status_filter {
+            body["status_filter"] = json!(statuses);
+        }
+        self.post("/api/mcp/tasks", &body).await
     }
 
     /// Get a single project by ID to validate access.

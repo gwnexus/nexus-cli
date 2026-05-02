@@ -316,6 +316,34 @@ pub struct ImportResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Tasks (POST /api/mcp/tasks  action=task_list)
+// ---------------------------------------------------------------------------
+
+/// A single task summary returned by `task_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub priority: String,
+    pub assignee: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response from `task_list` action.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskListResponse {
+    pub action: String,
+    pub project_id: String,
+    pub count: usize,
+    pub tasks: Vec<TaskSummary>,
+}
+
+// ---------------------------------------------------------------------------
 // Generic error
 // ---------------------------------------------------------------------------
 

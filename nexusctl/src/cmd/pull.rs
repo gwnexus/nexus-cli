@@ -297,6 +297,34 @@ pub async fn run(
         force,
     )?;
 
+    // Export open tasks as TASKS.md
+    match client
+        .list_tasks(&project_id, Some(&["open", "in_progress", "blocked"]))
+        .await
+    {
+        Ok(task_response) => {
+            if task_response.tasks.is_empty() {
+                println!("   {} No open tasks to export.", style("·").dim());
+            } else {
+                write_tasks(&workspace, &task_response.tasks, &agentic_root)?;
+                println!(
+                    "   {} Wrote {} task{} to {}/TASKS.md",
+                    style("✓").green(),
+                    task_response.tasks.len(),
+                    if task_response.tasks.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    agentic_root,
+                );
+            }
+        }
+        Err(e) => {
+            println!("   {} Could not fetch tasks: {}", style("!").yellow(), e);
+        }
+    }
+
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
 
@@ -1055,6 +1083,100 @@ fn capitalize(s: &str) -> String {
         None => String::new(),
         Some(f) => f.to_uppercase().to_string() + c.as_str(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tasks export
+// ---------------------------------------------------------------------------
+
+/// Write open tasks as `<agentic_root>/TASKS.md`.
+///
+/// The file is always overwritten (it is a snapshot of the current backlog,
+/// not a user-editable document).
+fn write_tasks(
+    workspace: &Path,
+    tasks: &[nexus_core::api::TaskSummary],
+    agentic_root: &str,
+) -> anyhow::Result<()> {
+    let dir = workspace.join(agentic_root);
+    fs::create_dir_all(&dir)?;
+
+    let priority_order = |p: &str| -> u8 {
+        match p {
+            "urgent" => 0,
+            "high" => 1,
+            "medium" => 2,
+            "low" => 3,
+            _ => 4,
+        }
+    };
+
+    let status_label = |s: &str| -> &'static str {
+        match s {
+            "open" => "Open",
+            "in_progress" => "In Progress",
+            "blocked" => "Blocked",
+            "done" => "Done",
+            "cancelled" => "Cancelled",
+            _ => "Unknown",
+        }
+    };
+
+    let priority_label = |p: &str| -> &'static str {
+        match p {
+            "urgent" => "URGENT",
+            "high" => "High",
+            "medium" => "Medium",
+            "low" => "Low",
+            _ => "Normal",
+        }
+    };
+
+    // Sort by priority (urgent first), then by updated_at descending
+    let mut sorted: Vec<_> = tasks.iter().collect();
+    sorted.sort_by(|a, b| {
+        let pa = priority_order(&a.priority);
+        let pb = priority_order(&b.priority);
+        pa.cmp(&pb).then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str("source: nexus-platform\n");
+    out.push_str("---\n\n");
+    out.push_str("# Active Tasks\n\n");
+    out.push_str(&format!(
+        "> {} open task{} pulled from Nexus platform.\n\n",
+        sorted.len(),
+        if sorted.len() == 1 { "" } else { "s" },
+    ));
+
+    for task in &sorted {
+        let status = status_label(&task.status);
+        let priority = priority_label(&task.priority);
+        let checkbox = if task.status == "done" { "[x]" } else { "[ ]" };
+
+        out.push_str(&format!(
+            "- {} **{}** `[{}]` `{}`\n",
+            checkbox, task.title, status, priority,
+        ));
+
+        if let Some(ref desc) = task.description {
+            let trimmed = desc.trim();
+            if !trimmed.is_empty() {
+                // Indent description lines under the list item
+                for line in trimmed.lines().take(5) {
+                    out.push_str(&format!("  {}\n", line));
+                }
+                if trimmed.lines().count() > 5 {
+                    out.push_str("  _...truncated_\n");
+                }
+            }
+        }
+    }
+
+    fs::write(dir.join("TASKS.md"), &out)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
