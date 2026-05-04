@@ -457,6 +457,7 @@ mod tests {
             Command::Pull {
                 ref project_id,
                 force,
+                ..
             } => {
                 assert!(project_id.is_none());
                 assert!(!force);
@@ -478,6 +479,7 @@ mod tests {
             Command::Pull {
                 ref project_id,
                 force,
+                ..
             } => {
                 assert_eq!(
                     project_id.as_deref(),

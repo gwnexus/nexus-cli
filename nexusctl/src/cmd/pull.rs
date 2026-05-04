@@ -2042,7 +2042,7 @@ mod tests {
         let scope_ws: Vec<String> = vec!["workspace".into()];
         let scope_skills: Vec<String> = vec!["skills".into()];
 
-        let pull_all_empty = scope_empty.is_empty();
+        let _pull_all_empty = scope_empty.is_empty();
         let check = |scope: &[String], name: &str| {
             scope.is_empty() || scope.iter().any(|s| s.eq_ignore_ascii_case(name))
         };
