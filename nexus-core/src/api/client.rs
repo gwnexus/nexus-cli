@@ -192,6 +192,7 @@ impl NexusClient {
     ///
     /// Calls the `wf_export` action. Returns the merged devbox.json + scripts
     /// with template variables substituted and S3 content resolved.
+    /// **Legacy v1** — kept for backward compatibility.
     pub async fn export_workspace(
         &self,
         project_id: &str,
@@ -201,6 +202,30 @@ impl NexusClient {
             "project_id": project_id
         });
         self.post("/api/mcp/workspace-files", &body).await
+    }
+
+    // -- Workspace v2 (Blueprint + Fork) ------------------------------------
+
+    /// List workspace forks for a project.
+    pub async fn list_workspace_forks(
+        &self,
+        project_id: &str,
+    ) -> Result<WorkspaceForksResponse, Error> {
+        let path = format!("/api/projects/{}/workspace-forks", project_id);
+        self.get(&path).await
+    }
+
+    /// Export a single workspace fork for CLI consumption.
+    pub async fn export_workspace_fork(
+        &self,
+        project_id: &str,
+        fork_id: &str,
+    ) -> Result<WorkspaceForkExportResponse, Error> {
+        let path = format!(
+            "/api/projects/{}/workspace-forks/{}/export",
+            project_id, fork_id
+        );
+        self.post(&path, &json!({})).await
     }
 
     /// Send a GET request and deserialize the JSON response.

@@ -365,6 +365,7 @@ pub struct WorkspaceTemplate {
 }
 
 /// Response from `wf_export` action (POST /api/mcp/workspace-files).
+/// Legacy v1 format — kept for backward compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceExportResponse {
     pub action: String,
@@ -382,6 +383,68 @@ pub struct WorkspaceExportResponse {
     pub scripts: Vec<WorkspaceScript>,
     #[serde(default)]
     pub message: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace v2 – Blueprint + Fork architecture (ADR-0034)
+// ---------------------------------------------------------------------------
+
+/// A workspace fork summary from `GET /api/projects/:id/workspace-forks`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForkSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub source_version: i64,
+    #[serde(default)]
+    pub shadow_mode: bool,
+    #[serde(default)]
+    pub upstream_changed: bool,
+    #[serde(default)]
+    pub scripts_path: Option<String>,
+}
+
+/// Response from `GET /api/projects/:id/workspace-forks`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForksResponse {
+    pub forks: Vec<WorkspaceForkSummary>,
+    #[serde(default)]
+    pub count: usize,
+}
+
+/// Export metadata from `POST /api/projects/:id/workspace-forks/:forkId/export`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForkExportMeta {
+    pub project_id: String,
+    pub fork_id: String,
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+    #[serde(default)]
+    pub version: i64,
+    #[serde(default)]
+    pub shadow_mode: bool,
+    #[serde(default)]
+    pub scripts_path: String,
+}
+
+/// A script entry in the v2 fork export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForkExportScript {
+    pub path: String,
+    pub body: String,
+    #[serde(default)]
+    pub executable: bool,
+}
+
+/// Response from `POST /api/projects/:id/workspace-forks/:forkId/export`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForkExportResponse {
+    pub devbox_json: String,
+    #[serde(default)]
+    pub scripts: Vec<WorkspaceForkExportScript>,
+    pub meta: WorkspaceForkExportMeta,
 }
 
 /// Generic API error shape returned by the Nexus server.

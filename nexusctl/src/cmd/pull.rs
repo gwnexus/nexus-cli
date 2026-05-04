@@ -330,100 +330,188 @@ pub async fn run(
         }
     }
 
-    // Export workspace files (devbox.json + scripts) — ADR-0032
+    // Export workspace files (devbox.json + scripts) — ADR-0034 (v2 fork API, v1 fallback)
     if pull_scope("workspace") {
-        match client.export_workspace(&project_id).await {
-            Ok(ws_export) => {
-                // Check if workspace provisioning is explicitly disabled
-                if ws_export.workspace_provisioning_enabled == Some(false) {
-                    println!(
-                        "   {} Workspace provisioning disabled for this project.",
-                        style("·").dim()
-                    );
-                } else if ws_export.workspace.is_none() && ws_export.scripts.is_empty() {
-                    println!(
-                        "   {} No workspace files assigned to this project.",
-                        style("·").dim()
-                    );
-                } else {
-                    let mut ws_written = 0;
+        // Try v2 fork-based export first
+        let mut v2_ok = false;
+        match client.list_workspace_forks(&project_id).await {
+            Ok(forks_resp) if !forks_resp.forks.is_empty() => {
+                let fork = &forks_resp.forks[0];
+                match client.export_workspace_fork(&project_id, &fork.id).await {
+                    Ok(export) => {
+                        v2_ok = true;
+                        let mut ws_written = 0;
 
-                    // Write composed workspace template (devbox.json)
-                    if let Some(ref tpl) = ws_export.workspace {
-                        let target = workspace.join(&tpl.target_path);
-                        if let Some(parent) = target.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-
+                        // Write devbox.json
+                        let target = workspace.join("devbox.json");
                         if target.exists() && !force && !is_managed_file(&target) {
                             println!(
-                                "   {} {} is user-managed, skipping",
+                                "   {} devbox.json is user-managed, skipping",
                                 style("--").yellow(),
-                                tpl.target_path
                             );
                         } else {
-                            fs::write(&target, &tpl.body)?;
+                            fs::write(&target, &export.devbox_json)?;
                             ws_written += 1;
                         }
-                    }
 
-                    // Write scripts
-                    let _scripts_base = if ws_export.scripts_path.is_empty() {
-                        ".nexus/scripts/devbox".to_string()
-                    } else {
-                        ws_export.scripts_path.clone()
-                    };
-
-                    for script in &ws_export.scripts {
-                        let target = workspace.join(&script.target_path);
-                        if let Some(parent) = target.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-
-                        if target.exists() && !force && !is_managed_file(&target) {
-                            println!(
-                                "   {} {} is user-managed, skipping",
-                                style("--").yellow(),
-                                script.target_path
-                            );
-                            continue;
-                        }
-
-                        fs::write(&target, &script.body)?;
-
-                        // Make executable on Unix
-                        #[cfg(unix)]
-                        if script.executable {
-                            use std::os::unix::fs::PermissionsExt;
-                            let perms = std::fs::Permissions::from_mode(0o755);
-                            fs::set_permissions(&target, perms)?;
-                        }
-
-                        ws_written += 1;
-                    }
-
-                    if ws_written > 0 {
-                        println!(
-                            "   {} {} workspace file(s) synced ({})",
-                            style("+").bold().green(),
-                            ws_written,
-                            if ws_export.shadow_mode {
-                                "shadow mode"
-                            } else {
-                                "direct mode"
+                        // Write scripts
+                        for script in &export.scripts {
+                            let target = workspace.join(&script.path);
+                            if let Some(parent) = target.parent() {
+                                fs::create_dir_all(parent)?;
                             }
+
+                            if target.exists() && !force && !is_managed_file(&target) {
+                                println!(
+                                    "   {} {} is user-managed, skipping",
+                                    style("--").yellow(),
+                                    script.path
+                                );
+                                continue;
+                            }
+
+                            fs::write(&target, &script.body)?;
+
+                            #[cfg(unix)]
+                            if script.executable {
+                                use std::os::unix::fs::PermissionsExt;
+                                let perms = std::fs::Permissions::from_mode(0o755);
+                                fs::set_permissions(&target, perms)?;
+                            }
+
+                            ws_written += 1;
+                        }
+
+                        if ws_written > 0 {
+                            println!(
+                                "   {} {} workspace file(s) synced (v2{}, {})",
+                                style("+").bold().green(),
+                                ws_written,
+                                if fork.upstream_changed {
+                                    ", upstream changed"
+                                } else {
+                                    ""
+                                },
+                                if export.meta.shadow_mode {
+                                    "shadow mode"
+                                } else {
+                                    "direct mode"
+                                }
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "   {} v2 fork export failed: {}, trying v1...",
+                            style("!").yellow(),
+                            e
                         );
                     }
                 }
             }
-            Err(e) => {
-                println!(
-                    "   {} Could not fetch workspace files: {}",
-                    style("!").yellow(),
-                    e
-                );
+            Ok(_) => {
+                // No forks — fall through to v1
+            }
+            Err(_) => {
+                // v2 endpoint not available — fall through to v1
             }
         }
+
+        // Fall back to v1 (legacy wf_export)
+        if !v2_ok {
+            match client.export_workspace(&project_id).await {
+                Ok(ws_export) => {
+                    // Check if workspace provisioning is explicitly disabled
+                    if ws_export.workspace_provisioning_enabled == Some(false) {
+                        println!(
+                            "   {} Workspace provisioning disabled for this project.",
+                            style("·").dim()
+                        );
+                    } else if ws_export.workspace.is_none() && ws_export.scripts.is_empty() {
+                        println!(
+                            "   {} No workspace files assigned to this project.",
+                            style("·").dim()
+                        );
+                    } else {
+                        let mut ws_written = 0;
+
+                        // Write composed workspace template (devbox.json)
+                        if let Some(ref tpl) = ws_export.workspace {
+                            let target = workspace.join(&tpl.target_path);
+                            if let Some(parent) = target.parent() {
+                                fs::create_dir_all(parent)?;
+                            }
+
+                            if target.exists() && !force && !is_managed_file(&target) {
+                                println!(
+                                    "   {} {} is user-managed, skipping",
+                                    style("--").yellow(),
+                                    tpl.target_path
+                                );
+                            } else {
+                                fs::write(&target, &tpl.body)?;
+                                ws_written += 1;
+                            }
+                        }
+
+                        // Write scripts
+                        let _scripts_base = if ws_export.scripts_path.is_empty() {
+                            ".nexus/scripts/devbox".to_string()
+                        } else {
+                            ws_export.scripts_path.clone()
+                        };
+
+                        for script in &ws_export.scripts {
+                            let target = workspace.join(&script.target_path);
+                            if let Some(parent) = target.parent() {
+                                fs::create_dir_all(parent)?;
+                            }
+
+                            if target.exists() && !force && !is_managed_file(&target) {
+                                println!(
+                                    "   {} {} is user-managed, skipping",
+                                    style("--").yellow(),
+                                    script.target_path
+                                );
+                                continue;
+                            }
+
+                            fs::write(&target, &script.body)?;
+
+                            // Make executable on Unix
+                            #[cfg(unix)]
+                            if script.executable {
+                                use std::os::unix::fs::PermissionsExt;
+                                let perms = std::fs::Permissions::from_mode(0o755);
+                                fs::set_permissions(&target, perms)?;
+                            }
+
+                            ws_written += 1;
+                        }
+
+                        if ws_written > 0 {
+                            println!(
+                                "   {} {} workspace file(s) synced ({})",
+                                style("+").bold().green(),
+                                ws_written,
+                                if ws_export.shadow_mode {
+                                    "shadow mode"
+                                } else {
+                                    "direct mode"
+                                }
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        "   {} Could not fetch workspace files: {}",
+                        style("!").yellow(),
+                        e
+                    );
+                }
+            }
+        } // end if !v2_ok
     }
 
     println!();
