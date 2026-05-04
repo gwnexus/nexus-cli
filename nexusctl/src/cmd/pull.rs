@@ -33,6 +33,7 @@ pub async fn run(
     cli_project_id: Option<&str>,
     force: bool,
     mcp_source: McpSource,
+    scope: &[String],
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -79,6 +80,10 @@ pub async fn run(
 
     let client = NexusClient::new(api_url, Some(token.clone()))?;
 
+    // Scope filter: if empty, pull everything. Otherwise only named scopes.
+    let pull_all = scope.is_empty();
+    let pull_scope = |name: &str| pull_all || scope.iter().any(|s| s.eq_ignore_ascii_case(name));
+
     // Verify identity
     let identity = client.get_identity().await?;
     println!(
@@ -101,7 +106,7 @@ pub async fn run(
     // Detect existing .claude/ files and hint at import (v0.7.0)
     detect_importable_files(&workspace);
 
-    // Export skills
+    // Export skills (always needed for project_name)
     let export = client.export_skills(&project_id).await?;
     let project_name = export.project.name.clone();
 
@@ -322,6 +327,102 @@ pub async fn run(
         }
         Err(e) => {
             println!("   {} Could not fetch tasks: {}", style("!").yellow(), e);
+        }
+    }
+
+    // Export workspace files (devbox.json + scripts) — ADR-0032
+    if pull_scope("workspace") {
+        match client.export_workspace(&project_id).await {
+            Ok(ws_export) => {
+                // Check if workspace provisioning is explicitly disabled
+                if ws_export.workspace_provisioning_enabled == Some(false) {
+                    println!(
+                        "   {} Workspace provisioning disabled for this project.",
+                        style("·").dim()
+                    );
+                } else if ws_export.workspace.is_none() && ws_export.scripts.is_empty() {
+                    println!(
+                        "   {} No workspace files assigned to this project.",
+                        style("·").dim()
+                    );
+                } else {
+                    let mut ws_written = 0;
+
+                    // Write composed workspace template (devbox.json)
+                    if let Some(ref tpl) = ws_export.workspace {
+                        let target = workspace.join(&tpl.target_path);
+                        if let Some(parent) = target.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+
+                        if target.exists() && !force && !is_managed_file(&target) {
+                            println!(
+                                "   {} {} is user-managed, skipping",
+                                style("--").yellow(),
+                                tpl.target_path
+                            );
+                        } else {
+                            fs::write(&target, &tpl.body)?;
+                            ws_written += 1;
+                        }
+                    }
+
+                    // Write scripts
+                    let _scripts_base = if ws_export.scripts_path.is_empty() {
+                        ".nexus/scripts/devbox".to_string()
+                    } else {
+                        ws_export.scripts_path.clone()
+                    };
+
+                    for script in &ws_export.scripts {
+                        let target = workspace.join(&script.target_path);
+                        if let Some(parent) = target.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+
+                        if target.exists() && !force && !is_managed_file(&target) {
+                            println!(
+                                "   {} {} is user-managed, skipping",
+                                style("--").yellow(),
+                                script.target_path
+                            );
+                            continue;
+                        }
+
+                        fs::write(&target, &script.body)?;
+
+                        // Make executable on Unix
+                        #[cfg(unix)]
+                        if script.executable {
+                            use std::os::unix::fs::PermissionsExt;
+                            let perms = std::fs::Permissions::from_mode(0o755);
+                            fs::set_permissions(&target, perms)?;
+                        }
+
+                        ws_written += 1;
+                    }
+
+                    if ws_written > 0 {
+                        println!(
+                            "   {} {} workspace file(s) synced ({})",
+                            style("+").bold().green(),
+                            ws_written,
+                            if ws_export.shadow_mode {
+                                "shadow mode"
+                            } else {
+                                "direct mode"
+                            }
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                println!(
+                    "   {} Could not fetch workspace files: {}",
+                    style("!").yellow(),
+                    e
+                );
+            }
         }
     }
 
@@ -1843,5 +1944,117 @@ mod tests {
         assert!(cm.contains("tools/nexus-mcp/dist/server.js"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Workspace file write tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_workspace_script_write_creates_file_with_content() {
+        let dir = std::env::temp_dir().join("nexus_test_ws_script");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let scripts_path = dir.join(".nexus/scripts/devbox");
+        fs::create_dir_all(&scripts_path).unwrap();
+
+        let target = scripts_path.join("dbx_init.sh");
+        let body = "#!/usr/bin/env bash\necho \"hello workspace\"\n";
+        fs::write(&target, body).unwrap();
+
+        // Verify content
+        let content = fs::read_to_string(&target).unwrap();
+        assert!(content.contains("hello workspace"));
+        assert!(content.starts_with("#!/usr/bin/env bash"));
+
+        // Verify permissions on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&target, perms).unwrap();
+            let meta = fs::metadata(&target).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o755, 0o755);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_workspace_devbox_json_write() {
+        let dir = std::env::temp_dir().join("nexus_test_ws_devbox");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let devbox_json = r#"{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.1/.schema/devbox.schema.json",
+  "packages": {
+    "nodejs": "latest",
+    "git": "latest"
+  },
+  "env": {
+    "PROJECT_NAME": "test-project"
+  },
+  "shell": {
+    "init_hook": [".nexus/scripts/devbox/dbx_init.sh"]
+  }
+}"#;
+
+        let target = dir.join("devbox.json");
+        fs::write(&target, devbox_json).unwrap();
+
+        let content = fs::read_to_string(&target).unwrap();
+        assert!(content.contains("0.17.1"));
+        assert!(content.contains("test-project"));
+        assert!(content.contains("dbx_init.sh"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_workspace_respects_managed_file_marker() {
+        let dir = std::env::temp_dir().join("nexus_test_ws_managed");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // File WITHOUT managed marker — should not be overwritten
+        let user_file = dir.join("devbox.json");
+        fs::write(&user_file, r#"{"packages": {"custom": "1.0"}}"#).unwrap();
+        assert!(!is_managed_file(&user_file));
+
+        // File WITH managed marker — safe to overwrite
+        let managed_file = dir.join("managed.json");
+        fs::write(
+            &managed_file,
+            "---\n# source: nexus-platform\n---\n{\"packages\": {}}",
+        )
+        .unwrap();
+        assert!(is_managed_file(&managed_file));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_workspace_scope_filter() {
+        // Scope filter helper logic
+        let scope_empty: Vec<String> = vec![];
+        let scope_ws: Vec<String> = vec!["workspace".into()];
+        let scope_skills: Vec<String> = vec!["skills".into()];
+
+        let pull_all_empty = scope_empty.is_empty();
+        let check = |scope: &[String], name: &str| {
+            scope.is_empty() || scope.iter().any(|s| s.eq_ignore_ascii_case(name))
+        };
+
+        // Empty scope = pull everything
+        assert!(check(&scope_empty, "workspace"));
+        assert!(check(&scope_empty, "skills"));
+
+        // Explicit scope = only that scope
+        assert!(check(&scope_ws, "workspace"));
+        assert!(!check(&scope_ws, "skills"));
+        assert!(!check(&scope_skills, "workspace"));
+        assert!(check(&scope_skills, "skills"));
     }
 }

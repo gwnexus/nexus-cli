@@ -12,7 +12,7 @@ use tracing::debug;
 use crate::api::types::{
     AgentFileExportResponse, ApiError, AuthStatus, AuthStatusResponse, DirectiveExportResponse,
     IdentityResponse, ProjectDetailResponse, ProjectListResponse, SkillExportResponse,
-    SkillListResponse, TaskListResponse,
+    SkillListResponse, TaskListResponse, WorkspaceExportResponse,
 };
 use crate::Error;
 
@@ -186,6 +186,21 @@ impl NexusClient {
     pub async fn get_project(&self, project_id: &str) -> Result<ProjectDetailResponse, Error> {
         let path = format!("/api/mcp/projects/{}", project_id);
         self.get(&path).await
+    }
+
+    /// Export composed workspace files for a project via `POST /api/mcp/workspace-files`.
+    ///
+    /// Calls the `wf_export` action. Returns the merged devbox.json + scripts
+    /// with template variables substituted and S3 content resolved.
+    pub async fn export_workspace(
+        &self,
+        project_id: &str,
+    ) -> Result<WorkspaceExportResponse, Error> {
+        let body = json!({
+            "action": "wf_export",
+            "project_id": project_id
+        });
+        self.post("/api/mcp/workspace-files", &body).await
     }
 
     /// Send a GET request and deserialize the JSON response.

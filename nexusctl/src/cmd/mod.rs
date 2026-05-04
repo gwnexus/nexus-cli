@@ -64,6 +64,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Pull {
             ref project_id,
             force,
+            ref scope,
         } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
@@ -72,6 +73,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 project_id.as_deref(),
                 force || cli.yes,
                 config.mcp_source,
+                scope,
             )
             .await?;
         }

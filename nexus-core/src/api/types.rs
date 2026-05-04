@@ -347,6 +347,43 @@ pub struct TaskListResponse {
 // Generic error
 // ---------------------------------------------------------------------------
 
+/// A single workspace file in the export response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceScript {
+    pub target_path: String,
+    pub body: String,
+    #[serde(default)]
+    pub executable: bool,
+}
+
+/// The composed workspace template (devbox.json or similar).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceTemplate {
+    pub target_path: String,
+    pub body: String,
+    pub provider: String,
+}
+
+/// Response from `wf_export` action (POST /api/mcp/workspace-files).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceExportResponse {
+    pub action: String,
+    pub project_id: String,
+    /// Whether workspace provisioning is enabled for this project.
+    /// If false, no workspace files will be provisioned.
+    #[serde(default)]
+    pub workspace_provisioning_enabled: Option<bool>,
+    #[serde(default)]
+    pub shadow_mode: bool,
+    #[serde(default)]
+    pub scripts_path: String,
+    pub workspace: Option<WorkspaceTemplate>,
+    #[serde(default)]
+    pub scripts: Vec<WorkspaceScript>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 /// Generic API error shape returned by the Nexus server.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiError {

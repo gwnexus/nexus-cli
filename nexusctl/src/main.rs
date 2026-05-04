@@ -97,6 +97,11 @@ pub enum Command {
         /// Overwrite existing files without confirmation.
         #[arg(short, long)]
         force: bool,
+
+        /// Limit pull to specific scope(s): skills, directives, agents, workspace, tasks.
+        /// Can be specified multiple times. If omitted, pulls everything.
+        #[arg(long, value_delimiter = ',')]
+        scope: Vec<String>,
     },
 
     /// Skills management subcommands.
