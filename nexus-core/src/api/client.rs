@@ -12,7 +12,8 @@ use tracing::debug;
 use crate::api::types::{
     AgentFileExportResponse, ApiError, AuthStatus, AuthStatusResponse, DirectiveExportResponse,
     IdentityResponse, ProjectDetailResponse, ProjectListResponse, SkillExportResponse,
-    SkillListResponse, TaskListResponse, WorkspaceExportResponse,
+    SkillListResponse, TaskListResponse, WorkspaceExportResponse, WorkspaceForkExportResponse,
+    WorkspaceForksResponse,
 };
 use crate::Error;
 
