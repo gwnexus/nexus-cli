@@ -332,88 +332,86 @@ pub async fn run(
 
     // Export workspace files (devbox.json + scripts) — ADR-0034 (v2 fork API, v1 fallback)
     if pull_scope("workspace") {
-        // Try v2 fork-based export first
+        // Try MCP-authenticated ws_export first (PAT-compatible)
         let mut v2_ok = false;
-        match client.list_workspace_forks(&project_id).await {
-            Ok(forks_resp) if !forks_resp.forks.is_empty() => {
-                let fork = &forks_resp.forks[0];
-                match client.export_workspace_fork(&project_id, &fork.id).await {
-                    Ok(export) => {
-                        v2_ok = true;
-                        let mut ws_written = 0;
+        match client.export_workspace_mcp(&project_id).await {
+            Ok(export) => {
+                v2_ok = true;
+                let mut ws_written = 0;
 
-                        // Write devbox.json
-                        let target = workspace.join("devbox.json");
-                        if target.exists() && !force && !is_managed_file(&target) {
-                            println!(
-                                "   {} devbox.json is user-managed, skipping",
-                                style("--").yellow(),
-                            );
-                        } else {
-                            fs::write(&target, &export.devbox_json)?;
-                            ws_written += 1;
-                        }
+                // Write devbox.json
+                let target = workspace.join("devbox.json");
+                if target.exists() && !force && !is_managed_file(&target) {
+                    println!(
+                        "   {} devbox.json is user-managed, skipping",
+                        style("--").yellow(),
+                    );
+                } else {
+                    fs::write(&target, &export.devbox_json)?;
+                    ws_written += 1;
+                }
 
-                        // Write scripts
-                        for script in &export.scripts {
-                            let target = workspace.join(&script.path);
-                            if let Some(parent) = target.parent() {
-                                fs::create_dir_all(parent)?;
-                            }
-
-                            if target.exists() && !force && !is_managed_file(&target) {
-                                println!(
-                                    "   {} {} is user-managed, skipping",
-                                    style("--").yellow(),
-                                    script.path
-                                );
-                                continue;
-                            }
-
-                            fs::write(&target, &script.body)?;
-
-                            #[cfg(unix)]
-                            if script.executable {
-                                use std::os::unix::fs::PermissionsExt;
-                                let perms = std::fs::Permissions::from_mode(0o755);
-                                fs::set_permissions(&target, perms)?;
-                            }
-
-                            ws_written += 1;
-                        }
-
-                        if ws_written > 0 {
-                            println!(
-                                "   {} {} workspace file(s) synced (v2{}, {})",
-                                style("+").bold().green(),
-                                ws_written,
-                                if fork.upstream_changed {
-                                    ", upstream changed"
-                                } else {
-                                    ""
-                                },
-                                if export.meta.shadow_mode {
-                                    "shadow mode"
-                                } else {
-                                    "direct mode"
-                                }
-                            );
-                        }
+                // Write scripts
+                for script in &export.scripts {
+                    let target = workspace.join(&script.path);
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)?;
                     }
-                    Err(e) => {
+
+                    if target.exists() && !force && !is_managed_file(&target) {
                         println!(
-                            "   {} v2 fork export failed: {}, trying v1...",
-                            style("!").yellow(),
-                            e
+                            "   {} {} is user-managed, skipping",
+                            style("--").yellow(),
+                            script.path
                         );
+                        continue;
                     }
+
+                    fs::write(&target, &script.body)?;
+
+                    #[cfg(unix)]
+                    if script.executable {
+                        use std::os::unix::fs::PermissionsExt;
+                        let perms = std::fs::Permissions::from_mode(0o755);
+                        fs::set_permissions(&target, perms)?;
+                    }
+
+                    ws_written += 1;
+                }
+
+                if ws_written > 0 {
+                    println!(
+                        "   {} {} workspace file(s) synced (v2{}, {})",
+                        style("+").bold().green(),
+                        ws_written,
+                        if export.meta.upstream_changed {
+                            ", upstream changed"
+                        } else {
+                            ""
+                        },
+                        if export.meta.shadow_mode {
+                            "shadow mode"
+                        } else {
+                            "direct mode"
+                        }
+                    );
                 }
             }
-            Ok(_) => {
-                // No forks — fall through to v1
-            }
-            Err(_) => {
-                // v2 endpoint not available — fall through to v1
+            Err(e) => {
+                let msg = format!("{}", e);
+                if msg.contains("No active workspace fork") {
+                    println!(
+                        "   {} No workspace fork assigned to this project.",
+                        style("·").dim()
+                    );
+                    v2_ok = true; // Not an error, just no fork
+                } else {
+                    println!(
+                        "   {} ws_export failed: {}, trying v1...",
+                        style("!").yellow(),
+                        e
+                    );
+                }
             }
         }
 

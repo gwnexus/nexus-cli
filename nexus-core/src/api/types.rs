@@ -417,8 +417,10 @@ pub struct WorkspaceForksResponse {
 /// Export metadata from `POST /api/projects/:id/workspace-forks/:forkId/export`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceForkExportMeta {
-    pub project_id: String,
-    pub fork_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub fork_id: Option<String>,
     #[serde(default)]
     pub workspace_name: Option<String>,
     #[serde(default)]
@@ -427,6 +429,8 @@ pub struct WorkspaceForkExportMeta {
     pub shadow_mode: bool,
     #[serde(default)]
     pub scripts_path: String,
+    #[serde(default)]
+    pub upstream_changed: bool,
 }
 
 /// A script entry in the v2 fork export.
@@ -438,13 +442,23 @@ pub struct WorkspaceForkExportScript {
     pub executable: bool,
 }
 
-/// Response from `POST /api/projects/:id/workspace-forks/:forkId/export`.
+/// Response from `POST /api/projects/:id/workspace-forks/:forkId/export`
+/// or from `POST /api/mcp/agent-files` with `action: "ws_export"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceForkExportResponse {
     pub devbox_json: String,
     #[serde(default)]
     pub scripts: Vec<WorkspaceForkExportScript>,
     pub meta: WorkspaceForkExportMeta,
+    /// Present in ws_export (MCP) responses
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Present in ws_export (MCP) responses
+    #[serde(default)]
+    pub fork_id: Option<String>,
+    /// Present in ws_export (MCP) responses
+    #[serde(default)]
+    pub workspace_name: Option<String>,
 }
 
 /// Generic API error shape returned by the Nexus server.

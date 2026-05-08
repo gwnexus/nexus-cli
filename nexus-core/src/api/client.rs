@@ -207,7 +207,22 @@ impl NexusClient {
 
     // -- Workspace v2 (Blueprint + Fork) ------------------------------------
 
+    /// Export workspace files via MCP-authenticated `ws_export` action.
+    /// This is the preferred method — uses PAT auth via `/api/mcp/agent-files`.
+    pub async fn export_workspace_mcp(
+        &self,
+        project_id: &str,
+    ) -> Result<WorkspaceForkExportResponse, Error> {
+        let body = json!({
+            "action": "ws_export",
+            "project_id": project_id
+        });
+        self.post("/api/mcp/agent-files", &body).await
+    }
+
     /// List workspace forks for a project.
+    /// NOTE: This endpoint uses session-auth and may fail with PAT tokens.
+    /// Prefer `export_workspace_mcp` instead.
     pub async fn list_workspace_forks(
         &self,
         project_id: &str,
