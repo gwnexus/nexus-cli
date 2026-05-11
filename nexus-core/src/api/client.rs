@@ -12,8 +12,8 @@ use tracing::debug;
 use crate::api::types::{
     AgentFileExportResponse, ApiError, AuthStatus, AuthStatusResponse, DirectiveExportResponse,
     IdentityResponse, ProjectDetailResponse, ProjectListResponse, SkillExportResponse,
-    SkillListResponse, TaskListResponse, WorkspaceExportResponse, WorkspaceForkExportResponse,
-    WorkspaceForksResponse,
+    SkillListResponse, SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse,
+    TaskListResponse, WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
 };
 use crate::Error;
 
@@ -242,6 +242,62 @@ impl NexusClient {
             project_id, fork_id
         );
         self.post(&path, &json!({})).await
+    }
+
+    // -- Sync protocol (ADR-0036) -------------------------------------------
+
+    /// Check sync status by comparing local file hashes against the platform.
+    ///
+    /// Calls `af_sync_check` action on the MCP agent-files endpoint.
+    pub async fn sync_check(
+        &self,
+        project_id: &str,
+        files: &[SyncFileHash],
+    ) -> Result<SyncCheckResponse, Error> {
+        let body = json!({
+            "action": "af_sync_check",
+            "project_id": project_id,
+            "files": files
+        });
+        self.post("/api/mcp/agent-files", &body).await
+    }
+
+    /// Push or pull a single file via the sync protocol.
+    ///
+    /// Calls `af_sync` action on the MCP agent-files endpoint.
+    /// Direction: "push" (local → remote) or "pull" (remote → local).
+    pub async fn sync_file(
+        &self,
+        project_id: &str,
+        file_key: &str,
+        direction: &str,
+        body_content: Option<&str>,
+        local_hash: Option<&str>,
+    ) -> Result<SyncResponse, Error> {
+        let mut payload = json!({
+            "action": "af_sync",
+            "project_id": project_id,
+            "file_key": file_key,
+            "direction": direction
+        });
+        if let Some(content) = body_content {
+            payload["body"] = json!(content);
+        }
+        if let Some(hash) = local_hash {
+            payload["local_hash"] = json!(hash);
+        }
+        self.post("/api/mcp/agent-files", &payload).await
+    }
+
+    /// Get bulk sync status for all project agent files.
+    ///
+    /// Calls `af_sync_status` action on the MCP agent-files endpoint.
+    pub async fn sync_status(&self, project_id: &str) -> Result<SyncStatusResponse, Error> {
+        let body = json!({
+            "action": "af_sync_status",
+            "project_id": project_id
+        });
+        self.post("/api/mcp/agent-files", &body).await
     }
 
     /// Send a GET request and deserialize the JSON response.

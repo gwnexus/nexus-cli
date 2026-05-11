@@ -561,6 +561,8 @@ fn test_exported_agent_file_serialize_roundtrip() {
         category: "ide".into(),
         version: 1,
         body: "# Cursor Rules\nFollow these rules.".into(),
+        content_hash: None,
+        agent_file_id: None,
     };
 
     let json = serde_json::to_string(&af).unwrap();

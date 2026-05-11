@@ -10,9 +10,10 @@ mod preflight;
 pub(crate) mod pull;
 mod shadow;
 mod skills_cmd;
+pub(crate) mod sync;
 mod upgrade;
 
-use crate::{Cli, Command, ConfigAction, ShadowAction, SkillsAction};
+use crate::{Cli, Command, ConfigAction, ShadowAction, SkillsAction, SyncAction};
 use console::style;
 
 /// Dispatch the parsed CLI command to the appropriate handler.
@@ -123,6 +124,27 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
             import::run(&api_url, dry_run, cli.yes).await?;
+        }
+        Command::Sync { ref action } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            match action {
+                SyncAction::Status { ref project_id } => {
+                    sync::status(&api_url, project_id.as_deref()).await?;
+                }
+                SyncAction::Push {
+                    ref file_key,
+                    ref project_id,
+                } => {
+                    sync::push(&api_url, project_id.as_deref(), file_key).await?;
+                }
+                SyncAction::Reset {
+                    ref file_key,
+                    ref project_id,
+                } => {
+                    sync::reset(&api_url, project_id.as_deref(), file_key).await?;
+                }
+            }
         }
     }
     Ok(())

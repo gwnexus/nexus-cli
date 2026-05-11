@@ -196,6 +196,12 @@ pub struct ExportedAgentFile {
     pub category: String,
     pub version: i64,
     pub body: String,
+    /// SHA-256 hash of the final exported body (after template substitution + directive injection).
+    #[serde(default)]
+    pub content_hash: Option<String>,
+    /// The agent_file UUID in project_agent_files (for sync operations).
+    #[serde(default)]
+    pub agent_file_id: Option<String>,
 }
 
 /// Response from `af_export` action.
@@ -478,4 +484,71 @@ impl std::fmt::Display for ApiError {
             write!(f, "unknown API error")
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sync protocol (POST /api/mcp/agent-files  action=af_sync_check/af_sync/af_sync_status)
+// ---------------------------------------------------------------------------
+
+/// A single file hash entry sent by the client for sync check.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncFileHash {
+    pub file_key: String,
+    pub local_hash: String,
+}
+
+/// Per-file sync result from af_sync_check.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncCheckResult {
+    pub file_key: String,
+    pub status: String,
+    pub local_hash: Option<String>,
+    pub remote_hash: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Response from `af_sync_check` action.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncCheckResponse {
+    pub action: String,
+    pub project_id: String,
+    pub results: Vec<SyncCheckResult>,
+    #[serde(default)]
+    pub deprecated_skills: Vec<String>,
+}
+
+/// Per-file sync status from af_sync_status.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncStatusEntry {
+    pub file_key: String,
+    pub name: String,
+    pub sync_status: String,
+    pub content_hash: Option<String>,
+    pub last_synced_at: Option<String>,
+    #[serde(default)]
+    pub body_override_source: Option<String>,
+}
+
+/// Response from `af_sync_status` action.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncStatusResponse {
+    pub action: String,
+    pub project_id: String,
+    pub files: Vec<SyncStatusEntry>,
+    pub count: usize,
+}
+
+/// Response from `af_sync` action (push or pull direction).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncResponse {
+    pub action: String,
+    pub project_id: String,
+    pub file_key: String,
+    pub direction: String,
+    pub new_hash: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
 }

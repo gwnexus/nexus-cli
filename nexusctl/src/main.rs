@@ -135,6 +135,12 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Sync agent files between the local workspace and the Nexus platform.
+    Sync {
+        #[command(subcommand)]
+        action: SyncAction,
+    },
 }
 
 /// Shadow mode subcommands.
@@ -146,6 +152,37 @@ pub enum ShadowAction {
     Off,
     /// Show current shadow mode status.
     Status,
+}
+
+/// Sync subcommands for agent file synchronization.
+#[derive(Debug, Subcommand)]
+pub enum SyncAction {
+    /// Show sync status of all agent files (local vs platform).
+    Status {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Push local agent file changes to the platform.
+    Push {
+        /// The file key to push (e.g. "AGENTS.md", "CLAUDE.md").
+        file_key: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Discard local changes and reset to the platform version.
+    Reset {
+        /// The file key to reset (e.g. "AGENTS.md", "CLAUDE.md").
+        file_key: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
 }
 
 /// Configuration subcommands.

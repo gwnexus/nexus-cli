@@ -238,6 +238,17 @@ pub async fn run(
                     }
 
                     write_agent_file(&workspace, af)?;
+
+                    // Update sync manifest with content hash from server
+                    if let Some(ref hash) = af.content_hash {
+                        let _ = super::sync::update_manifest_after_pull(
+                            &workspace,
+                            &af.file_key,
+                            &af.target_path,
+                            hash,
+                        );
+                    }
+
                     af_written += 1;
                 }
                 if af_written > 0 {
@@ -1640,6 +1651,8 @@ mod tests {
             category: "agent".into(),
             version: 1,
             body: "---\ntype: agent-policy\nsource: nexus-platform\n---\n# Test".into(),
+            content_hash: None,
+            agent_file_id: None,
         };
 
         write_agent_file(&tmp, &af).unwrap();
@@ -1667,6 +1680,8 @@ mod tests {
             category: "agent".into(),
             version: 2,
             body: "# Bootstrap\nTest content".into(),
+            content_hash: None,
+            agent_file_id: None,
         };
 
         write_agent_file(&tmp, &af).unwrap();
