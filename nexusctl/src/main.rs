@@ -122,11 +122,16 @@ pub enum Command {
     /// Upgrade the Nexus CLI to the latest release version.
     Upgrade,
 
-    /// [DEPRECATED] Shadow (hide) AI/agentic scaffold files from Git tracking.
-    #[command(hide = true)]
+    /// Shadow (hide) AI/agentic scaffold files from Git tracking.
     Shadow {
         #[command(subcommand)]
         action: ShadowAction,
+    },
+
+    /// Manage workspace shadow mode (exclude devbox files from Git tracking).
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
     },
 
     /// Import existing agentic files (CLAUDE.md, AGENTS.md, .cursorrules, etc.) into the linked Nexus project.
@@ -151,6 +156,28 @@ pub enum ShadowAction {
     /// Disable shadow mode: remove exclusions and re-track agentic files.
     Off,
     /// Show current shadow mode status.
+    Status,
+}
+
+/// Workspace shadow subcommands.
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceAction {
+    /// Enable workspace shadow: exclude devbox.json, devbox.lock, .devbox/, scripts/devbox/ from Git.
+    #[command(name = "shadow")]
+    Shadow {
+        #[command(subcommand)]
+        action: WorkspaceShadowAction,
+    },
+}
+
+/// Workspace shadow on/off/status.
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceShadowAction {
+    /// Enable workspace shadow mode.
+    On,
+    /// Disable workspace shadow mode.
+    Off,
+    /// Show workspace shadow status.
     Status,
 }
 

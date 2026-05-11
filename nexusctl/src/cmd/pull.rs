@@ -22,6 +22,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+use super::shadow;
+
 /// Marker in YAML frontmatter indicating the file is managed by Nexus CLI.
 /// Files without this marker are considered user-managed and will not be
 /// overwritten by `nexus pull`.
@@ -406,6 +408,20 @@ pub async fn run(
                             "direct mode"
                         }
                     );
+
+                    // Auto-apply workspace git-exclude when shadow_mode is active
+                    if export.meta.shadow_mode {
+                        match shadow::workspace_on() {
+                            Ok(()) => {}
+                            Err(e) => {
+                                println!(
+                                    "   {} Could not apply workspace git-exclude: {}",
+                                    style("!").yellow(),
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -509,6 +525,20 @@ pub async fn run(
                                     "direct mode"
                                 }
                             );
+
+                            // Auto-apply workspace git-exclude when shadow_mode is active
+                            if ws_export.shadow_mode {
+                                match shadow::workspace_on() {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        println!(
+                                            "   {} Could not apply workspace git-exclude: {}",
+                                            style("!").yellow(),
+                                            e
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1291,7 +1321,7 @@ fn capitalize(s: &str) -> String {
 ///
 /// The file is always overwritten (it is a snapshot of the current backlog,
 /// not a user-editable document).
-fn write_tasks(
+pub fn write_tasks(
     workspace: &Path,
     tasks: &[nexus_core::api::TaskSummary],
     agentic_root: &str,

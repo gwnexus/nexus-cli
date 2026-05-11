@@ -48,28 +48,23 @@ const AGENTIC_PATTERNS: &[&str] = &[
     "RTK.md",
 ];
 
+/// Workspace file patterns to shadow (devbox/workspace stack).
+const WORKSPACE_PATTERNS: &[&str] = &["devbox.json", "devbox.lock", ".devbox/", "scripts/devbox/"];
+
 /// Marker comments used to delimit our block in .git/info/exclude.
 const MARKER_START: &str = "# >>> nexus shadow";
 const MARKER_END: &str = "# <<< nexus shadow";
 
+/// Marker comments for workspace shadow block.
+const WS_MARKER_START: &str = "# >>> nexus workspace shadow";
+const WS_MARKER_END: &str = "# <<< nexus workspace shadow";
+
 // ---------------------------------------------------------------------------
-// Public entry points
+// Public entry points — agentic shadow
 // ---------------------------------------------------------------------------
 
-/// Print deprecation warning for shadow commands.
-fn print_deprecation_warning() {
-    eprintln!(
-        "{} {} The 'nexus shadow' command is deprecated and will be removed in v0.8.0.",
-        style("!").bold().yellow(),
-        style("[DEPRECATED]").bold().yellow(),
-    );
-    eprintln!("  .nexus/ is now always excluded via .git/info/exclude during 'nexus init'.");
-    eprintln!();
-}
-
-/// Enable shadow mode.
+/// Enable shadow mode (agentic files).
 pub fn on() -> anyhow::Result<()> {
-    print_deprecation_warning();
     let git_dir = find_git_dir()?;
     let exclude_path = git_dir.join("info").join("exclude");
 
@@ -79,7 +74,7 @@ pub fn on() -> anyhow::Result<()> {
     }
 
     // Check if already active
-    if is_shadow_active(&exclude_path) {
+    if is_block_active(&exclude_path, MARKER_START) {
         println!(
             "{} Shadow mode is already enabled.",
             style("●").green().bold()
@@ -87,29 +82,11 @@ pub fn on() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Build the exclude block
-    let mut block = String::new();
-    block.push('\n');
-    block.push_str(MARKER_START);
-    block.push('\n');
-    for pat in AGENTIC_PATTERNS {
-        block.push_str(pat);
-        block.push('\n');
-    }
-    block.push_str(MARKER_END);
-    block.push('\n');
-
-    // Append to exclude file
-    let mut existing = if exclude_path.exists() {
-        fs::read_to_string(&exclude_path)?
-    } else {
-        String::new()
-    };
-    existing.push_str(&block);
-    fs::write(&exclude_path, &existing)?;
+    // Build and write the exclude block
+    write_exclude_block(&exclude_path, MARKER_START, MARKER_END, AGENTIC_PATTERNS)?;
 
     // Remove already-tracked files from the index (best effort)
-    let removed = untrack_files()?;
+    let removed = untrack_patterns(AGENTIC_PATTERNS)?;
 
     println!(
         "{} Shadow mode {}.",
@@ -134,24 +111,23 @@ pub fn on() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Disable shadow mode.
+/// Disable shadow mode (agentic files).
 pub fn off() -> anyhow::Result<()> {
-    print_deprecation_warning();
     let git_dir = find_git_dir()?;
     let exclude_path = git_dir.join("info").join("exclude");
 
-    if !is_shadow_active(&exclude_path) {
+    if !is_block_active(&exclude_path, MARKER_START) {
         println!("{} Shadow mode is not currently enabled.", style("○").dim());
         return Ok(());
     }
 
     // Remove our block from the exclude file
     let content = fs::read_to_string(&exclude_path)?;
-    let cleaned = remove_shadow_block(&content);
+    let cleaned = remove_block(&content, MARKER_START, MARKER_END);
     fs::write(&exclude_path, &cleaned)?;
 
     // Re-track files that exist on disk (best effort)
-    let re_added = retrack_files()?;
+    let re_added = retrack_patterns(AGENTIC_PATTERNS)?;
 
     println!(
         "{} Shadow mode {}.",
@@ -166,13 +142,15 @@ pub fn off() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Show current shadow mode status.
+/// Show current shadow mode status (agentic files).
 pub fn status() -> anyhow::Result<()> {
-    print_deprecation_warning();
     let git_dir = find_git_dir()?;
     let exclude_path = git_dir.join("info").join("exclude");
 
-    if is_shadow_active(&exclude_path) {
+    let agentic_active = is_block_active(&exclude_path, MARKER_START);
+    let workspace_active = is_block_active(&exclude_path, WS_MARKER_START);
+
+    if agentic_active {
         println!(
             "{} Shadow mode is {}.",
             style("●").green().bold(),
@@ -190,7 +168,117 @@ pub fn status() -> anyhow::Result<()> {
         );
     }
 
+    if workspace_active {
+        println!(
+            "{} Workspace shadow is {}.",
+            style("●").magenta().bold(),
+            style("enabled").magenta().bold()
+        );
+        println!("  Workspace patterns:");
+        for pat in WORKSPACE_PATTERNS {
+            println!("    {}", style(pat).dim());
+        }
+    } else {
+        println!(
+            "{} Workspace shadow is {}.",
+            style("○").dim(),
+            style("disabled").dim()
+        );
+    }
+
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points — workspace shadow
+// ---------------------------------------------------------------------------
+
+/// Enable workspace shadow mode (devbox files excluded from git).
+pub fn workspace_on() -> anyhow::Result<()> {
+    let git_dir = find_git_dir()?;
+    let exclude_path = git_dir.join("info").join("exclude");
+
+    if let Some(parent) = exclude_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if is_block_active(&exclude_path, WS_MARKER_START) {
+        println!(
+            "{} Workspace shadow is already enabled.",
+            style("●").magenta().bold()
+        );
+        return Ok(());
+    }
+
+    write_exclude_block(
+        &exclude_path,
+        WS_MARKER_START,
+        WS_MARKER_END,
+        WORKSPACE_PATTERNS,
+    )?;
+    let removed = untrack_patterns(WORKSPACE_PATTERNS)?;
+
+    println!(
+        "{} Workspace shadow {}.",
+        style("●").magenta().bold(),
+        style("enabled").magenta().bold()
+    );
+    println!(
+        "  {} workspace patterns added to .git/info/exclude",
+        WORKSPACE_PATTERNS.len()
+    );
+    if removed > 0 {
+        println!(
+            "  {} previously tracked file(s) removed from index (files kept on disk)",
+            removed
+        );
+    }
+    println!(
+        "  {}",
+        style("Note: .git/info/exclude is local and will not be committed.").dim()
+    );
+
+    Ok(())
+}
+
+/// Disable workspace shadow mode.
+pub fn workspace_off() -> anyhow::Result<()> {
+    let git_dir = find_git_dir()?;
+    let exclude_path = git_dir.join("info").join("exclude");
+
+    if !is_block_active(&exclude_path, WS_MARKER_START) {
+        println!(
+            "{} Workspace shadow is not currently enabled.",
+            style("○").dim()
+        );
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&exclude_path)?;
+    let cleaned = remove_block(&content, WS_MARKER_START, WS_MARKER_END);
+    fs::write(&exclude_path, &cleaned)?;
+
+    let re_added = retrack_patterns(WORKSPACE_PATTERNS)?;
+
+    println!(
+        "{} Workspace shadow {}.",
+        style("○").yellow().bold(),
+        style("disabled").yellow().bold()
+    );
+    println!("  Workspace patterns removed from .git/info/exclude");
+    if re_added > 0 {
+        println!("  {} file(s) re-added to Git tracking", re_added);
+    }
+
+    Ok(())
+}
+
+/// Check whether workspace shadow is currently active.
+#[allow(dead_code)]
+pub fn is_workspace_shadow_active() -> anyhow::Result<bool> {
+    let git_dir = find_git_dir()?;
+    let exclude_path = git_dir.join("info").join("exclude");
+    Ok(is_block_active(&exclude_path, WS_MARKER_START))
 }
 
 // ---------------------------------------------------------------------------
@@ -211,28 +299,28 @@ fn find_git_dir() -> anyhow::Result<PathBuf> {
     }
 }
 
-/// Check whether the shadow block is present in the exclude file.
-fn is_shadow_active(exclude_path: &Path) -> bool {
+/// Check whether a marker block is present in the exclude file.
+fn is_block_active(exclude_path: &Path, marker_start: &str) -> bool {
     if !exclude_path.exists() {
         return false;
     }
     match fs::read_to_string(exclude_path) {
-        Ok(content) => content.contains(MARKER_START),
+        Ok(content) => content.contains(marker_start),
         Err(_) => false,
     }
 }
 
-/// Remove the shadow block (between markers, inclusive) from file content.
-fn remove_shadow_block(content: &str) -> String {
+/// Remove a marker-delimited block from file content.
+fn remove_block(content: &str, marker_start: &str, marker_end: &str) -> String {
     let mut result = String::with_capacity(content.len());
     let mut inside_block = false;
 
     for line in content.lines() {
-        if line.trim() == MARKER_START {
+        if line.trim() == marker_start {
             inside_block = true;
             continue;
         }
-        if line.trim() == MARKER_END {
+        if line.trim() == marker_end {
             inside_block = false;
             continue;
         }
@@ -242,7 +330,6 @@ fn remove_shadow_block(content: &str) -> String {
         }
     }
 
-    // Remove trailing blank lines that we may have introduced
     let trimmed = result.trim_end_matches('\n');
     if trimmed.is_empty() {
         String::new()
@@ -251,19 +338,44 @@ fn remove_shadow_block(content: &str) -> String {
     }
 }
 
-/// Run `git rm --cached` for each agentic pattern that is currently tracked.
-/// Returns the count of files actually removed from the index.
-fn untrack_files() -> anyhow::Result<usize> {
+/// Write a marker-delimited exclude block to the exclude file.
+fn write_exclude_block(
+    exclude_path: &Path,
+    marker_start: &str,
+    marker_end: &str,
+    patterns: &[&str],
+) -> anyhow::Result<()> {
+    let mut block = String::new();
+    block.push('\n');
+    block.push_str(marker_start);
+    block.push('\n');
+    for pat in patterns {
+        block.push_str(pat);
+        block.push('\n');
+    }
+    block.push_str(marker_end);
+    block.push('\n');
+
+    let mut existing = if exclude_path.exists() {
+        fs::read_to_string(exclude_path)?
+    } else {
+        String::new()
+    };
+    existing.push_str(&block);
+    fs::write(exclude_path, &existing)?;
+    Ok(())
+}
+
+/// Run `git rm --cached` for each pattern that is currently tracked.
+fn untrack_patterns(patterns: &[&str]) -> anyhow::Result<usize> {
     let mut count = 0;
-    for pat in AGENTIC_PATTERNS {
-        // Strip trailing slash for directory patterns
+    for pat in patterns {
         let clean = pat.trim_end_matches('/');
         let output = Command::new("git")
             .args(["rm", "-r", "--cached", "--ignore-unmatch", clean])
             .output();
         if let Ok(o) = output {
             if o.status.success() {
-                // Count non-empty stdout lines (each is a removed file)
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 count += stdout.lines().filter(|l| !l.is_empty()).count();
             }
@@ -272,11 +384,10 @@ fn untrack_files() -> anyhow::Result<usize> {
     Ok(count)
 }
 
-/// Run `git add` for each agentic pattern that exists on disk.
-/// Returns the count of patterns re-added.
-fn retrack_files() -> anyhow::Result<usize> {
+/// Run `git add` for each pattern that exists on disk.
+fn retrack_patterns(patterns: &[&str]) -> anyhow::Result<usize> {
     let mut count = 0;
-    for pat in AGENTIC_PATTERNS {
+    for pat in patterns {
         let clean = pat.trim_end_matches('/');
         let path = Path::new(clean);
         if path.exists() {
@@ -298,7 +409,7 @@ mod tests {
     #[test]
     fn test_remove_shadow_block() {
         let input = "# existing stuff\nfoo\n\n# >>> nexus shadow\n.claude/\nAGENTS.md\n# <<< nexus shadow\n\n# other stuff\nbar\n";
-        let result = remove_shadow_block(input);
+        let result = remove_block(input, MARKER_START, MARKER_END);
         assert!(result.contains("# existing stuff"));
         assert!(result.contains("# other stuff"));
         assert!(result.contains("bar"));
@@ -309,18 +420,36 @@ mod tests {
     #[test]
     fn test_remove_shadow_block_only_block() {
         let input = "# >>> nexus shadow\n.claude/\n# <<< nexus shadow\n";
-        let result = remove_shadow_block(input);
+        let result = remove_block(input, MARKER_START, MARKER_END);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_remove_workspace_block() {
+        let input = "# existing\n\n# >>> nexus workspace shadow\ndevbox.json\ndevbox.lock\n# <<< nexus workspace shadow\n\n# other\n";
+        let result = remove_block(input, WS_MARKER_START, WS_MARKER_END);
+        assert!(result.contains("# existing"));
+        assert!(result.contains("# other"));
+        assert!(!result.contains("devbox.json"));
+        assert!(!result.contains("nexus workspace shadow"));
     }
 
     #[test]
     fn test_agentic_patterns_not_empty() {
         assert!(!AGENTIC_PATTERNS.is_empty());
-        // Verify key patterns are present
         assert!(AGENTIC_PATTERNS.contains(&".claude/"));
         assert!(AGENTIC_PATTERNS.contains(&".taskmaster/"));
         assert!(AGENTIC_PATTERNS.contains(&".rtk/"));
         assert!(AGENTIC_PATTERNS.contains(&"RTK.md"));
         assert!(AGENTIC_PATTERNS.contains(&"taskmaster.config.yaml"));
+    }
+
+    #[test]
+    fn test_workspace_patterns_not_empty() {
+        assert!(!WORKSPACE_PATTERNS.is_empty());
+        assert!(WORKSPACE_PATTERNS.contains(&"devbox.json"));
+        assert!(WORKSPACE_PATTERNS.contains(&"devbox.lock"));
+        assert!(WORKSPACE_PATTERNS.contains(&".devbox/"));
+        assert!(WORKSPACE_PATTERNS.contains(&"scripts/devbox/"));
     }
 }

@@ -326,6 +326,16 @@ pub async fn run(
                     if !af_export.agent_files.is_empty() {
                         for af in &af_export.agent_files {
                             write_agent_file(&target, af)?;
+
+                            // Update sync manifest with content hash from server
+                            if let Some(ref hash) = af.content_hash {
+                                let _ = super::sync::update_manifest_after_pull(
+                                    &target,
+                                    &af.file_key,
+                                    &af.target_path,
+                                    hash,
+                                );
+                            }
                         }
                         println!(
                             "   {} {} agent file(s) synced",
@@ -337,6 +347,81 @@ pub async fn run(
                 Err(e) => {
                     println!(
                         "   {} Agent file export not available ({}), using local templates",
+                        style("!").bold().yellow(),
+                        e
+                    );
+                }
+            }
+
+            // Export workspace files (devbox.json + scripts) — same as `nexus pull`
+            match client.export_workspace_mcp(pid).await {
+                Ok(export) => {
+                    let mut ws_written = 0;
+
+                    // Write devbox.json
+                    let devbox_target = target.join("devbox.json");
+                    fs::write(&devbox_target, &export.devbox_json)?;
+                    ws_written += 1;
+
+                    // Write scripts
+                    for script in &export.scripts {
+                        let script_target = target.join(&script.path);
+                        if let Some(parent) = script_target.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        fs::write(&script_target, &script.body)?;
+
+                        #[cfg(unix)]
+                        if script.executable {
+                            use std::os::unix::fs::PermissionsExt;
+                            let perms = std::fs::Permissions::from_mode(0o755);
+                            fs::set_permissions(&script_target, perms)?;
+                        }
+
+                        ws_written += 1;
+                    }
+
+                    if ws_written > 0 {
+                        println!(
+                            "   {} {} workspace file(s) synced",
+                            style("+").bold().green(),
+                            ws_written
+                        );
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if msg.contains("No active workspace fork") {
+                        // Not an error — project simply has no workspace fork
+                    } else {
+                        println!(
+                            "   {} Workspace export not available: {}",
+                            style("!").bold().yellow(),
+                            e
+                        );
+                    }
+                }
+            }
+
+            // Export open tasks as TASKS.md
+            match client
+                .list_tasks(pid, Some(&["open", "in_progress", "blocked"]))
+                .await
+            {
+                Ok(task_response) => {
+                    if !task_response.tasks.is_empty() {
+                        super::pull::write_tasks(&target, &task_response.tasks, &agentic_root)?;
+                        println!(
+                            "   {} {} task(s) synced to {}/TASKS.md",
+                            style("+").bold().green(),
+                            task_response.tasks.len(),
+                            agentic_root,
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        "   {} Could not fetch tasks: {}",
                         style("!").bold().yellow(),
                         e
                     );
