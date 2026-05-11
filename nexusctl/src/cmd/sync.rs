@@ -337,10 +337,7 @@ pub async fn reset(
                 fs::write(&local_path, body)?;
 
                 // Update manifest
-                let new_hash = resp.new_hash.as_deref().unwrap_or_else(|| {
-                    // Compute locally if server didn't return
-                    ""
-                });
+                let new_hash = resp.new_hash.as_deref().unwrap_or("");
                 let computed_hash = if new_hash.is_empty() {
                     compute_hash(body)
                 } else {
