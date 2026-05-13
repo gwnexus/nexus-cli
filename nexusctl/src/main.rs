@@ -146,6 +146,12 @@ pub enum Command {
         #[command(subcommand)]
         action: SyncAction,
     },
+
+    /// Manage per-project git identity settings (user.name, user.email, GPG signing).
+    Git {
+        #[command(subcommand)]
+        action: GitAction,
+    },
 }
 
 /// Shadow mode subcommands.
@@ -210,6 +216,15 @@ pub enum SyncAction {
         #[arg(long)]
         project_id: Option<String>,
     },
+}
+
+/// Git identity subcommands.
+#[derive(Debug, Subcommand)]
+pub enum GitAction {
+    /// Verify local git config matches the project's expected identity.
+    Verify,
+    /// Apply the project's git identity settings to local .git/config.
+    Apply,
 }
 
 /// Configuration subcommands.
@@ -684,6 +699,34 @@ mod tests {
     #[test]
     fn test_parse_shadow_invalid_subcommand_fails() {
         let result = Cli::try_parse_from(["nexus", "shadow", "toggle"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_git_verify() {
+        let cli = Cli::try_parse_from(["nexus", "git", "verify"]).unwrap();
+        match cli.command {
+            Command::Git {
+                action: GitAction::Verify,
+            } => {}
+            _ => panic!("expected Git Verify"),
+        }
+    }
+
+    #[test]
+    fn test_parse_git_apply() {
+        let cli = Cli::try_parse_from(["nexus", "git", "apply"]).unwrap();
+        match cli.command {
+            Command::Git {
+                action: GitAction::Apply,
+            } => {}
+            _ => panic!("expected Git Apply"),
+        }
+    }
+
+    #[test]
+    fn test_parse_git_no_subcommand_fails() {
+        let result = Cli::try_parse_from(["nexus", "git"]);
         assert!(result.is_err());
     }
 }

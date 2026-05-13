@@ -553,6 +553,24 @@ pub async fn run(
         } // end if !v2_ok
     }
 
+    // Auto-apply git identity if configured
+    if pull_all || pull_scope("agents") {
+        if let Ok(detail) = client.get_project(&project_id).await {
+            if let Some(ref git_cfg) = detail.project.git_config {
+                if git_cfg.user_name.is_some() || git_cfg.user_email.is_some() {
+                    match super::git::apply_git_config(&workspace, git_cfg) {
+                        Ok(n) if n > 0 => println!(
+                            "   {} Applied {} git identity setting(s).",
+                            style("GIT").bold().blue(),
+                            n
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
 

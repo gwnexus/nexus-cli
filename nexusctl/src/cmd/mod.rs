@@ -3,6 +3,7 @@
 mod auth;
 mod config_cmd;
 mod deinit;
+pub(crate) mod git;
 pub(crate) mod import;
 mod init;
 mod link;
@@ -14,7 +15,7 @@ pub(crate) mod sync;
 mod upgrade;
 
 use crate::{
-    Cli, Command, ConfigAction, ShadowAction, SkillsAction, SyncAction, WorkspaceAction,
+    Cli, Command, ConfigAction, GitAction, ShadowAction, SkillsAction, SyncAction, WorkspaceAction,
     WorkspaceShadowAction,
 };
 
@@ -141,6 +142,30 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     ref project_id,
                 } => {
                     sync::reset(&api_url, project_id.as_deref(), file_key).await?;
+                }
+            }
+        }
+        Command::Git { ref action } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            // Resolve project ID from .nexus/config.toml
+            let workspace = std::env::current_dir()?;
+            let project_id = nexus_core::config::resolve_project_id(None, Some(&workspace))?;
+            let token = nexus_core::auth::resolve_token().ok_or_else(|| {
+                anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
+            })?;
+            let client = nexus_core::api::NexusClient::new(&api_url, Some(token))?;
+            let detail = client.get_project(&project_id).await?;
+
+            match detail.project.git_config {
+                Some(ref cfg) => match action {
+                    GitAction::Verify => git::run_verify(&workspace, cfg),
+                    GitAction::Apply => git::run_apply(&workspace, cfg),
+                },
+                None => {
+                    println!(
+                        "No git_config set for this project. Configure it in the Nexus dashboard."
+                    );
                 }
             }
         }

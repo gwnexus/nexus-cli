@@ -441,6 +441,24 @@ pub async fn run(
                     "{} Nexus workspace initialized successfully.",
                     style("OK").bold().green()
                 );
+
+                // Auto-apply git identity if configured
+                if let Some(ref git_cfg) = project_detail
+                    .as_ref()
+                    .and_then(|d| d.project.git_config.clone())
+                {
+                    if git_cfg.user_name.is_some() || git_cfg.user_email.is_some() {
+                        match super::git::apply_git_config(&target, git_cfg) {
+                            Ok(n) if n > 0 => println!(
+                                "   {} Applied {} git identity setting(s) from project config.",
+                                style("GIT").bold().blue(),
+                                n
+                            ),
+                            _ => {}
+                        }
+                    }
+                }
+
                 println!(
                     "   This project is optimized for: {}",
                     style(flavor_label).bold().cyan()

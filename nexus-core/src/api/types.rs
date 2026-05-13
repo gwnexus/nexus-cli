@@ -247,6 +247,17 @@ pub struct ProjectSummary {
     pub agent_owner: Option<String>,
     /// Agentic root directory (e.g. ".claude" or ".nexus").
     pub agentic_root: Option<String>,
+    /// Per-project git identity config.
+    pub git_config: Option<GitConfig>,
+}
+
+/// Per-project git identity settings (auto-applied by init/pull).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitConfig {
+    pub user_name: Option<String>,
+    pub user_email: Option<String>,
+    pub signing_key: Option<String>,
+    pub commit_gpgsign: Option<bool>,
 }
 
 /// Wrapper for project list API response.
