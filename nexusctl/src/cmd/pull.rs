@@ -29,6 +29,52 @@ use super::shadow;
 /// overwritten by `nexus pull`.
 const MANAGED_MARKER: &str = "source: nexus-platform";
 
+// ---------------------------------------------------------------------------
+// Protected file patterns — NEVER overwritten, even with --force.
+// These patterns match against the target_path (relative to workspace root).
+// ---------------------------------------------------------------------------
+const PROTECTED_PATTERNS: &[&str] = &[
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "*.keystore",
+    "id_rsa",
+    "id_ed25519",
+];
+
+/// Check whether a target path matches a protected file pattern.
+/// Protected files are NEVER overwritten by pull, regardless of --force.
+pub fn is_protected_path(target_path: &str) -> bool {
+    let filename = std::path::Path::new(target_path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(target_path);
+
+    for pattern in PROTECTED_PATTERNS {
+        if pattern.contains('*') {
+            // Simple glob: *.ext
+            if let Some(suffix) = pattern.strip_prefix('*') {
+                if filename.ends_with(suffix) {
+                    return true;
+                }
+            }
+            // Prefix glob: prefix.*
+            if let Some(prefix) = pattern.strip_suffix(".*") {
+                if filename.starts_with(prefix) && filename.contains('.') {
+                    return true;
+                }
+            }
+        } else if filename == *pattern {
+            return true;
+        }
+    }
+    false
+}
+
 /// Run the pull command.
 pub async fn run(
     api_url: &str,
@@ -228,6 +274,16 @@ pub async fn run(
                 let mut af_written = 0;
                 for af in &af_export.agent_files {
                     let target_path = workspace.join(&af.target_path);
+
+                    // Hard block: protected files are NEVER overwritten
+                    if is_protected_path(&af.target_path) && target_path.exists() {
+                        println!(
+                            "   {} {} is a protected file, refusing to overwrite (secrets/env files are never touched by pull)",
+                            style("!!").bold().red(),
+                            af.target_path
+                        );
+                        continue;
+                    }
 
                     // Check managed-file marker before overwriting
                     if target_path.exists() && !force && !is_managed_file(&target_path) {
@@ -743,6 +799,17 @@ pub fn write_agent_file(
     workspace: &Path,
     af: &nexus_core::api::ExportedAgentFile,
 ) -> anyhow::Result<()> {
+    // Protected file guard: never overwrite secrets/env files
+    if is_protected_path(&af.target_path) {
+        let target = workspace.join(&af.target_path);
+        if target.exists() {
+            anyhow::bail!(
+                "refusing to write: '{}' matches a protected file pattern (secrets/env files are never overwritten)",
+                af.target_path
+            );
+        }
+    }
+
     // Path traversal protection: reject target_path with parent-dir components
     let normalized = std::path::Path::new(&af.target_path);
     for component in normalized.components() {
@@ -1738,6 +1805,68 @@ mod tests {
         assert!(path.exists());
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("# Bootstrap"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // -- is_protected_path tests --
+
+    #[test]
+    fn test_protected_path_env_files() {
+        assert!(is_protected_path(".env"));
+        assert!(is_protected_path(".env.local"));
+        assert!(is_protected_path(".env.nexus.local"));
+        assert!(is_protected_path(".env.production"));
+    }
+
+    #[test]
+    fn test_protected_path_key_files() {
+        assert!(is_protected_path("server.pem"));
+        assert!(is_protected_path("private.key"));
+        assert!(is_protected_path("id_rsa"));
+        assert!(is_protected_path("id_ed25519"));
+        assert!(is_protected_path("keystore.p12"));
+    }
+
+    #[test]
+    fn test_protected_path_safe_files() {
+        assert!(!is_protected_path("AGENTS.md"));
+        assert!(!is_protected_path(".nexus/CLAUDE.md"));
+        assert!(!is_protected_path("opencode.json"));
+        assert!(!is_protected_path("skills/nx-init/SKILL.md"));
+    }
+
+    #[test]
+    fn test_write_agent_file_refuses_existing_env() {
+        let tmp = std::env::temp_dir().join("nexus_test_protected_env");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        // Pre-create the .env.local file
+        fs::write(tmp.join(".env.local"), "SECRET=value").unwrap();
+
+        let af = nexus_core::api::ExportedAgentFile {
+            file_key: "env-local".into(),
+            target_path: ".env.local".into(),
+            name: ".env.local".into(),
+            description: None,
+            category: "config".into(),
+            version: 1,
+            body: "OVERWRITTEN=true".into(),
+            content_hash: None,
+            agent_file_id: None,
+        };
+
+        let result = write_agent_file(&tmp, &af);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("protected file pattern"));
+
+        // Original content must be preserved
+        let content = fs::read_to_string(tmp.join(".env.local")).unwrap();
+        assert_eq!(content, "SECRET=value");
 
         let _ = fs::remove_dir_all(&tmp);
     }

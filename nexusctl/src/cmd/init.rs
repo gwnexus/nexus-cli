@@ -1006,6 +1006,17 @@ fn write_directives(
 /// Creates any intermediate directories as needed.
 /// The file body is already template-substituted by the server.
 fn write_agent_file(target: &Path, af: &nexus_core::api::ExportedAgentFile) -> anyhow::Result<()> {
+    // Protected file guard: never overwrite secrets/env files
+    if super::pull::is_protected_path(&af.target_path) {
+        let dest = target.join(&af.target_path);
+        if dest.exists() {
+            anyhow::bail!(
+                "refusing to write: '{}' matches a protected file pattern (secrets/env files are never overwritten)",
+                af.target_path
+            );
+        }
+    }
+
     // Path traversal protection: reject target_path with parent-dir components
     let normalized = Path::new(&af.target_path);
     for component in normalized.components() {
