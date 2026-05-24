@@ -183,8 +183,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_update_disabled() {
-        let mut config = crate::config::Config::default();
-        config.check_updates = false;
+        let config = crate::config::Config {
+            check_updates: false,
+            ..Default::default()
+        };
         let result = check_for_update(&config).await;
         assert!(result.is_none());
     }
