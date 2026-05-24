@@ -309,7 +309,36 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    cmd::dispatch(cli).await
+    // Load config for update check
+    let config = nexus_core::config::Config::load().unwrap_or_default();
+
+    // Spawn update check in background (non-blocking)
+    let update_handle = if config.check_updates {
+        Some(tokio::spawn(async move {
+            nexus_core::update_check::check_for_update(&config).await
+        }))
+    } else {
+        None
+    };
+
+    let result = cmd::dispatch(cli).await;
+
+    // Show update notice after command output (if available)
+    if let Some(handle) = update_handle {
+        if let Ok(Some(info)) = handle.await {
+            use console::style;
+            eprintln!();
+            eprintln!(
+                "{} A new version of Nexus CLI is available: {} -> {}",
+                style("UPDATE").bold().yellow(),
+                style(&info.current).dim(),
+                style(&info.latest).bold().green(),
+            );
+            eprintln!("   Run {} to upgrade.", style("nexus upgrade").bold());
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

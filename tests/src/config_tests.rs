@@ -38,6 +38,7 @@ fn test_config_toml_roundtrip() {
         default_output: OutputPreference::Json,
         no_color: true,
         mcp_source: McpSource::Local,
+        check_updates: false,
     };
 
     let serialized = toml::to_string_pretty(&config).unwrap();
@@ -60,6 +61,14 @@ fn test_config_backward_compat_minimal() {
     assert_eq!(config.default_output, OutputPreference::Table);
     assert!(!config.no_color);
     assert_eq!(config.mcp_source, McpSource::Npm);
+    assert!(config.check_updates); // default true
+}
+
+#[test]
+fn test_config_set_invalid_check_updates() {
+    let mut config = Config::default();
+    let result = config.set("check_updates", "maybe");
+    assert!(result.is_err());
 }
 
 #[test]
@@ -127,6 +136,12 @@ fn test_config_set_valid_keys() {
 
     config.set("mcp_source", "npm").unwrap();
     assert_eq!(config.mcp_source, McpSource::Npm);
+
+    config.set("check_updates", "false").unwrap();
+    assert!(!config.check_updates);
+
+    config.set("check_updates", "true").unwrap();
+    assert!(config.check_updates);
 }
 
 #[test]

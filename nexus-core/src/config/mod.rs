@@ -107,10 +107,19 @@ pub struct Config {
     /// MCP server source: npm (default) or local.
     #[serde(default)]
     pub mcp_source: McpSource,
+
+    /// Check for CLI updates on startup (default: true).
+    /// Uses a local cache to avoid network calls on every invocation.
+    #[serde(default = "default_check_updates")]
+    pub check_updates: bool,
 }
 
 fn default_api_url() -> String {
     DEFAULT_API_URL.to_string()
+}
+
+fn default_check_updates() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -120,6 +129,7 @@ impl Default for Config {
             default_output: OutputPreference::default(),
             no_color: false,
             mcp_source: McpSource::default(),
+            check_updates: true,
         }
     }
 }
@@ -193,8 +203,14 @@ impl Config {
                 self.mcp_source = value.parse()?;
                 Ok(())
             }
+            "check_updates" => {
+                self.check_updates = value
+                    .parse::<bool>()
+                    .map_err(|_| Error::Config(format!("invalid bool value: '{}'", value)))?;
+                Ok(())
+            }
             other => Err(Error::Config(format!(
-                "unknown config key '{}', valid keys: api_url, default_output, no_color, mcp_source",
+                "unknown config key '{}', valid keys: api_url, default_output, no_color, mcp_source, check_updates",
                 other
             ))),
         }

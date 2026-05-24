@@ -161,6 +161,7 @@ pub async fn run(
     // -----------------------------------------------------------------------
     // Phase 2: Server-aware init (when project_id + token are available)
     // -----------------------------------------------------------------------
+    let mut server_aware = false;
     if let Some(ref pid) = resolved_pid {
         let token = resolve_token();
         if let Some(ref tok) = token {
@@ -202,7 +203,7 @@ pub async fn run(
                     create_agents_md(&target, project_name, force, default_agentic_root)?;
                     append_gitignore(&target)?;
 
-                    print_done();
+                    print_done(false);
                     return Ok(());
                 }
             }
@@ -468,29 +469,30 @@ pub async fn run(
                 match flavor {
                     "claude-cli" => {
                         println!("  1. Start Claude CLI in this directory");
-                        println!(
-                            "  2. Run {} to bootstrap the agent",
-                            style("/nexus-init").bold()
-                        );
                     }
                     "opencode" => {
                         println!("  1. Start OpenCode in this directory");
-                        println!(
-                            "  2. Run {} to bootstrap the agent",
-                            style("/nexus-init").bold()
-                        );
                     }
                     _ => {
                         println!("  1. Start OpenCode or Claude CLI in this directory");
-                        println!(
-                            "  2. Run {} to bootstrap the agent",
-                            style("/nexus-init").bold()
-                        );
                     }
                 }
                 println!(
-                    "  3. Run {} periodically to sync skills and agent files",
+                    "  2. Run {} to bootstrap the agent",
+                    style("/nexus-init").bold()
+                );
+                println!(
+                    "  3. Skills are in {}, commands/configs in {}",
+                    style(".nexus/skills/").bold(),
+                    style(".opencode/").bold()
+                );
+                println!(
+                    "  4. Run {} periodically to sync from the platform",
                     style("nexus pull").bold()
+                );
+                println!(
+                    "  5. Use {} commands in your agent for Nexus operations",
+                    style("/nexus-*").bold()
                 );
                 println!();
                 println!(
@@ -499,6 +501,7 @@ pub async fn run(
                 );
                 println!("     will be overwritten by 'nexus pull'. These files are managed");
                 println!("     by the Nexus platform and cannot be pushed back yet.");
+                server_aware = true;
             }
         } else {
             // No token — fall back to default .nexus/ scaffold
@@ -526,7 +529,7 @@ pub async fn run(
         append_gitignore(&target)?;
     }
 
-    print_done();
+    print_done(server_aware);
     Ok(())
 }
 
@@ -1558,19 +1561,36 @@ fn print_created(path: &str) {
     println!("   {} {}", style("+").bold().green(), path);
 }
 
-/// Print the completion message.
-fn print_done() {
+/// Print the completion message and next steps.
+///
+/// When `server_aware` is true (project was synced from platform), the caller
+/// already printed flavour-specific next steps, so we only show the banner.
+/// When false (offline / no project), we print generic getting-started steps.
+fn print_done(server_aware: bool) {
     println!();
     println!(
         "{} Nexus workspace initialized successfully.",
         style("OK").bold().green()
     );
-    println!();
-    println!("Next steps:");
-    println!("  1. Run 'nexus login' to authenticate (if not already done)");
-    println!("  2. Review AGENTS.md and adjust agent roles");
-    println!("  3. Review .claude/skills/ for pulled skill definitions");
-    println!("  4. Start your coding agent -- skills and MCP are ready");
+
+    if !server_aware {
+        println!();
+        println!("Next steps:");
+        println!("  1. Run {} to authenticate", style("nexus login").bold());
+        println!(
+            "  2. Run {} to link and sync from the platform",
+            style("nexus init --project-id <UUID>").bold()
+        );
+        println!(
+            "  3. Review {} for skill definitions",
+            style(".nexus/skills/").bold()
+        );
+        println!(
+            "  4. Review {} for agent commands & configs",
+            style(".opencode/").bold()
+        );
+        println!("  5. Start your coding agent — skills and MCP are ready");
+    }
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod machine;
+pub mod update_check;
 
 // Re-exports for convenience
 pub use config::ExtraMcpServer;
