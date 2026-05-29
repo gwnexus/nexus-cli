@@ -7,7 +7,7 @@
 # Options (via env vars):
 #   NEXUS_VERSION   Pin a specific version tag, e.g. "v0.1.1" (default: latest release)
 #   NEXUS_BIN_DIR   Custom install directory (default: ~/.local/bin or ~/.cargo/bin)
-#   GITHUB_TOKEN    GitHub PAT for private repo access (required)
+#   GITHUB_TOKEN    GitHub PAT (optional — only needed for private repo or higher rate limits)
 #
 # The installer tries to download a pre-built binary from GitHub Releases.
 # If no binary exists for the current platform it falls back to `cargo install`.
@@ -84,13 +84,13 @@ check_github_auth() {
     fi
   fi
 
-  if [ -z "${GITHUB_TOKEN:-}" ]; then
-    die "GITHUB_TOKEN is required (private repo). Set it via:
-    export GITHUB_TOKEN=ghp_...
-  or authenticate with: gh auth login"
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    AUTH_HEADER=(-H "Authorization: token ${GITHUB_TOKEN}")
+    info "GitHub auth: ok (authenticated — higher rate limits)"
+  else
+    AUTH_HEADER=()
+    info "GitHub auth: anonymous (public repo — no token needed)"
   fi
-
-  info "GitHub auth: ok"
 }
 
 # ── try binary download (GitHub Releases) ─────────────────────────
@@ -109,7 +109,7 @@ try_binary_download() {
 
   local release_json http_code
   http_code="$(curl -sL -w "%{http_code}" -o /tmp/nexus_release.json \
-    -H "Authorization: token ${GITHUB_TOKEN}" \
+    "${AUTH_HEADER[@]}" \
     -H "Accept: application/vnd.github+json" \
     "$api_url" 2>/dev/null || echo "000")"
 
@@ -148,7 +148,7 @@ for a in data.get('assets', []):
 
   # Private repo: download via API (browser_download_url requires browser auth)
   curl -fsSL \
-    -H "Authorization: token ${GITHUB_TOKEN}" \
+    "${AUTH_HEADER[@]}" \
     -H "Accept: application/octet-stream" \
     -o "${tmp_dir}/${asset_name}" \
     "${api_base}/releases/assets/${asset_id}"
@@ -167,7 +167,7 @@ for a in data.get('assets', []):
 
   if [ -n "$sha_id" ]; then
     curl -fsSL \
-      -H "Authorization: token ${GITHUB_TOKEN}" \
+      "${AUTH_HEADER[@]}" \
       -H "Accept: application/octet-stream" \
       -o "${tmp_dir}/${asset_name}.sha256" \
       "${api_base}/releases/assets/${sha_id}"
@@ -224,7 +224,12 @@ build_from_source() {
 
   info "Building from source with cargo (Rust ${rust_ver})..."
 
-  local repo_url="https://${GITHUB_TOKEN}@github.com/${REPO}.git"
+  local repo_url
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    repo_url="https://${GITHUB_TOKEN}@github.com/${REPO}.git"
+  else
+    repo_url="https://github.com/${REPO}.git"
+  fi
   local version="${NEXUS_VERSION:-}"
   local version_args=()
   if [ -n "$version" ] && [ "$version" != "latest" ]; then
