@@ -8,6 +8,11 @@ authors = ["RelicFrog Holding UG <post@relicfrog.rocks>"]
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
+description = "CLI for the Gatewarden Nexus platform — project scaffolding, agent file sync, workspace management, and environment preflight checks"
+repository = "https://github.com/gwnexus/nexus-cli"
+homepage = "https://nexus.gatewarden.eu"
+keywords = ["cli", "nexus", "ai-agents", "mcp", "devops"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 nexus-core = { path = "nexus-core" }

@@ -1,14 +1,18 @@
-# nexus-cli
+# Nexus CLI
 
-Rust CLI for the [Nexus](https://nexus.gatewarden.eu) platform. Provides
-project scaffolding, authentication, environment preflight checks, and
-configuration management.
+[![CI](https://github.com/gwnexus/nexus-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/gwnexus/nexus-cli/actions/workflows/ci.yml)
+[![Release](https://github.com/gwnexus/nexus-cli/actions/workflows/release.yml/badge.svg)](https://github.com/gwnexus/nexus-cli/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+
+CLI for the [Gatewarden Nexus](https://nexus.gatewarden.eu) platform. Provides
+project scaffolding, agent file synchronization, workspace management,
+environment preflight checks, and configuration management for multi-agent
+engineering workflows.
 
 ## Install
 
 ### One-liner (recommended)
-
-Requires a GitHub PAT with `repo` scope for the private release artifacts:
 
 ```bash
 curl -fsSL https://nexus.gatewarden.eu/install.sh | bash
@@ -18,15 +22,27 @@ The installer detects your platform (macOS/Linux, x86_64/aarch64), downloads
 the pre-built binary from GitHub Releases, and verifies its SHA-256 checksum.
 If no binary exists for your platform it falls back to `cargo install --git`.
 
-> **Note:** Releases v0.1.3 and v0.1.4 contain installer URLs that point to
-> `raw.githubusercontent.com`, which is not accessible for private repos. If you
-> are on one of these versions, please upgrade to **v0.1.5+** where the
-> installer is served via CDN.
-
 ### From source
 
 ```bash
 cargo install --git https://github.com/gwnexus/nexus-cli.git nexusctl
+```
+
+Requires Rust >= 1.85.
+
+### Pin a version
+
+```bash
+NEXUS_VERSION=v0.6.12 curl -fsSL https://nexus.gatewarden.eu/install.sh | bash
+```
+
+## Quick Start
+
+```bash
+nexus login              # Authenticate with the Nexus platform
+nexus init               # Initialize a Nexus project workspace
+nexus preflight          # Verify environment readiness
+nexus pull               # Sync skills and agent files from the platform
 ```
 
 ## Commands
@@ -42,6 +58,7 @@ nexus pull [--project-id <id>]          Pull skills and config from the Nexus pl
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
 nexus deinit [--force]                  Remove all AI scaffold files from the workspace
+nexus shadow on|off|status              Manage Git exclusion of workspace agentic files
 nexus config show                       Display configuration
 nexus config set K=V                    Update a configuration value
 nexus config path                       Show the config file path
@@ -83,7 +100,7 @@ nexus upgrade                           Upgrade CLI to latest release version
 | Workspace | `.nexus/` workspace marker present |
 | MCP | Agent MCP configurations reference nexus-mcp |
 
-## Workspace Structure
+## Project Structure
 
 ```
 nexus-cli/
@@ -112,6 +129,29 @@ nexus-cli/
         └── types_tests.rs
 ```
 
+## Build
+
+```bash
+cargo build --release
+```
+
+> **Note:** On macOS with devbox/nix, set `RUSTFLAGS=""` to avoid linker issues
+> with mold.
+
+## Test
+
+```bash
+cargo test --workspace
+```
+
+## Development
+
+Install the pre-commit hook to run `cargo fmt` and `cargo clippy` before each commit:
+
+```bash
+cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+```
+
 ## CI/CD
 
 - **CI** (`ci.yml`): Runs on every push/PR to `main`. Tests on ubuntu-latest
@@ -121,15 +161,9 @@ nexus-cli/
   aarch64-unknown-linux-gnu), generates SHA-256 checksums, and creates a GitHub
   Release with all assets attached.
 
-## Build
-
-```bash
-cargo build --release
-```
-
 ## Tips
 
-> **:warning: Local agent file changes are overwritten by `nexus pull`.**
+> **Local agent file changes are overwritten by `nexus pull`.**
 >
 > Files managed by the Nexus platform (AGENTS.md, CLAUDE.md, .cursorrules,
 > copilot-instructions.md, plugin configs, etc.) are pulled from the server
@@ -144,32 +178,11 @@ cargo build --release
 - Use `/nexus-init` inside OpenCode or Claude CLI to bootstrap the agent after initialization.
 - Each project is optimized for a specific tool flavor (OpenCode, Claude CLI, or both). Run `nexus link` to see which flavor is configured.
 
-## Known Issues
-
-- **No push support for agent files.** Local edits to managed files (AGENTS.md, CLAUDE.md, etc.) cannot be synced back to the platform. Edit in the dashboard instead.
-- **`nexus pull` overwrites without merge.** There is no diff/merge strategy — the server version always wins. Back up local changes before pulling if needed.
-- **macOS build requires `RUSTFLAGS=""`** when using devbox/nix (the default `RUSTFLAGS=-C link-arg=-fuse-ld=mold` does not work on macOS).
-
-## Development
-
-Install the pre-commit hook to run `cargo fmt` automatically before each commit:
-
-```bash
-cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
-```
-
-## Test
-
-```bash
-cargo test --workspace
-```
-
 ## Related
 
-- [nexus](https://github.com/gwnexus/nexus-hub) — Backend + Frontend (Next.js/Supabase/Netlify)
+- [Gatewarden Nexus](https://nexus.gatewarden.eu) — Platform (Next.js/Supabase)
 - [nexus-mcp](https://github.com/gwnexus/nexus-mcp) — MCP server (38 tools, 4 layers)
 
 ## License
 
-Nexus is a product of the Nexus product group, owned by
-RelicFrog Holding UG (haftungsbeschränkt).
+[MIT](LICENSE) -- Copyright (c) 2026 RelicFrog Holding UG (haftungsbeschraenkt)
