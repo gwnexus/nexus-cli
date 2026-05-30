@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gwnexus/nexus-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/gwnexus/nexus-cli/actions/workflows/ci.yml)
 [![Release](https://github.com/gwnexus/nexus-cli/actions/workflows/release.yml/badge.svg)](https://github.com/gwnexus/nexus-cli/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
 CLI for the [Gatewarden Nexus](https://nexus.gatewarden.eu) platform. Provides
@@ -185,4 +185,4 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 
 ## License
 
-[MIT](LICENSE) -- Copyright (c) 2026 RelicFrog Holding UG (haftungsbeschraenkt)
+[Apache-2.0](LICENSE) -- Copyright (c) 2026 RelicFrog Holding UG (haftungsbeschraenkt)
