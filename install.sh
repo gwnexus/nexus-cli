@@ -75,6 +75,15 @@ resolve_bin_dir() {
   mkdir -p "$BIN_DIR"
 }
 
+# ── authenticated curl helper ─────────────────────────────────────
+auth_curl() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    curl -H "Authorization: token ${GITHUB_TOKEN}" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 # ── check GitHub auth ─────────────────────────────────────────────
 check_github_auth() {
   if [ -z "${GITHUB_TOKEN:-}" ]; then
@@ -85,10 +94,8 @@ check_github_auth() {
   fi
 
   if [ -n "${GITHUB_TOKEN:-}" ]; then
-    AUTH_HEADER=(-H "Authorization: token ${GITHUB_TOKEN}")
     info "GitHub auth: ok (authenticated — higher rate limits)"
   else
-    AUTH_HEADER=()
     info "GitHub auth: anonymous (public repo — no token needed)"
   fi
 }
@@ -108,8 +115,7 @@ try_binary_download() {
   info "Checking for pre-built binary (${version})..."
 
   local release_json http_code
-  http_code="$(curl -sL -w "%{http_code}" -o /tmp/nexus_release.json \
-    "${AUTH_HEADER[@]}" \
+  http_code="$(auth_curl -sL -w "%{http_code}" -o /tmp/nexus_release.json \
     -H "Accept: application/vnd.github+json" \
     "$api_url" 2>/dev/null || echo "000")"
 
@@ -147,8 +153,7 @@ for a in data.get('assets', []):
   trap "rm -rf '$tmp_dir'" EXIT
 
   # Private repo: download via API (browser_download_url requires browser auth)
-  curl -fsSL \
-    "${AUTH_HEADER[@]}" \
+  auth_curl -fsSL \
     -H "Accept: application/octet-stream" \
     -o "${tmp_dir}/${asset_name}" \
     "${api_base}/releases/assets/${asset_id}"
@@ -166,8 +171,7 @@ for a in data.get('assets', []):
 " 2>/dev/null || echo "")"
 
   if [ -n "$sha_id" ]; then
-    curl -fsSL \
-      "${AUTH_HEADER[@]}" \
+    auth_curl -fsSL \
       -H "Accept: application/octet-stream" \
       -o "${tmp_dir}/${asset_name}.sha256" \
       "${api_base}/releases/assets/${sha_id}"
