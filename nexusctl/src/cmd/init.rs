@@ -2503,4 +2503,68 @@ url = "https://example.com/plugin.ts"
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_resolve_platform_plugins_known_slugs() {
+        let slugs = vec![
+            "nexus-compaction-plus".to_string(),
+            "nexus-cost-control".to_string(),
+        ];
+        let result = resolve_platform_plugins(&slugs);
+
+        assert_eq!(result.len(), 2, "both known slugs must resolve");
+
+        let compaction = result.get("nexus-compaction-plus").unwrap();
+        assert_eq!(compaction.source, "github-raw");
+        assert!(
+            compaction
+                .url
+                .as_deref()
+                .unwrap_or("")
+                .contains("100-compaction-plus"),
+            "compaction-plus URL must point to 100-compaction-plus directory"
+        );
+        assert_eq!(
+            compaction.filename.as_deref(),
+            Some("nexus-compaction-plus.ts")
+        );
+
+        let cost = result.get("nexus-cost-control").unwrap();
+        assert_eq!(cost.source, "github-raw");
+        assert!(
+            cost.url
+                .as_deref()
+                .unwrap_or("")
+                .contains("200-cost-control"),
+            "cost-control URL must point to 200-cost-control directory"
+        );
+        assert_eq!(cost.filename.as_deref(), Some("nexus-cost-control.ts"));
+    }
+
+    #[test]
+    fn test_resolve_platform_plugins_unknown_slug_ignored() {
+        let slugs = vec!["rtk".to_string(), "taskmaster-ai".to_string()];
+        let result = resolve_platform_plugins(&slugs);
+        assert!(
+            result.is_empty(),
+            "unknown/optional plugin slugs must not resolve to download entries"
+        );
+    }
+
+    #[test]
+    fn test_resolve_platform_plugins_partial_match() {
+        let slugs = vec![
+            "nexus-compaction-plus".to_string(),
+            "rtk".to_string(), // not in registry
+        ];
+        let result = resolve_platform_plugins(&slugs);
+        assert_eq!(result.len(), 1, "only known slugs should resolve");
+        assert!(result.contains_key("nexus-compaction-plus"));
+    }
+
+    #[test]
+    fn test_resolve_platform_plugins_empty() {
+        let result = resolve_platform_plugins(&[]);
+        assert!(result.is_empty(), "empty input must return empty map");
+    }
 }
