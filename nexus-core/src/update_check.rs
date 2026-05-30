@@ -69,6 +69,18 @@ fn save_cache(cache: &Cache) {
     }
 }
 
+/// Stamp the update-check cache as "up to date" for the given version.
+///
+/// Call this after a successful upgrade so the update-check banner is
+/// suppressed for the remainder of the current process (and for the next
+/// 24 h cache window).
+pub fn mark_as_current(version: &str) {
+    save_cache(&Cache {
+        latest_version: version.to_string(),
+        checked_at: now_secs(),
+    });
+}
+
 /// Minimal GitHub release response — we only need the tag name.
 #[derive(Deserialize)]
 struct GhRelease {

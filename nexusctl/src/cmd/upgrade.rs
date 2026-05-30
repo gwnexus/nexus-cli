@@ -4,6 +4,7 @@
 //! to the latest release version.
 
 use console::style;
+use nexus_core::update_check::mark_as_current;
 use std::process::Command;
 
 /// CDN URL of the installer script.
@@ -32,6 +33,12 @@ pub fn run() -> anyhow::Result<()> {
             style("OK").bold().green(),
             style("nexus --version").bold()
         );
+
+        // Detect the newly installed version by running the upgraded binary.
+        // Suppress the update-check banner for the current process and the
+        // next 24 h cache window by stamping the cache with the new version.
+        let installed_version = detect_installed_version().unwrap_or_else(|| current.to_string());
+        mark_as_current(&installed_version);
     } else {
         println!(
             "{} Upgrade failed (exit code: {}).",
@@ -42,4 +49,21 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Try to determine the version of the newly installed binary by running
+/// `nexus --version` and parsing the output (e.g. "nexus 0.6.13").
+/// Returns `None` if the binary cannot be found or the output cannot be parsed.
+fn detect_installed_version() -> Option<String> {
+    // Resolve the binary path: prefer the same executable that is currently
+    // running so we pick up the freshly replaced binary in-place.
+    let bin = std::env::current_exe().ok()?;
+    let output = Command::new(&bin).arg("--version").output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Output format: "nexus 0.6.13" or "nexus v0.6.13"
+    stdout
+        .split_whitespace()
+        .last()
+        .map(|v| v.trim_start_matches('v').to_string())
+        .filter(|v| !v.is_empty())
 }
