@@ -22,6 +22,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+use super::init::resolve_platform_plugins;
 use super::shadow;
 
 /// Marker in YAML frontmatter indicating the file is managed by Nexus CLI.
@@ -370,6 +371,71 @@ pub async fn run(
         &plugin_mcp_servers,
         force,
     )?;
+
+    // Install platform-selected plugins from af_export plugins list.
+    // Downloads known Nexus plugins (nexus-compaction-plus, nexus-cost-control)
+    // into .opencode/plugins/ using the built-in registry. Existing plugin files
+    // are not overwritten unless --force is set.
+    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
+        if !af_export.plugins.is_empty() {
+            let platform_plugins = resolve_platform_plugins(&af_export.plugins);
+            if !platform_plugins.is_empty() {
+                let plugins_dir = workspace.join(".opencode").join("plugins");
+                std::fs::create_dir_all(&plugins_dir)?;
+                for (name, def) in &platform_plugins {
+                    let filename = def
+                        .filename
+                        .clone()
+                        .unwrap_or_else(|| format!("{}.ts", name));
+                    let dest = plugins_dir.join(&filename);
+                    // Skip if already present and not forcing
+                    if dest.exists() && !force {
+                        println!(
+                            "   {} .opencode/plugins/{} (already present, skipping)",
+                            style("·").dim(),
+                            filename
+                        );
+                        continue;
+                    }
+                    if let Some(ref url) = def.url {
+                        let client = reqwest::Client::new();
+                        match client.get(url).send().await {
+                            Ok(resp) if resp.status().is_success() => {
+                                let body = resp.text().await.unwrap_or_default();
+                                std::fs::write(&dest, &body)?;
+                                println!(
+                                    "   {} .opencode/plugins/{} ({})",
+                                    style("+").bold().green(),
+                                    filename,
+                                    if dest.exists() {
+                                        "updated"
+                                    } else {
+                                        "downloaded"
+                                    }
+                                );
+                            }
+                            Ok(resp) => {
+                                println!(
+                                    "   {} Plugin '{}' download failed: HTTP {}",
+                                    style("!").bold().yellow(),
+                                    name,
+                                    resp.status()
+                                );
+                            }
+                            Err(e) => {
+                                println!(
+                                    "   {} Plugin '{}' download failed: {}",
+                                    style("!").bold().yellow(),
+                                    name,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Export open tasks as TASKS.md
     match client

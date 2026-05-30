@@ -293,6 +293,18 @@ pub async fn run(
                 }
             }
 
+            // Install platform-selected plugins from af_export plugins list.
+            // Uses the built-in plugin registry to resolve download URLs for
+            // known Nexus plugins (nexus-compaction-plus, nexus-cost-control).
+            if let Ok(ref af_export) = af_export_result {
+                if !af_export.plugins.is_empty() {
+                    let platform_plugins = resolve_platform_plugins(&af_export.plugins);
+                    if !platform_plugins.is_empty() {
+                        install_plugins(&target, &platform_plugins).await?;
+                    }
+                }
+            }
+
             // Export directives for this project
             match client.export_directives(pid).await {
                 Ok(dir_export) => {
@@ -1436,6 +1448,53 @@ fn load_dotenv(target: &Path) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Built-in registry of known Nexus OpenCode plugins.
+///
+/// Maps a plugin slug (as stored in the platform) to a `PluginDef` with the
+/// canonical GitHub raw download URL. These are the "platform-managed" plugins
+/// that are automatically installed when selected in the project wizard.
+///
+/// To add a new plugin: add an entry here with `source = "github-raw"` and the
+/// raw URL of the `.ts` file in the `gwnexus/nexus-oc-plugins` repository.
+pub fn resolve_platform_plugins(slugs: &[String]) -> HashMap<String, PluginDef> {
+    let mut registry: HashMap<&str, PluginDef> = HashMap::new();
+
+    registry.insert(
+        "nexus-compaction-plus",
+        PluginDef {
+            source: "github-raw".to_string(),
+            url: Some(
+                "https://raw.githubusercontent.com/gwnexus/nexus-oc-plugins/main/100-compaction-plus/nexus-compaction-plus.ts"
+                    .to_string(),
+            ),
+            path: None,
+            filename: Some("nexus-compaction-plus.ts".to_string()),
+        },
+    );
+
+    registry.insert(
+        "nexus-cost-control",
+        PluginDef {
+            source: "github-raw".to_string(),
+            url: Some(
+                "https://raw.githubusercontent.com/gwnexus/nexus-oc-plugins/main/200-cost-control/nexus-cost-control.ts"
+                    .to_string(),
+            ),
+            path: None,
+            filename: Some("nexus-cost-control.ts".to_string()),
+        },
+    );
+
+    slugs
+        .iter()
+        .filter_map(|slug| {
+            registry
+                .remove(slug.as_str())
+                .map(|def| (slug.clone(), def))
+        })
+        .collect()
 }
 
 /// Install plugins from `[plugins]` config into `.opencode/plugins/`.
