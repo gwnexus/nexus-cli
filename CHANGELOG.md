@@ -17,8 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests for `resolve_platform_plugins` (known slugs, unknown slugs, partial
   match, empty input — 227 tests total passing)
 
-### Changed
-- Version synchronized with webapp v0.6.13
+### Fixed
+- Update-check banner no longer shown after a successful `nexus upgrade` —
+  the cache is stamped with the newly installed version so the banner is
+  suppressed for the remainder of the process and the next 24 h cache window
+
+
 
 ## [0.6.12] - 2026-05-27
 
