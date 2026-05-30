@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.13] - 2026-05-30
 
+### Added
+- Built-in plugin registry (`resolve_platform_plugins`) mapping platform plugin
+  slugs to GitHub raw download URLs for automatic installation
+- `nexus init`: auto-downloads platform-selected plugins from `af_export` response
+  (`nexus-compaction-plus`, `nexus-cost-control`) into `.opencode/plugins/`
+- `nexus pull`: downloads missing platform plugins on every pull; skips existing
+  files unless `--force` is set
+- Unit tests for `resolve_platform_plugins` (known slugs, unknown slugs, partial
+  match, empty input — 227 tests total passing)
+
 ### Changed
-- Version bump to stay synchronized with webapp v0.6.13
+- Version synchronized with webapp v0.6.13
 
 ## [0.6.12] - 2026-05-27
 
