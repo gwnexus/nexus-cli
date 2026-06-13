@@ -14,6 +14,7 @@
 use console::style;
 use nexus_core::api::McpServerConfig;
 use nexus_core::api::NexusClient;
+use nexus_core::api::ProviderConfig;
 use nexus_core::auth::resolve_token;
 use nexus_core::config;
 use nexus_core::McpSource;
@@ -264,6 +265,9 @@ pub async fn run(
 
     // Export agent files (AGENTS.md, CLAUDE.md, etc.) from platform
     // Reuse the af_export result fetched earlier (avoids duplicate API call)
+    // Track written agent file paths so the plugin download step doesn't
+    // overwrite them with stale content from the GitHub registry.
+    let mut af_written_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     match af_export_result {
         Ok(ref af_export) => {
             if af_export.agent_files.is_empty() {
@@ -297,6 +301,7 @@ pub async fn run(
                     }
 
                     write_agent_file(&workspace, af)?;
+                    af_written_paths.insert(af.target_path.clone());
 
                     // Update sync manifest with content hash from server
                     if let Some(ref hash) = af.content_hash {
@@ -360,6 +365,12 @@ pub async fn run(
         .map(|r| r.mcp_servers.clone())
         .unwrap_or_default();
 
+    let providers = af_export_result
+        .as_ref()
+        .ok()
+        .map(|r| r.providers.clone())
+        .unwrap_or_default();
+
     // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
     write_mcp_configs(
         &workspace,
@@ -369,6 +380,7 @@ pub async fn run(
         tool_flavor.as_deref(),
         &agentic_root,
         &plugin_mcp_servers,
+        &providers,
         force,
     )?;
 
@@ -388,6 +400,11 @@ pub async fn run(
                         .clone()
                         .unwrap_or_else(|| format!("{}.ts", name));
                     let dest = plugins_dir.join(&filename);
+                    // Skip plugins already delivered via agent_files (DB is source of truth)
+                    let plugin_target = format!(".opencode/plugins/{}", filename);
+                    if af_written_paths.contains(&plugin_target) {
+                        continue;
+                    }
                     // Skip if already present and not forcing
                     if dest.exists() && !force {
                         println!(
@@ -1084,6 +1101,7 @@ fn write_mcp_configs(
     tool_flavor: Option<&str>,
     agentic_root: &str,
     plugin_mcp_servers: &HashMap<String, McpServerConfig>,
+    providers: &HashMap<String, ProviderConfig>,
     force: bool,
 ) -> anyhow::Result<()> {
     let opencode_path = workspace.join("opencode.json");
@@ -1100,7 +1118,8 @@ fn write_mcp_configs(
     // ── opencode.json ──────────────────────────────────────────────────────
     if !skip_opencode {
         let exists = opencode_path.exists();
-        let needs_write = !exists || force || !plugin_mcp_servers.is_empty();
+        let needs_write =
+            !exists || force || !plugin_mcp_servers.is_empty() || !providers.is_empty();
 
         if needs_write {
             let mut mcp_block: serde_json::Map<String, serde_json::Value> = if exists && !force {
@@ -1161,10 +1180,34 @@ fn write_mcp_configs(
                 );
             }
 
-            let opencode_json = serde_json::json!({
-                "$schema": "https://opencode.ai/config.json",
-                "mcp": mcp_block
-            });
+            // LLM providers from platform (e.g. DGX Spark)
+            let mut provider_block: serde_json::Map<String, serde_json::Value> =
+                serde_json::Map::new();
+            for (name, cfg) in providers {
+                provider_block.insert(
+                    name.to_string(),
+                    serde_json::json!({
+                        "type": cfg.provider_type,
+                        "baseURL": cfg.base_url,
+                        "models": cfg.models
+                    }),
+                );
+            }
+
+            let mut opencode_obj = serde_json::Map::new();
+            opencode_obj.insert(
+                "$schema".to_string(),
+                serde_json::Value::String("https://opencode.ai/config.json".to_string()),
+            );
+            opencode_obj.insert("mcp".to_string(), serde_json::Value::Object(mcp_block));
+            if !provider_block.is_empty() {
+                opencode_obj.insert(
+                    "provider".to_string(),
+                    serde_json::Value::Object(provider_block),
+                );
+            }
+
+            let opencode_json = serde_json::Value::Object(opencode_obj);
 
             fs::write(
                 &opencode_path,
@@ -1172,22 +1215,32 @@ fn write_mcp_configs(
             )?;
 
             let verb = if exists { "updated" } else { "created" };
+            let mut extras = Vec::new();
+            if !plugin_mcp_servers.is_empty() {
+                extras.push(format!(
+                    "plugins: {}",
+                    plugin_mcp_servers
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !providers.is_empty() {
+                extras.push(format!(
+                    "providers: {}",
+                    providers.keys().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
             println!(
                 "   {} opencode.json {} (MCP source: {}{})",
                 style("+").bold().green(),
                 verb,
                 source_label,
-                if plugin_mcp_servers.is_empty() {
+                if extras.is_empty() {
                     String::new()
                 } else {
-                    format!(
-                        ", plugins: {}",
-                        plugin_mcp_servers
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
+                    format!(", {}", extras.join(", "))
                 },
             );
         }
@@ -2146,6 +2199,7 @@ mod tests {
             None,
             ".nexus",
             &HashMap::new(),
+            &HashMap::new(),
             false,
         )
         .unwrap();
@@ -2178,6 +2232,7 @@ mod tests {
             McpSource::Npm,
             None,
             ".claude",
+            &HashMap::new(),
             &HashMap::new(),
             false,
         )
@@ -2215,6 +2270,7 @@ mod tests {
             None,
             ".claude",
             &HashMap::new(),
+            &HashMap::new(),
             false,
         )
         .unwrap();
@@ -2247,6 +2303,7 @@ mod tests {
             None,
             ".claude",
             &HashMap::new(),
+            &HashMap::new(),
             false,
         )
         .unwrap();
@@ -2274,6 +2331,7 @@ mod tests {
             McpSource::Local,
             None,
             ".claude",
+            &HashMap::new(),
             &HashMap::new(),
             false,
         )

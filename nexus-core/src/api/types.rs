@@ -204,6 +204,25 @@ pub struct ExportedAgentFile {
     pub agent_file_id: Option<String>,
 }
 
+/// LLM provider configuration (e.g. DGX Spark local models).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Provider type for the AI SDK (e.g. "@ai-sdk/openai-compatible").
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    /// Base URL for the provider endpoint.
+    pub base_url: String,
+    /// List of model identifiers available from this provider.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Whether VPN access is required to reach the provider.
+    #[serde(default)]
+    pub requires_vpn: bool,
+    /// Human-readable note about the provider.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 /// Response from `af_export` action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentFileExportResponse {
@@ -224,6 +243,9 @@ pub struct AgentFileExportResponse {
     /// Plugin MCP server configs keyed by server name (e.g. "task-master-ai").
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    /// LLM provider configs keyed by provider name (e.g. "dgx-spark").
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
 }
 
 fn default_agentic_root() -> String {
