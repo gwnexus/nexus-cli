@@ -2459,4 +2459,199 @@ mod tests {
         assert!(!check(&scope_skills, "workspace"));
         assert!(check(&scope_skills, "skills"));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Provider integration tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    fn dgx_spark_provider() -> HashMap<String, ProviderConfig> {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "dgx-spark".to_string(),
+            ProviderConfig {
+                provider_type: "@ai-sdk/openai-compatible".into(),
+                base_url: "http://10.0.10.121/v1".into(),
+                models: vec!["nexus-coder-main".into()],
+                requires_vpn: true,
+                note: Some("DGX Spark local inference".into()),
+            },
+        );
+        providers
+    }
+
+    #[test]
+    fn test_write_mcp_configs_with_providers_writes_provider_block() {
+        let dir = temp_pull_dir("mcp-providers");
+
+        let providers = dgx_spark_provider();
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_provider-token",
+            McpSource::Npm,
+            None,
+            ".claude",
+            &HashMap::new(),
+            &providers,
+            false,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&oc).unwrap();
+
+        // "provider" block must exist (singular key)
+        let provider = parsed.get("provider").expect("provider key must exist");
+        let spark = provider
+            .get("dgx-spark")
+            .expect("dgx-spark provider must exist");
+
+        assert_eq!(spark["type"], "@ai-sdk/openai-compatible");
+        assert_eq!(spark["baseURL"], "http://10.0.10.121/v1");
+        assert_eq!(spark["models"][0], "nexus-coder-main");
+
+        // requires_vpn and note must NOT appear (not part of OpenCode schema)
+        assert!(spark.get("requires_vpn").is_none());
+        assert!(spark.get("note").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_empty_providers_omits_provider_key() {
+        let dir = temp_pull_dir("mcp-no-providers");
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_no-provider-token",
+            McpSource::Npm,
+            None,
+            ".claude",
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&oc).unwrap();
+
+        // "provider" key must NOT exist when providers map is empty
+        assert!(
+            parsed.get("provider").is_none(),
+            "provider key must be absent when no providers"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_providers_trigger_write_on_existing_file() {
+        let dir = temp_pull_dir("mcp-provider-trigger");
+
+        // Pre-create opencode.json with dummy content
+        fs::write(dir.join("opencode.json"), r#"{"mcp":{}}"#).unwrap();
+
+        let providers = dgx_spark_provider();
+        // force=false, no plugins, but providers non-empty -> must still write
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_trigger-token",
+            McpSource::Npm,
+            None,
+            ".claude",
+            &HashMap::new(),
+            &providers,
+            false,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        // Must have been overwritten (contains provider block now)
+        assert!(oc.contains("dgx-spark"));
+        assert!(oc.contains("@ai-sdk/openai-compatible"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_providers_not_in_mcp_json() {
+        let dir = temp_pull_dir("mcp-provider-no-claude");
+
+        let providers = dgx_spark_provider();
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_no-claude-token",
+            McpSource::Npm,
+            None,
+            ".claude",
+            &HashMap::new(),
+            &providers,
+            false,
+        )
+        .unwrap();
+
+        // mcp.json must NOT contain provider config
+        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        assert!(
+            !cm.contains("dgx-spark"),
+            "providers must not appear in mcp.json"
+        );
+        assert!(!cm.contains("@ai-sdk/openai-compatible"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_providers_and_plugins_coexist() {
+        let dir = temp_pull_dir("mcp-provider-plugin");
+
+        let providers = dgx_spark_provider();
+        let mut plugins = HashMap::new();
+        plugins.insert(
+            "nexus-plugin".to_string(),
+            McpServerConfig {
+                command: "npx".into(),
+                args: vec!["nexus-plugin".into()],
+                env_keys: vec![],
+            },
+        );
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_coexist-token",
+            McpSource::Npm,
+            None,
+            ".claude",
+            &plugins,
+            &providers,
+            false,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&oc).unwrap();
+
+        // Both MCP servers and providers must coexist
+        assert!(parsed.get("mcp").is_some(), "mcp block must exist");
+        assert!(
+            parsed.get("provider").is_some(),
+            "provider block must exist"
+        );
+
+        let mcp = parsed.get("mcp").unwrap();
+        assert!(mcp.get("nexus-plugin").is_some(), "plugin must be in mcp");
+
+        let provider = parsed.get("provider").unwrap();
+        assert!(
+            provider.get("dgx-spark").is_some(),
+            "dgx-spark must be in provider"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
