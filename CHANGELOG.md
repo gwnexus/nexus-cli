@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-15
+
+### Added
+- Provider support: `nexus pull` consumes provider configuration from `af_export`
+  and writes a `providers` block to `opencode.json` — DGX Spark auto-mapped as
+  `dgx-spark` provider with `@ai-sdk/openai-compatible` type
+- Init prompt fix: `nexus init` no longer prompts for API URL when the global
+  config file (`~/.config/nexus/config.toml`) already exists
+
+### Fixed
+- Security: updated `rustls-webpki` to 0.103.13, resolving RUSTSEC-2026-0098,
+  RUSTSEC-2026-0099, and RUSTSEC-2026-0100 — `cargo audit` clean
+- Suppressed update-check banner after successful `nexus upgrade`
+
+### Changed
+- 237 tests passing (10 new provider tests)
+
 ## [0.6.13] - 2026-05-30
 
 ### Added
