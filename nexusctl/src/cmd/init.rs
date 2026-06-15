@@ -268,7 +268,11 @@ pub async fn run(
             }
 
             // Write MCP server configs (independent of skill export)
-            let mcp_api_url = if force {
+            // Skip the interactive URL prompt when the global config file
+            // already exists (i.e. the user ran `nexus auth login` at least
+            // once) — the resolved api_url is already correct.
+            let has_configured_url = config::Config::path().map(|p| p.exists()).unwrap_or(false);
+            let mcp_api_url = if force || has_configured_url {
                 api_url.to_string()
             } else {
                 prompt_with_default("   Nexus API URL", api_url)?
