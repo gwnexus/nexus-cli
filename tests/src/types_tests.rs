@@ -576,91 +576,101 @@ fn test_exported_agent_file_serialize_roundtrip() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ProviderConfig tests
+// ProviderConfig tests (opaque JSON pass-through)
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_provider_config_deserialize_full() {
+fn test_provider_config_deserialize_opencode_format() {
     let json = r#"{
-        "type": "@ai-sdk/openai-compatible",
-        "base_url": "http://10.0.10.121/v1",
-        "models": ["nexus-coder-main"],
-        "requires_vpn": true,
-        "note": "DGX Spark local inference"
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "DGX Spark (HomeLab)",
+        "options": {
+            "baseURL": "http://10.0.10.121/v1"
+        },
+        "models": {
+            "nexus-coder-main": {
+                "name": "Nexus Coder Main"
+            }
+        }
     }"#;
 
     let cfg: ProviderConfig = serde_json::from_str(json).unwrap();
-    assert_eq!(cfg.provider_type, "@ai-sdk/openai-compatible");
-    assert_eq!(cfg.base_url, "http://10.0.10.121/v1");
-    assert_eq!(cfg.models, vec!["nexus-coder-main"]);
-    assert!(cfg.requires_vpn);
-    assert_eq!(cfg.note.as_deref(), Some("DGX Spark local inference"));
-}
-
-#[test]
-fn test_provider_config_deserialize_minimal() {
-    let json = r#"{
-        "type": "@ai-sdk/openai-compatible",
-        "base_url": "http://10.0.10.121/v1"
-    }"#;
-
-    let cfg: ProviderConfig = serde_json::from_str(json).unwrap();
-    assert_eq!(cfg.provider_type, "@ai-sdk/openai-compatible");
-    assert_eq!(cfg.base_url, "http://10.0.10.121/v1");
-    assert!(cfg.models.is_empty());
-    assert!(!cfg.requires_vpn);
-    assert!(cfg.note.is_none());
+    assert_eq!(cfg["npm"], "@ai-sdk/openai-compatible");
+    assert_eq!(cfg["name"], "DGX Spark (HomeLab)");
+    assert_eq!(cfg["options"]["baseURL"], "http://10.0.10.121/v1");
+    assert_eq!(
+        cfg["models"]["nexus-coder-main"]["name"],
+        "Nexus Coder Main"
+    );
 }
 
 #[test]
 fn test_provider_config_serialize_roundtrip() {
-    let cfg = ProviderConfig {
-        provider_type: "@ai-sdk/openai-compatible".into(),
-        base_url: "http://10.0.10.121/v1".into(),
-        models: vec!["nexus-coder-main".into()],
-        requires_vpn: true,
-        note: Some("DGX Spark".into()),
-    };
+    let cfg: ProviderConfig = serde_json::json!({
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "DGX Spark (HomeLab)",
+        "options": {
+            "baseURL": "http://10.0.10.121/v1"
+        },
+        "models": {
+            "nexus-coder-main": {
+                "name": "Nexus Coder Main"
+            }
+        }
+    });
 
     let json = serde_json::to_string(&cfg).unwrap();
-    // Verify serde(rename = "type") works
-    assert!(json.contains(r#""type":"@ai-sdk/openai-compatible"#));
-    assert!(!json.contains("provider_type"));
-
     let cfg2: ProviderConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(cfg.provider_type, cfg2.provider_type);
-    assert_eq!(cfg.base_url, cfg2.base_url);
-    assert_eq!(cfg.models, cfg2.models);
-    assert_eq!(cfg.requires_vpn, cfg2.requires_vpn);
-    assert_eq!(cfg.note, cfg2.note);
+    assert_eq!(cfg, cfg2);
 }
 
 #[test]
-fn test_agent_file_export_response_with_providers() {
+fn test_agent_file_export_response_with_provider() {
     let json = r##"{
         "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
         "project_name": "NEXUS-APP",
         "agent_files": [],
         "count": 0,
-        "providers": {
+        "provider": {
             "dgx-spark": {
-                "type": "@ai-sdk/openai-compatible",
-                "base_url": "http://10.0.10.121/v1",
-                "models": ["nexus-coder-main"],
-                "requires_vpn": true,
-                "note": "DGX Spark local inference"
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "DGX Spark (HomeLab)",
+                "options": {
+                    "baseURL": "http://10.0.10.121/v1"
+                },
+                "models": {
+                    "nexus-coder-main": {
+                        "name": "Nexus Coder Main"
+                    }
+                }
             }
         }
     }"##;
 
     let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
-    assert_eq!(resp.providers.len(), 1);
-    let spark = resp.providers.get("dgx-spark").unwrap();
-    assert_eq!(spark.provider_type, "@ai-sdk/openai-compatible");
-    assert_eq!(spark.base_url, "http://10.0.10.121/v1");
-    assert_eq!(spark.models, vec!["nexus-coder-main"]);
-    assert!(spark.requires_vpn);
-    assert_eq!(spark.note.as_deref(), Some("DGX Spark local inference"));
+    assert_eq!(resp.provider.len(), 1);
+    let spark = resp.provider.get("dgx-spark").unwrap();
+    assert_eq!(spark["npm"], "@ai-sdk/openai-compatible");
+    assert_eq!(spark["options"]["baseURL"], "http://10.0.10.121/v1");
+}
+
+#[test]
+fn test_agent_file_export_response_providers_alias() {
+    // The old API key "providers" must still work via serde alias
+    let json = r##"{
+        "project_id": "abc",
+        "project_name": "Test",
+        "agent_files": [],
+        "count": 0,
+        "providers": {
+            "dgx-spark": {
+                "npm": "@ai-sdk/openai-compatible"
+            }
+        }
+    }"##;
+
+    let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.provider.len(), 1);
 }
 
 #[test]
@@ -673,5 +683,5 @@ fn test_agent_file_export_response_providers_default_empty() {
     }"#;
 
     let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
-    assert!(resp.providers.is_empty());
+    assert!(resp.provider.is_empty());
 }

@@ -368,7 +368,7 @@ pub async fn run(
     let providers = af_export_result
         .as_ref()
         .ok()
-        .map(|r| r.providers.clone())
+        .map(|r| r.provider.clone())
         .unwrap_or_default();
 
     // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
@@ -1181,17 +1181,12 @@ fn write_mcp_configs(
             }
 
             // LLM providers from platform (e.g. DGX Spark)
+            // Pass through the API-provided config verbatim — it already
+            // matches the opencode.json provider schema.
             let mut provider_block: serde_json::Map<String, serde_json::Value> =
                 serde_json::Map::new();
             for (name, cfg) in providers {
-                provider_block.insert(
-                    name.to_string(),
-                    serde_json::json!({
-                        "type": cfg.provider_type,
-                        "baseURL": cfg.base_url,
-                        "models": cfg.models
-                    }),
-                );
+                provider_block.insert(name.to_string(), cfg.clone());
             }
 
             let mut opencode_obj = serde_json::Map::new();
@@ -2468,13 +2463,18 @@ mod tests {
         let mut providers = HashMap::new();
         providers.insert(
             "dgx-spark".to_string(),
-            ProviderConfig {
-                provider_type: "@ai-sdk/openai-compatible".into(),
-                base_url: "http://10.0.10.121/v1".into(),
-                models: vec!["nexus-coder-main".into()],
-                requires_vpn: true,
-                note: Some("DGX Spark local inference".into()),
-            },
+            serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "DGX Spark (HomeLab)",
+                "options": {
+                    "baseURL": "http://10.0.10.121/v1"
+                },
+                "models": {
+                    "nexus-coder-main": {
+                        "name": "Nexus Coder Main"
+                    }
+                }
+            }),
         );
         providers
     }
@@ -2506,13 +2506,13 @@ mod tests {
             .get("dgx-spark")
             .expect("dgx-spark provider must exist");
 
-        assert_eq!(spark["type"], "@ai-sdk/openai-compatible");
-        assert_eq!(spark["baseURL"], "http://10.0.10.121/v1");
-        assert_eq!(spark["models"][0], "nexus-coder-main");
-
-        // requires_vpn and note must NOT appear (not part of OpenCode schema)
-        assert!(spark.get("requires_vpn").is_none());
-        assert!(spark.get("note").is_none());
+        assert_eq!(spark["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(spark["name"], "DGX Spark (HomeLab)");
+        assert_eq!(spark["options"]["baseURL"], "http://10.0.10.121/v1");
+        assert_eq!(
+            spark["models"]["nexus-coder-main"]["name"],
+            "Nexus Coder Main"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
