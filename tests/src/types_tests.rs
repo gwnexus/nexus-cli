@@ -685,3 +685,102 @@ fn test_agent_file_export_response_providers_default_empty() {
     let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
     assert!(resp.provider.is_empty());
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// auth_token + prerequisites (v0.7.1)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_agent_file_export_response_auth_token_present() {
+    let json = r#"{
+        "project_id": "abc",
+        "project_name": "Test",
+        "agent_files": [],
+        "count": 0,
+        "auth_token": "nxs_pat_testtoken123"
+    }"#;
+
+    let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.auth_token, Some("nxs_pat_testtoken123".to_string()));
+}
+
+#[test]
+fn test_agent_file_export_response_auth_token_absent_defaults_none() {
+    let json = r#"{
+        "project_id": "abc",
+        "project_name": "Test",
+        "agent_files": [],
+        "count": 0
+    }"#;
+
+    let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+    assert!(resp.auth_token.is_none());
+}
+
+#[test]
+fn test_agent_file_export_response_prerequisites_present() {
+    let json = r#"{
+        "project_id": "abc",
+        "project_name": "Test",
+        "agent_files": [],
+        "count": 0,
+        "plugins": ["rtk", "headroom"],
+        "prerequisites": [
+            {
+                "tool": "rtk",
+                "check_command": "rtk --version",
+                "install_hint": "Install RTK: https://www.rtk-ai.app/#install",
+                "required_by": "RTK output filtering (codebase: rust, docker)"
+            },
+            {
+                "tool": "headroom",
+                "check_command": "headroom --version",
+                "install_hint": "pip install headroom-ai[mcp]",
+                "required_by": "Headroom context compression MCP"
+            }
+        ]
+    }"#;
+
+    let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.prerequisites.len(), 2);
+
+    let rtk = &resp.prerequisites[0];
+    assert_eq!(rtk.tool, "rtk");
+    assert_eq!(rtk.check_command, "rtk --version");
+    assert!(rtk.install_hint.contains("rtk-ai.app"));
+    assert!(rtk.required_by.contains("rust"));
+
+    let headroom = &resp.prerequisites[1];
+    assert_eq!(headroom.tool, "headroom");
+    assert_eq!(headroom.check_command, "headroom --version");
+}
+
+#[test]
+fn test_agent_file_export_response_prerequisites_absent_defaults_empty() {
+    let json = r#"{
+        "project_id": "abc",
+        "project_name": "Test",
+        "agent_files": [],
+        "count": 0
+    }"#;
+
+    let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+    assert!(resp.prerequisites.is_empty());
+}
+
+#[test]
+fn test_prerequisite_serialize_roundtrip() {
+    let prereq = Prerequisite {
+        tool: "rtk".to_string(),
+        check_command: "rtk --version".to_string(),
+        install_hint: "Install RTK: https://www.rtk-ai.app/#install".to_string(),
+        required_by: "RTK output filtering".to_string(),
+    };
+
+    let json = serde_json::to_string(&prereq).unwrap();
+    let prereq2: Prerequisite = serde_json::from_str(&json).unwrap();
+    assert_eq!(prereq.tool, prereq2.tool);
+    assert_eq!(prereq.check_command, prereq2.check_command);
+    assert_eq!(prereq.install_hint, prereq2.install_hint);
+    assert_eq!(prereq.required_by, prereq2.required_by);
+}

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-06-22
+
+### Added
+
+- **Prerequisites check**: `nexus pull` now checks for required external binaries
+  (e.g. `rtk`, `headroom`) after the plugin install step. For each missing
+  prerequisite, the CLI prints a clear warning with the tool name, which plugin
+  requires it, and an install hint. Pull succeeds regardless — the check is
+  informational only.
+- **`auth_token` echo**: `nexus pull` now uses the `auth_token` field from the
+  `af_export` response (if present) to write the PAT directly into `opencode.json`,
+  without a separate read of `~/.config/nexus/credentials.toml`. Falls back to
+  the token already in memory when the server does not provide the field (older hub
+  versions).
+- **`Prerequisite` struct** in `nexus-core` API types — deserialised from the
+  `prerequisites` array in `af_export` responses.
+
 ## [0.7.0] - 2026-06-15
 
 ### Added

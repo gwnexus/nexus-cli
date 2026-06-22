@@ -178,6 +178,48 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 - Use `/nexus-init` inside OpenCode or Claude CLI to bootstrap the agent after initialization.
 - Each project is optimized for a specific tool flavor (OpenCode, Claude CLI, or both). Run `nexus link` to see which flavor is configured.
 
+## Cost Control Tools
+
+`nexus pull` automatically configures two token-saving tools when enabled for a project:
+
+### RTK — Runtime Token Killer
+
+Filters and compresses CLI output before it reaches the agent context (60–90% savings on build/test/lint output).
+
+```bash
+# Install the RTK binary
+# See: https://www.rtk-ai.app/#install
+
+# Install the OpenCode plugin (once per machine)
+rtk init -g --opencode
+
+# After nexus pull, trust project filters
+rtk trust
+```
+
+The `.rtk/filters.toml` file is auto-generated from the project's **codebase character** presets (configured in the Nexus dashboard under Project → Plugins) and synced on every `nexus pull`. An OS/shell baseline (git, find, grep, curl, ssh) is always included.
+
+If RTK is not installed when you run `nexus pull`, the CLI prints a warning:
+
+```
+   ! rtk not found in PATH
+     Required by: RTK output filtering (codebase: rust, docker, make)
+     Install: Install RTK: https://www.rtk-ai.app/#install — then run: rtk init -g --opencode
+```
+
+### Headroom — Context Compression MCP
+
+ML-based context compression via MCP server. Reduces input context by 60–95% for large tool outputs.
+
+```bash
+# Install headroom
+pip install "headroom-ai[mcp]"
+# or
+pipx install "headroom-ai[mcp]"
+```
+
+The Headroom MCP server (`headroom mcp serve`) is configured automatically in `opencode.json` when the headroom plugin is active. It provides three tools: `headroom_compress`, `headroom_retrieve`, `headroom_stats`.
+
 ## Related
 
 - [Gatewarden Nexus](https://nexus.gatewarden.eu) — Platform (Next.js/Supabase)
