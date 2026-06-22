@@ -371,11 +371,19 @@ pub async fn run(
         .map(|r| r.provider.clone())
         .unwrap_or_default();
 
+    // Use auth_token from response if available — avoids a separate credentials.toml
+    // read and guarantees the token written to opencode.json is always fresh.
+    let effective_token = af_export_result
+        .as_ref()
+        .ok()
+        .and_then(|r| r.auth_token.clone())
+        .unwrap_or_else(|| token.to_string());
+
     // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
     write_mcp_configs(
         &workspace,
         api_url,
-        &token,
+        &effective_token,
         mcp_source,
         tool_flavor.as_deref(),
         &agentic_root,
@@ -450,6 +458,44 @@ pub async fn run(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Check prerequisites from af_export response.
+    // Warn for each required tool that is not found in PATH.
+    // This is non-blocking — pull succeeds regardless, but the user
+    // needs the tool for the plugin to actually work.
+    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
+        if !af_export.prerequisites.is_empty() {
+            let mut missing: Vec<String> = Vec::new();
+            for prereq in &af_export.prerequisites {
+                let found = std::process::Command::new("sh")
+                    .args(["-c", &prereq.check_command])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !found {
+                    missing.push(prereq.tool.clone());
+                    println!(
+                        "   {} {} not found in PATH",
+                        style("!").bold().yellow(),
+                        style(&prereq.tool).bold()
+                    );
+                    println!("     Required by: {}", prereq.required_by);
+                    println!("     Install: {}", style(&prereq.install_hint).dim());
+                }
+            }
+            if !missing.is_empty() {
+                println!(
+                    "   {} {} prerequisite{} missing — {} will not function until installed.",
+                    style("!").bold().yellow(),
+                    missing.len(),
+                    if missing.len() == 1 { "" } else { "s" },
+                    missing.join(", ")
+                );
             }
         }
     }

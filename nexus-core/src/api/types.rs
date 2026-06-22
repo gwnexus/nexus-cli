@@ -210,6 +210,20 @@ pub struct ExportedAgentFile {
 /// format, so the CLI passes it through without interpretation.
 pub type ProviderConfig = serde_json::Value;
 
+/// A prerequisite tool required by this project's plugin configuration.
+/// Returned by af_export so the CLI can warn or prompt the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Prerequisite {
+    /// Binary name (e.g. "rtk", "headroom").
+    pub tool: String,
+    /// Shell command to verify the tool is available (e.g. "rtk --version").
+    pub check_command: String,
+    /// Human-readable install hint shown when the tool is missing.
+    pub install_hint: String,
+    /// Which plugin or feature requires this tool.
+    pub required_by: String,
+}
+
 /// Response from `af_export` action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentFileExportResponse {
@@ -234,6 +248,15 @@ pub struct AgentFileExportResponse {
     /// The API uses the singular key "provider" matching the opencode.json schema.
     #[serde(default, alias = "providers")]
     pub provider: HashMap<String, ProviderConfig>,
+    /// The authenticated API token echoed back from the request.
+    /// Use this value directly in opencode.json rather than reading credentials.toml.
+    /// Present only when the server supports auth_token echo (v0.7.4+).
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// Tools that must be installed for this project's plugins to work.
+    /// The CLI should check each and warn/prompt when a binary is missing.
+    #[serde(default)]
+    pub prerequisites: Vec<Prerequisite>,
 }
 
 fn default_agentic_root() -> String {
