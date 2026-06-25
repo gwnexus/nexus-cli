@@ -1189,6 +1189,16 @@ fn write_mcp_configs(
                     serde_json::json!(["node", "tools/nexus-mcp/dist/server.js"])
                 }
             };
+
+            // Resolve NEXUS_SEC_OPENAI_API_KEY: use the literal value from the
+            // current environment (e.g. sourced from .env.nexus.local) so the
+            // MCP server process can access it directly.
+            // Fall back to {env:} template only when the variable is not set —
+            // this avoids the known issue where {env:} templates in opencode.json
+            // are not expanded when OpenCode is started without sourcing the env file.
+            let openai_key_value = std::env::var("NEXUS_SEC_OPENAI_API_KEY")
+                .unwrap_or_else(|_| "{env:NEXUS_SEC_OPENAI_API_KEY}".to_string());
+
             mcp_block.insert(
                 "nexus".to_string(),
                 serde_json::json!({
@@ -1197,10 +1207,7 @@ fn write_mcp_configs(
                     "environment": {
                         "NEXUS_API_URL": api_url,
                         "NEXUS_PRIVATE_TOKEN": token,
-                        // Semantic search (pgvector) requires this key in the MCP server process.
-                        // Written as an {env:} template so the secret is resolved at runtime
-                        // from the shell environment — never stored in plaintext in opencode.json.
-                        "NEXUS_SEC_OPENAI_API_KEY": "{env:NEXUS_SEC_OPENAI_API_KEY}"
+                        "NEXUS_SEC_OPENAI_API_KEY": openai_key_value
                     }
                 }),
             );

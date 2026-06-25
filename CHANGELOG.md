@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-06-25
+
+### Fixed
+
+- **`NEXUS_SEC_OPENAI_API_KEY` resolved at write time**: `nexus pull` and
+  `nexus init` now read `NEXUS_SEC_OPENAI_API_KEY` from the current shell
+  environment (e.g. sourced from `.env.nexus.local`) and write the **literal
+  value** into `opencode.json`. Previously the `{env:}` template was written,
+  which OpenCode cannot expand when the variable is not set at startup time.
+  Falls back to `{env:NEXUS_SEC_OPENAI_API_KEY}` when the variable is absent.
+
 ## [0.7.2] - 2026-06-25
 
 ### Added

@@ -1115,6 +1115,10 @@ fn write_mcp_configs(
                 McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
             };
 
+            // Resolve NEXAI_SEC_OPENAI_API_KEY at write time — use literal if available
+            let openai_key_value = std::env::var("NEXUS_SEC_OPENAI_API_KEY")
+                .unwrap_or_else(|_| "{env:NEXUS_SEC_OPENAI_API_KEY}".to_string());
+
             let opencode_json = format!(
                 r#"{{
   "$schema": "https://opencode.ai/config.json",
@@ -1125,7 +1129,7 @@ fn write_mcp_configs(
       "environment": {{
         "NEXUS_API_URL": "{api_url}",
         "NEXUS_PRIVATE_TOKEN": "{token}",
-        "NEXUS_SEC_OPENAI_API_KEY": "{{env:NEXUS_SEC_OPENAI_API_KEY}}"
+        "NEXUS_SEC_OPENAI_API_KEY": "{openai_key}"
       }}
     }}
   }}
@@ -1134,6 +1138,7 @@ fn write_mcp_configs(
                 command_block = command_block,
                 api_url = api_url,
                 token = token,
+                openai_key = openai_key_value,
             );
 
             fs::write(&opencode_path, opencode_json)?;
