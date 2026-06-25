@@ -19,7 +19,9 @@ Thumbs.db
 # Environment
 .env
 .env.local
+.env.*.local
 .env.build
 
 # Test artifacts
 tests/tmp/
+.env.nexus.local
