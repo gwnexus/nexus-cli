@@ -1196,7 +1196,11 @@ fn write_mcp_configs(
                     "command": nexus_command,
                     "environment": {
                         "NEXUS_API_URL": api_url,
-                        "NEXUS_PRIVATE_TOKEN": token
+                        "NEXUS_PRIVATE_TOKEN": token,
+                        // Semantic search (pgvector) requires this key in the MCP server process.
+                        // Written as an {env:} template so the secret is resolved at runtime
+                        // from the shell environment — never stored in plaintext in opencode.json.
+                        "NEXUS_SEC_OPENAI_API_KEY": "{env:NEXUS_SEC_OPENAI_API_KEY}"
                     }
                 }),
             );
@@ -2279,13 +2283,17 @@ mod tests {
         )
         .unwrap();
 
-        // opencode.json must exist with literal values
+        // opencode.json must exist with literal values for Nexus credentials
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(oc.contains("\"nexus\""));
         assert!(oc.contains("nxs_pat_pull-test-token"));
         assert!(oc.contains("https://nexus.gatewarden.eu"));
         assert!(oc.contains("npx"));
-        assert!(!oc.contains("{env:"));
+        // NEXUS_PRIVATE_TOKEN must never be an {env:} reference
+        assert!(!oc.contains("{env:NEXUS_PRIVATE_TOKEN}"));
+        assert!(!oc.contains("{env:NEXUS_API_URL}"));
+        // NEXUS_SEC_OPENAI_API_KEY is intentionally an {env:} reference
+        assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
 
         // .claude/mcp.json must exist
         let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();

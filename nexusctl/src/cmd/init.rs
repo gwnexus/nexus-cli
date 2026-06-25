@@ -1124,7 +1124,8 @@ fn write_mcp_configs(
       {command_block},
       "environment": {{
         "NEXUS_API_URL": "{api_url}",
-        "NEXUS_PRIVATE_TOKEN": "{token}"
+        "NEXUS_PRIVATE_TOKEN": "{token}",
+        "NEXUS_SEC_OPENAI_API_KEY": "{{env:NEXUS_SEC_OPENAI_API_KEY}}"
       }}
     }}
   }}
@@ -2085,10 +2086,15 @@ mod tests {
         assert!(!oc.contains("\"stdio\""));
         // Must use "environment" (not "env")
         assert!(oc.contains("\"environment\""));
-        // Must contain literal token and URL (not env var references)
+        // Must contain literal token and URL (not env var references for secrets)
         assert!(oc.contains("https://nexus.gatewarden.eu"));
         assert!(oc.contains("nxs_pat_test-token-1234567890"));
-        assert!(!oc.contains("{env:"));
+        // NEXUS_PRIVATE_TOKEN must be a literal value, never an {env:} reference
+        assert!(!oc.contains("{env:NEXUS_PRIVATE_TOKEN}"));
+        assert!(!oc.contains("{env:NEXUS_API_URL}"));
+        // NEXUS_SEC_OPENAI_API_KEY is intentionally an {env:} reference —
+        // it is not a Nexus credential and should be resolved from the shell at runtime
+        assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
 
         // .mcp.json must NOT be created (legacy root-level format)
         assert!(!dir.join(".mcp.json").exists());
