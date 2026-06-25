@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-06-25
+
+### Added
+
+- **Semantic search support**: `nexus pull` and `nexus init` now write
+  `NEXUS_SEC_OPENAI_API_KEY` as an `{env:NEXUS_SEC_OPENAI_API_KEY}` template
+  reference into the nexus MCP server environment block in `opencode.json`.
+  This enables pgvector-based semantic and hybrid knowledge search via the
+  Nexus MCP (`kb_search` with `search_mode=semantic` or `hybrid`). The key
+  is resolved at runtime from the shell environment — never stored as a
+  literal value.
+
 ## [0.7.1] - 2026-06-22
 
 ### Added
