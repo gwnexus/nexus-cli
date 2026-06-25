@@ -77,6 +77,45 @@ pub fn is_protected_path(target_path: &str) -> bool {
     false
 }
 
+/// Read a single key from a `.env`-style file in the workspace.
+///
+/// Searches `.env.nexus.local` (primary) and `.env.local` (fallback) for a
+/// line of the form `KEY=value` or `export KEY=value`. Strips surrounding
+/// quotes (`"` or `'`). Returns `None` when neither file exists or the key is
+/// not present.
+fn read_key_from_env_file(workspace: &Path, key: &str) -> Option<String> {
+    let candidates = [".env.nexus.local", ".env.local"];
+    for candidate in &candidates {
+        let path = workspace.join(candidate);
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            // Strip optional `export ` prefix
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            if let Some(rest) = line.strip_prefix(key) {
+                if let Some(value) = rest.strip_prefix('=') {
+                    let value = value.trim();
+                    // Strip surrounding quotes
+                    let value = value
+                        .strip_prefix('"')
+                        .and_then(|v| v.strip_suffix('"'))
+                        .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                        .unwrap_or(value);
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Run the pull command.
 pub async fn run(
     api_url: &str,
@@ -1190,14 +1229,15 @@ fn write_mcp_configs(
                 }
             };
 
-            // Resolve NEXUS_SEC_OPENAI_API_KEY: use the literal value from the
-            // current environment (e.g. sourced from .env.nexus.local) so the
-            // MCP server process can access it directly.
-            // Fall back to {env:} template only when the variable is not set —
-            // this avoids the known issue where {env:} templates in opencode.json
-            // are not expanded when OpenCode is started without sourcing the env file.
+            // Resolve NEXUS_SEC_OPENAI_API_KEY in priority order:
+            //   1. Shell environment variable (CI/CD, manually exported)
+            //   2. .env.nexus.local or .env.local in the workspace root
+            //   3. {env:} template fallback (OpenCode expands at startup)
             let openai_key_value = std::env::var("NEXUS_SEC_OPENAI_API_KEY")
-                .unwrap_or_else(|_| "{env:NEXUS_SEC_OPENAI_API_KEY}".to_string());
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(|| read_key_from_env_file(workspace, "NEXUS_SEC_OPENAI_API_KEY"))
+                .unwrap_or_else(|| "{env:NEXUS_SEC_OPENAI_API_KEY}".to_string());
 
             mcp_block.insert(
                 "nexus".to_string(),
@@ -2299,7 +2339,8 @@ mod tests {
         // NEXUS_PRIVATE_TOKEN must never be an {env:} reference
         assert!(!oc.contains("{env:NEXUS_PRIVATE_TOKEN}"));
         assert!(!oc.contains("{env:NEXUS_API_URL}"));
-        // NEXUS_SEC_OPENAI_API_KEY is intentionally an {env:} reference
+        // NEXUS_SEC_OPENAI_API_KEY: no env-file present in temp dir and no shell var set,
+        // so the {env:} fallback must be used.
         assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
 
         // .claude/mcp.json must exist
@@ -2713,6 +2754,97 @@ mod tests {
             "dgx-spark must be in provider"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_key_from_env_file_nexus_local() {
+        let dir = temp_pull_dir("read-env-nexus-local");
+        fs::write(
+            dir.join(".env.nexus.local"),
+            "# comment\nNEXUS_SEC_OPENAI_API_KEY=sk-test-literal-value\nOTHER=ignore\n",
+        )
+        .unwrap();
+        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
+        assert_eq!(result, Some("sk-test-literal-value".to_string()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_key_from_env_file_quoted_value() {
+        let dir = temp_pull_dir("read-env-quoted");
+        fs::write(
+            dir.join(".env.nexus.local"),
+            "NEXUS_SEC_OPENAI_API_KEY=\"sk-quoted-value\"\n",
+        )
+        .unwrap();
+        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
+        assert_eq!(result, Some("sk-quoted-value".to_string()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_key_from_env_file_export_prefix() {
+        let dir = temp_pull_dir("read-env-export");
+        fs::write(
+            dir.join(".env.nexus.local"),
+            "export NEXUS_SEC_OPENAI_API_KEY=sk-exported-value\n",
+        )
+        .unwrap();
+        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
+        assert_eq!(result, Some("sk-exported-value".to_string()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_key_from_env_file_missing_key() {
+        let dir = temp_pull_dir("read-env-missing-key");
+        fs::write(dir.join(".env.nexus.local"), "OTHER_KEY=something\n").unwrap();
+        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
+        assert_eq!(result, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_key_from_env_file_no_file() {
+        let dir = temp_pull_dir("read-env-no-file");
+        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
+        assert_eq!(result, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_reads_key_from_env_file() {
+        let dir = temp_pull_dir("mcp-env-file-key");
+        fs::write(
+            dir.join(".env.nexus.local"),
+            "NEXUS_SEC_OPENAI_API_KEY=sk-from-env-file\n",
+        )
+        .unwrap();
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_test",
+            McpSource::Npm,
+            None,
+            ".claude",
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        // Literal key from env file must be written — no {env:} template
+        assert!(
+            oc.contains("sk-from-env-file"),
+            "literal key must be present"
+        );
+        assert!(
+            !oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"),
+            "env template must not be used when file provides the key"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

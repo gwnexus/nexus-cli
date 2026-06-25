@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] - 2026-06-25
+
+### Fixed
+
+- **`NEXUS_SEC_OPENAI_API_KEY` resolved directly from `.env.nexus.local`**:
+  `nexus pull` and `nexus init` now read `NEXUS_SEC_OPENAI_API_KEY` directly
+  from `.env.nexus.local` (or `.env.local` as fallback) in the workspace root,
+  without requiring the variable to be exported into the shell environment first.
+  Resolution order: shell env → `.env.nexus.local` → `.env.local` → `{env:}`
+  template fallback. No more `set -a && source .env.nexus.local` required.
+
 ## [0.7.4] - 2026-06-25
 
 ### Fixed
