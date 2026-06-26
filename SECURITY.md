@@ -12,7 +12,7 @@
 If you discover a security vulnerability, please report it responsibly:
 
 1. **Do not** open a public GitHub issue
-2. Email **security@gatewarden.eu** with:
+2. Email **post+security@gatewarden.eu** with:
    - Description of the vulnerability
    - Steps to reproduce
    - Potential impact
