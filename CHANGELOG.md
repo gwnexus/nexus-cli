@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-27
+
+### Added
+
+- **`nexus init`: no-workspace advisory prompt** — when `nexus init` is run
+  against a project that has no workspace (devbox fork) configured in the
+  backend, the CLI now displays a clear advisory block explaining that this is
+  an unusual configuration, and prompts `Understood — continue without
+  workspace? [y/N]`. Answering `N` (the default) aborts with `Aborted.` and
+  gives actionable recovery instructions:
+  1. Add a workspace in the Nexus backend project settings, then
+     re-run `nexus init`; **or**
+  2. Run `nexus pull --force` after the workspace has been added.
+  The prompt is TTY-gated (non-interactive / CI contexts print the advisory
+  and continue without prompting). The `--force` / `-y` flag bypasses the
+  prompt entirely, consistent with all other advisory prompts in the CLI.
+  (ADR-0012)
+
+### Fixed
+
+- **macOS build: mold linker flag removed from `devbox.json` env** — `mold`
+  is a Linux-only linker. Previously `devbox.json` set
+  `RUSTFLAGS="-C link-arg=-fuse-ld=mold"` globally, which leaked into macOS
+  shell environments on devbox activation and caused all Cargo builds (including
+  agent-triggered builds from OpenCode) to fail with
+  `clang: error: invalid linker name in argument '-fuse-ld=mold'`.
+  `RUSTFLAGS` is removed from `devbox.json`; mold is now configured via
+  per-target `[target.*]` entries in `.cargo/config.toml` (Linux targets only).
+  macOS uses the system linker. `RUSTC_WRAPPER=sccache` is retained in
+  `devbox.json` (sccache is cross-platform). (ADR-0013)
+
 ## [0.7.5] - 2026-06-25
 
 ### Fixed

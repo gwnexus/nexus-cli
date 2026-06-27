@@ -1,2 +1,25 @@
+# Project-level Cargo configuration.
+#
+# Linker strategy by target:
+#   macOS (aarch64-apple-darwin):
+#     mold does not support Apple's linker protocol (-platform_version etc.)
+#     and is not usable as a cc-driver linker on macOS/Darwin.
+#     rustflags is explicitly empty to override any RUSTFLAGS env var that
+#     may have leaked from a devbox shell (devbox.json no longer exports
+#     RUSTFLAGS; this entry acts as a safety net for legacy activations).
+#
+#   Linux (x86_64 / aarch64):
+#     mold is available inside the devbox Nix profile and is the preferred
+#     linker for fast incremental builds on CI and Linux dev machines.
+#
+# sccache is configured via RUSTC_WRAPPER in devbox.json, not here, so
+# it is only active inside the devbox shell and never leaks to bare builds.
+
 [target.aarch64-apple-darwin]
 rustflags = []
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

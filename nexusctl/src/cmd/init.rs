@@ -409,7 +409,53 @@ pub async fn run(
                 Err(e) => {
                     let msg = format!("{}", e);
                     if msg.contains("No active workspace fork") {
-                        // Not an error — project simply has no workspace fork
+                        // No workspace configured — surface an advisory prompt so the user
+                        // knowingly proceeds without devbox integration.
+                        println!(
+                            "   {} No workspace (devbox integration) is configured for this project.",
+                            style("!").bold().yellow()
+                        );
+                        println!();
+                        println!(
+                            "   It is unusual to initialize a NEXUS project without a workspace."
+                        );
+                        println!(
+                            "   A workspace provides the devbox.json environment definition and"
+                        );
+                        println!("   project scripts required for consistent local development.");
+                        println!();
+                        println!("   To add a workspace later:");
+                        println!(
+                            "     1. Open the project settings in the Nexus backend and add a workspace."
+                        );
+                        println!(
+                            "     2. Then run:  {}",
+                            style("nexus pull --force").bold().cyan()
+                        );
+                        println!(
+                            "        — or — re-run {} in this directory.",
+                            style("nexus init").bold().cyan()
+                        );
+                        println!();
+
+                        // Prompt on TTY; skip (continue) in CI / pipes.
+                        use std::io::IsTerminal;
+                        if std::io::stdin().is_terminal() && !force {
+                            print!(
+                                "   {} ",
+                                style("Understood — continue without workspace? [y/N]").dim()
+                            );
+                            use std::io::{self, BufRead, Write};
+                            io::stdout().flush()?;
+                            let mut line = String::new();
+                            io::stdin().lock().read_line(&mut line)?;
+                            let answer = line.trim().to_lowercase();
+                            if answer != "y" && answer != "yes" {
+                                println!("   Aborted.");
+                                return Ok(());
+                            }
+                            println!();
+                        }
                     } else {
                         println!(
                             "   {} Workspace export not available: {}",
