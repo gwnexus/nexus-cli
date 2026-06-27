@@ -257,6 +257,10 @@ pub struct AgentFileExportResponse {
     /// The CLI should check each and warn/prompt when a binary is missing.
     #[serde(default)]
     pub prerequisites: Vec<Prerequisite>,
+    /// Actors assigned to this project (delivered as profile markdown files).
+    /// Written to `<agentic_root>/actors/<slug>.md` during pull.
+    #[serde(default)]
+    pub actors: Vec<ExportedActorFile>,
 }
 
 fn default_agentic_root() -> String {
@@ -509,6 +513,110 @@ pub struct WorkspaceForkExportResponse {
     /// Present in ws_export (MCP) responses
     #[serde(default)]
     pub workspace_name: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Actors (POST /api/mcp/actors  action=actor_list / actor_get)
+// ---------------------------------------------------------------------------
+
+/// Avatar metadata for an actor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorAvatar {
+    /// Avatar style (e.g. "dicebear", "custom", "ai-generated").
+    #[serde(default)]
+    pub style: Option<String>,
+    /// Seed used for DiceBear generation.
+    #[serde(default)]
+    pub seed: Option<String>,
+    /// S3/CDN URL for the cached avatar SVG.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Content hash of the avatar SVG (for cache invalidation).
+    #[serde(default)]
+    pub content_hash: Option<String>,
+}
+
+/// A single actor summary returned by `actor_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorSummary {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub model_routing: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<ActorAvatar>,
+    #[serde(default)]
+    pub status: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response from `actor_list` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorListResponse {
+    pub action: String,
+    pub project_id: String,
+    pub count: usize,
+    pub actors: Vec<ActorSummary>,
+}
+
+/// Full actor profile returned by `actor_get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorProfile {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Full Markdown profile body for the actor.
+    #[serde(default)]
+    pub profile_body: Option<String>,
+    #[serde(default)]
+    pub model_routing: Option<String>,
+    #[serde(default)]
+    pub permissions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub avatar: Option<ActorAvatar>,
+    #[serde(default)]
+    pub status: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response from `actor_get` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorGetResponse {
+    pub action: String,
+    pub project_id: String,
+    pub actor: ActorProfile,
+}
+
+/// Response from actor avatar operations (generate/reset).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorAvatarResponse {
+    pub action: String,
+    pub actor_id: String,
+    #[serde(default)]
+    pub avatar: Option<ActorAvatar>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// An exported actor file entry from af_export (actor profiles delivered during pull).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedActorFile {
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    /// Markdown content for `.nexus/actors/<slug>.md`
+    pub body: String,
+    #[serde(default)]
+    pub avatar: Option<ActorAvatar>,
 }
 
 /// Generic API error shape returned by the Nexus server.

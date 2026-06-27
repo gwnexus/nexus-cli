@@ -1,5 +1,6 @@
 //! Command dispatcher and implementations.
 
+mod actors;
 mod auth;
 mod config_cmd;
 mod deinit;
@@ -15,8 +16,8 @@ pub(crate) mod sync;
 mod upgrade;
 
 use crate::{
-    Cli, Command, ConfigAction, GitAction, ShadowAction, SkillsAction, SyncAction, WorkspaceAction,
-    WorkspaceShadowAction,
+    ActorAvatarAction, ActorsAction, Cli, Command, ConfigAction, GitAction, ShadowAction,
+    SkillsAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
 };
 
 /// Dispatch the parsed CLI command to the appropriate handler.
@@ -69,6 +70,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             ref project_id,
             force,
             ref scope,
+            with_actor_assets,
         } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
@@ -78,6 +80,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 force || cli.yes,
                 config.mcp_source,
                 scope,
+                with_actor_assets,
             )
             .await?;
         }
@@ -167,6 +170,35 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         "No git_config set for this project. Configure it in the Nexus dashboard."
                     );
                 }
+            }
+        }
+        Command::Actors { ref action } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            match action {
+                ActorsAction::List { ref project_id } => {
+                    actors::list(&api_url, project_id.as_deref()).await?;
+                }
+                ActorsAction::Show {
+                    ref slug,
+                    ref project_id,
+                } => {
+                    actors::show(&api_url, slug, project_id.as_deref()).await?;
+                }
+                ActorsAction::Avatar { ref action } => match action {
+                    ActorAvatarAction::Generate {
+                        ref slug,
+                        ref project_id,
+                    } => {
+                        actors::avatar_generate(&api_url, slug, project_id.as_deref()).await?;
+                    }
+                    ActorAvatarAction::Reset {
+                        ref slug,
+                        ref project_id,
+                    } => {
+                        actors::avatar_reset(&api_url, slug, project_id.as_deref()).await?;
+                    }
+                },
             }
         }
     }

@@ -102,6 +102,10 @@ pub enum Command {
         /// Can be specified multiple times. If omitted, pulls everything.
         #[arg(long, value_delimiter = ',')]
         scope: Vec<String>,
+
+        /// Download actor avatar SVGs into .nexus/actors/assets/.
+        #[arg(long)]
+        with_actor_assets: bool,
     },
 
     /// Skills management subcommands.
@@ -151,6 +155,12 @@ pub enum Command {
     Git {
         #[command(subcommand)]
         action: GitAction,
+    },
+
+    /// Manage actors assigned to the linked project.
+    Actors {
+        #[command(subcommand)]
+        action: ActorsAction,
     },
 }
 
@@ -259,6 +269,57 @@ pub enum SkillsAction {
 
     /// Export enabled skills for the linked project as JSON.
     Export {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+}
+
+/// Actors management subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ActorsAction {
+    /// List actors assigned to the linked project.
+    List {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Show full actor profile.
+    Show {
+        /// Actor slug or UUID.
+        slug: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Manage actor avatars.
+    Avatar {
+        #[command(subcommand)]
+        action: ActorAvatarAction,
+    },
+}
+
+/// Actor avatar subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ActorAvatarAction {
+    /// Trigger avatar regeneration via API.
+    Generate {
+        /// Actor slug.
+        slug: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Reset avatar to DiceBear default.
+    Reset {
+        /// Actor slug.
+        slug: String,
+
         /// Override the linked project ID.
         #[arg(long)]
         project_id: Option<String>,
@@ -756,6 +817,93 @@ mod tests {
     #[test]
     fn test_parse_git_no_subcommand_fails() {
         let result = Cli::try_parse_from(["nexus", "git"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_pull_with_actor_assets() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--with-actor-assets"]).unwrap();
+        match cli.command {
+            Command::Pull {
+                with_actor_assets, ..
+            } => assert!(with_actor_assets),
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_default_no_actor_assets() {
+        let cli = Cli::try_parse_from(["nexus", "pull"]).unwrap();
+        match cli.command {
+            Command::Pull {
+                with_actor_assets, ..
+            } => assert!(!with_actor_assets),
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_list() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "list"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action: ActorsAction::List { ref project_id },
+            } => {
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Actors List command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_show() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "show", "my-agent"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action: ActorsAction::Show { ref slug, .. },
+            } => {
+                assert_eq!(slug, "my-agent");
+            }
+            _ => panic!("expected Actors Show command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_avatar_generate() {
+        let cli =
+            Cli::try_parse_from(["nexus", "actors", "avatar", "generate", "my-agent"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Avatar {
+                        action: ActorAvatarAction::Generate { ref slug, .. },
+                    },
+            } => {
+                assert_eq!(slug, "my-agent");
+            }
+            _ => panic!("expected Actors Avatar Generate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_avatar_reset() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "avatar", "reset", "my-agent"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Avatar {
+                        action: ActorAvatarAction::Reset { ref slug, .. },
+                    },
+            } => {
+                assert_eq!(slug, "my-agent");
+            }
+            _ => panic!("expected Actors Avatar Reset command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_no_subcommand_fails() {
+        let result = Cli::try_parse_from(["nexus", "actors"]);
         assert!(result.is_err());
     }
 }

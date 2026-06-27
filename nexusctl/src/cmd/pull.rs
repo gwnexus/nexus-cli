@@ -123,6 +123,7 @@ pub async fn run(
     force: bool,
     mcp_source: McpSource,
     scope: &[String],
+    with_actor_assets: bool,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -378,6 +379,74 @@ pub async fn run(
                 &agentic_root,
             )?;
             sync_agents_md(&workspace, &project_name, force, &agentic_root)?;
+        }
+    }
+
+    // Export actor profiles from af_export response.
+    // Writes `.nexus/actors/<slug>.md` for each assigned actor and
+    // `.nexus/generated/actors.json` with the full actor metadata.
+    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
+        if !af_export.actors.is_empty() {
+            let actors_dir = workspace.join(&agentic_root).join("actors");
+            fs::create_dir_all(&actors_dir)?;
+
+            let generated_dir = workspace.join(&agentic_root).join("generated");
+            fs::create_dir_all(&generated_dir)?;
+
+            let mut actors_written = 0;
+            for actor in &af_export.actors {
+                let actor_path = actors_dir.join(format!("{}.md", actor.slug));
+                fs::write(&actor_path, &actor.body)?;
+                actors_written += 1;
+            }
+
+            // Write actors.json with full metadata
+            let actors_json = serde_json::to_string_pretty(&af_export.actors)?;
+            fs::write(generated_dir.join("actors.json"), &actors_json)?;
+
+            if actors_written > 0 {
+                println!(
+                    "   {} {} actor profile(s) synced",
+                    style("+").bold().green(),
+                    actors_written
+                );
+            }
+
+            // Download avatar assets if --with-actor-assets was passed
+            if with_actor_assets {
+                let assets_dir = actors_dir.join("assets");
+                fs::create_dir_all(&assets_dir)?;
+
+                let mut assets_downloaded = 0;
+                for actor in &af_export.actors {
+                    if let Some(ref avatar) = actor.avatar {
+                        if let Some(ref url) = avatar.url {
+                            match client.download_actor_avatar(url).await {
+                                Ok(svg_bytes) => {
+                                    let dest = assets_dir.join(format!("{}.svg", actor.slug));
+                                    fs::write(&dest, &svg_bytes)?;
+                                    assets_downloaded += 1;
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "   {} Avatar for '{}' download failed: {}",
+                                        style("!").bold().yellow(),
+                                        actor.slug,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                if assets_downloaded > 0 {
+                    println!(
+                        "   {} {} actor avatar(s) downloaded",
+                        style("+").bold().green(),
+                        assets_downloaded
+                    );
+                }
+            }
         }
     }
 

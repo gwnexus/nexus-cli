@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-27
+
+### Added
+
+- **Actor profile delivery in `nexus pull`** — when the backend returns actor
+  data in the `af_export` response, the CLI now writes:
+  - `.nexus/actors/<slug>.md` for each assigned actor (Markdown profile)
+  - `.nexus/generated/actors.json` with full actor metadata (JSON export)
+  This aligns with ADR-0053/0054 (Nexus Actor System).
+
+- **`nexus pull --with-actor-assets`** — new flag to download cached actor
+  avatar SVGs from the platform into `.nexus/actors/assets/<slug>.svg`.
+  Default: metadata only (no binary assets). Avatar URLs come from the
+  `actors[].avatar.url` field in the af_export response.
+
+- **`nexus actors` command group** — new top-level command with subcommands:
+  - `nexus actors list` — list actors assigned to the linked project
+  - `nexus actors show <slug>` — show full actor profile (role, model
+    routing, permissions, profile body)
+  - `nexus actors avatar generate <slug>` — trigger avatar regeneration
+    via API
+  - `nexus actors avatar reset <slug>` — reset avatar to DiceBear default
+
+- **Actor API types** — `nexus-core` now exports `ActorSummary`,
+  `ActorProfile`, `ActorAvatar`, `ActorListResponse`, `ActorGetResponse`,
+  `ActorAvatarResponse`, and `ExportedActorFile` types.
+
+- **NexusClient actor methods** — `list_actors()`, `get_actor()`,
+  `generate_actor_avatar()`, `reset_actor_avatar()`, and
+  `download_actor_avatar()` added to the HTTP client.
+
 ## [0.8.0] - 2026-06-27
 
 ### Added

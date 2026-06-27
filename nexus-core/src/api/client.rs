@@ -10,10 +10,11 @@ use serde_json::json;
 use tracing::debug;
 
 use crate::api::types::{
-    AgentFileExportResponse, ApiError, AuthStatus, AuthStatusResponse, DirectiveExportResponse,
-    IdentityResponse, ProjectDetailResponse, ProjectListResponse, SkillExportResponse,
-    SkillListResponse, SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse,
-    TaskListResponse, WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
+    ActorAvatarResponse, ActorGetResponse, ActorListResponse, AgentFileExportResponse, ApiError,
+    AuthStatus, AuthStatusResponse, DirectiveExportResponse, IdentityResponse,
+    ProjectDetailResponse, ProjectListResponse, SkillExportResponse, SkillListResponse,
+    SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse, TaskListResponse,
+    WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
 };
 use crate::Error;
 
@@ -242,6 +243,81 @@ impl NexusClient {
             project_id, fork_id
         );
         self.post(&path, &json!({})).await
+    }
+
+    // -- Actors ---------------------------------------------------------------
+
+    /// List actors assigned to a project via `POST /api/mcp/actors`.
+    ///
+    /// Calls the `actor_list` action.
+    pub async fn list_actors(&self, project_id: &str) -> Result<ActorListResponse, Error> {
+        let body = json!({
+            "action": "actor_list",
+            "project_id": project_id
+        });
+        self.post("/api/mcp/actors", &body).await
+    }
+
+    /// Get a single actor profile via `POST /api/mcp/actors`.
+    ///
+    /// Calls the `actor_get` action. Accepts slug or UUID.
+    pub async fn get_actor(
+        &self,
+        project_id: &str,
+        actor_slug: &str,
+    ) -> Result<ActorGetResponse, Error> {
+        let body = json!({
+            "action": "actor_get",
+            "project_id": project_id,
+            "actor_slug": actor_slug
+        });
+        self.post("/api/mcp/actors", &body).await
+    }
+
+    /// Trigger avatar regeneration for an actor via `POST /api/mcp/actors`.
+    ///
+    /// Calls the `actor_avatar_generate` action.
+    pub async fn generate_actor_avatar(
+        &self,
+        project_id: &str,
+        actor_slug: &str,
+    ) -> Result<ActorAvatarResponse, Error> {
+        let body = json!({
+            "action": "actor_avatar_generate",
+            "project_id": project_id,
+            "actor_slug": actor_slug
+        });
+        self.post("/api/mcp/actors", &body).await
+    }
+
+    /// Reset actor avatar to DiceBear default via `POST /api/mcp/actors`.
+    ///
+    /// Calls the `actor_avatar_reset` action.
+    pub async fn reset_actor_avatar(
+        &self,
+        project_id: &str,
+        actor_slug: &str,
+    ) -> Result<ActorAvatarResponse, Error> {
+        let body = json!({
+            "action": "actor_avatar_reset",
+            "project_id": project_id,
+            "actor_slug": actor_slug
+        });
+        self.post("/api/mcp/actors", &body).await
+    }
+
+    /// Download an actor avatar SVG from the provided URL.
+    ///
+    /// Returns the SVG content as bytes. Used by `nexus pull --with-actor-assets`.
+    pub async fn download_actor_avatar(&self, url: &str) -> Result<Vec<u8>, Error> {
+        let resp = self.client.get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(Error::Api(format!(
+                "Avatar download failed: HTTP {}",
+                resp.status()
+            )));
+        }
+        Ok(resp.bytes().await?.to_vec())
     }
 
     // -- Sync protocol (ADR-0036) -------------------------------------------
