@@ -10,11 +10,12 @@ use serde_json::json;
 use tracing::debug;
 
 use crate::api::types::{
-    ActorAvatarResponse, ActorGetResponse, ActorListResponse, AgentFileExportResponse, ApiError,
-    AuthStatus, AuthStatusResponse, DirectiveExportResponse, IdentityResponse,
-    ProjectDetailResponse, ProjectListResponse, SkillExportResponse, SkillListResponse,
-    SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse, TaskListResponse,
-    WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
+    ActorAvatarResponse, ActorExportResponse, ActorGetResponse, ActorImportPayload,
+    ActorImportResponse, ActorListResponse, AgentFileExportResponse, ApiError, AuthStatus,
+    AuthStatusResponse, DirectiveExportResponse, IdentityResponse, ProjectDetailResponse,
+    ProjectListResponse, SkillExportResponse, SkillListResponse, SyncCheckResponse, SyncFileHash,
+    SyncResponse, SyncStatusResponse, TaskListResponse, WorkspaceExportResponse,
+    WorkspaceForkExportResponse, WorkspaceForksResponse,
 };
 use crate::Error;
 
@@ -318,6 +319,32 @@ impl NexusClient {
             )));
         }
         Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// Import actor profiles into the Actor Registry via `POST /api/mcp/actors`.
+    ///
+    /// Calls the `actor_import` action.
+    pub async fn import_actors(
+        &self,
+        payload: &ActorImportPayload,
+    ) -> Result<ActorImportResponse, Error> {
+        self.post("/api/mcp/actors", payload).await
+    }
+
+    /// Export actor configuration for a target format via `POST /api/mcp/actors`.
+    ///
+    /// Calls the `actor_export` action. Target: "opencode" for opencode.json agent section.
+    pub async fn export_actors(
+        &self,
+        project_id: &str,
+        target: &str,
+    ) -> Result<ActorExportResponse, Error> {
+        let body = json!({
+            "action": "actor_export",
+            "project_id": project_id,
+            "target": target
+        });
+        self.post("/api/mcp/actors", &body).await
     }
 
     // -- Sync protocol (ADR-0036) -------------------------------------------

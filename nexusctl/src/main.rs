@@ -106,6 +106,10 @@ pub enum Command {
         /// Download actor avatar SVGs into .nexus/actors/assets/.
         #[arg(long)]
         with_actor_assets: bool,
+
+        /// Skip actor asset download (metadata only). This is the default.
+        #[arg(long)]
+        skip_actor_assets: bool,
     },
 
     /// Skills management subcommands.
@@ -289,6 +293,43 @@ pub enum ActorsAction {
     Show {
         /// Actor slug or UUID.
         slug: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Normalize actor markdown to YAML frontmatter format.
+    Normalize {
+        /// Path to actor markdown file.
+        path: String,
+    },
+
+    /// Validate actor profile(s) against schema and model route catalog.
+    Validate {
+        /// Path to actor markdown file.
+        path: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Import validated actor profiles into the Actor Registry.
+    Import {
+        /// Path to actor markdown file or directory.
+        path: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Export actor configuration for a target format.
+    Export {
+        /// Export target format.
+        #[arg(long, default_value = "opencode")]
+        target: String,
 
         /// Override the linked project ID.
         #[arg(long)]

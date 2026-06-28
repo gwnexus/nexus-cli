@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-06-28
+
+### Added
+
+- **`nexus actors normalize <path>`** — normalize actor markdown files to
+  canonical YAML frontmatter format (ADR-0056). Extracts or infers slug, name,
+  role, description, and route_alias fields, then rewrites the file with
+  consistent frontmatter structure.
+
+- **`nexus actors validate <path>`** — validate actor profile(s) against the
+  expected schema. Checks required frontmatter fields (slug, name, role), slug
+  format, and route_alias references against the model route catalog (ADR-0055).
+  Reports errors and warnings.
+
+- **`nexus actors import <path>`** — import validated actor profiles from local
+  markdown files (or a directory of .md files) into the Actor Registry via
+  `POST /api/mcp/actors` with `actor_import` action.
+
+- **`nexus actors export --target opencode`** — export actor configuration for
+  opencode.json format via `POST /api/mcp/actors` with `actor_export` action.
+  Outputs the JSON agent block to stdout.
+
+- **`opencode_agents` merge in `nexus pull`** — when the af_export response
+  includes an `opencode_agents` field, it is merged into `opencode.json` as the
+  `"agents"` top-level key alongside `"mcp"` and `"provider"`.
+
+- **Model route deprecation warnings** — `nexus pull` now checks if any
+  assigned actor references a deprecated model route (ADR-0055) and prints a
+  warning with the deprecation message.
+
+- **`nexus pull --skip-actor-assets`** — explicit flag to skip avatar asset
+  downloads (complement to `--with-actor-assets`). `--skip-actor-assets` takes
+  precedence when both are specified.
+
+- **`ModelRoute` type** — `nexus-core` exports `ModelRoute` with alias,
+  provider, model, deprecated flag, and deprecation message fields.
+
+- **Actor import/export API methods** — `import_actors()` and
+  `export_actors()` added to NexusClient.
+
 ## [0.9.0] - 2026-06-27
 
 ### Added

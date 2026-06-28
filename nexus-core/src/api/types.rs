@@ -261,6 +261,14 @@ pub struct AgentFileExportResponse {
     /// Written to `<agentic_root>/actors/<slug>.md` during pull.
     #[serde(default)]
     pub actors: Vec<ExportedActorFile>,
+    /// OpenCode agent configs to merge into `opencode.json` `"agents"` section.
+    /// Delivered by the backend when actors have opencode-compatible agent definitions.
+    #[serde(default)]
+    pub opencode_agents: Option<serde_json::Value>,
+    /// Model routes defined for this project (ADR-0055).
+    /// Used for route validation and deprecation warnings during pull.
+    #[serde(default)]
+    pub model_routes: Vec<ModelRoute>,
 }
 
 fn default_agentic_root() -> String {
@@ -617,6 +625,78 @@ pub struct ExportedActorFile {
     pub body: String,
     #[serde(default)]
     pub avatar: Option<ActorAvatar>,
+    /// Model route alias used by this actor (ADR-0055).
+    #[serde(default)]
+    pub route_alias: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Model Routes (ADR-0055)
+// ---------------------------------------------------------------------------
+
+/// A model route entry from the route catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoute {
+    pub alias: String,
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub deprecated: bool,
+    #[serde(default)]
+    pub deprecated_message: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Actor import (POST /api/mcp/actors  action=actor_import)
+// ---------------------------------------------------------------------------
+
+/// A single actor profile to import into the Actor Registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorImportEntry {
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub model_routing: Option<String>,
+    #[serde(default)]
+    pub route_alias: Option<String>,
+    /// Full Markdown profile body.
+    #[serde(default)]
+    pub profile_body: Option<String>,
+}
+
+/// Request payload for actor import.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActorImportPayload {
+    pub action: String,
+    pub project_id: String,
+    pub actors: Vec<ActorImportEntry>,
+}
+
+/// Response from actor import.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActorImportResponse {
+    pub action: String,
+    pub project_id: String,
+    pub imported: usize,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Response from actor export action.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActorExportResponse {
+    pub action: String,
+    pub project_id: String,
+    /// OpenCode-compatible agent configuration.
+    #[serde(default)]
+    pub opencode_agents: Option<serde_json::Value>,
+    #[serde(default)]
+    pub count: usize,
 }
 
 /// Generic API error shape returned by the Nexus server.

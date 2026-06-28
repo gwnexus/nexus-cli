@@ -450,6 +450,41 @@ pub async fn run(
         }
     }
 
+    // Check for deprecated model routes used by actors (ADR-0055)
+    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
+        if !af_export.model_routes.is_empty() {
+            let deprecated_routes: std::collections::HashMap<&str, &str> = af_export
+                .model_routes
+                .iter()
+                .filter(|r| r.deprecated)
+                .map(|r| {
+                    (
+                        r.alias.as_str(),
+                        r.deprecated_message
+                            .as_deref()
+                            .unwrap_or("deprecated, no replacement specified"),
+                    )
+                })
+                .collect();
+
+            if !deprecated_routes.is_empty() {
+                for actor in &af_export.actors {
+                    if let Some(ref route) = actor.route_alias {
+                        if let Some(msg) = deprecated_routes.get(route.as_str()) {
+                            println!(
+                                "   {} Actor '{}' uses deprecated route '{}': {}",
+                                style("!").bold().yellow(),
+                                actor.slug,
+                                route,
+                                msg
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Resolve tool flavor and plugin MCP servers from af_export response
     let tool_flavor = match af_export_result
         .as_ref()
@@ -487,6 +522,12 @@ pub async fn run(
         .and_then(|r| r.auth_token.clone())
         .unwrap_or_else(|| token.to_string());
 
+    // Resolve opencode_agents from af_export response
+    let opencode_agents = af_export_result
+        .as_ref()
+        .ok()
+        .and_then(|r| r.opencode_agents.clone());
+
     // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
     write_mcp_configs(
         &workspace,
@@ -497,6 +538,7 @@ pub async fn run(
         &agentic_root,
         &plugin_mcp_servers,
         &providers,
+        &opencode_agents,
         force,
     )?;
 
@@ -1256,6 +1298,7 @@ fn write_mcp_configs(
     agentic_root: &str,
     plugin_mcp_servers: &HashMap<String, McpServerConfig>,
     providers: &HashMap<String, ProviderConfig>,
+    opencode_agents: &Option<serde_json::Value>,
     force: bool,
 ) -> anyhow::Result<()> {
     let opencode_path = workspace.join("opencode.json");
@@ -1272,8 +1315,11 @@ fn write_mcp_configs(
     // ── opencode.json ──────────────────────────────────────────────────────
     if !skip_opencode {
         let exists = opencode_path.exists();
-        let needs_write =
-            !exists || force || !plugin_mcp_servers.is_empty() || !providers.is_empty();
+        let needs_write = !exists
+            || force
+            || !plugin_mcp_servers.is_empty()
+            || !providers.is_empty()
+            || opencode_agents.is_some();
 
         if needs_write {
             let mut mcp_block: serde_json::Map<String, serde_json::Value> = if exists && !force {
@@ -1366,6 +1412,11 @@ fn write_mcp_configs(
                     "provider".to_string(),
                     serde_json::Value::Object(provider_block),
                 );
+            }
+
+            // OpenCode agents block from platform actor system
+            if let Some(agents) = opencode_agents {
+                opencode_obj.insert("agents".to_string(), agents.clone());
             }
 
             let opencode_json = serde_json::Value::Object(opencode_obj);
@@ -2361,6 +2412,7 @@ mod tests {
             ".nexus",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             false,
         )
         .unwrap();
@@ -2395,6 +2447,7 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             false,
         )
         .unwrap();
@@ -2437,6 +2490,7 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             false,
         )
         .unwrap();
@@ -2470,6 +2524,7 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             false,
         )
         .unwrap();
@@ -2499,6 +2554,7 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             false,
         )
         .unwrap();
@@ -2664,6 +2720,7 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &providers,
+            &None,
             false,
         )
         .unwrap();
@@ -2701,6 +2758,7 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             false,
         )
         .unwrap();
@@ -2735,6 +2793,7 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &providers,
+            &None,
             false,
         )
         .unwrap();
@@ -2761,6 +2820,7 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &providers,
+            &None,
             false,
         )
         .unwrap();
@@ -2800,6 +2860,7 @@ mod tests {
             ".claude",
             &plugins,
             &providers,
+            &None,
             false,
         )
         .unwrap();
@@ -2900,6 +2961,7 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             false,
         )
         .unwrap();

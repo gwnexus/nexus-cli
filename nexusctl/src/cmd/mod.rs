@@ -71,16 +71,19 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             force,
             ref scope,
             with_actor_assets,
+            skip_actor_assets,
         } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
+            // --skip-actor-assets takes precedence over --with-actor-assets
+            let effective_with_assets = with_actor_assets && !skip_actor_assets;
             pull::run(
                 &api_url,
                 project_id.as_deref(),
                 force || cli.yes,
                 config.mcp_source,
                 scope,
-                with_actor_assets,
+                effective_with_assets,
             )
             .await?;
         }
@@ -184,6 +187,27 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     ref project_id,
                 } => {
                     actors::show(&api_url, slug, project_id.as_deref()).await?;
+                }
+                ActorsAction::Normalize { ref path } => {
+                    actors::normalize(path)?;
+                }
+                ActorsAction::Validate {
+                    ref path,
+                    ref project_id,
+                } => {
+                    actors::validate(&api_url, path, project_id.as_deref()).await?;
+                }
+                ActorsAction::Import {
+                    ref path,
+                    ref project_id,
+                } => {
+                    actors::import(&api_url, path, project_id.as_deref()).await?;
+                }
+                ActorsAction::Export {
+                    ref target,
+                    ref project_id,
+                } => {
+                    actors::export(&api_url, target, project_id.as_deref()).await?;
                 }
                 ActorsAction::Avatar { ref action } => match action {
                     ActorAvatarAction::Generate {
