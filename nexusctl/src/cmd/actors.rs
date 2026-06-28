@@ -524,3 +524,138 @@ fn parse_frontmatter(content: &str) -> (std::collections::HashMap<String, String
 
     (map, body_start)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- parse_frontmatter tests --
+
+    #[test]
+    fn test_parse_frontmatter_valid() {
+        let content = "---\nslug: my-agent\nname: My Agent\nrole: developer\n---\n\n# Profile\n\nHello world.\n";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("slug").unwrap(), "my-agent");
+        assert_eq!(fm.get("name").unwrap(), "My Agent");
+        assert_eq!(fm.get("role").unwrap(), "developer");
+        assert!(body.contains("# Profile"));
+        assert!(body.contains("Hello world."));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_no_frontmatter() {
+        let content = "# Just a markdown file\n\nNo frontmatter here.\n";
+        let (fm, body) = parse_frontmatter(content);
+        assert!(fm.is_empty());
+        assert_eq!(body, content);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_empty_values_skipped() {
+        let content = "---\nslug: my-agent\nempty_field:\nrole: agent\n---\n\nBody.\n";
+        let (fm, _body) = parse_frontmatter(content);
+        assert_eq!(fm.get("slug").unwrap(), "my-agent");
+        assert_eq!(fm.get("role").unwrap(), "agent");
+        assert!(!fm.contains_key("empty_field"));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_comments_ignored() {
+        let content = "---\n# This is a comment\nslug: test\nname: Test Agent\n---\n\nBody.\n";
+        let (fm, _body) = parse_frontmatter(content);
+        assert_eq!(fm.len(), 2);
+        assert_eq!(fm.get("slug").unwrap(), "test");
+        assert_eq!(fm.get("name").unwrap(), "Test Agent");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_colon_in_value() {
+        let content = "---\nslug: my-agent\ndescription: A description: with colon\n---\n\nBody.\n";
+        let (fm, _body) = parse_frontmatter(content);
+        assert_eq!(fm.get("slug").unwrap(), "my-agent");
+        assert_eq!(fm.get("description").unwrap(), "A description: with colon");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_unclosed_returns_raw() {
+        let content = "---\nslug: my-agent\nname: Test\n";
+        let (fm, body) = parse_frontmatter(content);
+        assert!(fm.is_empty());
+        assert_eq!(body, content);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_with_route_alias() {
+        let content =
+            "---\nslug: coder\nname: Coder\nrole: developer\nroute_alias: fast-model\n---\n\nDoes coding.\n";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("slug").unwrap(), "coder");
+        assert_eq!(fm.get("route_alias").unwrap(), "fast-model");
+        assert!(body.contains("Does coding."));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_leading_whitespace() {
+        let content = "\n\n---\nslug: test\n---\n\nBody.\n";
+        let (fm, _body) = parse_frontmatter(content);
+        assert_eq!(fm.get("slug").unwrap(), "test");
+    }
+
+    // -- normalize tests --
+
+    #[test]
+    fn test_normalize_creates_frontmatter() {
+        let dir = std::env::temp_dir().join("nexus-actors-test-normalize");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let file = dir.join("my-agent.md");
+        fs::write(&file, "# My Agent\n\nJust a plain profile.\n").unwrap();
+
+        normalize(file.to_str().unwrap()).unwrap();
+
+        let result = fs::read_to_string(&file).unwrap();
+        assert!(result.starts_with("---\n"));
+        assert!(result.contains("slug: my-agent"));
+        assert!(result.contains("name: my-agent"));
+        assert!(result.contains("role: agent"));
+        assert!(result.contains("source: nexus-platform"));
+        assert!(result.contains("# My Agent"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_normalize_preserves_existing_frontmatter() {
+        let dir = std::env::temp_dir().join("nexus-actors-test-normalize-existing");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let file = dir.join("coder.md");
+        let input = "---\nslug: coder\nname: The Coder\nrole: developer\ndescription: Writes code\nroute_alias: opus-4\n---\n\n# Profile Body\n";
+        fs::write(&file, input).unwrap();
+
+        normalize(file.to_str().unwrap()).unwrap();
+
+        let result = fs::read_to_string(&file).unwrap();
+        assert!(result.contains("slug: coder"));
+        assert!(result.contains("name: The Coder"));
+        assert!(result.contains("role: developer"));
+        assert!(result.contains("description: Writes code"));
+        assert!(result.contains("route_alias: opus-4"));
+        assert!(result.contains("source: nexus-platform"));
+        assert!(result.contains("# Profile Body"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_normalize_nonexistent_file_errors() {
+        let result = normalize("/tmp/nexus-does-not-exist-xyz.md");
+        assert!(result.is_err());
+    }
+}

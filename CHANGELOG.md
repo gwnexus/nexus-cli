@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-06-28
+
+### Added
+
+- **Unit tests for `parse_frontmatter()`** — 8 tests covering: valid frontmatter
+  extraction, missing frontmatter passthrough, empty values skipped, comments
+  ignored, colons in values, unclosed frontmatter, route_alias parsing, leading
+  whitespace handling.
+
+- **Unit tests for `normalize()`** — 3 tests covering: creating frontmatter from
+  plain markdown (infers slug from filename), preserving existing frontmatter
+  fields during normalization, error on nonexistent file.
+
+- **CLI parser tests for new actors subcommands** — 7 tests covering:
+  `actors normalize`, `actors validate`, `actors validate --project-id`,
+  `actors import`, `actors export` (default target), `actors export --target`,
+  `pull --skip-actor-assets`.
+
+Total test count: 149 → 167 (+18 new tests).
+
 ## [0.9.1] - 2026-06-28
 
 ### Added

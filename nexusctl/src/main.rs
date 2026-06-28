@@ -947,4 +947,130 @@ mod tests {
         let result = Cli::try_parse_from(["nexus", "actors"]);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_parse_actors_normalize() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "normalize", "/tmp/actor.md"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action: ActorsAction::Normalize { ref path },
+            } => {
+                assert_eq!(path, "/tmp/actor.md");
+            }
+            _ => panic!("expected Actors Normalize command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_validate() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "validate", "/tmp/actor.md"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Validate {
+                        ref path,
+                        ref project_id,
+                    },
+            } => {
+                assert_eq!(path, "/tmp/actor.md");
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Actors Validate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_validate_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "actors",
+            "validate",
+            "/tmp/actor.md",
+            "--project-id",
+            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Validate {
+                        ref path,
+                        ref project_id,
+                    },
+            } => {
+                assert_eq!(path, "/tmp/actor.md");
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                );
+            }
+            _ => panic!("expected Actors Validate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_import() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "import", "./actors/"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Import {
+                        ref path,
+                        ref project_id,
+                    },
+            } => {
+                assert_eq!(path, "./actors/");
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Actors Import command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_export_default_target() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "export"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Export {
+                        ref target,
+                        ref project_id,
+                    },
+            } => {
+                assert_eq!(target, "opencode");
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Actors Export command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_export_custom_target() {
+        let cli =
+            Cli::try_parse_from(["nexus", "actors", "export", "--target", "opencode"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action: ActorsAction::Export { ref target, .. },
+            } => {
+                assert_eq!(target, "opencode");
+            }
+            _ => panic!("expected Actors Export command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_skip_actor_assets() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--skip-actor-assets"]).unwrap();
+        match cli.command {
+            Command::Pull {
+                skip_actor_assets,
+                with_actor_assets,
+                ..
+            } => {
+                assert!(skip_actor_assets);
+                assert!(!with_actor_assets);
+            }
+            _ => panic!("expected Pull command"),
+        }
+    }
 }
