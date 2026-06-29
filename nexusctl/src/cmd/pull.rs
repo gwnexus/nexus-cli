@@ -1414,9 +1414,10 @@ fn write_mcp_configs(
                 );
             }
 
-            // OpenCode agents block from platform actor system
+            // OpenCode agents block from platform actor system (key must be "agent", singular)
+            // https://opencode.ai/docs/agents/#json
             if let Some(agents) = opencode_agents {
-                opencode_obj.insert("agents".to_string(), agents.clone());
+                opencode_obj.insert("agent".to_string(), agents.clone());
             }
 
             let opencode_json = serde_json::Value::Object(opencode_obj);
