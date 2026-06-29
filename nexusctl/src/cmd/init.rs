@@ -342,7 +342,10 @@ pub async fn run(
                 Ok(ref af_export) => {
                     if !af_export.agent_files.is_empty() {
                         for af in &af_export.agent_files {
-                            write_agent_file(&target, af)?;
+                            let written = write_agent_file(&target, af)?;
+                            if !written {
+                                continue;
+                            }
 
                             // Update sync manifest with content hash from server
                             if let Some(ref hash) = af.content_hash {
@@ -1070,19 +1073,31 @@ fn write_directives(
 ///
 /// Creates any intermediate directories as needed.
 /// The file body is already template-substituted by the server.
-fn write_agent_file(target: &Path, af: &nexus_core::api::ExportedAgentFile) -> anyhow::Result<()> {
-    // Protected file guard: never overwrite secrets/env files
+///
+/// Returns `Ok(false)` when the file was skipped due to a protected path
+/// (existing secrets/env file) — the caller should `continue` and not
+/// count this as an error. Returns `Ok(true)` on a successful write.
+fn write_agent_file(
+    target: &Path,
+    af: &nexus_core::api::ExportedAgentFile,
+) -> anyhow::Result<bool> {
+    // Protected file guard: never overwrite secrets/env files.
+    // This is NOT an error — the workspace init succeeded, the env file is
+    // intentionally left untouched. Emit a warning and skip silently.
     if super::pull::is_protected_path(&af.target_path) {
         let dest = target.join(&af.target_path);
         if dest.exists() {
-            anyhow::bail!(
-                "refusing to write: '{}' matches a protected file pattern (secrets/env files are never overwritten)",
+            println!(
+                "   {} '{}' matches a protected file pattern, skipping (secrets/env files are never overwritten)",
+                style("!").bold().yellow(),
                 af.target_path
             );
+            return Ok(false);
         }
     }
 
-    // Path traversal protection: reject target_path with parent-dir components
+    // Path traversal protection: reject target_path with parent-dir components.
+    // This IS a hard error — it indicates a malformed or malicious response.
     let normalized = Path::new(&af.target_path);
     for component in normalized.components() {
         if matches!(component, std::path::Component::ParentDir) {
@@ -1102,7 +1117,7 @@ fn write_agent_file(target: &Path, af: &nexus_core::api::ExportedAgentFile) -> a
     fs::write(&dest, &af.body)?;
     print_created(&af.target_path);
 
-    Ok(())
+    Ok(true)
 }
 
 /// Capitalize the first letter of a string.

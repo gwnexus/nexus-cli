@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-06-29
+
+### Fixed
+
+- **`nexus init`: protected file refusal no longer exits with code 1** — when
+  `nexus init` encounters an existing protected file (e.g. `.env.nexus.local`)
+  during agent file delivery, it now prints a yellow warning and continues
+  instead of calling `anyhow::bail!()`. The workspace is fully initialized;
+  only the env file is intentionally skipped. Exit code is now 0 in all cases
+  where the workspace itself was set up correctly.
+
+  Path traversal attempts (`..` in `target_path`) remain a hard error — that
+  indicates a malformed or malicious server response. (Dispatch 038595ee)
+
 ## [0.9.2] - 2026-06-28
 
 ### Added
