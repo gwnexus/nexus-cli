@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-06-30
+
+### Security
+
+- **SEC-001: quinn-proto upgraded to 0.11.15** — fixes RUSTSEC-2026-0185
+  (remote memory exhaustion via unbounded out-of-order QUIC stream reassembly,
+  CVSS 7.5 high). Transitive via `reqwest`.
+
+- **SEC-002: anyhow upgraded to 1.0.103** — addresses RUSTSEC-2026-0190
+  (unsoundness in `Error::downcast_mut()`). No direct call to `downcast_mut()`
+  in nexus-cli source; upgrade is precautionary.
+
+- **SEC-003: URL allowlist for plugin and avatar downloads** — `nexus pull` and
+  `nexus init` now validate all remote download URLs (plugin registries, actor
+  avatar assets) against a trusted-host allowlist before fetching:
+  `nexus.gatewarden.eu`, `cdn.gatewarden.eu`, `raw.githubusercontent.com`,
+  `github.com`, `objects.githubusercontent.com`. Non-HTTPS URLs and
+  non-allowlisted hosts are rejected with a warning. Prevents SSRF if the
+  API response is ever compromised. (CWE-918)
+
+- **SEC-004: nexus upgrade — supply-chain risk documented** — module-level doc
+  comment and runtime output now explicitly note that `nexus upgrade` runs
+  `curl | bash` without checksum verification. Alternative GitHub Releases
+  download URL shown on failure. (CWE-494)
+
+`cargo audit` passes with 0 vulnerabilities and 0 warnings after these updates.
+
 ## [0.9.4] - 2026-06-29
 
 ### Fixed
