@@ -239,21 +239,26 @@ pub async fn validate(
             {
                 if let Ok(client) = NexusClient::new(api_url, Some(token)) {
                     if let Ok(af_export) = client.export_agent_files(&project_id).await {
-                        if !af_export.model_routes.is_empty() {
-                            let route_exists = af_export
-                                .model_routes
-                                .iter()
-                                .any(|r| r.alias == *route_alias);
+                        // model_routes is now Option<serde_json::Value> map format (ADR-0057)
+                        if let Some(ref routes_val) = af_export.model_routes {
+                            let route_exists = routes_val
+                                .as_object()
+                                .map(|m| m.contains_key(route_alias.as_str()))
+                                .unwrap_or(false);
                             if !route_exists {
                                 errors.push(format!(
                                     "route_alias '{}' not found in model route catalog",
                                     route_alias
                                 ));
                             }
-                            let is_deprecated = af_export
-                                .model_routes
-                                .iter()
-                                .any(|r| r.alias == *route_alias && r.deprecated);
+                            // Check deprecated status in new map format
+                            let is_deprecated = routes_val
+                                .as_object()
+                                .and_then(|m| m.get(route_alias.as_str()))
+                                .and_then(|r| r.get("lifecycle_status"))
+                                .and_then(|s| s.as_str())
+                                .map(|s| s == "deprecated")
+                                .unwrap_or(false);
                             if is_deprecated {
                                 warnings.push(format!(
                                     "route_alias '{}' references a deprecated route",

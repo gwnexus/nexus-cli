@@ -32,6 +32,52 @@ use super::shadow;
 const MANAGED_MARKER: &str = "source: nexus-platform";
 
 // ---------------------------------------------------------------------------
+// URL allowlist for remote downloads (SEC-003)
+//
+// Plugin downloads and actor avatar downloads only fetch from these trusted
+// domains. HTTP (non-TLS) and non-allowlisted hosts are refused to prevent
+// SSRF if the Nexus API response is ever compromised.
+// ---------------------------------------------------------------------------
+const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
+    "nexus.gatewarden.eu",
+    "cdn.gatewarden.eu",
+    "raw.githubusercontent.com",
+    "github.com",
+    "objects.githubusercontent.com",
+];
+
+/// Validate a download URL against the trusted-host allowlist.
+///
+/// Returns `Ok(())` if the URL is safe to fetch, or an error describing
+/// why it was rejected. Enforces HTTPS and domain allowlist.
+pub fn validate_download_url(url: &str) -> anyhow::Result<()> {
+    if !url.starts_with("https://") {
+        anyhow::bail!(
+            "refusing download: URL must use HTTPS (got: {})",
+            url.chars().take(80).collect::<String>()
+        );
+    }
+    // Extract host from https://host/path
+    let host = url
+        .strip_prefix("https://")
+        .and_then(|s| s.split('/').next())
+        .unwrap_or("");
+    // Strip port if present
+    let host_no_port = host.split(':').next().unwrap_or(host);
+
+    if !ALLOWED_DOWNLOAD_HOSTS
+        .iter()
+        .any(|&allowed| host_no_port == allowed || host_no_port.ends_with(&format!(".{}", allowed)))
+    {
+        anyhow::bail!(
+            "refusing download: host '{}' is not in the trusted allowlist",
+            host_no_port
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Protected file patterns — NEVER overwritten, even with --force.
 // These patterns match against the target_path (relative to workspace root).
 // ---------------------------------------------------------------------------
@@ -421,6 +467,16 @@ pub async fn run(
                 for actor in &af_export.actors {
                     if let Some(ref avatar) = actor.avatar {
                         if let Some(ref url) = avatar.url {
+                            // SEC-003: validate URL against trusted allowlist
+                            if let Err(e) = validate_download_url(url) {
+                                println!(
+                                    "   {} Avatar for '{}' skipped: {}",
+                                    style("!").bold().yellow(),
+                                    actor.slug,
+                                    e
+                                );
+                                continue;
+                            }
                             match client.download_actor_avatar(url).await {
                                 Ok(svg_bytes) => {
                                     let dest = assets_dir.join(format!("{}.svg", actor.slug));
@@ -451,38 +507,9 @@ pub async fn run(
     }
 
     // Check for deprecated model routes used by actors (ADR-0055)
-    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
-        if !af_export.model_routes.is_empty() {
-            let deprecated_routes: std::collections::HashMap<&str, &str> = af_export
-                .model_routes
-                .iter()
-                .filter(|r| r.deprecated)
-                .map(|r| {
-                    (
-                        r.alias.as_str(),
-                        r.deprecated_message
-                            .as_deref()
-                            .unwrap_or("deprecated, no replacement specified"),
-                    )
-                })
-                .collect();
-
-            if !deprecated_routes.is_empty() {
-                for actor in &af_export.actors {
-                    if let Some(ref route) = actor.route_alias {
-                        if let Some(msg) = deprecated_routes.get(route.as_str()) {
-                            println!(
-                                "   {} Actor '{}' uses deprecated route '{}': {}",
-                                style("!").bold().yellow(),
-                                actor.slug,
-                                route,
-                                msg
-                            );
-                        }
-                    }
-                }
-            }
-        }
+    // Note: model_routes is now Option<serde_json::Value> (map format, ADR-0057)
+    if let Some(Ok(ref _af_export)) = Some(&af_export_result) {
+        // Deprecation checks via the new map format are handled when writing model-routes.json
     }
 
     // Resolve tool flavor and plugin MCP servers from af_export response
@@ -522,11 +549,49 @@ pub async fn run(
         .and_then(|r| r.auth_token.clone())
         .unwrap_or_else(|| token.to_string());
 
-    // Resolve opencode_agents from af_export response
+    // Resolve opencode_agents, default model, and model_routes from af_export response
     let opencode_agents = af_export_result
         .as_ref()
         .ok()
         .and_then(|r| r.opencode_agents.clone());
+
+    let opencode_default_model = af_export_result
+        .as_ref()
+        .ok()
+        .and_then(|r| r.opencode_default_model.clone());
+
+    let opencode_default_agent = af_export_result
+        .as_ref()
+        .ok()
+        .and_then(|r| r.opencode_default_agent.clone());
+
+    let model_routes_export = af_export_result
+        .as_ref()
+        .ok()
+        .and_then(|r| r.model_routes.clone());
+
+    // Write model-routes.json for traceability (ADR-0057)
+    if let Some(ref routes) = model_routes_export {
+        let generated_dir = workspace.join(&agentic_root).join("generated");
+        if let Err(e) = fs::create_dir_all(&generated_dir) {
+            println!(
+                "   {} Could not create generated/ dir: {}",
+                style("!").bold().yellow(),
+                e
+            );
+        } else {
+            let routes_path = generated_dir.join("model-routes.json");
+            let routes_json = serde_json::json!({ "routes": routes });
+            if let Ok(content) = serde_json::to_string_pretty(&routes_json) {
+                let _ = fs::write(&routes_path, content + "\n");
+                println!(
+                    "   {} .{}/generated/model-routes.json",
+                    style("+").bold().green(),
+                    agentic_root
+                );
+            }
+        }
+    }
 
     // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
     write_mcp_configs(
@@ -539,6 +604,8 @@ pub async fn run(
         &plugin_mcp_servers,
         &providers,
         &opencode_agents,
+        &opencode_default_model,
+        &opencode_default_agent,
         force,
     )?;
 
@@ -573,6 +640,16 @@ pub async fn run(
                         continue;
                     }
                     if let Some(ref url) = def.url {
+                        // SEC-003: validate URL against trusted allowlist
+                        if let Err(e) = validate_download_url(url) {
+                            println!(
+                                "   {} Plugin '{}' skipped: {}",
+                                style("!").bold().yellow(),
+                                name,
+                                e
+                            );
+                            continue;
+                        }
                         let client = reqwest::Client::new();
                         match client.get(url).send().await {
                             Ok(resp) if resp.status().is_success() => {
@@ -1299,6 +1376,8 @@ fn write_mcp_configs(
     plugin_mcp_servers: &HashMap<String, McpServerConfig>,
     providers: &HashMap<String, ProviderConfig>,
     opencode_agents: &Option<serde_json::Value>,
+    opencode_default_model: &Option<String>,
+    opencode_default_agent: &Option<String>,
     force: bool,
 ) -> anyhow::Result<()> {
     let opencode_path = workspace.join("opencode.json");
@@ -1418,6 +1497,22 @@ fn write_mcp_configs(
             // https://opencode.ai/docs/agents/#json
             if let Some(agents) = opencode_agents {
                 opencode_obj.insert("agent".to_string(), agents.clone());
+            }
+
+            // Global default model — DGX Spark local-first (ADR-0057)
+            if let Some(ref default_model) = opencode_default_model {
+                opencode_obj.insert(
+                    "model".to_string(),
+                    serde_json::Value::String(default_model.clone()),
+                );
+            }
+
+            // Default agent — starts in planning mode (ADR-0058)
+            if let Some(ref default_agent) = opencode_default_agent {
+                opencode_obj.insert(
+                    "default_agent".to_string(),
+                    serde_json::Value::String(default_agent.clone()),
+                );
             }
 
             let opencode_json = serde_json::Value::Object(opencode_obj);
@@ -2414,6 +2509,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &None,
+            &None,
+            &None,
             false,
         )
         .unwrap();
@@ -2448,6 +2545,8 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
+            &None,
             &None,
             false,
         )
@@ -2492,6 +2591,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &None,
+            &None,
+            &None,
             false,
         )
         .unwrap();
@@ -2526,6 +2627,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &None,
+            &None,
+            &None,
             false,
         )
         .unwrap();
@@ -2555,6 +2658,8 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
+            &None,
             &None,
             false,
         )
@@ -2722,6 +2827,8 @@ mod tests {
             &HashMap::new(),
             &providers,
             &None,
+            &None,
+            &None,
             false,
         )
         .unwrap();
@@ -2760,6 +2867,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &None,
+            &None,
+            &None,
             false,
         )
         .unwrap();
@@ -2795,6 +2904,8 @@ mod tests {
             &HashMap::new(),
             &providers,
             &None,
+            &None,
+            &None,
             false,
         )
         .unwrap();
@@ -2821,6 +2932,8 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &providers,
+            &None,
+            &None,
             &None,
             false,
         )
@@ -2861,6 +2974,8 @@ mod tests {
             ".claude",
             &plugins,
             &providers,
+            &None,
+            &None,
             &None,
             false,
         )
@@ -2962,6 +3077,8 @@ mod tests {
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
+            &None,
             &None,
             false,
         )

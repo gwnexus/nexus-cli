@@ -2,6 +2,16 @@
 //!
 //! Downloads and runs the official install script to upgrade the CLI binary
 //! to the latest release version.
+//!
+//! # Security note
+//!
+//! This command executes `curl -fsSL <URL> | bash` which downloads and
+//! immediately runs a shell script from `nexus.gatewarden.eu` over HTTPS.
+//! The script is fetched without an additional checksum or signature
+//! verification step. The connection is encrypted (TLS) and the domain is
+//! pinned at compile time. If you require stronger supply-chain guarantees,
+//! download the binary directly from GitHub Releases and verify the SHA-256
+//! checksum published alongside each release.
 
 use console::style;
 use nexus_core::update_check::mark_as_current;
@@ -17,6 +27,11 @@ pub fn run() -> anyhow::Result<()> {
         "{} Upgrading Nexus CLI (current: v{})",
         style(">>").bold().cyan(),
         current
+    );
+    println!(
+        "   {} Fetching install script over HTTPS from {}",
+        style("i").bold().blue(),
+        style("nexus.gatewarden.eu").dim()
     );
     println!();
 
@@ -46,6 +61,10 @@ pub fn run() -> anyhow::Result<()> {
             status.code().unwrap_or(-1)
         );
         println!("   You can try manually: curl -fsSL {} | bash", INSTALL_URL);
+        println!(
+            "   Or download a binary directly from: {}",
+            style("https://github.com/gwnexus/nexus-cli/releases").dim()
+        );
     }
 
     Ok(())

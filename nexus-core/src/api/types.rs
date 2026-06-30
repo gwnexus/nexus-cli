@@ -261,14 +261,21 @@ pub struct AgentFileExportResponse {
     /// Written to `<agentic_root>/actors/<slug>.md` during pull.
     #[serde(default)]
     pub actors: Vec<ExportedActorFile>,
-    /// OpenCode agent configs to merge into `opencode.json` `"agents"` section.
+    /// OpenCode agent configs to merge into `opencode.json` `"agent"` section.
     /// Delivered by the backend when actors have opencode-compatible agent definitions.
     #[serde(default)]
     pub opencode_agents: Option<serde_json::Value>,
-    /// Model routes defined for this project (ADR-0055).
-    /// Used for route validation and deprecation warnings during pull.
+    /// Global default model for opencode.json (ADR-0057: local-first, DGX Spark).
+    /// Written as top-level `"model"` key in opencode.json when present.
     #[serde(default)]
-    pub model_routes: Vec<ModelRoute>,
+    pub opencode_default_model: Option<String>,
+    /// Default agent for opencode.json (ADR-0058: "nexus-plan" for actor-based projects).
+    #[serde(default)]
+    pub opencode_default_agent: Option<String>,
+    /// Model routes map for .nexus/generated/model-routes.json (ADR-0057).
+    /// Key is route alias, value is route metadata.
+    #[serde(default)]
+    pub model_routes: Option<serde_json::Value>,
 }
 
 fn default_agentic_root() -> String {

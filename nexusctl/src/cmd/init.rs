@@ -1598,6 +1598,16 @@ async fn install_plugins(
         match def.source.as_str() {
             "github-raw" => {
                 if let Some(ref url) = def.url {
+                    // SEC-003: validate URL against trusted allowlist
+                    if let Err(e) = super::pull::validate_download_url(url) {
+                        println!(
+                            "   {} Plugin '{}' skipped: {}",
+                            style("!").bold().yellow(),
+                            name,
+                            e
+                        );
+                        continue;
+                    }
                     let client = reqwest::Client::new();
                     match client.get(url).send().await {
                         Ok(resp) if resp.status().is_success() => {
