@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-09
+
+### Added
+
+- **`nexus run` — pre-launch checks** — before launching the tool, `nexus run` now
+  verifies workspace state, authentication, MCP config, plugin env vars, tool binary
+  availability, and headroom mode. Checks are displayed in a formatted table. On
+  failure, the user is prompted to continue or abort. Skip with `--skip-checks`.
+
+- **`nexus run` — post-session summary** — after the tool exits, prints a summary
+  including session duration, exit code, git activity (commits, file changes), and
+  newly created release tags. Token usage and headroom stats sections are placeholders
+  pending nexus-app integration (dispatch 9ae65f3a).
+
+- **`nexus run --exec` flag** — opt-in for the previous `exec()` behaviour (replaces
+  the nexus process, no post-session summary). Default is now `spawn()+wait()` on all
+  platforms, which enables the post-session summary and correct exit code propagation.
+
+- **`nexus run --skip-checks` flag** — skip the pre-launch check suite for faster
+  startup when the environment is known-good.
+
+- **`nexus run --show-env` confirmation prompt** — `--show-env` now displays the
+  resolved env block and waits for `Enter` before launching the tool (previously it
+  launched immediately). `--dry-run` behaviour is unchanged (display only, no launch).
+
+- **`nexus run` hint after `nexus init` and `nexus pull`** — both commands now print
+  a contextual hint about `nexus run`:
+  - With `devbox.json` present: optional tip (devbox shell already sets vars).
+  - Without `devbox.json`: important notice that `nexus run` is required for plugin
+    env var injection.
+
+### Changed
+
+- **`nexus run` default launch mode** — changed from `exec()` (Unix) to `spawn()+wait()`
+  on all platforms. This enables the post-session summary and preserves the nexus
+  process after the tool exits. Use `--exec` for the previous behaviour.
+
+- **`preflight.rs` — check functions are now `pub(crate)`** — `CheckResult`, `print_check`,
+  and `cmd_version` are reused by `nexus run` pre-launch checks.
+
 ## [0.10.2] - 2026-07-09
 
 ### Fixed

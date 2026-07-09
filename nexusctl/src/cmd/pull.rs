@@ -210,6 +210,35 @@ pub(crate) fn write_plugin_env_file(
     Ok(())
 }
 
+/// Print a hint about `nexus run` after pull/init.
+///
+/// - If `devbox.json` exists in the workspace → optional tip (devbox shell already injects vars).
+/// - If no `devbox.json` → important notice (nexus run is required for plugin env vars).
+pub(crate) fn print_nexus_run_hint(workspace: &Path) {
+    let has_devbox = workspace.join("devbox.json").exists();
+    println!();
+    if has_devbox {
+        println!(
+            "   {} Use {} to launch OpenCode with plugin env vars (e.g. HEADROOM_*).",
+            style("Tip:").bold().cyan(),
+            style("nexus run").bold(),
+        );
+        println!(
+            "        Inside {}, these are already set — nexus run is optional.",
+            style("devbox shell").dim(),
+        );
+    } else {
+        println!(
+            "   {} Use {} (not plain {}) to ensure all plugin",
+            style("Important:").bold().yellow(),
+            style("nexus run").bold(),
+            style("opencode").dim(),
+        );
+        println!("              env vars (e.g. HEADROOM_*) are injected. Without nexus run,");
+        println!("              headroom and other plugins may not function correctly.");
+    }
+}
+
 /// Convert days since Unix epoch to (year, month, day). Used for ISO 8601 timestamps
 /// in `.nexus/env` without requiring the `chrono` crate.
 fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
@@ -1120,6 +1149,9 @@ pub async fn run(
 
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
+
+    // Hint: use `nexus run` for env-var injection
+    print_nexus_run_hint(&workspace);
 
     Ok(())
 }

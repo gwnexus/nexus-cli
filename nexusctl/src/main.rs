@@ -170,7 +170,9 @@ pub enum Command {
     /// Launch a tool (default: opencode) with platform-managed env vars injected.
     ///
     /// Resolves env vars from .nexus/env (plugin defaults) and .env.nexus.local
-    /// (secrets), then execs the tool. Shell vars already set are never overwritten.
+    /// (secrets), runs a pre-launch check, then spawns the tool. After the tool
+    /// exits, prints a session summary with duration and git activity.
+    /// Shell vars already set are never overwritten.
     Run {
         /// Tool binary to launch (default: opencode, or config run.default_tool).
         #[arg(short, long)]
@@ -180,13 +182,21 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Print resolved env block then launch the tool.
+        /// Print resolved env block, then confirm before launching.
         #[arg(long)]
         show_env: bool,
 
         /// Skip af_export API call; use only .nexus/env from disk.
         #[arg(long)]
         no_db: bool,
+
+        /// Use exec() instead of spawn+wait (no post-session summary, Unix only).
+        #[arg(long)]
+        exec: bool,
+
+        /// Skip pre-launch checks.
+        #[arg(long)]
+        skip_checks: bool,
 
         /// Extra arguments forwarded verbatim to the tool.
         #[arg(last = true)]

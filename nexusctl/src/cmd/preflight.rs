@@ -15,20 +15,23 @@ use std::process::Command as Proc;
 
 /// Result of a single preflight check.
 #[derive(Debug)]
-enum CheckResult {
+pub(crate) enum CheckResult {
     Pass(String),
     Warn(String),
     Fail(String),
 }
 
 impl CheckResult {
-    fn is_fail(&self) -> bool {
+    pub(crate) fn is_fail(&self) -> bool {
         matches!(self, CheckResult::Fail(_))
+    }
+    pub(crate) fn is_warn(&self) -> bool {
+        matches!(self, CheckResult::Warn(_))
     }
 }
 
 /// Display a single check result line.
-fn print_check(label: &str, result: &CheckResult) {
+pub(crate) fn print_check(label: &str, result: &CheckResult) {
     let (icon, msg) = match result {
         CheckResult::Pass(m) => (style("PASS").bold().green(), m.as_str()),
         CheckResult::Warn(m) => (style("WARN").bold().yellow(), m.as_str()),
@@ -38,7 +41,7 @@ fn print_check(label: &str, result: &CheckResult) {
 }
 
 /// Run a command and capture stdout (first line, trimmed).
-fn cmd_version(bin: &str, args: &[&str]) -> Option<String> {
+pub(crate) fn cmd_version(bin: &str, args: &[&str]) -> Option<String> {
     Proc::new(bin).args(args).output().ok().and_then(|o| {
         if o.status.success() {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();

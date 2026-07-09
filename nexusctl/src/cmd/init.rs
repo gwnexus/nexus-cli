@@ -576,6 +576,10 @@ pub async fn run(
                 );
                 println!("     will be overwritten by 'nexus pull'. These files are managed");
                 println!("     by the Nexus platform and cannot be pushed back yet.");
+
+                // Hint: use `nexus run` for env-var injection
+                crate::cmd::pull::print_nexus_run_hint(&target);
+
                 server_aware = true;
             }
         } else {

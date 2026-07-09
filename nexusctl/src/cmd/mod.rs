@@ -8,7 +8,7 @@ pub(crate) mod git;
 pub(crate) mod import;
 mod init;
 mod link;
-mod preflight;
+pub(crate) mod preflight;
 pub(crate) mod pull;
 pub(crate) mod run;
 pub(crate) mod shadow;
@@ -231,6 +231,8 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             dry_run,
             show_env,
             no_db,
+            exec,
+            skip_checks,
             ref args,
         } => {
             let config = nexus_core::config::Config::load()?;
@@ -242,6 +244,8 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 dry_run,
                 show_env,
                 no_db,
+                exec,
+                skip_checks,
                 args,
                 &default_tool,
             )
