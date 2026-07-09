@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cmd::pull::detect_importable_files;
+use crate::cmd::pull::{detect_importable_files, write_plugin_env_file};
 
 /// Run the init command.
 pub async fn run(
@@ -286,6 +286,16 @@ pub async fn run(
                 tool_flavor.as_deref(),
                 &agentic_root,
             )?;
+
+            // Write .nexus/env from af_export.plugin_env (platform-managed, full overwrite)
+            {
+                let plugin_env = af_export_result
+                    .as_ref()
+                    .ok()
+                    .map(|r| r.plugin_env.clone())
+                    .unwrap_or_default();
+                write_plugin_env_file(&target, &plugin_env, project_name, &agentic_root)?;
+            }
 
             // Apply extra MCP servers and plugins from .nexus/config.toml
             if let Ok(Some(proj_config)) = config::load_project_config(Some(&target)) {

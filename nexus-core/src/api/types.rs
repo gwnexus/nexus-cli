@@ -261,6 +261,11 @@ pub struct AgentFileExportResponse {
     /// Written to `<agentic_root>/actors/<slug>.md` during pull.
     #[serde(default)]
     pub actors: Vec<ExportedActorFile>,
+    /// Flat map of non-sensitive, platform-managed env vars for `.nexus/env`.
+    /// Written by `nexus pull` / `nexus init`; read by `nexus run` and dbx_init.sh.
+    /// Absent when no plugin provides env vars.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub plugin_env: HashMap<String, String>,
     /// OpenCode agent configs to merge into `opencode.json` `"agent"` section.
     /// Delivered by the backend when actors have opencode-compatible agent definitions.
     #[serde(default)]

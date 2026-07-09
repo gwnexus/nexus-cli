@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-09
+
+### Added
+
+- **`.nexus/env` — platform-managed plugin env vars** — `nexus pull` and `nexus init`
+  now write `.nexus/env` from `af_export.plugin_env`. The file is the single source of
+  truth for non-sensitive, platform-managed environment variables (e.g. `HEADROOM_*`).
+  - Full overwrite on every pull/init (platform-owned file).
+  - Automatically git-ignored via `.<agentic_root>/.gitignore` (entry `env` appended if missing).
+  - Deleted gracefully when `plugin_env` is absent or empty in the API response.
+  - Provides the env source for the upcoming `nexus run` command (dispatch 33f31b4d).
+
 ## [0.9.5] - 2026-06-30
 
 ### Security
