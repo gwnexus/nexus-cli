@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-07-09
+
+### Added
+
+- **Post-session headroom stats** — `nexus run` now reads `.nexus/headroom-intercept.jsonl`
+  after the tool exits and displays compression statistics: mode, compressions,
+  local transforms, tokens saved, observations, skips, passthroughs, and cache
+  integrity failures. Entries are filtered by session start time to show only
+  stats from the current run.
+
+- **Token usage hint** — post-session summary now shows `recorded in Nexus session
+  (nexus pull to sync)` instead of a generic placeholder. Full cost readback from
+  session entries will follow in v0.12.0 (dispatch 9ae65f3a, approach A2).
+
 ## [0.11.0] - 2026-07-09
 
 ### Added

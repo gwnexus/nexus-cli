@@ -136,6 +136,10 @@ pub async fn run(
         let head_before = git_head_sha(&workspace);
         let tags_before = git_tags(&workspace);
         let start = Instant::now();
+        let run_start_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         let exit_code = spawn_tool(effective_tool, args)?;
 
@@ -152,6 +156,7 @@ pub async fn run(
             head_after.as_deref(),
             &tags_before,
             &tags_after,
+            run_start_epoch,
         );
 
         std::process::exit(exit_code);
@@ -398,6 +403,7 @@ fn exec_tool(tool: &str, args: &[String]) -> anyhow::Result<()> {
 // Post-session summary
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn print_session_summary(
     workspace: &Path,
     elapsed: std::time::Duration,
@@ -406,6 +412,7 @@ fn print_session_summary(
     head_after: Option<&str>,
     tags_before: &[String],
     tags_after: &[String],
+    run_start_epoch: u64,
 ) {
     let hrs = elapsed.as_secs() / 3600;
     let mins = (elapsed.as_secs() % 3600) / 60;
@@ -478,17 +485,49 @@ fn print_session_summary(
         );
     }
 
-    // Token / Headroom placeholders
+    // Headroom stats from .nexus/headroom-intercept.jsonl
+    let headroom = read_headroom_stats(workspace, run_start_epoch);
     println!();
+    print!("  {}:     ", style("Headroom").bold());
+    match headroom {
+        Some(ref h) => {
+            let mode_style = if h.mode == "transform" {
+                style(&h.mode).green()
+            } else {
+                style(&h.mode).yellow()
+            };
+            println!("{} mode", mode_style);
+            if h.compressions > 0 || h.locally_applied > 0 {
+                println!(
+                    "    {} compressions, {} local transforms, ~{} tokens saved",
+                    h.compressions, h.locally_applied, h.potential_saved_tokens
+                );
+            }
+            println!(
+                "    {} observations, {} skips, {} passthroughs",
+                h.observations, h.skips, h.passthroughs
+            );
+            if h.cache_integrity_failures > 0 {
+                println!(
+                    "    {}",
+                    style(format!(
+                        "{} cache integrity failures",
+                        h.cache_integrity_failures
+                    ))
+                    .yellow()
+                );
+            }
+        }
+        None => {
+            println!("{}", style("no stats (headroom JSONL not found)").dim());
+        }
+    }
+
+    // Token/Cost — requires session read-back (v0.11.1+)
     println!(
         "  {}:  {}",
         style("Token Usage").bold(),
-        style("(pending — nexus-app integration)").dim()
-    );
-    println!(
-        "  {}:     {}",
-        style("Headroom").bold(),
-        style("(pending — nexus-app integration)").dim()
+        style("recorded in Nexus session (nexus pull to sync)").dim()
     );
 
     println!(
@@ -553,6 +592,108 @@ fn git_diff_stat(workspace: &Path, since_sha: &str) -> Option<String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+// ---------------------------------------------------------------------------
+// Headroom JSONL reader
+// ---------------------------------------------------------------------------
+
+/// Parsed headroom session summary from `.nexus/headroom-intercept.jsonl`.
+struct HeadroomSummary {
+    mode: String,
+    compressions: u64,
+    locally_applied: u64,
+    observations: u64,
+    skips: u64,
+    passthroughs: u64,
+    potential_saved_tokens: u64,
+    cache_integrity_failures: u64,
+}
+
+/// Read the last `session_summary` event from `.nexus/headroom-intercept.jsonl`
+/// that was written after `run_start_epoch` (Unix seconds). Falls back to the
+/// very last `session_summary` in the file if timestamp filtering fails.
+fn read_headroom_stats(workspace: &Path, run_start_epoch: u64) -> Option<HeadroomSummary> {
+    let jsonl_path = workspace.join(".nexus").join("headroom-intercept.jsonl");
+    let content = fs::read_to_string(&jsonl_path).ok()?;
+
+    let mut best: Option<(u64, HeadroomSummary)> = None;
+
+    for line in content.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if val.get("event").and_then(|v| v.as_str()) != Some("session_summary") {
+            continue;
+        }
+
+        // Parse timestamp — may be ISO 8601 string or Unix millis number
+        let ts_epoch = val
+            .get("ts")
+            .and_then(|v| {
+                v.as_u64().or_else(|| {
+                    // ISO string → approximate epoch (just compare against run_start)
+                    v.as_str().map(|_| run_start_epoch) // treat as "current session"
+                })
+            })
+            .unwrap_or(0);
+
+        // Convert millis to seconds if necessary
+        let ts_secs = if ts_epoch > 1_000_000_000_000 {
+            ts_epoch / 1000
+        } else {
+            ts_epoch
+        };
+
+        let summary = HeadroomSummary {
+            mode: val
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            compressions: val
+                .get("compressions")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            locally_applied: val
+                .get("locallyAppliedTransforms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            observations: val
+                .get("observations")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            skips: val.get("skips").and_then(|v| v.as_u64()).unwrap_or(0),
+            passthroughs: val
+                .get("passthroughs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            potential_saved_tokens: val
+                .get("potentialSavedTokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            cache_integrity_failures: val
+                .get("cacheIntegrityFailures")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        };
+
+        // Prefer entries from after run start
+        if ts_secs >= run_start_epoch {
+            return Some(summary);
+        }
+
+        // Keep the most recent as fallback
+        if best.is_none() || ts_secs > best.as_ref().unwrap().0 {
+            best = Some((ts_secs, summary));
+        }
+    }
+
+    best.map(|(_, s)| s)
 }
 
 // ---------------------------------------------------------------------------
@@ -780,5 +921,58 @@ mod tests {
         let tags = git_tags(&cwd);
         // May or may not have tags, but must not panic
         let _ = tags;
+    }
+
+    #[test]
+    fn test_read_headroom_stats_from_jsonl() {
+        let dir = tmp_dir("headroom_jsonl");
+        let nexus_dir = dir.join(".nexus");
+        fs::create_dir_all(&nexus_dir).unwrap();
+        let jsonl = nexus_dir.join("headroom-intercept.jsonl");
+
+        let content = r#"{"event":"tool_intercept","tool":"nexus_kb_memory","ts":1752044000000}
+{"event":"session_summary","mode":"transform","compressions":4,"locallyAppliedTransforms":2,"observations":3,"skips":115,"passthroughs":12,"potentialSavedTokens":10690,"cacheIntegrityFailures":0,"fullRetrievalDenied":0,"outputBudgetTruncated":0,"cacheReadFailures":0,"ts":1752044100000}
+"#;
+        fs::write(&jsonl, content).unwrap();
+
+        let stats = read_headroom_stats(&dir, 0);
+        assert!(stats.is_some());
+        let s = stats.unwrap();
+        assert_eq!(s.mode, "transform");
+        assert_eq!(s.compressions, 4);
+        assert_eq!(s.locally_applied, 2);
+        assert_eq!(s.observations, 3);
+        assert_eq!(s.skips, 115);
+        assert_eq!(s.passthroughs, 12);
+        assert_eq!(s.potential_saved_tokens, 10690);
+        assert_eq!(s.cache_integrity_failures, 0);
+    }
+
+    #[test]
+    fn test_read_headroom_stats_missing_file() {
+        let dir = tmp_dir("headroom_missing");
+        let stats = read_headroom_stats(&dir, 0);
+        assert!(stats.is_none());
+    }
+
+    #[test]
+    fn test_read_headroom_stats_filters_by_start_time() {
+        let dir = tmp_dir("headroom_filter");
+        let nexus_dir = dir.join(".nexus");
+        fs::create_dir_all(&nexus_dir).unwrap();
+        let jsonl = nexus_dir.join("headroom-intercept.jsonl");
+
+        // Two summaries: old one and recent one
+        let content = r#"{"event":"session_summary","mode":"observe","compressions":0,"locallyAppliedTransforms":0,"observations":1,"skips":50,"passthroughs":5,"potentialSavedTokens":0,"cacheIntegrityFailures":0,"ts":1000000000000}
+{"event":"session_summary","mode":"transform","compressions":7,"locallyAppliedTransforms":3,"observations":5,"skips":200,"passthroughs":20,"potentialSavedTokens":15000,"cacheIntegrityFailures":0,"ts":1752044200000}
+"#;
+        fs::write(&jsonl, content).unwrap();
+
+        // Start time after the old entry but before the new one
+        let stats = read_headroom_stats(&dir, 1752044100);
+        assert!(stats.is_some());
+        let s = stats.unwrap();
+        assert_eq!(s.mode, "transform");
+        assert_eq!(s.compressions, 7);
     }
 }
