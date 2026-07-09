@@ -2147,6 +2147,13 @@ mod tests {
     fn test_write_mcp_configs_npm_mode() {
         let dir = temp_project_dir("mcp-configs-npm");
 
+        // Isolate from shell environment: if NEXUS_SEC_OPENAI_API_KEY is set
+        // in the shell (e.g. from .env.nexus.local via devbox) the assertion
+        // `oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}")` would fail because
+        // write_mcp_configs would write the literal value instead.
+        let _prev_key = std::env::var("NEXUS_SEC_OPENAI_API_KEY").ok();
+        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
+
         write_mcp_configs(
             &dir,
             "test-proj",

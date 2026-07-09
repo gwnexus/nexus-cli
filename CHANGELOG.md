@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-07-09
+
+### Fixed
+
+- **`McpServerConfig.command` — String vs. Array deserialization** — the backend
+  delivers array commands (e.g. `["headroom", "mcp", "serve"]`) for plugin MCP
+  servers. The previous `command: String` field caused a hard serde failure, making
+  `nexus pull` silently fall back to the local template and skip `.nexus/env` entirely.
+  `command` is now `Vec<String>` with a custom `StringOrVec` deserializer that
+  accepts both forms. `opencode.json` writes the full array; `mcp.json` (Claude format)
+  splits into `command` (first element) + `args` (remainder).
+
+- **`McpServerConfig.environment` field missing** — inline env vars delivered by the
+  platform (e.g. `HEADROOM_*` from `nexus-headroom` MCP config) were silently dropped.
+  New `environment: HashMap<String, String>` field is now merged into the
+  `opencode.json` and `mcp.json` environment blocks. Inline values take precedence
+  over `env_keys` templates.
+
+- **3 environment-dependent test failures** — `test_write_mcp_configs_npm_mode`,
+  `test_write_mcp_configs_if_missing_creates_both`, and
+  `test_write_mcp_configs_reads_key_from_env_file` failed when `NEXUS_SEC_OPENAI_API_KEY`
+  was set in the shell (e.g. via devbox / `.env.nexus.local`). Each test now calls
+  `std::env::remove_var` before the assertion to ensure deterministic results
+  regardless of the shell environment.
+
+### Tests
+
+- **T1–T4** (`nexus-core/src/api/types.rs`): `McpServerConfig` string command,
+  array command, `environment` map, and full `af_export` round-trip with
+  `nexus-headroom` (array command + environment + `plugin_env`).
+
+- **T5–T9** (`nexusctl/src/cmd/pull.rs`): `write_mcp_configs` plugin-server paths —
+  array command in `opencode.json`, inline environment overlay, `env_keys` template
+  rendering, inline-overrides-env_keys precedence, and `mcp.json` Claude format
+  (`command[0]` → string, `command[1..]` + `args` → array).
+
 ## [0.10.1] - 2026-07-09
 
 ### Fixed

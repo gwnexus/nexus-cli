@@ -1583,9 +1583,12 @@ fn write_mcp_configs(
 
             // Plugin servers from platform
             for (name, cfg) in plugin_mcp_servers {
-                // Build env object: map env_keys to OpenCode template variables {env:KEY}
-                // so secrets are resolved at runtime, never persisted to disk.
-                let env: serde_json::Map<String, serde_json::Value> = cfg
+                // Build env object.
+                // Priority: inline `environment` map (e.g. HEADROOM_* vars from the platform)
+                // merged with `env_keys` rendered as OpenCode {env:KEY} templates.
+                // Inline values take precedence so the platform can deliver real values
+                // (like HEADROOM_MODE=transform) without leaking secrets.
+                let mut env: serde_json::Map<String, serde_json::Value> = cfg
                     .env_keys
                     .iter()
                     .map(|k: &String| {
@@ -1593,14 +1596,24 @@ fn write_mcp_configs(
                         (k.clone(), serde_json::Value::String(template))
                     })
                     .collect();
+                // Overlay inline environment vars (platform-managed, non-secret)
+                for (k, v) in &cfg.environment {
+                    env.insert(k.clone(), serde_json::Value::String(v.clone()));
+                }
+
+                // Build the full command array: cfg.command (Vec<String>) + cfg.args
+                let full_command: Vec<serde_json::Value> = cfg
+                    .command
+                    .iter()
+                    .chain(cfg.args.iter())
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect();
 
                 mcp_block.insert(
                     name.to_string(),
                     serde_json::json!({
                         "type": "local",
-                        "command": std::iter::once(cfg.command.clone())
-                            .chain(cfg.args.iter().cloned())
-                            .collect::<Vec<_>>(),
+                        "command": full_command,
                         "environment": env
                     }),
                 );
@@ -1730,7 +1743,8 @@ fn write_mcp_configs(
             for (name, cfg) in plugin_mcp_servers {
                 // Build env object: map env_keys to shell-style template variables ${KEY}
                 // so secrets are resolved at runtime, never persisted to disk.
-                let env: serde_json::Map<String, serde_json::Value> = cfg
+                // Also overlay inline environment vars from the platform.
+                let mut env: serde_json::Map<String, serde_json::Value> = cfg
                     .env_keys
                     .iter()
                     .map(|k: &String| {
@@ -1738,12 +1752,25 @@ fn write_mcp_configs(
                         (k.clone(), serde_json::Value::String(template))
                     })
                     .collect();
+                for (k, v) in &cfg.environment {
+                    env.insert(k.clone(), serde_json::Value::String(v.clone()));
+                }
+
+                // mcp.json uses Claude Code format: command = string, args = array.
+                // cfg.command is Vec<String> (array form from backend), so split
+                // first element as command and remainder + cfg.args as args.
+                let cmd_str = cfg.command.first().cloned().unwrap_or_default();
+                let args: Vec<serde_json::Value> = cfg.command[1..]
+                    .iter()
+                    .chain(cfg.args.iter())
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect();
 
                 servers_block.insert(
                     name.to_string(),
                     serde_json::json!({
-                        "command": cfg.command,
-                        "args": cfg.args,
+                        "command": cmd_str,
+                        "args": args,
                         "env": env
                     }),
                 );
@@ -2671,6 +2698,10 @@ mod tests {
     fn test_write_mcp_configs_if_missing_creates_both() {
         let dir = temp_pull_dir("mcp-creates");
 
+        // Isolate from shell environment: NEXUS_SEC_OPENAI_API_KEY must be absent
+        // so the {env:} fallback is written. Devbox / .env.nexus.local may inject it.
+        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
+
         write_mcp_configs(
             &dir,
             "https://nexus.gatewarden.eu",
@@ -3094,9 +3125,10 @@ mod tests {
         plugins.insert(
             "nexus-plugin".to_string(),
             McpServerConfig {
-                command: "npx".into(),
+                command: vec!["npx".into()],
                 args: vec!["nexus-plugin".into()],
                 env_keys: vec![],
+                environment: Default::default(),
             },
         );
 
@@ -3197,6 +3229,11 @@ mod tests {
     #[test]
     fn test_write_mcp_configs_reads_key_from_env_file() {
         let dir = temp_pull_dir("mcp-env-file-key");
+
+        // Isolate from shell environment: the env-file key must win over any
+        // shell-level NEXUS_SEC_OPENAI_API_KEY that devbox may have injected.
+        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
+
         fs::write(
             dir.join(".env.nexus.local"),
             "NEXUS_SEC_OPENAI_API_KEY=sk-from-env-file\n",
@@ -3229,6 +3266,241 @@ mod tests {
             !oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"),
             "env template must not be used when file provides the key"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // T5: Plugin server with Vec<String> command → opencode.json "command": [array]
+    #[test]
+    fn test_write_mcp_configs_plugin_array_command_in_opencode_json() {
+        let dir = temp_pull_dir("plugin-array-cmd");
+        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
+
+        let mut plugin_servers = HashMap::new();
+        plugin_servers.insert(
+            "nexus-headroom".to_string(),
+            nexus_core::api::McpServerConfig {
+                command: vec!["headroom".into(), "mcp".into(), "serve".into()],
+                args: vec![],
+                env_keys: vec![],
+                environment: Default::default(),
+            },
+        );
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_test",
+            McpSource::Npm,
+            None,
+            ".nexus",
+            &plugin_servers,
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            false,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        // opencode.json uses array command form
+        assert!(oc.contains("\"nexus-headroom\""), "plugin block must exist");
+        assert!(
+            oc.contains("\"headroom\""),
+            "first command element must appear"
+        );
+        assert!(oc.contains("\"mcp\""), "second command element must appear");
+        assert!(
+            oc.contains("\"serve\""),
+            "third command element must appear"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // T6: Plugin server with inline environment → opencode.json "environment": {inline vars}
+    #[test]
+    fn test_write_mcp_configs_plugin_inline_environment_in_opencode_json() {
+        let dir = temp_pull_dir("plugin-inline-env");
+        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
+
+        let mut env_map = HashMap::new();
+        env_map.insert("HEADROOM_MODE".to_string(), "transform".to_string());
+        env_map.insert("HEADROOM_DEBUG".to_string(), "false".to_string());
+
+        let mut plugin_servers = HashMap::new();
+        plugin_servers.insert(
+            "nexus-headroom".to_string(),
+            nexus_core::api::McpServerConfig {
+                command: vec!["headroom".into(), "mcp".into(), "serve".into()],
+                args: vec![],
+                env_keys: vec![],
+                environment: env_map,
+            },
+        );
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_test",
+            McpSource::Npm,
+            None,
+            ".nexus",
+            &plugin_servers,
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            false,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        assert!(oc.contains("\"HEADROOM_MODE\""), "env key must be present");
+        assert!(oc.contains("\"transform\""), "env value must be present");
+        assert!(oc.contains("\"HEADROOM_DEBUG\""));
+        assert!(oc.contains("\"false\""));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // T7: Plugin server with env_keys → opencode.json "environment": {"{env:KEY}"}
+    #[test]
+    fn test_write_mcp_configs_plugin_env_keys_template_in_opencode_json() {
+        let dir = temp_pull_dir("plugin-env-keys");
+        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
+
+        let mut plugin_servers = HashMap::new();
+        plugin_servers.insert(
+            "task-master-ai".to_string(),
+            nexus_core::api::McpServerConfig {
+                command: vec!["npx".into(), "task-master-ai".into()],
+                args: vec![],
+                env_keys: vec!["ANTHROPIC_API_KEY".to_string()],
+                environment: Default::default(),
+            },
+        );
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_test",
+            McpSource::Npm,
+            None,
+            ".nexus",
+            &plugin_servers,
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            false,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        assert!(
+            oc.contains("{env:ANTHROPIC_API_KEY}"),
+            "env_key must render as {{env:KEY}} template"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // T8: env_keys + inline environment → inline overrides env_keys template
+    #[test]
+    fn test_write_mcp_configs_inline_env_overrides_env_keys() {
+        let dir = temp_pull_dir("plugin-env-override");
+        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
+
+        let mut env_map = HashMap::new();
+        // Inline value for a key that is also in env_keys — inline must win
+        env_map.insert("HEADROOM_MODE".to_string(), "transform".to_string());
+
+        let mut plugin_servers = HashMap::new();
+        plugin_servers.insert(
+            "nexus-headroom".to_string(),
+            nexus_core::api::McpServerConfig {
+                command: vec!["headroom".into()],
+                args: vec![],
+                env_keys: vec!["HEADROOM_MODE".to_string()],
+                environment: env_map,
+            },
+        );
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_test",
+            McpSource::Npm,
+            None,
+            ".nexus",
+            &plugin_servers,
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            false,
+        )
+        .unwrap();
+
+        let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        // Inline value must be present; env template must NOT be present for the same key
+        assert!(oc.contains("\"transform\""), "inline value must win");
+        assert!(
+            !oc.contains("{env:HEADROOM_MODE}"),
+            "env template must not appear when inline value is provided"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // T9: mcp.json Claude format: command[0] → "command" string, rest → "args" array
+    #[test]
+    fn test_write_mcp_configs_plugin_mcp_json_claude_format() {
+        let dir = temp_pull_dir("plugin-mcp-json");
+        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
+
+        let mut plugin_servers = HashMap::new();
+        plugin_servers.insert(
+            "nexus-headroom".to_string(),
+            nexus_core::api::McpServerConfig {
+                command: vec!["headroom".into(), "mcp".into(), "serve".into()],
+                args: vec!["--port".into(), "9000".into()],
+                env_keys: vec![],
+                environment: Default::default(),
+            },
+        );
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_test",
+            McpSource::Npm,
+            None,
+            ".nexus",
+            &plugin_servers,
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            false,
+        )
+        .unwrap();
+
+        // mcp.json uses "command": string + "args": array (Claude Code format)
+        let cm = fs::read_to_string(dir.join(".nexus/mcp.json")).unwrap();
+        assert!(
+            cm.contains("\"command\": \"headroom\""),
+            "mcp.json command must be the first element as a string"
+        );
+        assert!(cm.contains("\"mcp\""), "mcp subcommand must appear in args");
+        assert!(
+            cm.contains("\"serve\""),
+            "serve subcommand must appear in args"
+        );
+        assert!(cm.contains("\"--port\""), "extra args must be forwarded");
+        assert!(cm.contains("\"9000\""), "extra arg value must be forwarded");
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

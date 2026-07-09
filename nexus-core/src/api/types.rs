@@ -176,14 +176,69 @@ pub struct DirectiveExportResponse {
 // Agent file export (POST /api/mcp/agent-files  action=af_export)
 // ---------------------------------------------------------------------------
 
-/// MCP server configuration for a plugin (e.g. task-master-ai).
+/// MCP server configuration for a plugin (e.g. task-master-ai, nexus-headroom).
+///
+/// The `command` field is normalised to a `Vec<String>` on deserialisation.
+/// The API may send it as either a plain string (`"headroom"`) or an array
+/// (`["headroom", "mcp", "serve"]`).  Both forms are accepted via the custom
+/// `StringOrVec` deserializer so that the CLI never fails on the array form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
-    pub command: String,
+    /// Executable + optional sub-command arguments from the platform.
+    /// Deserialized from either `"cmd"` (string) or `["cmd", "arg1", ...]` (array).
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
+    pub command: Vec<String>,
+    /// Extra arguments appended after `command` when building the full argv.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Secret env-var names whose values are resolved at runtime via `{env:KEY}`.
     #[serde(default)]
     pub env_keys: Vec<String>,
+    /// Inline environment variables delivered directly (e.g. HEADROOM_* from
+    /// the platform).  Written into opencode.json `environment` block verbatim.
+    #[serde(default)]
+    pub environment: std::collections::HashMap<String, String>,
+}
+
+/// Serde helper: deserialise a JSON value that is either a plain string or an
+/// array of strings into `Vec<String>`.
+///
+/// * `"headroom"` → `["headroom"]`
+/// * `["headroom", "mcp", "serve"]` → `["headroom", "mcp", "serve"]`
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{SeqAccess, Visitor};
+    use std::fmt;
+
+    struct StringOrVec;
+
+    impl<'de> Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a string or an array of strings")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_string()])
+        }
+
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Vec<String>, E> {
+            Ok(vec![v])
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                out.push(s);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 /// A single exported agent file.
@@ -795,4 +850,100 @@ pub struct SyncResponse {
     pub body: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // T1: McpServerConfig with string command deserializes to Vec<String>
+    #[test]
+    fn test_mcp_server_config_string_command() {
+        let json = r#"{"command": "headroom"}"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.command, vec!["headroom"]);
+        assert!(cfg.args.is_empty());
+        assert!(cfg.env_keys.is_empty());
+        assert!(cfg.environment.is_empty());
+    }
+
+    // T2: McpServerConfig with array command deserializes to Vec<String>
+    #[test]
+    fn test_mcp_server_config_array_command() {
+        let json = r#"{"command": ["headroom", "mcp", "serve"]}"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.command, vec!["headroom", "mcp", "serve"]);
+    }
+
+    // T3: McpServerConfig with environment map deserializes correctly
+    #[test]
+    fn test_mcp_server_config_with_environment() {
+        let json = r#"{
+            "command": ["headroom", "mcp", "serve"],
+            "environment": {
+                "HEADROOM_MODE": "transform",
+                "HEADROOM_DEBUG": "false"
+            }
+        }"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.command, vec!["headroom", "mcp", "serve"]);
+        assert_eq!(
+            cfg.environment.get("HEADROOM_MODE").map(|s| s.as_str()),
+            Some("transform")
+        );
+        assert_eq!(
+            cfg.environment.get("HEADROOM_DEBUG").map(|s| s.as_str()),
+            Some("false")
+        );
+    }
+
+    // T4: Full af_export with nexus-headroom (array command + environment) round-trips
+    #[test]
+    fn test_af_export_with_headroom_mcp_server() {
+        let json = r#"{
+            "project_id": "test-proj-id",
+            "project_name": "Test Project",
+            "agent_files": [],
+            "count": 0,
+            "mcp_servers": {
+                "nexus-headroom": {
+                    "command": ["headroom", "mcp", "serve"],
+                    "args": [],
+                    "env_keys": [],
+                    "environment": {
+                        "HEADROOM_MODE": "transform",
+                        "HEADROOM_REQUIRE_PREFLIGHT": "true"
+                    }
+                }
+            },
+            "plugin_env": {
+                "HEADROOM_MODE": "transform"
+            }
+        }"#;
+        let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+        let headroom = resp.mcp_servers.get("nexus-headroom").unwrap();
+        assert_eq!(headroom.command, vec!["headroom", "mcp", "serve"]);
+        assert_eq!(
+            headroom
+                .environment
+                .get("HEADROOM_MODE")
+                .map(|s| s.as_str()),
+            Some("transform")
+        );
+        assert_eq!(
+            headroom
+                .environment
+                .get("HEADROOM_REQUIRE_PREFLIGHT")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            resp.plugin_env.get("HEADROOM_MODE").map(|s| s.as_str()),
+            Some("transform")
+        );
+    }
 }
