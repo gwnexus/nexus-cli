@@ -15,7 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Full overwrite on every pull/init (platform-owned file).
   - Automatically git-ignored via `.<agentic_root>/.gitignore` (entry `env` appended if missing).
   - Deleted gracefully when `plugin_env` is absent or empty in the API response.
-  - Provides the env source for the upcoming `nexus run` command (dispatch 33f31b4d).
+
+- **`nexus run` — env-var injection before tool launch** — new command that launches a
+  tool (default: `opencode`) with platform-managed plugin env vars injected into the
+  process environment.
+  - Env resolution order (low→high): `.nexus/env` → `.env.nexus.local` → shell (shell vars
+    are never overwritten).
+  - `--dry-run`: print resolved env block and exit without launching.
+  - `--show-env`: print env block, then exec.
+  - `--no-db`: offline mode — reads `.nexus/env` from disk only (no API call).
+  - `--tool <name>`: override the default tool; configurable via `[run] default_tool` in
+    `~/.config/nexus/config.toml`.
+  - `-- <args...>`: extra args forwarded verbatim to the tool.
+  - Unix: replaces the current process via `exec()` (same PID, signals work correctly).
+  - Windows: spawns + waits; propagates exit code.
 
 ## [0.9.5] - 2026-06-30
 

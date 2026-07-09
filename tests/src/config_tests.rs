@@ -39,6 +39,7 @@ fn test_config_toml_roundtrip() {
         no_color: true,
         mcp_source: McpSource::Local,
         check_updates: false,
+        run: nexus_core::config::RunConfig::default(),
     };
 
     let serialized = toml::to_string_pretty(&config).unwrap();

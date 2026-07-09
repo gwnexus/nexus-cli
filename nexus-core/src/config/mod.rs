@@ -112,6 +112,10 @@ pub struct Config {
     /// Uses a local cache to avoid network calls on every invocation.
     #[serde(default = "default_check_updates")]
     pub check_updates: bool,
+
+    /// Configuration for `nexus run`.
+    #[serde(default)]
+    pub run: RunConfig,
 }
 
 fn default_api_url() -> String {
@@ -122,6 +126,26 @@ fn default_check_updates() -> bool {
     true
 }
 
+fn default_run_tool() -> String {
+    "opencode".to_string()
+}
+
+/// Configuration for `nexus run` stored in `[run]` section of `~/.config/nexus/config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunConfig {
+    /// Default tool binary to launch (default: "opencode").
+    #[serde(default = "default_run_tool")]
+    pub default_tool: String,
+}
+
+impl Default for RunConfig {
+    fn default() -> Self {
+        Self {
+            default_tool: default_run_tool(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -130,6 +154,7 @@ impl Default for Config {
             no_color: false,
             mcp_source: McpSource::default(),
             check_updates: true,
+            run: RunConfig::default(),
         }
     }
 }

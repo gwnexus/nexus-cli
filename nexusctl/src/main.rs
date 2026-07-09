@@ -166,6 +166,32 @@ pub enum Command {
         #[command(subcommand)]
         action: ActorsAction,
     },
+
+    /// Launch a tool (default: opencode) with platform-managed env vars injected.
+    ///
+    /// Resolves env vars from .nexus/env (plugin defaults) and .env.nexus.local
+    /// (secrets), then execs the tool. Shell vars already set are never overwritten.
+    Run {
+        /// Tool binary to launch (default: opencode, or config run.default_tool).
+        #[arg(short, long)]
+        tool: Option<String>,
+
+        /// Print resolved env block and exit without launching the tool.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print resolved env block then launch the tool.
+        #[arg(long)]
+        show_env: bool,
+
+        /// Skip af_export API call; use only .nexus/env from disk.
+        #[arg(long)]
+        no_db: bool,
+
+        /// Extra arguments forwarded verbatim to the tool.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
 }
 
 /// Shadow mode subcommands.

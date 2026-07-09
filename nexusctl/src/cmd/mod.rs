@@ -10,6 +10,7 @@ mod init;
 mod link;
 mod preflight;
 pub(crate) mod pull;
+pub(crate) mod run;
 pub(crate) mod shadow;
 mod skills_cmd;
 pub(crate) mod sync;
@@ -224,6 +225,27 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     }
                 },
             }
+        }
+        Command::Run {
+            ref tool,
+            dry_run,
+            show_env,
+            no_db,
+            ref args,
+        } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            let default_tool = config.run.default_tool.clone();
+            run::run(
+                &api_url,
+                tool.as_deref(),
+                dry_run,
+                show_env,
+                no_db,
+                args,
+                &default_tool,
+            )
+            .await?;
         }
     }
     Ok(())
