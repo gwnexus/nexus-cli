@@ -234,8 +234,12 @@ impl Config {
                     .map_err(|_| Error::Config(format!("invalid bool value: '{}'", value)))?;
                 Ok(())
             }
+            "run.default_tool" => {
+                self.run.default_tool = value.to_string();
+                Ok(())
+            }
             other => Err(Error::Config(format!(
-                "unknown config key '{}', valid keys: api_url, default_output, no_color, mcp_source, check_updates",
+                "unknown config key '{}', valid keys: api_url, default_output, no_color, mcp_source, check_updates, run.default_tool",
                 other
             ))),
         }
