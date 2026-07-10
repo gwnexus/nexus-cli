@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-07-10
+
+### Fixed
+
+- **headroom JSONL timestamp parsing** — `read_headroom_stats()` failed to parse
+  ISO 8601 timestamps (`"2026-07-09T15:18:06.407Z"`) and fell back to
+  `run_start_epoch`, causing all headroom entries to be treated as "too old".
+  Introduced `iso8601_to_unix_secs()` — a dependency-free parser for the UTC
+  subset used by headroom-intercept.
+
+- **Token usage "unavailable" regression** — Session entries lookup used a
+  chained `and_then(|_| ...)` that always returned `None` after the first failed
+  path. Now uses defensive multi-path traversal: `.entries`, `.document.entries`,
+  `.session.entries`. Error message improved:
+  `unavailable (nexus-cost-control plugin not active for this project)`.
+
+### Added
+
+- **Pre-launch spinner** — `nexus run` now shows an animated `indicatif` spinner
+  (`⠋ Running Nexus pre-launch checks...`) while collecting check results, then
+  clears it before printing the result table. Improves perceived responsiveness
+  on slow filesystems or API calls.
+
+- **Activity Stats: ingested documents** — `research_added` session entry type
+  is now counted and displayed as `Docs: N ingested` in the post-session
+  Nexus Activity block.
+
 ## [0.12.0] - 2026-07-09
 
 ### Added

@@ -16,6 +16,7 @@
 
 use anyhow::Context as _;
 use console::style;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
@@ -249,6 +250,16 @@ fn run_prelaunch_checks(
     println!("{} Nexus Pre-launch Check", style(">>").bold().cyan());
     println!();
 
+    // Spinner while collecting check results
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    spinner.set_message("Running Nexus pre-launch checks...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
     let mut checks: Vec<(&str, CheckResult)> = Vec::new();
 
     // Workspace
@@ -332,7 +343,9 @@ fn run_prelaunch_checks(
     };
     checks.push(("Headroom", headroom_check));
 
-    // Print results
+    // Done collecting — clear spinner and print results
+    spinner.finish_and_clear();
+
     for (label, result) in &checks {
         print_check(label, result);
     }
@@ -630,6 +643,9 @@ fn print_session_summary(
                     activity.dispatches_sent, activity.dispatches_replied
                 );
             }
+            if activity.docs_ingested > 0 {
+                println!("    Docs:       {} ingested", activity.docs_ingested);
+            }
             if activity.notes > 0 {
                 println!("    Notes:      {}", activity.notes);
             }
@@ -721,6 +737,7 @@ struct ActivityStats {
     tasks_completed: u64,
     dispatches_sent: u64,
     dispatches_replied: u64,
+    docs_ingested: u64,
     notes: u64,
 }
 
@@ -732,6 +749,7 @@ impl ActivityStats {
             || self.tasks_completed > 0
             || self.dispatches_sent > 0
             || self.dispatches_replied > 0
+            || self.docs_ingested > 0
             || self.notes > 0
     }
 }
@@ -820,6 +838,7 @@ async fn fetch_session_stats(
         tasks_completed: 0,
         dispatches_sent: 0,
         dispatches_replied: 0,
+        docs_ingested: 0,
         notes: 0,
     };
 
@@ -835,6 +854,7 @@ async fn fetch_session_stats(
             "task_updated" => activity.tasks_completed += 1,
             "letter_sent" => activity.dispatches_sent += 1,
             "letter_replied" => activity.dispatches_replied += 1,
+            "research_added" => activity.docs_ingested += 1,
             "note" => activity.notes += 1,
             _ => {}
         }
