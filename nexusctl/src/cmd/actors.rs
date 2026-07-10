@@ -57,8 +57,8 @@ pub async fn list(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Result
         println!(
             "   {:<20} {:<24} {:<16} {}",
             style(&actor.slug).cyan(),
-            &actor.name,
-            &actor.role,
+            actor.name,
+            actor.role,
             status_styled,
         );
     }
@@ -87,7 +87,7 @@ pub async fn show(api_url: &str, slug: &str, cli_project_id: Option<&str>) -> an
         style(&actor.slug).dim(),
     );
     println!();
-    println!("   Role:        {}", &actor.role);
+    println!("   Role:        {}", actor.role);
     if let Some(ref desc) = actor.description {
         println!("   Description: {}", desc);
     }
@@ -105,8 +105,8 @@ pub async fn show(api_url: &str, slug: &str, cli_project_id: Option<&str>) -> an
             println!("   Avatar URL:  {}", style(url).dim());
         }
     }
-    println!("   Created:     {}", &actor.created_at);
-    println!("   Updated:     {}", &actor.updated_at);
+    println!("   Created:     {}", actor.created_at);
+    println!("   Updated:     {}", actor.updated_at);
 
     // Show profile body if available
     if let Some(ref body) = actor.profile_body {

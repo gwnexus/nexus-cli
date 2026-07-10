@@ -406,7 +406,7 @@ pub async fn run(
         "   {} Project: {} ({})",
         style("+").bold().green(),
         style(&export.project.name).bold(),
-        &export.project.slug
+        export.project.slug
     );
 
     if export.skills.is_empty() {

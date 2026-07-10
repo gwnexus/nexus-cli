@@ -243,7 +243,7 @@ pub async fn run(
                         "   {} Project: {} ({})",
                         style("+").bold().green(),
                         style(&export.project.name).bold(),
-                        &export.project.slug
+                        export.project.slug
                     );
                     println!(
                         "   {} {} skill(s) exported",

@@ -103,7 +103,7 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
         "{} Linked to project: {} ({})",
         style("OK").bold().green(),
         style(&selected_project.name).bold(),
-        &selected_project.id
+        selected_project.id
     );
 
     Ok(())

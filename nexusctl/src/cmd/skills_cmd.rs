@@ -118,7 +118,7 @@ pub async fn export(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Resu
         style("OK").bold().green(),
         export.count,
         style(&export.project.name).bold(),
-        &export.project.slug
+        export.project.slug
     );
 
     Ok(())
