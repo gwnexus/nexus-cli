@@ -600,7 +600,10 @@ fn print_session_summary(
             }
         }
         None => {
-            println!("{}", style("unavailable (no session data)").dim());
+            println!(
+                "{}",
+                style("unavailable (nexus-cost-control plugin not active for this project)").dim()
+            );
         }
     }
 
@@ -776,9 +779,9 @@ async fn fetch_session_stats(
     };
 
     let entries = session_data
-        .get("document")
-        .or_else(|| session_data.get("entries"))
-        .and_then(|_| session_data.get("entries"))
+        .get("entries")
+        .or_else(|| session_data.get("document").and_then(|d| d.get("entries")))
+        .or_else(|| session_data.get("session").and_then(|s| s.get("entries")))
         .and_then(|e| e.as_array());
 
     let entries = match entries {
@@ -896,23 +899,26 @@ fn read_headroom_stats(workspace: &Path, run_start_epoch: u64) -> Option<Headroo
             continue;
         }
 
-        // Parse timestamp — may be ISO 8601 string or Unix millis number
-        let ts_epoch = val
+        // Parse timestamp — ISO 8601 string ("2026-07-09T15:18:06.407Z") or Unix millis
+        let ts_secs = val
             .get("ts")
             .and_then(|v| {
-                v.as_u64().or_else(|| {
-                    // ISO string → approximate epoch (just compare against run_start)
-                    v.as_str().map(|_| run_start_epoch) // treat as "current session"
-                })
+                // Numeric millis
+                if let Some(ms) = v.as_u64() {
+                    return Some(if ms > 1_000_000_000_000 {
+                        ms / 1000
+                    } else {
+                        ms
+                    });
+                }
+                // ISO 8601 string — parse manually (avoid heavy chrono dep)
+                // Format: "2026-07-09T15:18:06.407Z" or "2026-07-09T15:18:06Z"
+                if let Some(s) = v.as_str() {
+                    return iso8601_to_unix_secs(s);
+                }
+                None
             })
             .unwrap_or(0);
-
-        // Convert millis to seconds if necessary
-        let ts_secs = if ts_epoch > 1_000_000_000_000 {
-            ts_epoch / 1000
-        } else {
-            ts_epoch
-        };
 
         let summary = HeadroomSummary {
             mode: val
@@ -959,6 +965,40 @@ fn read_headroom_stats(workspace: &Path, run_start_epoch: u64) -> Option<Headroo
     }
 
     best.map(|(_, s)| s)
+}
+
+/// Parse an ISO 8601 UTC timestamp to Unix seconds.
+/// Handles formats: "2026-07-09T15:18:06.407Z" and "2026-07-09T15:18:06Z"
+fn iso8601_to_unix_secs(s: &str) -> Option<u64> {
+    // Expect at least "YYYY-MM-DDTHH:MM:SS"
+    if s.len() < 19 {
+        return None;
+    }
+    let year: u64 = s[0..4].parse().ok()?;
+    let month: u64 = s[5..7].parse().ok()?;
+    let day: u64 = s[8..10].parse().ok()?;
+    let hour: u64 = s[11..13].parse().ok()?;
+    let min: u64 = s[14..16].parse().ok()?;
+    let sec: u64 = s[17..19].parse().ok()?;
+
+    // Days from epoch (1970-01-01) to given date — simplified but sufficient for
+    // timestamps in range 2020-2099. Not accounting for leap seconds.
+    let days_in_month = [0u64, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let is_leap = |y: u64| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+
+    let mut days: u64 = 0;
+    for y in 1970..year {
+        days += if is_leap(y) { 366 } else { 365 };
+    }
+    for m in 1..month {
+        days += days_in_month[m as usize];
+        if m == 2 && is_leap(year) {
+            days += 1;
+        }
+    }
+    days += day - 1;
+
+    Some(days * 86400 + hour * 3600 + min * 60 + sec)
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,8 +1237,9 @@ mod tests {
         fs::create_dir_all(&nexus_dir).unwrap();
         let jsonl = nexus_dir.join("headroom-intercept.jsonl");
 
-        let content = r#"{"event":"tool_intercept","tool":"nexus_kb_memory","ts":1752044000000}
-{"event":"session_summary","mode":"transform","compressions":4,"locallyAppliedTransforms":2,"observations":3,"skips":115,"passthroughs":12,"potentialSavedTokens":10690,"cacheIntegrityFailures":0,"fullRetrievalDenied":0,"outputBudgetTruncated":0,"cacheReadFailures":0,"ts":1752044100000}
+        // Use ISO 8601 timestamps (real format from headroom-intercept)
+        let content = r#"{"event":"tool_intercept","tool":"nexus_kb_memory","ts":"2026-07-09T15:16:40.000Z"}
+{"event":"session_summary","mode":"transform","compressions":4,"locallyAppliedTransforms":2,"observations":3,"skips":115,"passthroughs":12,"potentialSavedTokens":10690,"cacheIntegrityFailures":0,"fullRetrievalDenied":0,"outputBudgetTruncated":0,"cacheReadFailures":0,"ts":"2026-07-09T15:18:06.407Z"}
 "#;
         fs::write(&jsonl, content).unwrap();
 
@@ -1216,6 +1257,17 @@ mod tests {
     }
 
     #[test]
+    fn test_iso8601_to_unix_secs() {
+        // 2026-07-09T15:18:06Z — known offset from epoch
+        let result = iso8601_to_unix_secs("2026-07-09T15:18:06.407Z");
+        assert!(result.is_some());
+        let secs = result.unwrap();
+        // Sanity: must be > 2020 epoch and < 2030 epoch
+        assert!(secs > 1_577_836_800); // 2020-01-01
+        assert!(secs < 1_893_456_000); // 2030-01-01
+    }
+
+    #[test]
     fn test_read_headroom_stats_missing_file() {
         let dir = tmp_dir("headroom_missing");
         let stats = read_headroom_stats(&dir, 0);
@@ -1229,14 +1281,14 @@ mod tests {
         fs::create_dir_all(&nexus_dir).unwrap();
         let jsonl = nexus_dir.join("headroom-intercept.jsonl");
 
-        // Two summaries: old one and recent one
-        let content = r#"{"event":"session_summary","mode":"observe","compressions":0,"locallyAppliedTransforms":0,"observations":1,"skips":50,"passthroughs":5,"potentialSavedTokens":0,"cacheIntegrityFailures":0,"ts":1000000000000}
-{"event":"session_summary","mode":"transform","compressions":7,"locallyAppliedTransforms":3,"observations":5,"skips":200,"passthroughs":20,"potentialSavedTokens":15000,"cacheIntegrityFailures":0,"ts":1752044200000}
+        // Two summaries: old one (2001) and recent one (2026-07-09)
+        let content = r#"{"event":"session_summary","mode":"observe","compressions":0,"locallyAppliedTransforms":0,"observations":1,"skips":50,"passthroughs":5,"potentialSavedTokens":0,"cacheIntegrityFailures":0,"ts":"2001-01-01T00:00:00Z"}
+{"event":"session_summary","mode":"transform","compressions":7,"locallyAppliedTransforms":3,"observations":5,"skips":200,"passthroughs":20,"potentialSavedTokens":15000,"cacheIntegrityFailures":0,"ts":"2026-07-09T16:03:20.000Z"}
 "#;
         fs::write(&jsonl, content).unwrap();
 
-        // Start time after the old entry but before the new one
-        let stats = read_headroom_stats(&dir, 1752044100);
+        // run_start just before the 2026 entry (~2026-07-09T16:00:00Z)
+        let stats = read_headroom_stats(&dir, 1752076800);
         assert!(stats.is_some());
         let s = stats.unwrap();
         assert_eq!(s.mode, "transform");
