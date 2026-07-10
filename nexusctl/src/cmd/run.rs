@@ -40,6 +40,7 @@ pub async fn run(
     no_db: bool,
     use_exec: bool,
     skip_checks: bool,
+    force: bool,
     args: &[String],
     default_tool: &str,
 ) -> anyhow::Result<()> {
@@ -117,7 +118,8 @@ pub async fn run(
 
     // ── 6. Pre-launch checks ─────────────────────────────────────────────────
     if !skip_checks {
-        let should_continue = run_prelaunch_checks(&workspace, effective_tool, &env_file_path)?;
+        let should_continue =
+            run_prelaunch_checks(&workspace, effective_tool, &env_file_path, force)?;
         if !should_continue {
             return Ok(());
         }
@@ -148,6 +150,13 @@ pub async fn run(
         let head_after = git_head_sha(&workspace);
         let tags_after = git_tags(&workspace);
 
+        // Fetch token/cost + activity stats from Nexus session (best effort)
+        let (token_stats, activity_stats) = if !no_db {
+            fetch_session_stats(api_url, &workspace).await
+        } else {
+            (None, None)
+        };
+
         print_session_summary(
             &workspace,
             elapsed,
@@ -157,6 +166,8 @@ pub async fn run(
             &tags_before,
             &tags_after,
             run_start_epoch,
+            token_stats.as_ref(),
+            activity_stats.as_ref(),
         );
 
         std::process::exit(exit_code);
@@ -228,7 +239,12 @@ fn print_env_table(
 // ---------------------------------------------------------------------------
 
 /// Run pre-launch checks and return `true` if the tool should be launched.
-fn run_prelaunch_checks(workspace: &Path, tool: &str, env_file: &Path) -> anyhow::Result<bool> {
+fn run_prelaunch_checks(
+    workspace: &Path,
+    tool: &str,
+    env_file: &Path,
+    force: bool,
+) -> anyhow::Result<bool> {
     println!();
     println!("{} Nexus Pre-launch Check", style(">>").bold().cyan());
     println!();
@@ -335,15 +351,23 @@ fn run_prelaunch_checks(workspace: &Path, tool: &str, env_file: &Path) -> anyhow
             fail_count,
         );
         println!();
-        println!("   {} checks failed. Continue anyway? [y/N] ", fail_count);
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf)?;
-        let answer = buf.trim().to_lowercase();
-        if answer != "y" && answer != "yes" {
-            println!("   Aborted.");
-            return Ok(false);
+        if force {
+            println!(
+                "   {} checks failed (--force: continuing anyway)",
+                fail_count
+            );
+            println!();
+        } else {
+            println!("   {} checks failed. Continue anyway? [y/N] ", fail_count);
+            let mut buf = String::new();
+            std::io::stdin().read_line(&mut buf)?;
+            let answer = buf.trim().to_lowercase();
+            if answer != "y" && answer != "yes" {
+                println!("   Aborted.");
+                return Ok(false);
+            }
+            println!();
         }
-        println!();
     } else if warn_count > 0 {
         println!(
             "  {} {} passed, {} warnings",
@@ -351,6 +375,17 @@ fn run_prelaunch_checks(workspace: &Path, tool: &str, env_file: &Path) -> anyhow
             pass_count,
             warn_count,
         );
+        if !force {
+            println!();
+            println!(
+                "   Press {} to launch {}, or {} to abort...",
+                style("Enter").bold(),
+                style(tool).bold(),
+                style("Ctrl+C").bold()
+            );
+            let mut buf = String::new();
+            std::io::stdin().read_line(&mut buf)?;
+        }
         println!();
     } else {
         println!(
@@ -358,6 +393,17 @@ fn run_prelaunch_checks(workspace: &Path, tool: &str, env_file: &Path) -> anyhow
             style("RESULT").bold().green(),
             pass_count,
         );
+        if !force {
+            println!();
+            println!(
+                "   Press {} to launch {}, or {} to abort...",
+                style("Enter").bold(),
+                style(tool).bold(),
+                style("Ctrl+C").bold()
+            );
+            let mut buf = String::new();
+            std::io::stdin().read_line(&mut buf)?;
+        }
         println!();
     }
 
@@ -413,6 +459,8 @@ fn print_session_summary(
     tags_before: &[String],
     tags_after: &[String],
     run_start_epoch: u64,
+    token_stats: Option<&TokenStats>,
+    activity_stats: Option<&ActivityStats>,
 ) {
     let hrs = elapsed.as_secs() / 3600;
     let mins = (elapsed.as_secs() % 3600) / 60;
@@ -523,12 +571,67 @@ fn print_session_summary(
         }
     }
 
-    // Token/Cost — requires session read-back (v0.11.1+)
-    println!(
-        "  {}:  {}",
-        style("Token Usage").bold(),
-        style("recorded in Nexus session (nexus pull to sync)").dim()
-    );
+    // Token/Cost stats
+    println!();
+    print!("  {}:  ", style("Token Usage").bold());
+    match token_stats {
+        Some(ts) => {
+            println!();
+            println!(
+                "    Input:      {:>10} tokens",
+                format_number(ts.tokens_input)
+            );
+            println!(
+                "    Output:     {:>10} tokens",
+                format_number(ts.tokens_output)
+            );
+            if ts.tokens_cache_read > 0 {
+                println!(
+                    "    Cache:      {:>10} tokens (read)",
+                    format_number(ts.tokens_cache_read)
+                );
+            }
+            println!(
+                "    Total:      {:>10} tokens",
+                format_number(ts.total_tokens)
+            );
+            if ts.cost_usd > 0.0 {
+                println!("    Est. Cost:  ${:.2}", ts.cost_usd);
+            }
+        }
+        None => {
+            println!("{}", style("unavailable (no session data)").dim());
+        }
+    }
+
+    // Nexus Activity
+    if let Some(activity) = activity_stats {
+        if activity.has_any() {
+            println!();
+            println!("  {}:", style("Nexus Activity").bold());
+            if activity.adrs_created > 0 || activity.adrs_accepted > 0 {
+                println!(
+                    "    ADRs:       {} created, {} accepted",
+                    activity.adrs_created, activity.adrs_accepted
+                );
+            }
+            if activity.tasks_created > 0 || activity.tasks_completed > 0 {
+                println!(
+                    "    Tasks:      {} created, {} completed",
+                    activity.tasks_created, activity.tasks_completed
+                );
+            }
+            if activity.dispatches_sent > 0 || activity.dispatches_replied > 0 {
+                println!(
+                    "    Dispatches: {} sent, {} replied",
+                    activity.dispatches_sent, activity.dispatches_replied
+                );
+            }
+            if activity.notes > 0 {
+                println!("    Notes:      {}", activity.notes);
+            }
+        }
+    }
 
     println!(
         "{}",
@@ -592,6 +695,168 @@ fn git_diff_stat(workspace: &Path, since_sha: &str) -> Option<String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+// ---------------------------------------------------------------------------
+// Token + Activity stats from Nexus session
+// ---------------------------------------------------------------------------
+
+/// Token usage summary extracted from session cost_snapshot entries.
+struct TokenStats {
+    tokens_input: u64,
+    tokens_output: u64,
+    tokens_cache_read: u64,
+    total_tokens: u64,
+    cost_usd: f64,
+}
+
+/// Nexus platform activity summary from session entries.
+struct ActivityStats {
+    adrs_created: u64,
+    adrs_accepted: u64,
+    tasks_created: u64,
+    tasks_completed: u64,
+    dispatches_sent: u64,
+    dispatches_replied: u64,
+    notes: u64,
+}
+
+impl ActivityStats {
+    fn has_any(&self) -> bool {
+        self.adrs_created > 0
+            || self.adrs_accepted > 0
+            || self.tasks_created > 0
+            || self.tasks_completed > 0
+            || self.dispatches_sent > 0
+            || self.dispatches_replied > 0
+            || self.notes > 0
+    }
+}
+
+/// Fetch token and activity stats from the Nexus session (best effort).
+async fn fetch_session_stats(
+    api_url: &str,
+    workspace: &Path,
+) -> (Option<TokenStats>, Option<ActivityStats>) {
+    let token = match resolve_token() {
+        Some(t) => t,
+        None => return (None, None),
+    };
+    let client = match NexusClient::new(api_url, Some(token)) {
+        Ok(c) => c,
+        Err(_) => return (None, None),
+    };
+    let project_id = config::resolve_project_id(None, Some(workspace)).unwrap_or_default();
+    if project_id.is_empty() {
+        return (None, None);
+    }
+
+    // 1. Find the open session for this project
+    let session_list = match client.list_sessions(&project_id).await {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+
+    let session_id = session_list
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|s| s.get("id"))
+        .and_then(|v| v.as_str());
+
+    let session_id = match session_id {
+        Some(id) => id.to_string(),
+        None => return (None, None),
+    };
+
+    // 2. Fetch full session with entries
+    let session_data = match client.get_session(&session_id).await {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+
+    let entries = session_data
+        .get("document")
+        .or_else(|| session_data.get("entries"))
+        .and_then(|_| session_data.get("entries"))
+        .and_then(|e| e.as_array());
+
+    let entries = match entries {
+        Some(e) => e,
+        None => return (None, None),
+    };
+
+    // 3. Extract latest cost_snapshot
+    let mut token_stats: Option<TokenStats> = None;
+    for entry in entries.iter().rev() {
+        let meta = entry.get("metadata");
+        let is_cost = meta.and_then(|m| m.get("plugin")).and_then(|v| v.as_str())
+            == Some("nexus-cost-control");
+        if is_cost {
+            if let Some(m) = meta {
+                token_stats = Some(TokenStats {
+                    tokens_input: m.get("tokens_input").and_then(|v| v.as_u64()).unwrap_or(0),
+                    tokens_output: m.get("tokens_output").and_then(|v| v.as_u64()).unwrap_or(0),
+                    tokens_cache_read: m
+                        .get("tokens_cache_read")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    total_tokens: m.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                    cost_usd: m.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                });
+                break;
+            }
+        }
+    }
+
+    // 4. Extract activity counts from entry_type fields
+    let mut activity = ActivityStats {
+        adrs_created: 0,
+        adrs_accepted: 0,
+        tasks_created: 0,
+        tasks_completed: 0,
+        dispatches_sent: 0,
+        dispatches_replied: 0,
+        notes: 0,
+    };
+
+    for entry in entries {
+        let entry_type = entry
+            .get("entry_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        match entry_type {
+            "adr_drafted" => activity.adrs_created += 1,
+            "adr_accepted" => activity.adrs_accepted += 1,
+            "task_created" => activity.tasks_created += 1,
+            "task_updated" => activity.tasks_completed += 1,
+            "letter_sent" => activity.dispatches_sent += 1,
+            "letter_replied" => activity.dispatches_replied += 1,
+            "note" => activity.notes += 1,
+            _ => {}
+        }
+    }
+
+    let activity_result = if activity.has_any() {
+        Some(activity)
+    } else {
+        None
+    };
+
+    (token_stats, activity_result)
+}
+
+/// Format a number with thousands separators.
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result.chars().rev().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +1096,7 @@ mod tests {
                 no_db,
                 exec,
                 skip_checks,
+                force,
                 args,
             } => {
                 assert!(tool.is_none());
@@ -839,6 +1105,7 @@ mod tests {
                 assert!(!no_db);
                 assert!(!exec);
                 assert!(!skip_checks);
+                assert!(!force);
                 assert!(args.is_empty());
             }
             _ => panic!("expected Run"),

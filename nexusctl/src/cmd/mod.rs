@@ -233,6 +233,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             no_db,
             exec,
             skip_checks,
+            force,
             ref args,
         } => {
             let config = nexus_core::config::Config::load()?;
@@ -245,7 +246,8 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 show_env,
                 no_db,
                 exec,
-                skip_checks,
+                skip_checks || force,
+                force,
                 args,
                 &default_tool,
             )

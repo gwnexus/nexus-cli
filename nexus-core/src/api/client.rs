@@ -403,6 +403,26 @@ impl NexusClient {
         self.post("/api/mcp/agent-files", &body).await
     }
 
+    /// List open sessions for a project via `POST /api/mcp/sessions`.
+    pub async fn list_sessions(&self, project_id: &str) -> Result<serde_json::Value, Error> {
+        let body = json!({
+            "action": "session_list",
+            "project_id": project_id
+        });
+        self.post("/api/mcp/sessions", &body).await
+    }
+
+    /// Get a full session (with entries) via `POST /api/mcp/sessions`.
+    pub async fn get_session(&self, entity_id: &str) -> Result<serde_json::Value, Error> {
+        let body = json!({
+            "action": "kb_get",
+            "entity_type": "session",
+            "entity_id": entity_id,
+            "render_mode": "structured"
+        });
+        self.post("/api/mcp/kb", &body).await
+    }
+
     /// Send a GET request and deserialize the JSON response.
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
         let url = format!("{}{}", self.base_url, path);

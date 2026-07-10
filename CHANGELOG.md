@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-09
+
+### Added
+
+- **Pre-launch confirmation prompt** — after all pre-launch checks pass (or only
+  produce warnings), `nexus run` now pauses with `Press Enter to launch <tool>,
+  or Ctrl+C to abort...` before starting the tool. Gives the user a chance to
+  review the check results.
+
+- **`--force` / `-f` flag** — skip the confirmation prompt and launch immediately
+  after checks (non-interactive/CI mode). Also skips pre-launch checks entirely
+  (equivalent to `--skip-checks --force`).
+
+- **Post-session token usage** — after the tool exits, `nexus run` queries the
+  Nexus backend session API (`session_list` + `kb_get`) and displays the latest
+  token cost snapshot: input/output/cache tokens, total, and estimated cost in USD.
+  Shows `unavailable (no session data)` if no cost entry exists.
+
+- **Post-session Nexus activity stats** — session entries are counted by type:
+  ADRs created/accepted, tasks created/completed, dispatches sent/replied, notes.
+  Displayed in the summary when any activity occurred during the session.
+
+- **`NexusClient::list_sessions()`** — new API method for `POST /api/mcp/sessions`
+  with `session_list` action.
+
+- **`NexusClient::get_session()`** — new API method for `POST /api/mcp/kb` with
+  `kb_get` action (entity_type=session).
+
+### Changed
+
+- **Pre-launch checks: warn/pass paths now prompt** — previously only failures
+  prompted for confirmation. Now all outcomes (pass, warn) prompt unless `--force`
+  is set.
+
 ## [0.11.1] - 2026-07-09
 
 ### Added

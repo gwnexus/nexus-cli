@@ -198,6 +198,10 @@ pub enum Command {
         #[arg(long)]
         skip_checks: bool,
 
+        /// Skip pre-launch confirmation prompt (non-interactive/CI mode).
+        #[arg(short, long)]
+        force: bool,
+
         /// Extra arguments forwarded verbatim to the tool.
         #[arg(last = true)]
         args: Vec<String>,
