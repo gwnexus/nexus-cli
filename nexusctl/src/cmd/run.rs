@@ -547,76 +547,78 @@ fn print_session_summary(
     }
 
     // Headroom stats from .nexus/headroom-intercept.jsonl
+    // Only show this section if headroom is configured for this workspace
+    let headroom_active = env::var("HEADROOM_MODE").is_ok()
+        || workspace
+            .join(".opencode/plugins/nexus-headroom-intercept.ts")
+            .exists();
     let headroom = read_headroom_stats(workspace, run_start_epoch);
-    println!();
-    print!("  {}:     ", style("Headroom").bold());
-    match headroom {
-        Some(ref h) => {
-            let mode_style = if h.mode == "transform" {
-                style(&h.mode).green()
-            } else {
-                style(&h.mode).yellow()
-            };
-            println!("{} mode", mode_style);
-            if h.compressions > 0 || h.locally_applied > 0 {
+    if headroom_active || headroom.is_some() {
+        println!();
+        print!("  {}:     ", style("Headroom").bold());
+        match headroom {
+            Some(ref h) => {
+                let mode_style = if h.mode == "transform" {
+                    style(&h.mode).green()
+                } else {
+                    style(&h.mode).yellow()
+                };
+                println!("{} mode", mode_style);
+                if h.compressions > 0 || h.locally_applied > 0 {
+                    println!(
+                        "    {} compressions, {} local transforms, ~{} tokens saved",
+                        h.compressions, h.locally_applied, h.potential_saved_tokens
+                    );
+                }
                 println!(
-                    "    {} compressions, {} local transforms, ~{} tokens saved",
-                    h.compressions, h.locally_applied, h.potential_saved_tokens
+                    "    {} observations, {} skips, {} passthroughs",
+                    h.observations, h.skips, h.passthroughs
+                );
+                if h.cache_integrity_failures > 0 {
+                    println!(
+                        "    {}",
+                        style(format!(
+                            "{} cache integrity failures",
+                            h.cache_integrity_failures
+                        ))
+                        .yellow()
+                    );
+                }
+            }
+            None => {
+                println!(
+                    "{}",
+                    style("no session stats (short session or no MCP activity)").dim()
                 );
             }
-            println!(
-                "    {} observations, {} skips, {} passthroughs",
-                h.observations, h.skips, h.passthroughs
-            );
-            if h.cache_integrity_failures > 0 {
-                println!(
-                    "    {}",
-                    style(format!(
-                        "{} cache integrity failures",
-                        h.cache_integrity_failures
-                    ))
-                    .yellow()
-                );
-            }
-        }
-        None => {
-            println!("{}", style("no stats (headroom JSONL not found)").dim());
         }
     }
 
-    // Token/Cost stats
-    println!();
-    print!("  {}:  ", style("Token Usage").bold());
-    match token_stats {
-        Some(ts) => {
-            println!();
+    // Token/Cost stats — only show if data is available
+    if let Some(ts) = token_stats {
+        println!();
+        print!("  {}:  ", style("Token Usage").bold());
+        println!();
+        println!(
+            "    Input:      {:>10} tokens",
+            format_number(ts.tokens_input)
+        );
+        println!(
+            "    Output:     {:>10} tokens",
+            format_number(ts.tokens_output)
+        );
+        if ts.tokens_cache_read > 0 {
             println!(
-                "    Input:      {:>10} tokens",
-                format_number(ts.tokens_input)
+                "    Cache:      {:>10} tokens (read)",
+                format_number(ts.tokens_cache_read)
             );
-            println!(
-                "    Output:     {:>10} tokens",
-                format_number(ts.tokens_output)
-            );
-            if ts.tokens_cache_read > 0 {
-                println!(
-                    "    Cache:      {:>10} tokens (read)",
-                    format_number(ts.tokens_cache_read)
-                );
-            }
-            println!(
-                "    Total:      {:>10} tokens",
-                format_number(ts.total_tokens)
-            );
-            if ts.cost_usd > 0.0 {
-                println!("    Est. Cost:  ${:.2}", ts.cost_usd);
-            }
         }
-        None => {
-            println!(
-                "{}",
-                style("unavailable (nexus-cost-control plugin not active for this project)").dim()
-            );
+        println!(
+            "    Total:      {:>10} tokens",
+            format_number(ts.total_tokens)
+        );
+        if ts.cost_usd > 0.0 {
+            println!("    Est. Cost:  ${:.2}", ts.cost_usd);
         }
     }
 
