@@ -126,8 +126,29 @@ pub async fn run(
         }
     }
 
-    // ── 7. Inject env vars ────────────────────────────────────────────────────
+    // ── 7. Inject env vars (with denylist for dangerous variables) ────────────
+    const DENIED_ENV_VARS: &[&str] = &[
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "PATH",
+        "HOME",
+        "SHELL",
+        "USER",
+        "LOGNAME",
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+    ];
+
     for (key, value, _) in &to_inject {
+        if DENIED_ENV_VARS.iter().any(|&d| d.eq_ignore_ascii_case(key)) {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m skipping denied env var '{}' from file source",
+                key
+            );
+            continue;
+        }
         env::set_var(key, value);
     }
 

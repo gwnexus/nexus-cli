@@ -444,6 +444,19 @@ fn extract_markdown_links(body: &str, workspace: &Path) -> Vec<ImportReferencedD
             continue;
         }
 
+        // Path traversal guard: ensure resolved path stays within workspace
+        let canonical = match resolved.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let workspace_canonical = match workspace.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if !canonical.starts_with(&workspace_canonical) {
+            continue;
+        }
+
         // Size limit: 100KB
         if resolved.metadata().map(|m| m.len()).unwrap_or(0) > 100_000 {
             continue;

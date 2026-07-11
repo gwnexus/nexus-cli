@@ -5,7 +5,7 @@
 //! - Bearer token authentication
 //! - Typed error mapping from HTTP status codes
 
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use serde_json::json;
 use tracing::debug;
 
@@ -44,7 +44,10 @@ impl NexusClient {
     /// Enforces HTTPS for the base URL unless it targets localhost.
     pub fn new(base_url: &str, token: Option<String>) -> Result<Self, Error> {
         // Allow http for localhost/127.0.0.1 during development
-        let is_local = base_url.contains("localhost") || base_url.contains("127.0.0.1");
+        let is_local = match Url::parse(base_url) {
+            Ok(u) => matches!(u.host_str(), Some("localhost") | Some("127.0.0.1")),
+            Err(_) => false,
+        };
         if !is_local && !base_url.starts_with("https://") {
             return Err(Error::Config(format!(
                 "API URL must use HTTPS: {}",
@@ -310,7 +313,27 @@ impl NexusClient {
     /// Download an actor avatar SVG from the provided URL.
     ///
     /// Returns the SVG content as bytes. Used by `nexus pull --with-actor-assets`.
+    /// Only allows downloads from the same host as the configured API base URL.
     pub async fn download_actor_avatar(&self, url: &str) -> Result<Vec<u8>, Error> {
+        // Validate URL domain matches the API host to prevent SSRF
+        if let (Ok(avatar_url), Ok(api_url)) = (Url::parse(url), Url::parse(&self.base_url)) {
+            let api_host = api_url.host_str().unwrap_or("");
+            let avatar_host = avatar_url.host_str().unwrap_or("");
+            // Allow same host or known CDN subdomains
+            if avatar_host != api_host
+                && !avatar_host.ends_with(&format!(".{}", api_host))
+                && !avatar_host.ends_with(".supabase.co")
+                && !avatar_host.ends_with(".supabase.in")
+            {
+                return Err(Error::Api(format!(
+                    "Avatar URL host '{}' not allowed (expected '{}')",
+                    avatar_host, api_host
+                )));
+            }
+        } else {
+            return Err(Error::Api(format!("Invalid avatar URL: {}", url)));
+        }
+
         let resp = self.client.get(url).send().await?;
         if !resp.status().is_success() {
             return Err(Error::Api(format!(
