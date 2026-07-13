@@ -5,7 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.13.0] - 2026-07-13
+## [0.13.1] - 2026-07-13
+
+### Fixed
+
+- **`nexus shadow on` no longer silently corrupts the git index** — previously,
+  `git rm --cached` was called unconditionally for every matched file, including
+  files that had commit history on the current branch. This staged deletions
+  that would be committed on the next `git commit`, causing silent data loss.
+
+  The fix introduces a per-file guard in `untrack_patterns`: before calling
+  `git rm --cached`, each resolved path is checked via `git log --oneline -1 --
+  <file>`. If the file has commit history, it is skipped with a warning:
+
+  ```
+  warning: skipping '<file>' — file has commit history on this branch
+           (use 'git rm --cached <file>' manually if intended)
+  ```
+
+  Files that are staged-only (in the index but never committed) continue to be
+  removed from the index as before.
+
+  The same guard applies to `nexus shadow workspace on`.
+
+
 
 ### Added
 

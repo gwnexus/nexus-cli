@@ -367,21 +367,83 @@ fn write_exclude_block(
 }
 
 /// Run `git rm --cached` for each pattern that is currently tracked.
+///
+/// Skips any file that has a commit history on the current branch
+/// (`git log -1 -- <file>` returns output). Removing such a file from the
+/// index would stage a deletion that could be accidentally committed.
+///
+/// Skipped files are reported as warnings so the user can act manually
+/// with `git rm --cached` if that is truly their intent.
 fn untrack_patterns(patterns: &[&str]) -> anyhow::Result<usize> {
     let mut count = 0;
     for pat in patterns {
         let clean = pat.trim_end_matches('/');
-        let output = Command::new("git")
-            .args(["rm", "-r", "--cached", "--ignore-unmatch", clean])
-            .output();
-        if let Ok(o) = output {
-            if o.status.success() {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                count += stdout.lines().filter(|l| !l.is_empty()).count();
+
+        // Collect concrete paths matched by this pattern (handles dirs and globs).
+        let matched_paths = resolve_tracked_paths(clean);
+
+        for path in &matched_paths {
+            if is_file_tracked_in_history(path) {
+                eprintln!(
+                    "  {} skipping '{}' — file has commit history on this branch (use 'git rm --cached {}' manually if intended)",
+                    console::style("warning:").yellow().bold(),
+                    path,
+                    path,
+                );
+                continue;
+            }
+
+            let output = Command::new("git")
+                .args(["rm", "-r", "--cached", "--ignore-unmatch", path])
+                .output();
+            if let Ok(o) = output {
+                if o.status.success() {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    count += stdout.lines().filter(|l| !l.is_empty()).count();
+                }
+            }
+        }
+
+        // Also attempt the pattern itself for any unmatched cases (directories, etc.)
+        // that resolve_tracked_paths may have missed — but only if no specific paths
+        // were found (avoids double-processing).
+        if matched_paths.is_empty() {
+            let output = Command::new("git")
+                .args(["rm", "-r", "--cached", "--ignore-unmatch", clean])
+                .output();
+            if let Ok(o) = output {
+                if o.status.success() {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    count += stdout.lines().filter(|l| !l.is_empty()).count();
+                }
             }
         }
     }
     Ok(count)
+}
+
+/// Return all paths under `pattern` that git currently tracks in the index.
+fn resolve_tracked_paths(pattern: &str) -> Vec<String> {
+    let output = Command::new("git")
+        .args(["ls-files", "--", pattern])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Returns `true` if `path` appears in the commit history of the current branch.
+fn is_file_tracked_in_history(path: &str) -> bool {
+    Command::new("git")
+        .args(["log", "--oneline", "-1", "--", path])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 /// Run `git add` for each pattern that exists on disk.
@@ -451,5 +513,149 @@ mod tests {
         assert!(WORKSPACE_PATTERNS.contains(&"devbox.lock"));
         assert!(WORKSPACE_PATTERNS.contains(&".devbox/"));
         assert!(WORKSPACE_PATTERNS.contains(&"scripts/devbox/"));
+    }
+
+    // ── Guard helper unit tests ──────────────────────────────────────────────
+
+    /// `is_file_tracked_in_history` must return false for a path that has never
+    /// been committed (we run against the current repo where this path does not
+    /// exist as a committed file).
+    #[test]
+    fn test_is_file_tracked_in_history_unknown_path() {
+        let result = is_file_tracked_in_history("__nexus_test_nonexistent_file_xyz__.txt");
+        assert!(!result, "non-existent path must not appear in git history");
+    }
+
+    /// `resolve_tracked_paths` returns an empty vec for a pattern that matches
+    /// nothing in the index.
+    #[test]
+    fn test_resolve_tracked_paths_no_match() {
+        let paths = resolve_tracked_paths("__nexus_test_nonexistent_dir_xyz__/");
+        assert!(
+            paths.is_empty(),
+            "no tracked paths expected for non-existent pattern"
+        );
+    }
+
+    /// `untrack_patterns` must skip a file that is committed on the current
+    /// branch and return 0 removed — verified with a real temp git repo.
+    #[test]
+    fn test_untrack_patterns_skips_committed_file() {
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+
+        // Init a bare repo and commit a file
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::fs::write(path.join("shadow_test.txt"), "hello").unwrap();
+        Command::new("git")
+            .args(["add", "shadow_test.txt"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add file"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // Run untrack_patterns from within the temp repo
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(path).unwrap();
+
+        let removed = untrack_patterns(&["shadow_test.txt"]).unwrap();
+
+        std::env::set_current_dir(orig).unwrap();
+
+        assert_eq!(
+            removed, 0,
+            "committed file must be skipped — 0 files should be removed from index"
+        );
+
+        // File must still exist on disk
+        assert!(
+            path.join("shadow_test.txt").exists(),
+            "file must remain on disk"
+        );
+    }
+
+    /// `untrack_patterns` removes a file that has never been committed and
+    /// has no pending changes (a freshly staged-only file in a new repo).
+    #[test]
+    fn test_untrack_patterns_removes_unhistoried_staged_file() {
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+
+        // Init repo, create an initial commit so HEAD exists, then add a second
+        // file without committing it — it is in the index but has no history.
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // Initial commit (needed so git log works)
+        std::fs::write(path.join("readme.txt"), "root").unwrap();
+        Command::new("git")
+            .args(["add", "readme.txt"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "root"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // A staged-only file — in index, no commit history, no worktree changes
+        std::fs::write(path.join("agentic_file.txt"), "agent").unwrap();
+        Command::new("git")
+            .args(["add", "agentic_file.txt"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(path).unwrap();
+
+        let removed = untrack_patterns(&["agentic_file.txt"]).unwrap();
+
+        std::env::set_current_dir(orig).unwrap();
+
+        assert_eq!(
+            removed, 1,
+            "staged-only file with no history should be removed from index"
+        );
+        assert!(
+            path.join("agentic_file.txt").exists(),
+            "file must remain on disk after git rm --cached"
+        );
     }
 }
