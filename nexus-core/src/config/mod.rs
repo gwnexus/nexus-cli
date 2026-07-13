@@ -130,18 +130,28 @@ fn default_run_tool() -> String {
     "opencode".to_string()
 }
 
+fn default_launch_countdown_secs() -> u64 {
+    5
+}
+
 /// Configuration for `nexus run` stored in `[run]` section of `~/.config/nexus/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
     /// Default tool binary to launch (default: "opencode").
     #[serde(default = "default_run_tool")]
     pub default_tool: String,
+
+    /// Seconds to count down after pre-launch checks before starting the tool (default: 5).
+    /// Set to 0 to skip the countdown and launch immediately.
+    #[serde(default = "default_launch_countdown_secs")]
+    pub launch_countdown_secs: u64,
 }
 
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
             default_tool: default_run_tool(),
+            launch_countdown_secs: default_launch_countdown_secs(),
         }
     }
 }
@@ -238,8 +248,14 @@ impl Config {
                 self.run.default_tool = value.to_string();
                 Ok(())
             }
+            "run.launch_countdown_secs" => {
+                self.run.launch_countdown_secs = value
+                    .parse::<u64>()
+                    .map_err(|_| Error::Config(format!("invalid u64 value: '{}'", value)))?;
+                Ok(())
+            }
             other => Err(Error::Config(format!(
-                "unknown config key '{}', valid keys: api_url, default_output, no_color, mcp_source, check_updates, run.default_tool",
+                "unknown config key '{}', valid keys: api_url, default_output, no_color, mcp_source, check_updates, run.default_tool, run.launch_countdown_secs",
                 other
             ))),
         }

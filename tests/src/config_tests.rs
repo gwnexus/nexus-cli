@@ -9,6 +9,7 @@ fn test_config_default_values() {
     assert_eq!(config.default_output, OutputPreference::Table);
     assert!(!config.no_color);
     assert_eq!(config.mcp_source, McpSource::Npm);
+    assert_eq!(config.run.launch_countdown_secs, 5);
 }
 
 #[test]
@@ -143,6 +144,12 @@ fn test_config_set_valid_keys() {
 
     config.set("check_updates", "true").unwrap();
     assert!(config.check_updates);
+
+    config.set("run.launch_countdown_secs", "10").unwrap();
+    assert_eq!(config.run.launch_countdown_secs, 10);
+
+    config.set("run.launch_countdown_secs", "0").unwrap();
+    assert_eq!(config.run.launch_countdown_secs, 0);
 }
 
 #[test]
@@ -171,6 +178,45 @@ fn test_config_set_invalid_mcp_source() {
     let mut config = Config::default();
     let result = config.set("mcp_source", "docker");
     assert!(result.is_err());
+}
+
+#[test]
+fn test_run_config_launch_countdown_secs_default() {
+    let run = nexus_core::config::RunConfig::default();
+    assert_eq!(run.launch_countdown_secs, 5);
+}
+
+#[test]
+fn test_run_config_launch_countdown_secs_toml_roundtrip() {
+    let mut config = Config::default();
+    config.set("run.launch_countdown_secs", "3").unwrap();
+
+    let serialized = toml::to_string_pretty(&config).unwrap();
+    let deserialized: Config = toml::from_str(&serialized).unwrap();
+    assert_eq!(deserialized.run.launch_countdown_secs, 3);
+}
+
+#[test]
+fn test_run_config_launch_countdown_secs_zero() {
+    let mut config = Config::default();
+    config.set("run.launch_countdown_secs", "0").unwrap();
+    assert_eq!(config.run.launch_countdown_secs, 0);
+}
+
+#[test]
+fn test_config_set_invalid_countdown_secs() {
+    let mut config = Config::default();
+    assert!(config.set("run.launch_countdown_secs", "five").is_err());
+    assert!(config.set("run.launch_countdown_secs", "-1").is_err());
+    assert!(config.set("run.launch_countdown_secs", "").is_err());
+}
+
+#[test]
+fn test_config_backward_compat_no_countdown() {
+    // Old config without [run] section — defaults should fill in
+    let toml_str = r#"api_url = "https://legacy.nexus.api""#;
+    let config: Config = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.run.launch_countdown_secs, 5);
 }
 
 #[test]

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-07-13
+
+### Added
+
+- **Configurable launch countdown** — `nexus run` now displays a per-second
+  countdown after the pre-launch checks complete before starting the tool.
+  The default is 5 seconds; the user can abort at any time with `Ctrl+C`.
+  Replaces the previous "Press Enter to launch" prompt for the all-pass and
+  warnings-only cases.
+
+  Configurable via `~/.config/nexus/config.toml`:
+
+  ```toml
+  [run]
+  launch_countdown_secs = 5   # default; set to 0 to launch immediately
+  ```
+
+  Or via CLI:
+
+  ```bash
+  nexus config set run.launch_countdown_secs=3
+  nexus config set run.launch_countdown_secs=0   # skip countdown
+  ```
+
 ## [0.12.1] - 2026-07-10
 
 ### Fixed

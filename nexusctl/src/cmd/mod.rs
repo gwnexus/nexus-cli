@@ -239,6 +239,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
             let default_tool = config.run.default_tool.clone();
+            let countdown_secs = config.run.launch_countdown_secs;
             run::run(
                 &api_url,
                 tool.as_deref(),
@@ -250,6 +251,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 force,
                 args,
                 &default_tool,
+                countdown_secs,
             )
             .await?;
         }

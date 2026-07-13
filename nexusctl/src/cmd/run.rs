@@ -18,6 +18,7 @@ use anyhow::Context as _;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::Path;
 use std::time::Instant;
 use std::{env, fs};
@@ -44,6 +45,7 @@ pub async fn run(
     force: bool,
     args: &[String],
     default_tool: &str,
+    countdown_secs: u64,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
     let agentic_root = resolve_agentic_root(&workspace);
@@ -119,8 +121,13 @@ pub async fn run(
 
     // ── 6. Pre-launch checks ─────────────────────────────────────────────────
     if !skip_checks {
-        let should_continue =
-            run_prelaunch_checks(&workspace, effective_tool, &env_file_path, force)?;
+        let should_continue = run_prelaunch_checks(
+            &workspace,
+            effective_tool,
+            &env_file_path,
+            force,
+            countdown_secs,
+        )?;
         if !should_continue {
             return Ok(());
         }
@@ -266,6 +273,7 @@ fn run_prelaunch_checks(
     tool: &str,
     env_file: &Path,
     force: bool,
+    countdown_secs: u64,
 ) -> anyhow::Result<bool> {
     println!();
     println!("{} Nexus Pre-launch Check", style(">>").bold().cyan());
@@ -411,14 +419,7 @@ fn run_prelaunch_checks(
         );
         if !force {
             println!();
-            println!(
-                "   Press {} to launch {}, or {} to abort...",
-                style("Enter").bold(),
-                style(tool).bold(),
-                style("Ctrl+C").bold()
-            );
-            let mut buf = String::new();
-            std::io::stdin().read_line(&mut buf)?;
+            launch_countdown(tool, countdown_secs)?;
         }
         println!();
     } else {
@@ -429,19 +430,40 @@ fn run_prelaunch_checks(
         );
         if !force {
             println!();
-            println!(
-                "   Press {} to launch {}, or {} to abort...",
-                style("Enter").bold(),
-                style(tool).bold(),
-                style("Ctrl+C").bold()
-            );
-            let mut buf = String::new();
-            std::io::stdin().read_line(&mut buf)?;
+            launch_countdown(tool, countdown_secs)?;
         }
         println!();
     }
 
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Launch countdown
+// ---------------------------------------------------------------------------
+
+/// Display a countdown before launching `tool`.
+///
+/// If `secs` is 0, launches immediately without any output.
+/// The user can abort at any time with Ctrl+C (SIGINT terminates the process).
+fn launch_countdown(tool: &str, secs: u64) -> anyhow::Result<()> {
+    if secs == 0 {
+        return Ok(());
+    }
+    for remaining in (1..=secs).rev() {
+        print!(
+            "\r   Launching {} in {}s… ({}  to abort)",
+            style(tool).bold(),
+            style(remaining).bold().cyan(),
+            style("Ctrl+C").bold(),
+        );
+        std::io::stdout().flush()?;
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    // Clear the countdown line
+    print!("\r{}\r", " ".repeat(72));
+    std::io::stdout().flush()?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

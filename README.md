@@ -100,6 +100,31 @@ nexus upgrade                           Upgrade CLI to latest release version
 | Workspace | `.nexus/` workspace marker present |
 | MCP | Agent MCP configurations reference nexus-mcp |
 
+`nexus run` embeds the same checks and adds a **launch countdown** after
+they complete. The countdown gives you a moment to review the results before
+the tool starts. Press `Ctrl+C` at any time to abort.
+
+### Configuration
+
+Global config is stored in `~/.config/nexus/config.toml`.
+
+| Key | Default | Description |
+| --- | ------- | ----------- |
+| `api_url` | `https://nexus.gatewarden.eu` | Nexus API base URL |
+| `default_output` | `table` | Output format: `table`, `json`, `plain` |
+| `no_color` | `false` | Disable colored output |
+| `mcp_source` | `npm` | MCP server source: `npm` or `local` |
+| `check_updates` | `true` | Check for CLI updates on startup |
+| `run.default_tool` | `opencode` | Tool binary launched by `nexus run` |
+| `run.launch_countdown_secs` | `5` | Seconds to count down after pre-launch checks before starting the tool. Set to `0` to skip the countdown and launch immediately. |
+
+Use `nexus config set K=V` to update a value, e.g.:
+
+```bash
+nexus config set run.launch_countdown_secs=3   # shorter countdown
+nexus config set run.launch_countdown_secs=0   # launch immediately
+```
+
 ## Project Structure
 
 ```
