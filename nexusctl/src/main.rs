@@ -454,8 +454,12 @@ async fn main() -> anyhow::Result<()> {
     // Load config for update check
     let config = nexus_core::config::Config::load().unwrap_or_default();
 
-    // Spawn update check in background (non-blocking)
-    let update_handle = if config.check_updates {
+    // Spawn update check in background (non-blocking).
+    // Suppressed when the user is already running `nexus upgrade` — the new
+    // version is installed by the time the notice would appear, so showing it
+    // is misleading.
+    let is_upgrade_cmd = matches!(cli.command, Command::Upgrade);
+    let update_handle = if config.check_updates && !is_upgrade_cmd {
         Some(tokio::spawn(async move {
             nexus_core::update_check::check_for_update(&config).await
         }))
