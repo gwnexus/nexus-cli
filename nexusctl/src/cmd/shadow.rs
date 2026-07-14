@@ -552,16 +552,6 @@ mod tests {
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()
-            .unwrap();
         std::fs::write(path.join("shadow_test.txt"), "hello").unwrap();
         Command::new("git")
             .args(["add", "shadow_test.txt"])
@@ -571,6 +561,10 @@ mod tests {
         Command::new("git")
             .args(["commit", "-m", "add file"])
             .current_dir(path)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
             .output()
             .unwrap();
 
@@ -610,16 +604,6 @@ mod tests {
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()
-            .unwrap();
 
         // Initial commit (needed so git log works)
         std::fs::write(path.join("readme.txt"), "root").unwrap();
@@ -631,6 +615,10 @@ mod tests {
         Command::new("git")
             .args(["commit", "-m", "root"])
             .current_dir(path)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
             .output()
             .unwrap();
 
