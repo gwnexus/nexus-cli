@@ -445,25 +445,85 @@ fn run_prelaunch_checks(
 /// Display a countdown before launching `tool`.
 ///
 /// If `secs` is 0, launches immediately without any output.
-/// The user can abort at any time with Ctrl+C (SIGINT terminates the process).
+/// The user can press Enter to skip the countdown or Ctrl+C to abort.
 fn launch_countdown(tool: &str, secs: u64) -> anyhow::Result<()> {
+    use std::sync::mpsc;
+
     if secs == 0 {
         return Ok(());
     }
+
+    // Set terminal to raw mode so we can detect Enter without waiting for newline
+    let _raw_guard = RawModeGuard::enter();
+
+    // Spawn a thread that waits for any keypress (Enter)
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1];
+        // Read a single byte from stdin — blocks until keypress
+        if std::io::Read::read(&mut std::io::stdin(), &mut buf).is_ok() {
+            let _ = tx.send(());
+        }
+    });
+
     for remaining in (1..=secs).rev() {
         print!(
-            "\r   Launching {} in {}s… ({}  to abort)",
+            "\r   Launching {} in {}s… ({} to skip, {} to abort)",
             style(tool).bold(),
             style(remaining).bold().cyan(),
+            style("Enter").bold().green(),
             style("Ctrl+C").bold(),
         );
         std::io::stdout().flush()?;
-        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Sleep in small increments to check for Enter press
+        for _ in 0..20 {
+            if rx.try_recv().is_ok() {
+                // User pressed Enter — skip remaining countdown
+                print!("\r{}\r", " ".repeat(80));
+                std::io::stdout().flush()?;
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
     // Clear the countdown line
-    print!("\r{}\r", " ".repeat(72));
+    print!("\r{}\r", " ".repeat(80));
     std::io::stdout().flush()?;
     Ok(())
+}
+
+/// RAII guard to set terminal to raw mode and restore on drop.
+struct RawModeGuard {
+    original: libc::termios,
+}
+
+impl RawModeGuard {
+    fn enter() -> Option<Self> {
+        unsafe {
+            let mut original: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut original) != 0 {
+                return None;
+            }
+            let mut raw = original;
+            // Disable canonical mode and echo
+            raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+            raw.c_cc[libc::VMIN] = 1;
+            raw.c_cc[libc::VTIME] = 0;
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {
+                return None;
+            }
+            Some(Self { original })
+        }
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
