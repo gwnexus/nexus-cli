@@ -176,28 +176,53 @@ pub async fn run(
 
         // ── 9. Post-session summary ──────────────────────────────────────
         let elapsed = start.elapsed();
-        let head_after = git_head_sha(&workspace);
-        let tags_after = git_tags(&workspace);
 
-        // Fetch token/cost + activity stats from Nexus session (best effort)
-        let (token_stats, activity_stats) = if !no_db {
-            fetch_session_stats(api_url, &workspace).await
-        } else {
-            (None, None)
+        // Show spinner so the user knows post-processing is in progress.
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap()
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        );
+        spinner.set_message("Session ended — collecting summary. Press Ctrl+C to skip.");
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
+        // Race: collect stats vs. user pressing Ctrl+C to skip.
+        let summary_result = tokio::select! {
+            _ = tokio::signal::ctrl_c() => None,
+            result = async {
+                let head_after = git_head_sha(&workspace);
+                let tags_after = git_tags(&workspace);
+                let (token_stats, activity_stats) = if !no_db {
+                    fetch_session_stats(api_url, &workspace).await
+                } else {
+                    (None, None)
+                };
+                Some((head_after, tags_after, token_stats, activity_stats))
+            } => result,
         };
 
-        print_session_summary(
-            &workspace,
-            elapsed,
-            exit_code,
-            head_before.as_deref(),
-            head_after.as_deref(),
-            &tags_before,
-            &tags_after,
-            run_start_epoch,
-            token_stats.as_ref(),
-            activity_stats.as_ref(),
-        );
+        spinner.finish_and_clear();
+
+        match summary_result {
+            Some((head_after, tags_after, token_stats, activity_stats)) => {
+                print_session_summary(
+                    &workspace,
+                    elapsed,
+                    exit_code,
+                    head_before.as_deref(),
+                    head_after.as_deref(),
+                    &tags_before,
+                    &tags_after,
+                    run_start_epoch,
+                    token_stats.as_ref(),
+                    activity_stats.as_ref(),
+                );
+            }
+            None => {
+                println!("\n  {} Summary skipped.", style("⚡").cyan(),);
+            }
+        }
 
         std::process::exit(exit_code);
     }
