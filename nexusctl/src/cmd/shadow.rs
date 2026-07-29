@@ -281,6 +281,48 @@ pub fn is_workspace_shadow_active() -> anyhow::Result<bool> {
     Ok(is_block_active(&exclude_path, WS_MARKER_START))
 }
 
+/// Ensure that the given file paths are listed in `.git/info/exclude`.
+///
+/// This is a best-effort operation: if no `.git` directory is found or the
+/// exclude file cannot be written, errors are silently ignored. The function
+/// is intended to protect token-bearing config files from accidental commit.
+pub fn ensure_git_excluded(paths: &[&str]) {
+    let git_dir = match find_git_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let exclude_path = git_dir.join("info").join("exclude");
+
+    // Ensure parent directory exists
+    if let Some(parent) = exclude_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
+
+    let mut additions = Vec::new();
+    for path in paths {
+        if !existing.lines().any(|line| line.trim() == *path) {
+            additions.push(*path);
+        }
+    }
+
+    if additions.is_empty() {
+        return;
+    }
+
+    let mut content = existing;
+    if !content.ends_with('\n') && !content.is_empty() {
+        content.push('\n');
+    }
+    content.push_str("# nexus: token-bearing files (auto-added)\n");
+    for path in additions {
+        content.push_str(path);
+        content.push('\n');
+    }
+    let _ = fs::write(&exclude_path, content);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

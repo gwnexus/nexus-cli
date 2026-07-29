@@ -119,10 +119,14 @@ fn check_config() -> (CheckResult, Option<Config>) {
 fn check_credentials() -> (CheckResult, Option<String>) {
     match Credentials::load() {
         Ok(Some(creds)) => {
-            let prefix = if creds.token.len() > 16 {
-                format!("{}...", &creds.token[..16])
+            let prefix = if creds.token.len() > 12 {
+                format!(
+                    "{}...{}",
+                    &creds.token[..8],
+                    &creds.token[creds.token.len() - 4..]
+                )
             } else {
-                creds.token.clone()
+                "nxs_pat_****".to_string()
             };
             (CheckResult::Pass(prefix), Some(creds.token))
         }

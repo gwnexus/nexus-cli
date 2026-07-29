@@ -861,13 +861,23 @@ pub async fn run(
         if !af_export.prerequisites.is_empty() {
             let mut missing: Vec<String> = Vec::new();
             for prereq in &af_export.prerequisites {
-                let found = std::process::Command::new("sh")
-                    .args(["-c", &prereq.check_command])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
+                // SEC-004: validate check_command against shell injection.
+                // Only allow simple commands: alphanumeric, hyphens, underscores,
+                // dots, forward slashes, spaces, and common flags (--version).
+                let is_safe = prereq.check_command.chars().all(|c| {
+                    c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ' ' | '=' | ':')
+                });
+                let found = if !is_safe {
+                    false
+                } else {
+                    std::process::Command::new("sh")
+                        .args(["-c", &prereq.check_command])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                };
                 if !found {
                     missing.push(prereq.tool.clone());
                     println!(
@@ -1702,6 +1712,9 @@ fn write_mcp_configs(
                 serde_json::to_string_pretty(&opencode_json)? + "\n",
             )?;
 
+            // SEC-002: ensure token-bearing config files are git-excluded
+            shadow::ensure_git_excluded(&["opencode.json", "opencode.jsonc"]);
+
             let verb = if exists { "updated" } else { "created" };
             let mut extras = Vec::new();
             if !plugin_mcp_servers.is_empty() {
@@ -1819,6 +1832,10 @@ fn write_mcp_configs(
                 &claude_mcp_path,
                 serde_json::to_string_pretty(&claude_mcp_json)? + "\n",
             )?;
+
+            // SEC-002: ensure token-bearing config files are git-excluded
+            let mcp_rel = format!("{}/mcp.json", agentic_root);
+            shadow::ensure_git_excluded(&[&mcp_rel]);
 
             let verb = if exists { "updated" } else { "created" };
             println!(

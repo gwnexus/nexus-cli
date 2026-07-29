@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::shadow;
 use crate::cmd::pull::{detect_importable_files, write_plugin_env_file};
 
 /// Run the init command.
@@ -1217,6 +1218,8 @@ fn write_mcp_configs(
             );
 
             fs::write(&opencode_path, opencode_json)?;
+            // SEC-002: ensure token-bearing config files are git-excluded
+            shadow::ensure_git_excluded(&["opencode.json", "opencode.jsonc"]);
             println!(
                 "   {} opencode.json (MCP source: {})",
                 style("+").bold().green(),
@@ -1266,6 +1269,9 @@ fn write_mcp_configs(
                 fs::create_dir_all(parent)?;
             }
             fs::write(&claude_mcp_path, claude_mcp_json)?;
+            // SEC-002: ensure token-bearing config files are git-excluded
+            let mcp_rel = format!("{}/mcp.json", agentic_root);
+            shadow::ensure_git_excluded(&[&mcp_rel]);
             println!(
                 "   {} {}/mcp.json (MCP source: {})",
                 style("+").bold().green(),

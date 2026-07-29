@@ -20,6 +20,9 @@ use std::process::Command;
 /// CDN URL of the installer script.
 const INSTALL_URL: &str = "https://nexus.gatewarden.eu/install.sh";
 
+/// CDN URL of the installer script SHA-256 checksum.
+const INSTALL_SHA256_URL: &str = "https://nexus.gatewarden.eu/install.sh.sha256";
+
 /// Run the upgrade command.
 pub fn run() -> anyhow::Result<()> {
     let current = env!("CARGO_PKG_VERSION");
@@ -35,13 +38,61 @@ pub fn run() -> anyhow::Result<()> {
     );
     println!();
 
-    // Execute: curl -fsSL <URL> | bash
-    let status = Command::new("bash")
-        .arg("-c")
-        .arg(format!("curl -fsSL {} | bash", INSTALL_URL))
+    // Download the install script to a temp file and verify integrity
+    let tmp_dir = std::env::temp_dir();
+    let script_path = tmp_dir.join("nexus-install.sh");
+    let script_path_str = script_path.display().to_string();
+
+    // Fetch the script
+    let dl_status = Command::new("curl")
+        .args(["-fsSL", "-o", &script_path_str, INSTALL_URL])
         .status()?;
 
+    if !dl_status.success() {
+        anyhow::bail!(
+            "Failed to download install script from {}. Check your network connection.",
+            INSTALL_URL
+        );
+    }
+
+    // Attempt checksum verification (non-blocking if checksum file unavailable)
+    let checksum_verified = verify_script_checksum(&script_path_str);
+    match checksum_verified {
+        Ok(true) => {
+            println!(
+                "   {} Checksum verified (SHA-256)",
+                style("✓").bold().green()
+            );
+        }
+        Ok(false) => {
+            println!(
+                "   {} Checksum mismatch — aborting upgrade for safety",
+                style("✗").bold().red()
+            );
+            let _ = std::fs::remove_file(&script_path);
+            anyhow::bail!(
+                "Install script integrity check failed. The file may have been tampered with."
+            );
+        }
+        Err(_) => {
+            println!(
+                "   {} Checksum file unavailable — proceeding without verification",
+                style("!").bold().yellow()
+            );
+            println!(
+                "     {}",
+                style("For stronger supply-chain guarantees, download from GitHub Releases").dim()
+            );
+        }
+    }
     println!();
+
+    // Execute the verified script
+    let status = Command::new("bash").arg(&script_path_str).status()?;
+
+    // Clean up
+    let _ = std::fs::remove_file(&script_path);
+
     if status.success() {
         println!(
             "{} Upgrade complete. Run {} to verify.",
@@ -85,4 +136,50 @@ fn detect_installed_version() -> Option<String> {
         .last()
         .map(|v| v.trim_start_matches('v').to_string())
         .filter(|v| !v.is_empty())
+}
+
+/// Verify the install script checksum against the `.sha256` sidecar file.
+///
+/// Returns:
+/// - `Ok(true)` if checksum matches
+/// - `Ok(false)` if checksum does NOT match (tampered)
+/// - `Err(_)` if the checksum file could not be fetched (unavailable)
+fn verify_script_checksum(script_path: &str) -> anyhow::Result<bool> {
+    // Fetch expected checksum
+    let output = Command::new("curl")
+        .args(["-fsSL", INSTALL_SHA256_URL])
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!("checksum file unavailable");
+    }
+
+    let expected = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+
+    if expected.is_empty() || expected.len() != 64 {
+        anyhow::bail!("invalid checksum format");
+    }
+
+    // Compute local SHA-256
+    let local_output = Command::new("shasum")
+        .args(["-a", "256", script_path])
+        .output()?;
+
+    if !local_output.status.success() {
+        anyhow::bail!("shasum failed");
+    }
+
+    let local_hash = String::from_utf8_lossy(&local_output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+
+    Ok(local_hash == expected)
 }

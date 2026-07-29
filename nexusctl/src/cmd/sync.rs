@@ -74,6 +74,13 @@ pub async fn status(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Resu
     if let Some(entries) = manifest_obj {
         for (file_key, info) in entries {
             let target_path = info["target_path"].as_str().unwrap_or("");
+            // Path traversal protection: skip entries with parent-dir components
+            if std::path::Path::new(target_path)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                continue;
+            }
             let local_path = workspace.join(target_path);
 
             let local_hash = if local_path.exists() {
@@ -330,6 +337,16 @@ pub async fn reset(
     {
         Ok(resp) => {
             if let Some(body) = &resp.body {
+                // Path traversal protection: reject target_path with parent-dir components
+                if std::path::Path::new(&target_path)
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    anyhow::bail!(
+                        "refusing to write: target_path '{}' contains '..' traversal",
+                        target_path
+                    );
+                }
                 let local_path = workspace.join(&target_path);
                 if let Some(parent) = local_path.parent() {
                     fs::create_dir_all(parent)?;

@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.5] - 2026-07-29
+
+### Security
+
+- **SEC-001: Path traversal protection in `sync.rs`** — added `ParentDir`
+  component validation to `sync::status()` and `sync::reset()` functions.
+  Server-supplied `target_path` values from the sync manifest are now rejected
+  if they contain `..` traversal components, matching the existing guard in
+  `write_agent_file`. (CWE-22, OWASP A03)
+
+- **SEC-002: Token-bearing config files auto-excluded from git** — `nexus pull`
+  and `nexus init` now automatically add `opencode.json`, `opencode.jsonc`, and
+  `<agentic_root>/mcp.json` to `.git/info/exclude` after writing PAT tokens
+  into these files. This prevents accidental credential commits without
+  requiring manual `nexus shadow on`. (CWE-312, OWASP A02)
+
+- **SEC-003: Install script integrity verification in `nexus upgrade`** — the
+  upgrade command now downloads the install script to a temp file and verifies
+  its SHA-256 checksum against a `.sha256` sidecar file before execution.
+  If the checksum file is unavailable, a warning is shown but execution
+  proceeds (graceful degradation). (CWE-494, OWASP A08)
+
+- **SEC-004: Prerequisite check command sanitization** — server-supplied
+  `check_command` strings from the agent-file export are now validated against
+  an allowlist of safe characters before shell execution. Commands containing
+  shell metacharacters are skipped. (CWE-78, OWASP A03)
+
+- **SEC-005: Reduced token exposure in preflight output** — the credential
+  check now shows only the first 8 and last 4 characters of the PAT token
+  (e.g., `nxs_pat_...4567`) instead of the first 16 characters.
+  (CWE-200, OWASP A02)
+
 ## [0.13.2] - 2026-07-14
 
 ### Fixed
