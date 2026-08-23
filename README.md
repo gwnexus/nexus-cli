@@ -152,6 +152,16 @@ Global config is stored in `~/.config/nexus/config.toml`.
 | `run.default_tool` | `opencode` | Tool binary launched by `nexus run` |
 | `run.launch_countdown_secs` | `5` | Seconds to count down after pre-launch checks before starting the tool. Set to `0` to skip the countdown and launch immediately. |
 
+The API URL can also be set via the `NEXUS_API_URL` environment variable.
+Resolution order: `--api-url` flag > `NEXUS_API_URL` env var > config.toml > default.
+
+```bash
+# Temporary staging session (no config change needed)
+export NEXUS_API_URL=https://staging.example.com
+nexus status
+nexus push --dry-run
+```
+
 Use `nexus config set K=V` to update a value, e.g.:
 
 ```bash
@@ -177,7 +187,8 @@ nexus-cli/
 │       ├── api/        # HTTP client + API types
 │       ├── auth/       # Credential storage (nxs_pat_*)
 │       ├── config/     # CLI configuration (~/.config/nexus/)
-│       └── error/      # Unified error types
+│       ├── error/      # Unified error types
+│       └── hash/       # Shared hashing utilities (sha256_hex)
 └── tests/              # Dedicated test crate
     └── src/
         ├── auth_tests.rs
@@ -222,16 +233,16 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 
 ## Tips
 
-> **Local agent file changes are overwritten by `nexus pull`.**
+> **Local changes are protected by default.**
 >
-> Files managed by the Nexus platform (AGENTS.md, CLAUDE.md, .cursorrules,
-> copilot-instructions.md, plugin configs, etc.) are pulled from the server
-> and will **overwrite** any local modifications. `nexus pull` warns before
-> overwriting, but with `--force` changes are lost silently.
+> `nexus pull` checks if local files were modified since the last pull.
+> Modified files are **skipped** with a warning. Use `nexus stash` to save
+> changes before pulling, or `nexus pull --force` to overwrite.
 >
-> **Pushing local changes back to the platform is not yet supported.**
-> If you need custom content, edit the agent files in the Nexus dashboard
-> and run `nexus pull` to sync them to your workspace.
+> **Pushing workspace changes back to the platform:**
+> Use `nexus push` to upload modified workspace files (devbox.json, scripts/)
+> as a new workspace fork. Agent file push (skills, AGENTS.md) is planned
+> for a future release.
 
 - Run `nexus pull` periodically (or after skill/agent file changes in the dashboard) to keep your workspace in sync.
 - Use `/nexus-init` inside OpenCode or Claude CLI to bootstrap the agent after initialization.
