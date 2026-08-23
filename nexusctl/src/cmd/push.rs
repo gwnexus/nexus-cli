@@ -113,6 +113,22 @@ fn read_scripts_recursive(base: &Path, dir: &Path, files: &mut HashMap<String, S
     }
 }
 
+/// Sync manifest path.
+const SYNC_MANIFEST: &str = ".nexus/sync-manifest.json";
+
+/// Check if a file path is tracked in the sync manifest (proving Nexus origin).
+fn is_manifest_tracked(key: &str, manifest: &serde_json::Value) -> bool {
+    // Direct key lookup
+    if manifest.get(key).is_some() {
+        return true;
+    }
+    // Search by target_path value
+    manifest.as_object().is_some_and(|m| {
+        m.values()
+            .any(|v| v.get("target_path").and_then(|p| p.as_str()) == Some(key))
+    })
+}
+
 /// `nexus push` — push local workspace changes to the platform.
 pub async fn run(
     api_url: &str,
@@ -135,11 +151,43 @@ pub async fn run(
     println!("   Project: {}", style(&project_id).dim());
     println!();
 
+    // Origin guard: require sync manifest (proves nexus pull was run)
+    let manifest_path = workspace.join(SYNC_MANIFEST);
+    if !manifest_path.exists() {
+        anyhow::bail!(
+            "No sync manifest found. Run 'nexus pull' first to establish a Nexus baseline."
+        );
+    }
+    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+    if manifest.as_object().is_none_or(|m| m.is_empty()) {
+        anyhow::bail!(
+            "Sync manifest is empty. Run 'nexus pull' first to establish a Nexus baseline."
+        );
+    }
+
     // Collect local hashes
-    let local_hashes = collect_workspace_hashes(&workspace);
-    if local_hashes.is_empty() {
+    let all_hashes = collect_workspace_hashes(&workspace);
+    if all_hashes.is_empty() {
         println!("   {} No workspace files found.", style("!").yellow());
         return Ok(());
+    }
+
+    // Filter to only manifest-tracked files (origin guard)
+    let mut local_hashes = HashMap::new();
+    for (key, hash) in all_hashes {
+        if is_manifest_tracked(&key, &manifest) {
+            local_hashes.insert(key, hash);
+        } else {
+            println!(
+                "     {} {} (not tracked by Nexus, skipped)",
+                style("S").dim(),
+                key
+            );
+        }
+    }
+
+    if local_hashes.is_empty() {
+        anyhow::bail!("No Nexus-managed workspace files found. Run 'nexus pull' first.");
     }
 
     // Compare with server
@@ -261,5 +309,62 @@ mod tests {
         let (devbox, scripts) = read_workspace_files(dir.path());
         assert!(devbox.is_some());
         assert!(scripts.is_none());
+    }
+
+    #[test]
+    fn test_is_manifest_tracked_direct_key() {
+        let manifest = serde_json::json!({
+            "devbox.json": { "hash": "abc", "target_path": "devbox.json" }
+        });
+        assert!(is_manifest_tracked("devbox.json", &manifest));
+        assert!(!is_manifest_tracked("unknown.json", &manifest));
+    }
+
+    #[test]
+    fn test_is_manifest_tracked_by_target_path() {
+        let manifest = serde_json::json!({
+            "workspace-devbox": { "hash": "abc", "target_path": "devbox.json" }
+        });
+        assert!(is_manifest_tracked("devbox.json", &manifest));
+    }
+
+    #[test]
+    fn test_is_manifest_tracked_scripts() {
+        let manifest = serde_json::json!({
+            "scripts/devbox/init.sh": { "hash": "abc", "target_path": "scripts/devbox/init.sh" }
+        });
+        assert!(is_manifest_tracked("scripts/devbox/init.sh", &manifest));
+        assert!(!is_manifest_tracked("scripts/devbox/custom.sh", &manifest));
+    }
+
+    #[test]
+    fn test_origin_guard_filters_untracked() {
+        let dir = TempDir::new().unwrap();
+
+        // Create workspace files
+        fs::write(dir.path().join("devbox.json"), "{}").unwrap();
+        let scripts = dir.path().join("scripts/devbox");
+        fs::create_dir_all(&scripts).unwrap();
+        fs::write(scripts.join("tracked.sh"), "#!/bin/bash").unwrap();
+        fs::write(scripts.join("untracked.sh"), "#!/bin/bash").unwrap();
+
+        // Manifest only tracks devbox.json and tracked.sh
+        let manifest = serde_json::json!({
+            "devbox.json": { "hash": "old", "target_path": "devbox.json" },
+            "scripts/devbox/tracked.sh": { "hash": "old", "target_path": "scripts/devbox/tracked.sh" }
+        });
+
+        let all_hashes = collect_workspace_hashes(dir.path());
+        assert_eq!(all_hashes.len(), 3);
+
+        // Filter by manifest
+        let tracked: HashMap<String, String> = all_hashes
+            .into_iter()
+            .filter(|(k, _)| is_manifest_tracked(k, &manifest))
+            .collect();
+        assert_eq!(tracked.len(), 2);
+        assert!(tracked.contains_key("devbox.json"));
+        assert!(tracked.contains_key("scripts/devbox/tracked.sh"));
+        assert!(!tracked.contains_key("scripts/devbox/untracked.sh"));
     }
 }

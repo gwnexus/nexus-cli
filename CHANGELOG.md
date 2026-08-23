@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] - 2026-08-23
+
+### Added
+- **Origin guard for `nexus push`** - push now requires a sync manifest (`.nexus/sync-manifest.json`) to exist, proving that `nexus pull` was run at least once. Only files tracked in the manifest are included in the push; untracked local files are skipped with a warning. Prevents pushing arbitrary local files to Nexus workspace forks.
+
 ## [0.14.1] - 2026-08-23
 
 ### Added
