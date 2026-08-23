@@ -381,6 +381,11 @@ pub async fn reset(
     Ok(())
 }
 
+/// Public accessor for the sync manifest, used by pull.rs for local-modification detection.
+pub fn load_manifest_pub(workspace: &Path) -> serde_json::Value {
+    load_manifest(workspace)
+}
+
 /// Update the sync manifest after a `nexus pull` writes agent files.
 /// Called from pull.rs to record content hashes for each exported file.
 pub fn update_manifest_after_pull(

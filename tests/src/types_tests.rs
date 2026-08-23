@@ -784,3 +784,109 @@ fn test_prerequisite_serialize_roundtrip() {
     assert_eq!(prereq.install_hint, prereq2.install_hint);
     assert_eq!(prereq.required_by, prereq2.required_by);
 }
+
+// ---------------------------------------------------------------------------
+// WorkspacePushResponse deserialization (v0.14.0)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_workspace_push_response_deserialize() {
+    let json = r#"{
+        "action": "ws_push",
+        "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        "fork_id": "aaaa-bbbb-cccc",
+        "fork_name": "push-2026-08-23T10:30:00Z",
+        "version": 1,
+        "previous_fork_id": "dddd-eeee-ffff",
+        "previous_fork_name": "default",
+        "files_pushed": ["devbox.json", "scripts/devbox/dbx_init.sh"]
+    }"#;
+
+    let resp: WorkspacePushResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.action, "ws_push");
+    assert_eq!(resp.project_id, "fdc7a78c-d0b9-46fd-8206-9fc57301de2d");
+    assert_eq!(resp.fork_name, "push-2026-08-23T10:30:00Z");
+    assert_eq!(resp.version, 1);
+    assert_eq!(resp.previous_fork_name, "default");
+    assert_eq!(resp.files_pushed.len(), 2);
+    assert_eq!(resp.files_pushed[0], "devbox.json");
+}
+
+#[test]
+fn test_workspace_push_response_roundtrip() {
+    let resp = WorkspacePushResponse {
+        action: "ws_push".to_string(),
+        project_id: "test-id".to_string(),
+        fork_id: "fork-1".to_string(),
+        fork_name: "my-fork".to_string(),
+        version: 3,
+        previous_fork_id: "fork-0".to_string(),
+        previous_fork_name: "old-fork".to_string(),
+        files_pushed: vec!["devbox.json".to_string()],
+    };
+
+    let json = serde_json::to_string(&resp).unwrap();
+    let resp2: WorkspacePushResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(resp.fork_name, resp2.fork_name);
+    assert_eq!(resp.version, resp2.version);
+    assert_eq!(resp.files_pushed, resp2.files_pushed);
+}
+
+// ---------------------------------------------------------------------------
+// FileStatusResponse deserialization (v0.14.0)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_file_status_response_deserialize_full() {
+    let json = r#"{
+        "action": "af_status",
+        "project_id": "test-proj",
+        "modified": [{
+            "path": "devbox.json",
+            "local_hash": "abc123",
+            "remote_hash": "def456",
+            "category": "workspace"
+        }],
+        "new_local": [{"path": "scripts/devbox/custom.sh"}],
+        "deleted_local": [{
+            "path": "scripts/devbox/old.sh",
+            "remote_hash": "ghi789",
+            "category": "workspace"
+        }],
+        "unchanged": [{
+            "path": ".nexus/skills/nx-init/SKILL.md",
+            "category": "skill"
+        }],
+        "server_file_count": 5
+    }"#;
+
+    let resp: FileStatusResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.action, "af_status");
+    assert_eq!(resp.modified.len(), 1);
+    assert_eq!(resp.modified[0].path, "devbox.json");
+    assert_eq!(resp.modified[0].category, "workspace");
+    assert_eq!(resp.new_local.len(), 1);
+    assert_eq!(resp.new_local[0].path, "scripts/devbox/custom.sh");
+    assert_eq!(resp.deleted_local.len(), 1);
+    assert_eq!(resp.unchanged.len(), 1);
+    assert_eq!(resp.server_file_count, 5);
+}
+
+#[test]
+fn test_file_status_response_deserialize_empty() {
+    let json = r#"{
+        "action": "af_status",
+        "project_id": "test-proj",
+        "modified": [],
+        "new_local": [],
+        "deleted_local": [],
+        "unchanged": []
+    }"#;
+
+    let resp: FileStatusResponse = serde_json::from_str(json).unwrap();
+    assert!(resp.modified.is_empty());
+    assert!(resp.new_local.is_empty());
+    assert!(resp.deleted_local.is_empty());
+    assert!(resp.unchanged.is_empty());
+    assert_eq!(resp.server_file_count, 0); // default
+}

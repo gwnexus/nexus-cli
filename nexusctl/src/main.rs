@@ -464,10 +464,16 @@ impl Cli {
         }
     }
 
-    /// Resolve the effective API URL from CLI flag -> config -> default.
+    /// Resolve the effective API URL from CLI flag -> env var -> config -> default.
     pub fn resolve_api_url(&self, config: &nexus_core::config::Config) -> String {
         if let Some(ref url) = self.api_url {
             url.clone()
+        } else if let Ok(env_url) = std::env::var("NEXUS_API_URL") {
+            if !env_url.is_empty() {
+                env_url
+            } else {
+                config.api_url.clone()
+            }
         } else {
             config.api_url.clone()
         }

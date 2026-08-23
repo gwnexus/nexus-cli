@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-08-23
+
+### Added
+- **`NEXUS_API_URL` env var override** — API URL is now resolved as: `--api-url` flag > `NEXUS_API_URL` env var > config.toml > default. Enables temporary staging testing without permanent config changes.
+- **`nexus pull` local modification warning** — before overwriting agent files or workspace files, pull now checks if the local file was modified since the last pull (via sync-manifest hash comparison). Modified files are skipped with a warning; use `--force` to overwrite or `nexus stash` to save changes first.
+- **`nexus_core::hash` module** — shared `sha256_hex()` utility extracted from duplicate implementations across push, stash, and sync commands.
+- **Integration tests** for `WorkspacePushResponse` and `FileStatusResponse` deserialization (roundtrip + edge cases).
+
+### Fixed
+- **`chrono_lite_timestamp()`** — correct date calculation with proper leap year handling and per-month day lengths (was using approximate `days / 365` and `remaining_days / 30`).
+- **Hash key format** — script file hashes now use workspace-relative paths (`scripts/devbox/init.sh`) instead of the `script:` prefix, matching the `af_status` server endpoint format.
+- **Silent file read failures** — push and stash commands now log `tracing::warn!()` when file reads fail instead of silently skipping.
+- **`nexus stash` default subcommand** — running `nexus stash` without a subcommand now defaults to `nexus stash save`.
+- Removed unused `_workspace_only` parameter from `push::run()`.
+- Removed direct `sha2` dependency from `nexusctl` (uses `nexus-core` re-export).
+
 ## [0.14.0] - 2026-08-23
 
 ### Added

@@ -17,6 +17,7 @@ use nexus_core::api::NexusClient;
 use nexus_core::api::ProviderConfig;
 use nexus_core::auth::resolve_token;
 use nexus_core::config;
+use nexus_core::hash::sha256_hex;
 use nexus_core::McpSource;
 use std::collections::HashMap;
 use std::fs;
@@ -121,6 +122,48 @@ pub fn is_protected_path(target_path: &str) -> bool {
         }
     }
     false
+}
+
+/// Check whether a local file was modified since the last pull.
+///
+/// Compares the current file content hash against the hash stored in the
+/// sync manifest (`.nexus/sync-manifest.json`). Returns `true` if the file
+/// exists, has a manifest entry, and the hashes differ.
+fn is_locally_modified(workspace: &Path, target_path: &str, manifest: &serde_json::Value) -> bool {
+    let file_path = workspace.join(target_path);
+    if !file_path.exists() {
+        return false;
+    }
+
+    // Look up manifest hash by target_path (searching values) or direct key
+    let manifest_hash = manifest
+        .as_object()
+        .and_then(|obj| {
+            obj.values().find_map(|entry| {
+                let tp = entry.get("target_path")?.as_str()?;
+                if tp == target_path {
+                    entry.get("hash")?.as_str().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .or_else(|| {
+            manifest
+                .get(target_path)
+                .and_then(|v| v.get("hash"))
+                .and_then(|h| h.as_str())
+                .map(|s| s.to_string())
+        });
+
+    let Some(expected_hash) = manifest_hash else {
+        return false;
+    };
+
+    match fs::read_to_string(&file_path) {
+        Ok(content) => sha256_hex(&content) != expected_hash,
+        Err(_) => false,
+    }
 }
 
 /// Write `.nexus/env` (or `.<agentic_root>/env`) from the platform-managed `plugin_env` map.
@@ -398,6 +441,11 @@ pub async fn run(
     // Detect existing .claude/ files and hint at import (v0.7.0)
     detect_importable_files(&workspace);
 
+    // Load sync manifest for local-modification detection
+    let manifest = super::sync::load_manifest_pub(&workspace);
+    let mut skipped_modified: Vec<String> = Vec::new();
+    let mut overwrote_modified: Vec<String> = Vec::new();
+
     // Export skills (always needed for project_name)
     let export = client.export_skills(&project_id).await?;
     let project_name = export.project.name.clone();
@@ -540,6 +588,23 @@ pub async fn run(
                             af.target_path
                         );
                         continue;
+                    }
+
+                    // Check for local modifications since last pull
+                    if target_path.exists()
+                        && is_locally_modified(&workspace, &af.target_path, &manifest)
+                    {
+                        if !force {
+                            println!(
+                                "   {} skipped: {} (locally modified, use --force to overwrite or nexus stash to save)",
+                                style("!").bold().yellow(),
+                                af.target_path
+                            );
+                            skipped_modified.push(af.target_path.clone());
+                            continue;
+                        } else {
+                            overwrote_modified.push(af.target_path.clone());
+                        }
                     }
 
                     write_agent_file(&workspace, af)?;
@@ -945,6 +1010,20 @@ pub async fn run(
                         "   {} devbox.json is user-managed, skipping",
                         style("--").yellow(),
                     );
+                } else if target.exists()
+                    && is_locally_modified(&workspace, "devbox.json", &manifest)
+                {
+                    if !force {
+                        println!(
+                            "   {} skipped: devbox.json (locally modified, use --force to overwrite or nexus stash to save)",
+                            style("!").bold().yellow(),
+                        );
+                        skipped_modified.push("devbox.json".to_string());
+                    } else {
+                        overwrote_modified.push("devbox.json".to_string());
+                        fs::write(&target, &export.devbox_json)?;
+                        ws_written += 1;
+                    }
                 } else {
                     fs::write(&target, &export.devbox_json)?;
                     ws_written += 1;
@@ -964,6 +1043,20 @@ pub async fn run(
                             script.path
                         );
                         continue;
+                    }
+
+                    if target.exists() && is_locally_modified(&workspace, &script.path, &manifest) {
+                        if !force {
+                            println!(
+                                "   {} skipped: {} (locally modified, use --force to overwrite or nexus stash to save)",
+                                style("!").bold().yellow(),
+                                script.path
+                            );
+                            skipped_modified.push(script.path.clone());
+                            continue;
+                        } else {
+                            overwrote_modified.push(script.path.clone());
+                        }
                     }
 
                     fs::write(&target, &script.body)?;
@@ -1154,6 +1247,35 @@ pub async fn run(
                     }
                 }
             }
+        }
+    }
+
+    // Summary: locally modified files
+    if !skipped_modified.is_empty() {
+        println!();
+        println!(
+            "   {} {} locally modified file(s) skipped:",
+            style("!").bold().yellow(),
+            skipped_modified.len(),
+        );
+        for path in &skipped_modified {
+            println!("      {}", style(path).yellow());
+        }
+        println!(
+            "   Use {} to save local changes, or {} to overwrite.",
+            style("nexus stash").bold(),
+            style("nexus pull --force").bold(),
+        );
+    }
+    if !overwrote_modified.is_empty() {
+        println!();
+        println!(
+            "   {} Overwrote {} locally modified file(s):",
+            style("!").bold().yellow(),
+            overwrote_modified.len(),
+        );
+        for path in &overwrote_modified {
+            println!("      {}", style(path).yellow());
         }
     }
 
@@ -3551,5 +3673,87 @@ mod tests {
         assert!(cm.contains("\"9000\""), "extra arg value must be forwarded");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -- is_locally_modified tests --
+
+    #[test]
+    fn test_is_locally_modified_no_file() {
+        let tmp = std::env::temp_dir().join("nexus_test_mod_nofile");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let manifest = serde_json::json!({});
+        assert!(!is_locally_modified(&tmp, "nonexistent.json", &manifest));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_is_locally_modified_no_manifest_entry() {
+        let tmp = std::env::temp_dir().join("nexus_test_mod_nomanifest");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("devbox.json"), "{}").unwrap();
+
+        let manifest = serde_json::json!({});
+        // No manifest entry: cannot determine modification, returns false
+        assert!(!is_locally_modified(&tmp, "devbox.json", &manifest));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_is_locally_modified_unchanged() {
+        let tmp = std::env::temp_dir().join("nexus_test_mod_unchanged");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let content = r#"{"packages":{}}"#;
+        fs::write(tmp.join("devbox.json"), content).unwrap();
+
+        let hash = sha256_hex(content);
+        let manifest = serde_json::json!({
+            "devbox.json": { "target_path": "devbox.json", "hash": hash }
+        });
+        assert!(!is_locally_modified(&tmp, "devbox.json", &manifest));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_is_locally_modified_changed() {
+        let tmp = std::env::temp_dir().join("nexus_test_mod_changed");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        // Write file with content that differs from manifest hash
+        fs::write(tmp.join("devbox.json"), r#"{"packages":{"new":"pkg"}}"#).unwrap();
+
+        let old_hash = sha256_hex(r#"{"packages":{}}"#);
+        let manifest = serde_json::json!({
+            "devbox.json": { "target_path": "devbox.json", "hash": old_hash }
+        });
+        assert!(is_locally_modified(&tmp, "devbox.json", &manifest));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_is_locally_modified_by_target_path_lookup() {
+        let tmp = std::env::temp_dir().join("nexus_test_mod_target_path");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        fs::write(tmp.join("AGENTS.md"), "# Modified").unwrap();
+
+        // Manifest keyed by file_key, not target_path
+        let old_hash = sha256_hex("# Original");
+        let manifest = serde_json::json!({
+            "agents-md": { "target_path": "AGENTS.md", "hash": old_hash }
+        });
+        assert!(is_locally_modified(&tmp, "AGENTS.md", &manifest));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
