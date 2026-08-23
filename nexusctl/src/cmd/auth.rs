@@ -2,7 +2,7 @@
 
 use console::style;
 use nexus_core::api::NexusClient;
-use nexus_core::auth::{Credentials, TOKEN_PREFIX};
+use nexus_core::auth::{resolve_token, Credentials, TOKEN_PREFIX};
 
 /// Interactive login flow.
 ///
@@ -80,9 +80,14 @@ pub async fn status(api_url: &str) -> anyhow::Result<()> {
     println!();
 
     // --- Auth status ---
-    let creds = Credentials::load()?;
+    // Resolve token via standard priority: env var > credentials.toml
+    let token = resolve_token();
+    let from_env = std::env::var("NEXUS_PRIVATE_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_some();
 
-    match creds {
+    match token {
         None => {
             println!(
                 "  Auth:     {} Not authenticated",
@@ -90,16 +95,17 @@ pub async fn status(api_url: &str) -> anyhow::Result<()> {
             );
             println!("            Run 'nexus login' to authenticate.");
         }
-        Some(ref c) => {
-            // Show token prefix
-            let prefix = if c.token.len() > 8 {
-                format!("{}****...", &c.token[..8])
+        Some(ref t) => {
+            // Show token prefix + source
+            let prefix = if t.len() > 8 {
+                format!("{}****...", &t[..8])
             } else {
                 "****".to_string()
             };
+            let source_label = if from_env { " (env)" } else { "" };
 
             // Verify against API
-            let client = NexusClient::new(api_url, Some(c.token.clone()))?;
+            let client = NexusClient::new(api_url, Some(t.clone()))?;
             match client.auth_status().await {
                 Ok(auth) => {
                     println!(
@@ -111,7 +117,11 @@ pub async fn status(api_url: &str) -> anyhow::Result<()> {
                     if let Some(ref name) = auth.user.display_name {
                         println!("            Name: {}", name);
                     }
-                    println!("            Token: {}", style(prefix).dim());
+                    println!(
+                        "            Token: {}{}",
+                        style(prefix).dim(),
+                        style(source_label).dim()
+                    );
                 }
                 Err(e) => {
                     println!(
@@ -119,7 +129,11 @@ pub async fn status(api_url: &str) -> anyhow::Result<()> {
                         style("ERR").bold().red(),
                         e
                     );
-                    println!("            Token: {}", style(prefix).dim());
+                    println!(
+                        "            Token: {}{}",
+                        style(prefix).dim(),
+                        style(source_label).dim()
+                    );
                 }
             }
         }

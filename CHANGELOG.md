@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.4] - 2026-08-23
+
+### Fixed
+- **`nexus status` ignored `NEXUS_PRIVATE_TOKEN` env var** - the status command used `Credentials::load()` directly instead of `resolve_token()`, bypassing the env var override. Now uses the same resolution order as all other commands (env var > credentials.toml). Token source is shown as `(env)` when resolved from environment.
+- **`nexus preflight` ignored `NEXUS_PRIVATE_TOKEN` env var** - same fix applied to the credentials check in preflight. Shows `(env)` indicator when token comes from environment.
+
 ## [0.14.3] - 2026-08-23
 
 ### Fixed

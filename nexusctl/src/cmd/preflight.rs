@@ -9,7 +9,7 @@
 
 use console::style;
 use nexus_core::api::NexusClient;
-use nexus_core::auth::Credentials;
+use nexus_core::auth::resolve_token;
 use nexus_core::config::Config;
 use std::process::Command as Proc;
 
@@ -115,26 +115,30 @@ fn check_config() -> (CheckResult, Option<Config>) {
     }
 }
 
-/// Check: Nexus auth credentials
+/// Check: Nexus auth credentials (env var > credentials.toml)
 fn check_credentials() -> (CheckResult, Option<String>) {
-    match Credentials::load() {
-        Ok(Some(creds)) => {
-            let prefix = if creds.token.len() > 12 {
-                format!(
-                    "{}...{}",
-                    &creds.token[..8],
-                    &creds.token[creds.token.len() - 4..]
-                )
+    match resolve_token() {
+        Some(token) => {
+            let prefix = if token.len() > 12 {
+                format!("{}...{}", &token[..8], &token[token.len() - 4..])
             } else {
                 "nxs_pat_****".to_string()
             };
-            (CheckResult::Pass(prefix), Some(creds.token))
+            let from_env = std::env::var("NEXUS_PRIVATE_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some();
+            let label = if from_env {
+                format!("{} (env)", prefix)
+            } else {
+                prefix
+            };
+            (CheckResult::Pass(label), Some(token))
         }
-        Ok(None) => (
+        None => (
             CheckResult::Warn("Not authenticated -- run 'nexus login'".into()),
             None,
         ),
-        Err(e) => (CheckResult::Fail(format!("Credential error: {}", e)), None),
     }
 }
 
