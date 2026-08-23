@@ -55,6 +55,10 @@ nexus status                            Show auth, project, and workspace status
 nexus link [--project-id <id>]          Bind a project to the current workspace
 nexus unlink                            Remove project binding from the workspace
 nexus pull [--project-id <id>]          Pull skills and config from the Nexus platform
+nexus push [--name "..."] [--dry-run]   Push workspace changes as a new fork
+nexus stash save                        Save modified workspace files to a stash
+nexus stash pop                         Restore the most recent stash
+nexus stash list                        List all available stashes
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
 nexus deinit [--force]                  Remove all AI scaffold files from the workspace
@@ -83,6 +87,36 @@ nexus upgrade                           Upgrade CLI to latest release version
 | `nexus deinit`  | `--yes`          | Auto-confirm removal                           |
 | `nexus link`    | `--project-id`   | Specify project UUID directly (skip picker)    |
 | `nexus pull`    | `--project-id`   | Pull from a specific project (skip picker)     |
+| `nexus push`    | `--name`         | Custom fork name (default: auto-generated)     |
+| `nexus push`    | `--dry-run`      | Show what would be pushed without sending      |
+| `nexus push`    | `--workspace`    | Only push workspace files (default for now)    |
+
+### Workspace Sync (Push / Stash)
+
+`nexus push` detects local changes to workspace files (`devbox.json`,
+`scripts/devbox/`) and uploads them as a new workspace fork to the linked
+Nexus project.
+
+```bash
+nexus push                          # detect changes + push
+nexus push --name "v3.1 ansible"    # push with custom fork name
+nexus push --dry-run                # show what would be pushed
+```
+
+Each push **archives the current active fork** and creates a new one. The
+fork name is either auto-generated (`push-2026-08-23T10-30-00`) or set
+via `--name`. Previous forks remain accessible in the dashboard.
+
+`nexus stash` provides temporary local backup before a `nexus pull --force`:
+
+```bash
+nexus stash save    # save modified workspace files to .nexus/stash/
+nexus stash pop     # restore the most recent stash
+nexus stash list    # show all available stashes
+```
+
+Stashes are stored locally in `.nexus/stash/<timestamp>/` with metadata.
+Multiple stashes can coexist; `pop` always restores the most recent one.
 
 ### Preflight Checks
 

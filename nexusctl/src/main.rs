@@ -167,6 +167,35 @@ pub enum Command {
         action: ActorsAction,
     },
 
+    /// Push local workspace changes to the linked Nexus project.
+    ///
+    /// Detects modified workspace files (devbox.json, scripts/devbox/),
+    /// compares with the server-side version, and creates a new workspace
+    /// fork with the local changes.
+    Push {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Custom name for the created fork (default: auto-generated).
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Only show what would be pushed, without sending changes.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Only push workspace files (devbox.json, scripts). This is the default for now.
+        #[arg(long)]
+        workspace: bool,
+    },
+
+    /// Temporarily save modified workspace files and restore them later.
+    Stash {
+        #[command(subcommand)]
+        action: StashAction,
+    },
+
     /// Launch a tool (default: opencode) with platform-managed env vars injected.
     ///
     /// Resolves env vars from .nexus/env (plugin defaults) and .env.nexus.local
@@ -405,6 +434,19 @@ pub enum ActorAvatarAction {
         #[arg(long)]
         project_id: Option<String>,
     },
+}
+
+/// Stash subcommands for workspace file management.
+#[derive(Debug, Subcommand)]
+pub enum StashAction {
+    /// Save modified workspace files to a stash (default action).
+    Save,
+
+    /// Restore the most recent stash.
+    Pop,
+
+    /// List all available stashes.
+    List,
 }
 
 impl Cli {

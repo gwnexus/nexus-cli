@@ -10,15 +10,17 @@ mod init;
 mod link;
 pub(crate) mod preflight;
 pub(crate) mod pull;
+pub(crate) mod push;
 pub(crate) mod run;
 pub(crate) mod shadow;
 mod skills_cmd;
+pub(crate) mod stash;
 pub(crate) mod sync;
 mod upgrade;
 
 use crate::{
     ActorAvatarAction, ActorsAction, Cli, Command, ConfigAction, GitAction, ShadowAction,
-    SkillsAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
+    SkillsAction, StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
 };
 
 /// Dispatch the parsed CLI command to the appropriate handler.
@@ -224,6 +226,31 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         actors::avatar_reset(&api_url, slug, project_id.as_deref()).await?;
                     }
                 },
+            }
+        }
+        Command::Push {
+            ref project_id,
+            ref name,
+            dry_run,
+            workspace: _,
+        } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            push::run(
+                &api_url,
+                project_id.as_deref(),
+                name.as_deref(),
+                dry_run,
+                true, // workspace_only (always true for 0.14.0)
+            )
+            .await?;
+        }
+        Command::Stash { ref action } => {
+            let workspace = std::env::current_dir()?;
+            match action {
+                StashAction::Save => stash::save(&workspace)?,
+                StashAction::Pop => stash::pop(&workspace)?,
+                StashAction::List => stash::list(&workspace)?,
             }
         }
         Command::Run {

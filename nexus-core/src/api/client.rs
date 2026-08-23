@@ -12,10 +12,11 @@ use tracing::debug;
 use crate::api::types::{
     ActorAvatarResponse, ActorExportResponse, ActorGetResponse, ActorImportPayload,
     ActorImportResponse, ActorListResponse, AgentFileExportResponse, ApiError, AuthStatus,
-    AuthStatusResponse, DirectiveExportResponse, IdentityResponse, ProjectDetailResponse,
-    ProjectListResponse, SkillExportResponse, SkillListResponse, SyncCheckResponse, SyncFileHash,
-    SyncResponse, SyncStatusResponse, TaskListResponse, WorkspaceExportResponse,
-    WorkspaceForkExportResponse, WorkspaceForksResponse,
+    AuthStatusResponse, DirectiveExportResponse, FileStatusResponse, IdentityResponse,
+    ProjectDetailResponse, ProjectListResponse, SkillExportResponse, SkillListResponse,
+    SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse, TaskListResponse,
+    WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
+    WorkspacePushResponse,
 };
 use crate::Error;
 
@@ -507,5 +508,43 @@ impl NexusClient {
             StatusCode::NOT_FOUND => Err(Error::NotFound(error_msg)),
             _ => Err(Error::Api(error_msg)),
         }
+    }
+
+    /// Push workspace changes (devbox.json + scripts) as a new fork.
+    pub async fn workspace_push(
+        &self,
+        project_id: &str,
+        devbox_json: Option<serde_json::Value>,
+        script_files: Option<std::collections::HashMap<String, String>>,
+        fork_name: Option<&str>,
+    ) -> Result<WorkspacePushResponse, Error> {
+        let mut payload = json!({
+            "action": "ws_push",
+            "project_id": project_id,
+        });
+        if let Some(dj) = devbox_json {
+            payload["devbox_json"] = dj;
+        }
+        if let Some(sf) = script_files {
+            payload["script_files"] = serde_json::to_value(sf).unwrap_or_default();
+        }
+        if let Some(name) = fork_name {
+            payload["fork_name"] = serde_json::Value::String(name.to_string());
+        }
+        self.post("/api/mcp/agent-files", &payload).await
+    }
+
+    /// Compare local file hashes against server-side content hashes.
+    pub async fn file_status(
+        &self,
+        project_id: &str,
+        local_hashes: std::collections::HashMap<String, String>,
+    ) -> Result<FileStatusResponse, Error> {
+        let payload = json!({
+            "action": "af_status",
+            "project_id": project_id,
+            "local_hashes": local_hashes,
+        });
+        self.post("/api/mcp/agent-files", &payload).await
     }
 }

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-08-23
+
+### Added
+- **`nexus push`** — push local workspace changes (devbox.json, scripts/devbox/) to the linked Nexus project as a new workspace fork. Archives the current active fork automatically. Supports `--name` for custom fork naming, `--dry-run` for preview, `--workspace` flag (default scope for this release).
+- **`nexus stash save`** — save modified workspace files to a local stash (`.nexus/stash/<timestamp>/`). Detects modifications by comparing SHA-256 hashes against the sync manifest from the last pull.
+- **`nexus stash pop`** — restore the most recent stash and remove it from the stash directory.
+- **`nexus stash list`** — list all available stashes with timestamps and file counts.
+- **API: `workspace_push`** — new client method calling `ws_push` action on the MCP agent-files endpoint. Creates a new fork with pushed devbox.json and script_files.
+- **API: `file_status`** — new client method calling `af_status` action. Compares local file hashes against server-side content hashes, returns categorized diff (modified, new_local, deleted_local, unchanged).
+- **API types** — `WorkspacePushResponse`, `FileStatusResponse`, `StatusModifiedFile`, `StatusNewFile`, `StatusDeletedFile`, `StatusUnchangedFile` response structs for the new endpoints.
+
+### Changed
+- Version bumped to 0.14.0 — bidirectional workspace sync milestone.
+
 ## [0.13.5] - 2026-07-29
 
 ### Security

@@ -3,7 +3,7 @@ members = ["nexusctl", "nexus-core", "tests"]
 resolver = "2"
 
 [workspace.package]
-version = "0.13.5"
+version = "0.14.0"
 authors = ["RelicFrog Holding UG <post@relicfrog.rocks>"]
 edition = "2021"
 rust-version = "1.85"
@@ -35,6 +35,7 @@ uuid = { version = "1", features = ["v4"] }
 regex = "1"
 indicatif = "0.17"
 libc = "0.2"
+tempfile = "3"
 
 [profile.release]
 lto = true

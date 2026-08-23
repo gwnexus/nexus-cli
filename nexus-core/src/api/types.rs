@@ -591,6 +591,70 @@ pub struct WorkspaceForkExportResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace Push (POST /api/mcp/agent-files  action=ws_push)
+// ---------------------------------------------------------------------------
+
+/// Response from `ws_push` action — push local workspace changes as a new fork.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacePushResponse {
+    pub action: String,
+    pub project_id: String,
+    pub fork_id: String,
+    pub fork_name: String,
+    pub version: i64,
+    pub previous_fork_id: String,
+    pub previous_fork_name: String,
+    pub files_pushed: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent File Status (POST /api/mcp/agent-files  action=af_status)
+// ---------------------------------------------------------------------------
+
+/// A file that differs between local and remote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusModifiedFile {
+    pub path: String,
+    pub local_hash: String,
+    pub remote_hash: String,
+    pub category: String,
+}
+
+/// A file that exists locally but not on the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusNewFile {
+    pub path: String,
+}
+
+/// A file that exists on the server but not locally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusDeletedFile {
+    pub path: String,
+    pub remote_hash: String,
+    pub category: String,
+}
+
+/// A file that is unchanged between local and remote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusUnchangedFile {
+    pub path: String,
+    pub category: String,
+}
+
+/// Response from `af_status` action — compare local vs server file hashes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileStatusResponse {
+    pub action: String,
+    pub project_id: String,
+    pub modified: Vec<StatusModifiedFile>,
+    pub new_local: Vec<StatusNewFile>,
+    pub deleted_local: Vec<StatusDeletedFile>,
+    pub unchanged: Vec<StatusUnchangedFile>,
+    #[serde(default)]
+    pub server_file_count: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Actors (POST /api/mcp/actors  action=actor_list / actor_get)
 // ---------------------------------------------------------------------------
 
