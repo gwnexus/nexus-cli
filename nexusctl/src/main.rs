@@ -191,9 +191,11 @@ pub enum Command {
     },
 
     /// Temporarily save modified workspace files and restore them later.
+    ///
+    /// Running `nexus stash` without a subcommand defaults to `nexus stash save`.
     Stash {
         #[command(subcommand)]
-        action: StashAction,
+        action: Option<StashAction>,
     },
 
     /// Launch a tool (default: opencode) with platform-managed env vars injected.

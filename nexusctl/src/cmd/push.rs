@@ -7,20 +7,14 @@ use console::style;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::resolve_token;
 use nexus_core::config;
-use sha2::{Digest, Sha256};
+use nexus_core::hash::sha256_hex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use tracing::warn;
 
 /// Directory containing workspace scripts.
 const SCRIPTS_DIR: &str = "scripts/devbox";
-
-/// Compute SHA-256 hash of content (matches server-side `computeContentHash`).
-fn compute_hash(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
 
 /// Collect local workspace file hashes for comparison.
 pub fn collect_workspace_hashes(workspace: &Path) -> HashMap<String, String> {
@@ -29,32 +23,38 @@ pub fn collect_workspace_hashes(workspace: &Path) -> HashMap<String, String> {
     // devbox.json
     let devbox_path = workspace.join("devbox.json");
     if devbox_path.exists() {
-        if let Ok(content) = fs::read_to_string(&devbox_path) {
-            hashes.insert("devbox.json".to_string(), compute_hash(&content));
+        match fs::read_to_string(&devbox_path) {
+            Ok(content) => {
+                hashes.insert("devbox.json".to_string(), sha256_hex(&content));
+            }
+            Err(e) => warn!("Failed to read devbox.json: {}", e),
         }
     }
 
     // scripts/devbox/**
     let scripts_dir = workspace.join(SCRIPTS_DIR);
     if scripts_dir.is_dir() {
-        collect_script_hashes(&scripts_dir, &scripts_dir, &mut hashes);
+        collect_script_hashes(workspace, &scripts_dir, &mut hashes);
     }
 
     hashes
 }
 
-/// Recursively collect script file hashes.
-fn collect_script_hashes(base: &Path, dir: &Path, hashes: &mut HashMap<String, String>) {
+/// Recursively collect script file hashes using workspace-relative paths.
+fn collect_script_hashes(workspace: &Path, dir: &Path, hashes: &mut HashMap<String, String>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                collect_script_hashes(base, &path, hashes);
+                collect_script_hashes(workspace, &path, hashes);
             } else if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    let rel = path.strip_prefix(base).unwrap_or(&path);
-                    let key = format!("script:{}", rel.display());
-                    hashes.insert(key, compute_hash(&content));
+                match fs::read_to_string(&path) {
+                    Ok(content) => {
+                        let rel = path.strip_prefix(workspace).unwrap_or(&path);
+                        let key = rel.display().to_string();
+                        hashes.insert(key, sha256_hex(&content));
+                    }
+                    Err(e) => warn!("Failed to read {}: {}", path.display(), e),
                 }
             }
         }
@@ -101,9 +101,12 @@ fn read_scripts_recursive(base: &Path, dir: &Path, files: &mut HashMap<String, S
             if path.is_dir() {
                 read_scripts_recursive(base, &path, files);
             } else if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    let rel = path.strip_prefix(base).unwrap_or(&path);
-                    files.insert(rel.display().to_string(), content);
+                match fs::read_to_string(&path) {
+                    Ok(content) => {
+                        let rel = path.strip_prefix(base).unwrap_or(&path);
+                        files.insert(rel.display().to_string(), content);
+                    }
+                    Err(e) => warn!("Failed to read {}: {}", path.display(), e),
                 }
             }
         }
@@ -116,7 +119,6 @@ pub async fn run(
     cli_project_id: Option<&str>,
     fork_name: Option<&str>,
     dry_run: bool,
-    _workspace_only: bool,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -215,21 +217,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_compute_hash_deterministic() {
-        let h1 = compute_hash("hello");
-        let h2 = compute_hash("hello");
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 64);
-    }
-
-    #[test]
-    fn test_compute_hash_different_inputs() {
-        let h1 = compute_hash("hello");
-        let h2 = compute_hash("world");
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
     fn test_collect_workspace_hashes_empty_dir() {
         let dir = TempDir::new().unwrap();
         let hashes = collect_workspace_hashes(dir.path());
@@ -254,8 +241,9 @@ mod tests {
         fs::write(scripts.join("post.sh"), "echo done").unwrap();
         let hashes = collect_workspace_hashes(dir.path());
         assert_eq!(hashes.len(), 2);
-        assert!(hashes.contains_key("script:init.sh"));
-        assert!(hashes.contains_key("script:post.sh"));
+        // Keys use workspace-relative paths (not script: prefix)
+        assert!(hashes.contains_key("scripts/devbox/init.sh"));
+        assert!(hashes.contains_key("scripts/devbox/post.sh"));
     }
 
     #[test]

@@ -4,9 +4,10 @@
 //! restore them later, or list available stashes.
 
 use console::style;
-use sha2::{Digest, Sha256};
+use nexus_core::hash::sha256_hex;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Stash storage directory inside the agentic root.
 const STASH_DIR: &str = ".nexus/stash";
@@ -16,13 +17,6 @@ const SYNC_MANIFEST: &str = ".nexus/sync-manifest.json";
 
 /// Workspace files to track for stash.
 const WORKSPACE_PATHS: &[&str] = &["devbox.json", "scripts/devbox"];
-
-/// Compute SHA-256 hash of content.
-fn compute_hash(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
 
 /// Metadata for a stash entry.
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -50,17 +44,20 @@ fn detect_modified_files(workspace: &Path) -> Vec<(PathBuf, String)> {
     for &tracked in WORKSPACE_PATHS {
         let full_path = workspace.join(tracked);
         if full_path.is_file() {
-            if let Ok(content) = fs::read_to_string(&full_path) {
-                // Check if hash differs from manifest
-                let current_hash = compute_hash(&content);
-                let manifest_hash = manifest
-                    .get(tracked)
-                    .and_then(|v| v.get("hash"))
-                    .and_then(|h| h.as_str())
-                    .unwrap_or("");
-                if current_hash != manifest_hash {
-                    modified.push((full_path, content));
+            match fs::read_to_string(&full_path) {
+                Ok(content) => {
+                    // Check if hash differs from manifest
+                    let current_hash = sha256_hex(&content);
+                    let manifest_hash = manifest
+                        .get(tracked)
+                        .and_then(|v| v.get("hash"))
+                        .and_then(|h| h.as_str())
+                        .unwrap_or("");
+                    if current_hash != manifest_hash {
+                        modified.push((full_path, content));
+                    }
                 }
+                Err(e) => warn!("Failed to read {}: {}", full_path.display(), e),
             }
         } else if full_path.is_dir() {
             collect_modified_in_dir(workspace, &full_path, &manifest, &mut modified);
@@ -83,21 +80,24 @@ fn collect_modified_in_dir(
             if path.is_dir() {
                 collect_modified_in_dir(workspace, &path, manifest, modified);
             } else if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    let rel = path
-                        .strip_prefix(workspace)
-                        .unwrap_or(&path)
-                        .display()
-                        .to_string();
-                    let current_hash = compute_hash(&content);
-                    let manifest_hash = manifest
-                        .get(&rel)
-                        .and_then(|v| v.get("hash"))
-                        .and_then(|h| h.as_str())
-                        .unwrap_or("");
-                    if current_hash != manifest_hash {
-                        modified.push((path, content));
+                match fs::read_to_string(&path) {
+                    Ok(content) => {
+                        let rel = path
+                            .strip_prefix(workspace)
+                            .unwrap_or(&path)
+                            .display()
+                            .to_string();
+                        let current_hash = sha256_hex(&content);
+                        let manifest_hash = manifest
+                            .get(&rel)
+                            .and_then(|v| v.get("hash"))
+                            .and_then(|h| h.as_str())
+                            .unwrap_or("");
+                        if current_hash != manifest_hash {
+                            modified.push((path, content));
+                        }
                     }
+                    Err(e) => warn!("Failed to read {}: {}", path.display(), e),
                 }
             }
         }
@@ -267,26 +267,69 @@ pub fn list(workspace: &Path) -> anyhow::Result<()> {
 }
 
 /// Generate a timestamp string suitable for directory names.
+///
+/// Produces ISO-like format: `2026-08-23T10-30-00Z` with correct
+/// date calculation (handles leap years and actual month lengths).
 fn chrono_lite_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs();
-    // Convert to ISO-ish format: 2026-08-23T10-30-00
-    let days = secs / 86400;
-    let years = 1970 + (days / 365); // approximate
-    let remaining_days = days % 365;
-    let months = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
+        .unwrap_or_default()
+        .as_secs();
+
+    // Days since epoch
+    let mut remaining_days = (secs / 86400) as i64;
     let time_of_day = secs % 86400;
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
     let seconds = time_of_day % 60;
+
+    // Compute year
+    let mut year: i64 = 1970;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    // Compute month and day
+    let leap = is_leap_year(year);
+    let days_in_months: [i64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1;
+    for &dim in &days_in_months {
+        if remaining_days < dim {
+            break;
+        }
+        remaining_days -= dim;
+        month += 1;
+    }
+    let day = remaining_days + 1;
+
     format!(
-        "{:04}-{:02}-{:02}T{:02}-{:02}-{:02}",
-        years, months, day, hours, minutes, seconds
+        "{:04}-{:02}-{:02}T{:02}-{:02}-{:02}Z",
+        year, month, day, hours, minutes, seconds
     )
+}
+
+/// Check if a year is a leap year.
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 #[cfg(test)]
@@ -351,12 +394,28 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_hash() {
-        let hash = compute_hash("hello");
-        assert_eq!(hash.len(), 64); // SHA-256 hex
-        assert_eq!(
-            hash,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
+    fn test_chrono_lite_timestamp_format() {
+        let ts = chrono_lite_timestamp();
+        // Should match pattern YYYY-MM-DDTHH-MM-SSZ
+        assert!(ts.ends_with('Z'), "timestamp should end with Z: {}", ts);
+        assert_eq!(ts.len(), 20, "unexpected length: {}", ts);
+        assert!(ts.contains('T'), "missing T separator: {}", ts);
+        // Year should be >= 2024
+        let year: i64 = ts[..4].parse().unwrap();
+        assert!(year >= 2024, "year too low: {}", year);
+        // Month should be 1-12
+        let month: i64 = ts[5..7].parse().unwrap();
+        assert!((1..=12).contains(&month), "invalid month: {}", month);
+        // Day should be 1-31
+        let day: i64 = ts[8..10].parse().unwrap();
+        assert!((1..=31).contains(&day), "invalid day: {}", day);
+    }
+
+    #[test]
+    fn test_is_leap_year() {
+        assert!(is_leap_year(2024));
+        assert!(!is_leap_year(2025));
+        assert!(is_leap_year(2000));
+        assert!(!is_leap_year(1900));
     }
 }

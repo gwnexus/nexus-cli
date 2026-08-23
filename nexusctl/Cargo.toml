@@ -23,7 +23,6 @@ console.workspace = true
 anyhow.workspace = true
 regex.workspace = true
 indicatif.workspace = true
-sha2.workspace = true
 libc.workspace = true
 
 [dev-dependencies]

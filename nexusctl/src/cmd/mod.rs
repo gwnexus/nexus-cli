@@ -236,18 +236,11 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
-            push::run(
-                &api_url,
-                project_id.as_deref(),
-                name.as_deref(),
-                dry_run,
-                true, // workspace_only (always true for 0.14.0)
-            )
-            .await?;
+            push::run(&api_url, project_id.as_deref(), name.as_deref(), dry_run).await?;
         }
         Command::Stash { ref action } => {
             let workspace = std::env::current_dir()?;
-            match action {
+            match action.as_ref().unwrap_or(&StashAction::Save) {
                 StashAction::Save => stash::save(&workspace)?,
                 StashAction::Pop => stash::pop(&workspace)?,
                 StashAction::List => stash::list(&workspace)?,

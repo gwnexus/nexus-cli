@@ -13,19 +13,12 @@ use nexus_core::api::NexusClient;
 use nexus_core::api::SyncFileHash;
 use nexus_core::auth::resolve_token;
 use nexus_core::config;
-use sha2::{Digest, Sha256};
+use nexus_core::hash::sha256_hex;
 use std::fs;
 use std::path::Path;
 
 /// Path to the local sync manifest file that stores content hashes.
 const SYNC_MANIFEST: &str = ".nexus/sync-manifest.json";
-
-/// Compute SHA-256 hash of content (matches server-side `computeContentHash`).
-fn compute_hash(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
 
 /// Load the sync manifest (file_key → { hash, target_path }).
 fn load_manifest(workspace: &Path) -> serde_json::Value {
@@ -85,7 +78,7 @@ pub async fn status(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Resu
 
             let local_hash = if local_path.exists() {
                 let content = fs::read_to_string(&local_path)?;
-                compute_hash(&content)
+                sha256_hex(&content)
             } else {
                 // File was deleted locally
                 String::new()
@@ -256,7 +249,7 @@ pub async fn push(
     }
 
     let content = fs::read_to_string(&local_path)?;
-    let local_hash = compute_hash(&content);
+    let local_hash = sha256_hex(&content);
 
     println!(
         "{} Pushing {} to platform...",
@@ -356,7 +349,7 @@ pub async fn reset(
                 // Update manifest
                 let new_hash = resp.new_hash.as_deref().unwrap_or("");
                 let computed_hash = if new_hash.is_empty() {
-                    compute_hash(body)
+                    sha256_hex(body)
                 } else {
                     new_hash.to_string()
                 };
