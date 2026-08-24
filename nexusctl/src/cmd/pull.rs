@@ -1022,10 +1022,24 @@ pub async fn run(
                     } else {
                         overwrote_modified.push("devbox.json".to_string());
                         fs::write(&target, &export.devbox_json)?;
+                        let hash = sha256_hex(&export.devbox_json);
+                        let _ = super::sync::update_manifest_after_pull(
+                            &workspace,
+                            "devbox.json",
+                            "devbox.json",
+                            &hash,
+                        );
                         ws_written += 1;
                     }
                 } else {
                     fs::write(&target, &export.devbox_json)?;
+                    let hash = sha256_hex(&export.devbox_json);
+                    let _ = super::sync::update_manifest_after_pull(
+                        &workspace,
+                        "devbox.json",
+                        "devbox.json",
+                        &hash,
+                    );
                     ws_written += 1;
                 }
 
@@ -1060,6 +1074,15 @@ pub async fn run(
                     }
 
                     fs::write(&target, &script.body)?;
+
+                    // Track in sync manifest for origin guard
+                    let hash = sha256_hex(&script.body);
+                    let _ = super::sync::update_manifest_after_pull(
+                        &workspace,
+                        &script.path,
+                        &script.path,
+                        &hash,
+                    );
 
                     #[cfg(unix)]
                     if script.executable {
@@ -1154,6 +1177,13 @@ pub async fn run(
                                 );
                             } else {
                                 fs::write(&target, &tpl.body)?;
+                                let hash = sha256_hex(&tpl.body);
+                                let _ = super::sync::update_manifest_after_pull(
+                                    &workspace,
+                                    &tpl.target_path,
+                                    &tpl.target_path,
+                                    &hash,
+                                );
                                 ws_written += 1;
                             }
                         }
@@ -1181,6 +1211,15 @@ pub async fn run(
                             }
 
                             fs::write(&target, &script.body)?;
+
+                            // Track in sync manifest for origin guard
+                            let hash = sha256_hex(&script.body);
+                            let _ = super::sync::update_manifest_after_pull(
+                                &workspace,
+                                &script.target_path,
+                                &script.target_path,
+                                &hash,
+                            );
 
                             // Make executable on Unix
                             #[cfg(unix)]

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.5] - 2026-08-24
+
+### Fixed
+- **Workspace files now tracked in sync-manifest after pull** - `nexus pull` writes workspace files (devbox.json, scripts/devbox/*) but did not add them to `.nexus/sync-manifest.json`. This caused the `nexus push` origin guard to always block workspace pushes ("not tracked by Nexus"). Both v2 (ws_export) and v1 (wf_export) code paths now track pulled workspace files in the manifest with their content hashes.
+
 ## [0.14.4] - 2026-08-23
 
 ### Fixed
