@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-09-03
+
+### Fixed
+- **`nexus push` misleading "run nexus pull first" error** - push now verifies the target project exists on the resolved backend before checking for a local baseline. A project that is absent from the targeted API URL (for example, targeting staging when the project lives on prod) now produces a precise "project not found on <api_url>, check NEXUS_API_URL / wrong backend" error instead of the misleading pull-first message. Auth and access failures are reported distinctly.
+- **Precise workspace-scope diagnostics** - when the sync manifest is missing, empty, or tracks only the agent-files scope (workspace never pulled), the error now names the exact cause and points to `nexus pull --scope workspace` or `nexus push --adopt-local`, instead of the generic pull-first message.
+
+### Added
+- **`nexus push --adopt-local`** - publishes the current local workspace (devbox.json, scripts/devbox/**) as a new fork without a prior pull, bypassing the sync-manifest origin guard. This bootstraps a first fork from an untracked-but-existing local workspace without risking a clobber from pulling an older server-side fork. Honors `--dry-run` and `--name`.
+- **Backend visibility in `nexus push`** - push output now prints the effective backend API URL alongside the project id, making wrong-backend situations diagnosable in one step (including under `--dry-run`).
+
 ## [0.15.0] - 2026-09-03
 
 ### Added

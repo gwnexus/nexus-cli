@@ -198,6 +198,15 @@ pub enum Command {
         /// Only push workspace files (devbox.json, scripts). This is the default for now.
         #[arg(long)]
         workspace: bool,
+
+        /// Publish the current local workspace as a new fork without a prior pull.
+        ///
+        /// Bypasses the sync-manifest origin guard and pushes the local
+        /// devbox.json and scripts/devbox/** as-is. Use this to bootstrap a
+        /// first fork from an untracked local workspace without risking a
+        /// clobber from pulling an older server-side fork.
+        #[arg(long)]
+        adopt_local: bool,
     },
 
     /// Temporarily save modified workspace files and restore them later.

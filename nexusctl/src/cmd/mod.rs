@@ -275,10 +275,18 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             ref name,
             dry_run,
             workspace: _,
+            adopt_local,
         } => {
             let config = nexus_core::config::Config::load()?;
             let api_url = cli.resolve_api_url(&config);
-            push::run(&api_url, project_id.as_deref(), name.as_deref(), dry_run).await?;
+            push::run(
+                &api_url,
+                project_id.as_deref(),
+                name.as_deref(),
+                dry_run,
+                adopt_local,
+            )
+            .await?;
         }
         Command::Stash { ref action } => {
             let workspace = std::env::current_dir()?;

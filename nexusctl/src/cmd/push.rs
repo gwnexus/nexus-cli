@@ -129,12 +129,113 @@ fn is_manifest_tracked(key: &str, manifest: &serde_json::Value) -> bool {
     })
 }
 
+/// Verify the target project exists and is reachable on the configured backend.
+///
+/// Maps API errors to actionable messages so a wrong `NEXUS_API_URL` (project on a
+/// different environment) or an auth problem is not misreported as a missing baseline.
+async fn verify_project(
+    client: &NexusClient,
+    project_id: &str,
+    api_url: &str,
+) -> anyhow::Result<()> {
+    use nexus_core::error::Error as CoreError;
+    match client.get_project(project_id).await {
+        Ok(_) => Ok(()),
+        Err(CoreError::NotFound(_)) => anyhow::bail!(
+            "Project {project_id} was not found on {api_url}.\n\
+             You may be targeting the wrong backend. Check NEXUS_API_URL (or --api-url); \
+             the project may live on a different environment (e.g. prod vs staging)."
+        ),
+        Err(CoreError::Unauthorized(msg)) => anyhow::bail!(
+            "Authentication failed against {api_url}: {msg}\n\
+             Run 'nexus login' or check NEXUS_PRIVATE_TOKEN."
+        ),
+        Err(CoreError::Forbidden(msg)) => {
+            anyhow::bail!("Access denied to project {project_id} on {api_url}: {msg}")
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Publish the current local workspace files as a new fork, bypassing the
+/// sync-manifest origin guard. Used by `nexus push --adopt-local` to bootstrap
+/// a fork from an untracked-but-existing local workspace.
+async fn adopt_local_push(
+    client: &NexusClient,
+    workspace: &Path,
+    project_id: &str,
+    fork_name: Option<&str>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let all_hashes = collect_workspace_hashes(workspace);
+    if all_hashes.is_empty() {
+        anyhow::bail!(
+            "No local workspace files found (expected devbox.json and/or scripts/devbox/**). \
+             Nothing to adopt."
+        );
+    }
+
+    println!(
+        "   {} adopt-local: publishing the current local workspace as a new fork (origin guard bypassed).",
+        style("!").yellow()
+    );
+    println!("   {} files to push:", style("Files").bold());
+    let mut keys: Vec<_> = all_hashes.keys().cloned().collect();
+    keys.sort();
+    for key in &keys {
+        println!("     {} {}", style("A").green().bold(), key);
+    }
+    println!();
+
+    if dry_run {
+        println!(
+            "   {} Dry run — no changes pushed.",
+            style("--dry-run").dim()
+        );
+        return Ok(());
+    }
+
+    let (devbox_json, script_files) = read_workspace_files(workspace);
+
+    let name_display = fork_name.unwrap_or("(auto-generated)");
+    println!(
+        "   {} Pushing as fork: {}",
+        style(">>").bold().cyan(),
+        style(name_display).bold()
+    );
+
+    let result = client
+        .workspace_push(project_id, devbox_json, script_files, fork_name)
+        .await?;
+
+    print_push_result(&result);
+    Ok(())
+}
+
+/// Print the outcome of a successful workspace push.
+fn print_push_result(result: &nexus_core::api::WorkspacePushResponse) {
+    println!();
+    println!(
+        "   {} Fork created: {} (v{})",
+        style("✓").green().bold(),
+        style(&result.fork_name).bold(),
+        result.version,
+    );
+    println!(
+        "     Previous fork archived: {}",
+        style(&result.previous_fork_name).dim()
+    );
+    println!("     Files pushed: {}", result.files_pushed.join(", "));
+    println!();
+}
+
 /// `nexus push` — push local workspace changes to the platform.
 pub async fn run(
     api_url: &str,
     cli_project_id: Option<&str>,
     fork_name: Option<&str>,
     dry_run: bool,
+    adopt_local: bool,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -149,19 +250,36 @@ pub async fn run(
         style(">>").bold().cyan()
     );
     println!("   Project: {}", style(&project_id).dim());
+    println!("   Backend: {}", style(api_url).dim());
     println!();
+
+    // Verify the project exists on the targeted backend before anything else.
+    // This turns the previously misleading "run nexus pull first" into a precise
+    // wrong-backend / auth signal when the project is simply not on this API URL.
+    verify_project(&client, &project_id, api_url).await?;
+
+    // Bootstrap path: publish the current local workspace as a new fork without
+    // requiring a prior pull (which could clobber newer local edits with an older
+    // server fork). Bypasses the sync-manifest origin guard by explicit opt-in.
+    if adopt_local {
+        return adopt_local_push(&client, &workspace, &project_id, fork_name, dry_run).await;
+    }
 
     // Origin guard: require sync manifest (proves nexus pull was run)
     let manifest_path = workspace.join(SYNC_MANIFEST);
     if !manifest_path.exists() {
         anyhow::bail!(
-            "No sync manifest found. Run 'nexus pull' first to establish a Nexus baseline."
+            "Workspace scope is not initialized locally: no sync manifest at {SYNC_MANIFEST}.\n\
+             Run 'nexus pull --scope workspace' to establish a baseline, or\n\
+             run 'nexus push --adopt-local' to publish the current local workspace as a new fork."
         );
     }
     let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
     if manifest.as_object().is_none_or(|m| m.is_empty()) {
         anyhow::bail!(
-            "Sync manifest is empty. Run 'nexus pull' first to establish a Nexus baseline."
+            "Sync manifest at {SYNC_MANIFEST} is empty.\n\
+             Run 'nexus pull --scope workspace' to establish a baseline, or\n\
+             run 'nexus push --adopt-local' to publish the current local workspace as a new fork."
         );
     }
 
@@ -187,7 +305,12 @@ pub async fn run(
     }
 
     if local_hashes.is_empty() {
-        anyhow::bail!("No Nexus-managed workspace files found. Run 'nexus pull' first.");
+        anyhow::bail!(
+            "No workspace files are tracked in the sync manifest (only agent files were pulled).\n\
+             Run 'nexus pull --scope workspace' to track the workspace files, or\n\
+             run 'nexus push --adopt-local' to publish the current local files as a new fork\n\
+             without pulling (avoids overwriting newer local edits with an older server fork)."
+        );
     }
 
     // Compare with server
@@ -241,19 +364,7 @@ pub async fn run(
         .workspace_push(&project_id, devbox_json, script_files, fork_name)
         .await?;
 
-    println!();
-    println!(
-        "   {} Fork created: {} (v{})",
-        style("✓").green().bold(),
-        style(&result.fork_name).bold(),
-        result.version,
-    );
-    println!(
-        "     Previous fork archived: {}",
-        style(&result.previous_fork_name).dim()
-    );
-    println!("     Files pushed: {}", result.files_pushed.join(", "));
-    println!();
+    print_push_result(&result);
 
     Ok(())
 }
