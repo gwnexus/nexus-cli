@@ -258,12 +258,11 @@ pub async fn status(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
     let store = ProjectTokenStore::load()?;
     match store.get(&project_id) {
         Some(entry) => {
-            let prefix = entry.token_prefix.as_deref().unwrap_or("nxs_proj_****");
             println!(
                 "   Local: {} runtime={} prefix={}",
                 style("active").bold().green(),
                 style(&entry.runtime_id).bold(),
-                style(prefix).dim()
+                style(display_prefix(entry.token_prefix.as_deref())).dim()
             );
         }
         None => {
@@ -305,7 +304,7 @@ pub async fn status(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
         println!(
             "   - {} {} runtime={} created={} last_used={} expires={}",
             status_label,
-            style(t.token_prefix.as_deref().unwrap_or("nxs_proj_****")).dim(),
+            style(display_prefix(t.token_prefix.as_deref())).dim(),
             t.runtime_id.as_deref().unwrap_or("-"),
             t.created_at.as_deref().unwrap_or("-"),
             t.last_used_at.as_deref().unwrap_or("-"),
@@ -442,12 +441,23 @@ fn persist_token(
     Ok(())
 }
 
+/// Compose the human-readable token prefix for display.
+///
+/// The server returns `token_prefix` as the bare 8-char body; the full
+/// display form is `nxs_proj_<token_prefix>`.
+fn display_prefix(prefix: Option<&str>) -> String {
+    match prefix.filter(|p| !p.is_empty()) {
+        Some(p) => format!("nxs_proj_{}", p),
+        None => "nxs_proj_****".to_string(),
+    }
+}
+
 /// Print a one-line non-secret token summary.
 fn print_token_summary(prefix: &Option<String>, runtime: &str, expires_at: Option<&str>) {
     println!(
         "   {} prefix={} runtime={} expires={}",
         style("token").dim(),
-        style(prefix.as_deref().unwrap_or("nxs_proj_****")).bold(),
+        style(display_prefix(prefix.as_deref())).bold(),
         style(runtime).bold(),
         style(expires_at.unwrap_or("never")).dim()
     );
@@ -746,6 +756,13 @@ mod tests {
         );
         assert_eq!(sanitize_runtime_id("  CI Runner 7 "), "ci-runner-7");
         assert_eq!(sanitize_runtime_id("---"), "developer-workstation");
+    }
+
+    #[test]
+    fn test_display_prefix() {
+        assert_eq!(display_prefix(Some("deadbeef")), "nxs_proj_deadbeef");
+        assert_eq!(display_prefix(None), "nxs_proj_****");
+        assert_eq!(display_prefix(Some("")), "nxs_proj_****");
     }
 
     #[test]
