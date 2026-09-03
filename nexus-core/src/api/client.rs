@@ -13,10 +13,10 @@ use crate::api::types::{
     ActorAvatarResponse, ActorExportResponse, ActorGetResponse, ActorImportPayload,
     ActorImportResponse, ActorListResponse, AgentFileExportResponse, ApiError, AuthStatus,
     AuthStatusResponse, DirectiveExportResponse, FileStatusResponse, IdentityResponse,
-    ProjectDetailResponse, ProjectListResponse, SkillExportResponse, SkillListResponse,
-    SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse, TaskListResponse,
-    WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
-    WorkspacePushResponse,
+    InferenceTokenInfo, InferenceTokenIssueRequest, InferenceTokenResponse, ProjectDetailResponse,
+    ProjectListResponse, SkillExportResponse, SkillListResponse, SyncCheckResponse, SyncFileHash,
+    SyncResponse, SyncStatusResponse, TaskListResponse, WorkspaceExportResponse,
+    WorkspaceForkExportResponse, WorkspaceForksResponse, WorkspacePushResponse,
 };
 use crate::Error;
 
@@ -485,6 +485,26 @@ impl NexusClient {
         self.handle_response(resp).await
     }
 
+    /// Send a DELETE request and deserialize the JSON response.
+    ///
+    /// Endpoints that return an empty body should be requested with
+    /// `T = serde_json::Value`, which tolerates `null`/empty responses.
+    async fn delete<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
+        let url = format!("{}{}", self.base_url, path);
+        debug!("DELETE {}", url);
+
+        let mut req = self.client.delete(&url);
+        if let Some(ref token) = self.token {
+            req = req.bearer_auth(token);
+        }
+        if let Some(ref mid) = self.machine_id {
+            req = req.header("X-Nexus-Machine-Id", mid);
+        }
+
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
     /// Map HTTP response status to typed errors or deserialize the body.
     async fn handle_response<T: serde::de::DeserializeOwned>(
         &self,
@@ -546,5 +566,71 @@ impl NexusClient {
             "local_hashes": local_hashes,
         });
         self.post("/api/mcp/agent-files", &payload).await
+    }
+
+    // -- Project inference tokens (nxs_proj_*) — gateway ADR-0005 -----------
+
+    /// Issue a new project inference token via
+    /// `POST /api/projects/:projectId/inference-tokens`.
+    ///
+    /// PAT-authenticated. The server enforces `project.manage` membership.
+    /// The raw token in the response is returned exactly once.
+    pub async fn issue_inference_token(
+        &self,
+        project_id: &str,
+        request: &InferenceTokenIssueRequest,
+    ) -> Result<InferenceTokenResponse, Error> {
+        let path = format!("/api/projects/{}/inference-tokens", project_id);
+        self.post(&path, request).await
+    }
+
+    /// Rotate an existing project inference token via
+    /// `POST /api/projects/:projectId/inference-tokens/:tokenId`.
+    ///
+    /// The new token inherits the runtime, capabilities, and ceilings of the
+    /// old one. The old token stays valid during an overlapping window until
+    /// it is revoked.
+    pub async fn rotate_inference_token(
+        &self,
+        project_id: &str,
+        token_id: &str,
+    ) -> Result<InferenceTokenResponse, Error> {
+        let path = format!("/api/projects/{}/inference-tokens/{}", project_id, token_id);
+        self.post(&path, &json!({})).await
+    }
+
+    /// Revoke (soft-delete) a project inference token via
+    /// `DELETE /api/projects/:projectId/inference-tokens/:tokenId`.
+    pub async fn revoke_inference_token(
+        &self,
+        project_id: &str,
+        token_id: &str,
+    ) -> Result<(), Error> {
+        let path = format!("/api/projects/{}/inference-tokens/{}", project_id, token_id);
+        let _: serde_json::Value = self.delete(&path).await?;
+        Ok(())
+    }
+
+    /// List project inference tokens via
+    /// `GET /api/projects/:projectId/inference-tokens`.
+    ///
+    /// Tolerant of both a bare array response and an object with a `tokens`
+    /// field. Never returns raw secrets.
+    pub async fn list_inference_tokens(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<InferenceTokenInfo>, Error> {
+        let path = format!("/api/projects/{}/inference-tokens", project_id);
+        let value: serde_json::Value = self.get(&path).await?;
+        let tokens_value = match value {
+            serde_json::Value::Array(_) => value,
+            serde_json::Value::Object(ref map) => map
+                .get("tokens")
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(Vec::new())),
+            _ => serde_json::Value::Array(Vec::new()),
+        };
+        let tokens: Vec<InferenceTokenInfo> = serde_json::from_value(tokens_value)?;
+        Ok(tokens)
     }
 }

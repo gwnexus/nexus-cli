@@ -8,6 +8,13 @@ use std::path::PathBuf;
 
 use crate::Error;
 
+mod project_token;
+
+pub use project_token::{
+    resolve_project_token, validate_project_token_format, ProjectTokenEntry, ProjectTokenStore,
+    PROJECT_TOKEN_ENV, PROJECT_TOKEN_PREFIX,
+};
+
 /// Expected prefix for Nexus personal access tokens.
 pub const TOKEN_PREFIX: &str = "nxs_pat_";
 

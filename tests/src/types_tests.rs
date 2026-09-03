@@ -890,3 +890,93 @@ fn test_file_status_response_deserialize_empty() {
     assert!(resp.unchanged.is_empty());
     assert_eq!(resp.server_file_count, 0); // default
 }
+
+// -- Project inference tokens (nxs_proj_*) ----------------------------------
+
+#[test]
+fn test_inference_token_response_deserialize() {
+    let json = r#"{
+        "token": "nxs_proj_abcdefghijklmnop",
+        "token_id": "11111111-2222-3333-4444-555555555555",
+        "token_prefix": "nxs_proj_abcd",
+        "runtime_id": "developer-workstation",
+        "expires_at": "2027-01-01T00:00:00Z",
+        "warning": "no expiry recommended"
+    }"#;
+    let resp: InferenceTokenResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.token, "nxs_proj_abcdefghijklmnop");
+    assert_eq!(resp.token_id, "11111111-2222-3333-4444-555555555555");
+    assert_eq!(resp.token_prefix.as_deref(), Some("nxs_proj_abcd"));
+    assert_eq!(resp.runtime_id.as_deref(), Some("developer-workstation"));
+    assert_eq!(resp.expires_at.as_deref(), Some("2027-01-01T00:00:00Z"));
+    assert_eq!(resp.warning.as_deref(), Some("no expiry recommended"));
+}
+
+#[test]
+fn test_inference_token_response_minimal() {
+    // Only the mandatory fields are present.
+    let json = r#"{ "token": "nxs_proj_x", "token_id": "abc" }"#;
+    let resp: InferenceTokenResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.token, "nxs_proj_x");
+    assert!(resp.token_prefix.is_none());
+    assert!(resp.expires_at.is_none());
+    assert!(resp.warning.is_none());
+}
+
+#[test]
+fn test_inference_token_list_deserialize() {
+    let json = r#"{
+        "tokens": [
+            {
+                "token_id": "t1",
+                "token_prefix": "nxs_proj_aaaa",
+                "runtime_id": "ci-production",
+                "status": "active",
+                "created_at": "2026-09-01T00:00:00Z",
+                "last_used_at": "2026-09-02T00:00:00Z",
+                "expires_at": null
+            }
+        ]
+    }"#;
+    let resp: InferenceTokenListResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(resp.tokens.len(), 1);
+    let t = &resp.tokens[0];
+    assert_eq!(t.token_id, "t1");
+    assert_eq!(t.status.as_deref(), Some("active"));
+    assert!(t.expires_at.is_none());
+}
+
+#[test]
+fn test_inference_token_issue_request_skips_none() {
+    let req = InferenceTokenIssueRequest {
+        runtime_id: "developer-workstation".to_string(),
+        capabilities: None,
+        profile_ceiling: None,
+        budget_ceiling_ref: None,
+        expires_at: None,
+    };
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(json.contains("\"runtime_id\":\"developer-workstation\""));
+    assert!(!json.contains("capabilities"));
+    assert!(!json.contains("profile_ceiling"));
+    assert!(!json.contains("budget_ceiling_ref"));
+    assert!(!json.contains("expires_at"));
+}
+
+#[test]
+fn test_inference_token_issue_request_with_ceiling() {
+    let req = InferenceTokenIssueRequest {
+        runtime_id: "ci-production".to_string(),
+        capabilities: None,
+        profile_ceiling: Some(ProfileCeiling {
+            mode: "restrict".to_string(),
+            profiles: vec!["coding".to_string(), "reasoning".to_string()],
+        }),
+        budget_ceiling_ref: None,
+        expires_at: Some("2027-01-01T00:00:00Z".to_string()),
+    };
+    let value: serde_json::Value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["profile_ceiling"]["mode"], "restrict");
+    assert_eq!(value["profile_ceiling"]["profiles"][0], "coding");
+    assert_eq!(value["expires_at"], "2027-01-01T00:00:00Z");
+}

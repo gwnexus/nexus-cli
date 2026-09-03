@@ -19,4 +19,7 @@ mod error_tests;
 mod link_tests;
 
 #[cfg(test)]
+mod project_token_tests;
+
+#[cfg(test)]
 mod types_tests;

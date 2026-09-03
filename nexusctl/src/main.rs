@@ -72,6 +72,16 @@ pub enum Command {
     /// Unlink this directory from its Nexus project.
     Unlink,
 
+    /// Manage project inference tokens (nxs_proj_*) for gateway auth.
+    ///
+    /// Provisions a project-scoped inference credential from your PAT and
+    /// stores it locally (never committed). Exposed to tools as
+    /// NEXUS_PROJECT_TOKEN via the gitignored .env.nexus.local.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+
     /// Remove all Nexus/AI scaffold files from this directory.
     Deinit {
         /// Delete without confirmation prompt.
@@ -310,6 +320,66 @@ pub enum GitAction {
     Verify,
     /// Apply the project's git identity settings to local .git/config.
     Apply,
+}
+
+/// Project inference token subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ProjectAction {
+    /// Issue and store a project inference token for this workspace.
+    ///
+    /// Uses the linked project (or --project-id) and provisions a
+    /// nxs_proj_* token, storing it locally and exposing it as
+    /// NEXUS_PROJECT_TOKEN. Use --rotate/--status as shortcuts.
+    Link {
+        /// Nexus project UUID (defaults to the linked project).
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Logical runtime name (defaults to the hostname).
+        #[arg(long)]
+        runtime_id: Option<String>,
+
+        /// Restrict the token to specific profile slugs (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        restrict_profiles: Vec<String>,
+
+        /// Token lifetime: relative (e.g. 30d, 12h, 2w) or an ISO 8601 timestamp.
+        #[arg(long)]
+        expires: Option<String>,
+
+        /// Shortcut for `nexus project rotate`.
+        #[arg(long, conflicts_with = "status")]
+        rotate: bool,
+
+        /// Shortcut for `nexus project status`.
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Rotate the project inference token (previous stays valid until finalized).
+    Rotate {
+        /// Nexus project UUID (defaults to the linked project).
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Revoke the previously superseded token to complete rotation.
+        #[arg(long)]
+        finalize: bool,
+    },
+
+    /// Revoke the project inference token and clear local state.
+    Unlink {
+        /// Nexus project UUID (defaults to the linked project).
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// List issued project inference tokens for the linked project.
+    Status {
+        /// Nexus project UUID (defaults to the linked project).
+        #[arg(long)]
+        project_id: Option<String>,
+    },
 }
 
 /// Configuration subcommands.
@@ -655,6 +725,121 @@ mod tests {
     fn test_parse_unlink() {
         let cli = Cli::try_parse_from(["nexus", "unlink"]).unwrap();
         assert!(matches!(cli.command, Command::Unlink));
+    }
+
+    #[test]
+    fn test_parse_project_link_no_args() {
+        let cli = Cli::try_parse_from(["nexus", "project", "link"]).unwrap();
+        match cli.command {
+            Command::Project {
+                action:
+                    ProjectAction::Link {
+                        project_id,
+                        runtime_id,
+                        restrict_profiles,
+                        expires,
+                        rotate,
+                        status,
+                    },
+            } => {
+                assert!(project_id.is_none());
+                assert!(runtime_id.is_none());
+                assert!(restrict_profiles.is_empty());
+                assert!(expires.is_none());
+                assert!(!rotate);
+                assert!(!status);
+            }
+            _ => panic!("expected Project::Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_link_full() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "project",
+            "link",
+            "--project-id",
+            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "--runtime-id",
+            "ci-production",
+            "--restrict-profiles",
+            "coding,reasoning",
+            "--expires",
+            "30d",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Project {
+                action:
+                    ProjectAction::Link {
+                        project_id,
+                        runtime_id,
+                        restrict_profiles,
+                        expires,
+                        ..
+                    },
+            } => {
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                );
+                assert_eq!(runtime_id.as_deref(), Some("ci-production"));
+                assert_eq!(restrict_profiles, vec!["coding", "reasoning"]);
+                assert_eq!(expires.as_deref(), Some("30d"));
+            }
+            _ => panic!("expected Project::Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_link_rotate_shortcut() {
+        let cli = Cli::try_parse_from(["nexus", "project", "link", "--rotate"]).unwrap();
+        match cli.command {
+            Command::Project {
+                action: ProjectAction::Link { rotate, status, .. },
+            } => {
+                assert!(rotate);
+                assert!(!status);
+            }
+            _ => panic!("expected Project::Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_rotate_finalize() {
+        let cli = Cli::try_parse_from(["nexus", "project", "rotate", "--finalize"]).unwrap();
+        match cli.command {
+            Command::Project {
+                action: ProjectAction::Rotate { finalize, .. },
+            } => assert!(finalize),
+            _ => panic!("expected Project::Rotate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_unlink_and_status() {
+        let unlink = Cli::try_parse_from(["nexus", "project", "unlink"]).unwrap();
+        assert!(matches!(
+            unlink.command,
+            Command::Project {
+                action: ProjectAction::Unlink { .. }
+            }
+        ));
+        let status = Cli::try_parse_from(["nexus", "project", "status"]).unwrap();
+        assert!(matches!(
+            status.command,
+            Command::Project {
+                action: ProjectAction::Status { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_project_link_rotate_status_conflict() {
+        // --rotate and --status are mutually exclusive.
+        let result = Cli::try_parse_from(["nexus", "project", "link", "--rotate", "--status"]);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub(crate) mod import;
 mod init;
 mod link;
 pub(crate) mod preflight;
+pub(crate) mod project;
 pub(crate) mod pull;
 pub(crate) mod push;
 pub(crate) mod run;
@@ -19,8 +20,8 @@ pub(crate) mod sync;
 mod upgrade;
 
 use crate::{
-    ActorAvatarAction, ActorsAction, Cli, Command, ConfigAction, GitAction, ShadowAction,
-    SkillsAction, StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
+    ActorAvatarAction, ActorsAction, Cli, Command, ConfigAction, GitAction, ProjectAction,
+    ShadowAction, SkillsAction, StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
 };
 
 /// Dispatch the parsed CLI command to the appropriate handler.
@@ -52,6 +53,47 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Unlink => {
             link::unlink()?;
+        }
+        Command::Project { ref action } => {
+            let config = nexus_core::config::Config::load()?;
+            let api_url = cli.resolve_api_url(&config);
+            match action {
+                ProjectAction::Link {
+                    ref project_id,
+                    ref runtime_id,
+                    ref restrict_profiles,
+                    ref expires,
+                    rotate,
+                    status,
+                } => {
+                    if *rotate {
+                        project::rotate(&api_url, project_id.as_deref(), false).await?;
+                    } else if *status {
+                        project::status(&api_url, project_id.as_deref()).await?;
+                    } else {
+                        project::link(
+                            &api_url,
+                            project_id.as_deref(),
+                            runtime_id.as_deref(),
+                            restrict_profiles,
+                            expires.as_deref(),
+                        )
+                        .await?;
+                    }
+                }
+                ProjectAction::Rotate {
+                    ref project_id,
+                    finalize,
+                } => {
+                    project::rotate(&api_url, project_id.as_deref(), *finalize).await?;
+                }
+                ProjectAction::Unlink { ref project_id } => {
+                    project::unlink(&api_url, project_id.as_deref()).await?;
+                }
+                ProjectAction::Status { ref project_id } => {
+                    project::status(&api_url, project_id.as_deref()).await?;
+                }
+            }
         }
         Command::Deinit { force } => {
             deinit::run(force || cli.yes)?;

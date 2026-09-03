@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-09-03
+
+### Added
+- **`nexus project link` — project inference tokens (`nxs_proj_*`)** - new command group that provisions project-scoped inference credentials for the Nexus Model Gateway (gateway ADR-0005), bootstrapped from the user PAT. Subcommands:
+  - `nexus project link` issues a token for the linked project (or `--project-id`), defaulting the logical `--runtime-id` to the hostname. Supports `--expires` (relative `30d`/`12h`/`2w` or ISO 8601) and `--restrict-profiles` (tighten-only profile ceiling). Shortcuts: `--rotate`, `--status`.
+  - `nexus project rotate` performs a zero-downtime rotation (previous token stays valid); `--finalize` revokes the superseded token after the overlap window.
+  - `nexus project unlink` revokes the token(s) server-side and clears local state.
+  - `nexus project status` lists issued tokens (runtime, prefix, created/last-used/expiry, status) and never prints secrets.
+- **Project token storage** - tokens are stored in `~/.config/nexus/project-tokens.toml` (mode `0600`, never committed) and exposed to tools as `NEXUS_PROJECT_TOKEN` via the gitignored `.env.nexus.local`. The `NEXUS_PROJECT_TOKEN` environment variable overrides the store (CI-friendly). Existing linked workspaces need no relink: `nexus project link` reuses the project from `.nexus/config.toml`.
+- **API client** - `issue_inference_token`, `rotate_inference_token`, `revoke_inference_token`, and `list_inference_tokens` methods against `/api/projects/:id/inference-tokens`, plus a generic authenticated `DELETE` helper.
+
 ## [0.14.5] - 2026-08-24
 
 ### Fixed

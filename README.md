@@ -54,6 +54,10 @@ nexus logout                            Remove stored credentials
 nexus status                            Show auth, project, and workspace status
 nexus link [--project-id <id>]          Bind a project to the current workspace
 nexus unlink                            Remove project binding from the workspace
+nexus project link [--runtime-id <n>]   Issue a project inference token (nxs_proj_*) for gateway auth
+nexus project rotate [--finalize]       Rotate the project inference token (zero-downtime overlap)
+nexus project unlink                    Revoke the project inference token and clear local state
+nexus project status                    List issued project inference tokens
 nexus pull [--project-id <id>]          Pull skills and config from the Nexus platform
 nexus push [--name "..."] [--dry-run]   Push workspace changes as a new fork
 nexus stash save                        Save modified workspace files to a stash
@@ -86,10 +90,42 @@ nexus upgrade                           Upgrade CLI to latest release version
 | `nexus deinit`  | `--force`        | Skip confirmation prompt                       |
 | `nexus deinit`  | `--yes`          | Auto-confirm removal                           |
 | `nexus link`    | `--project-id`   | Specify project UUID directly (skip picker)    |
+| `nexus project link` | `--runtime-id` | Logical runtime name for the token (default: hostname) |
+| `nexus project link` | `--expires`  | Token lifetime: 30d, 12h, 2w, or an ISO 8601 timestamp |
+| `nexus project link` | `--restrict-profiles` | Restrict the token to profile slugs (comma-separated) |
+| `nexus project rotate` | `--finalize` | Revoke the previously superseded token after overlap |
 | `nexus pull`    | `--project-id`   | Pull from a specific project (skip picker)     |
 | `nexus push`    | `--name`         | Custom fork name (default: auto-generated)     |
 | `nexus push`    | `--dry-run`      | Show what would be pushed without sending      |
 | `nexus push`    | `--workspace`    | Only push workspace files (default for now)    |
+
+### Project Inference Tokens (`nexus project link`)
+
+The Nexus Model Gateway authenticates client inference traffic (`POST /v1/chat/completions`)
+with a project-scoped token (`nxs_proj_*`), separate from your user PAT
+(`nxs_pat_*`). `nexus project link` bootstraps such a token from your PAT and
+stores it for tools like OpenCode to use.
+
+```bash
+nexus project link                         # issue a token for the linked project
+nexus project link --runtime-id ci-prod    # name the logical runtime
+nexus project link --expires 30d           # set a lifetime (30d / 12h / 2w / ISO 8601)
+nexus project rotate                        # rotate with zero-downtime overlap
+nexus project rotate --finalize             # revoke the previous token after overlap
+nexus project status                        # list issued tokens (never prints secrets)
+nexus project unlink                        # revoke and clear the local token
+```
+
+**Existing links:** run `nexus project link` in any already-linked workspace.
+It reuses the project from `.nexus/config.toml`, so no relink is needed.
+
+**Storage and exposure.** The raw token is returned by the API exactly once. It
+is stored in `~/.config/nexus/project-tokens.toml` (mode `0600`, never
+committed) and written to the gitignored `.env.nexus.local` as
+`NEXUS_PROJECT_TOKEN`, which `nexus run` and OpenCode load automatically. In
+CI, set `NEXUS_PROJECT_TOKEN` directly in the environment; it always takes
+precedence over the local store. The PAT remains the long-lived bootstrap
+credential; project tokens are shorter-lived and rotate independently.
 
 ### Workspace Sync (Push / Stash)
 

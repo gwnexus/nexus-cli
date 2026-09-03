@@ -917,6 +917,112 @@ pub struct SyncResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Project inference tokens (nxs_proj_*) — gateway ADR-0005
+// ---------------------------------------------------------------------------
+
+/// Optional profile ceiling for an issued project inference token.
+///
+/// Tighten-only: `inherit` keeps the project policy, `restrict` narrows it to
+/// the listed profile slugs. Serialized only when explicitly requested.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileCeiling {
+    /// Ceiling mode: `inherit` or `restrict`.
+    pub mode: String,
+
+    /// Profile slugs the token is restricted to (only meaningful for `restrict`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
+}
+
+/// Request body for `POST /api/projects/:projectId/inference-tokens`.
+///
+/// `runtime_id` is a logical runtime name (e.g. `developer-workstation`),
+/// not a device attestation. All other fields are optional and default to
+/// inheriting the project policy server-side.
+#[derive(Debug, Clone, Serialize)]
+pub struct InferenceTokenIssueRequest {
+    pub runtime_id: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_ceiling: Option<ProfileCeiling>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_ceiling_ref: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// Response from issuing or rotating a project inference token.
+///
+/// The raw `token` value is returned exactly once and can never be retrieved
+/// again. Callers must persist it immediately.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InferenceTokenResponse {
+    /// The raw `nxs_proj_*` token. Shown once, never retrievable again.
+    pub token: String,
+
+    /// Stable identifier for the token record (used for rotate/revoke).
+    pub token_id: String,
+
+    /// Non-secret display prefix (safe to print / store in listings).
+    #[serde(default)]
+    pub token_prefix: Option<String>,
+
+    /// Logical runtime name the token was issued for.
+    #[serde(default)]
+    pub runtime_id: Option<String>,
+
+    /// Optional ISO 8601 expiry timestamp.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+
+    /// Optional server-side advisory (e.g. missing-expiry warning).
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+/// A single project inference token record as returned by the list endpoint.
+///
+/// Never contains the raw secret — only metadata.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InferenceTokenInfo {
+    pub token_id: String,
+
+    #[serde(default)]
+    pub token_prefix: Option<String>,
+
+    #[serde(default)]
+    pub runtime_id: Option<String>,
+
+    /// Lifecycle status: `active`, `expired`, or `revoked`.
+    #[serde(default)]
+    pub status: Option<String>,
+
+    #[serde(default)]
+    pub created_at: Option<String>,
+
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// Response from `GET /api/projects/:projectId/inference-tokens`.
+///
+/// The server may return either a bare array or an object with a `tokens`
+/// field; `#[serde(default)]` keeps deserialization tolerant.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InferenceTokenListResponse {
+    #[serde(default)]
+    pub tokens: Vec<InferenceTokenInfo>,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
