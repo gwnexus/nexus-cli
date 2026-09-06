@@ -100,7 +100,7 @@ fn check_npx() -> CheckResult {
 
 /// Check: Nexus CLI config
 fn check_config() -> (CheckResult, Option<Config>) {
-    match Config::load() {
+    match Config::load_effective(None) {
         Ok(cfg) => (
             CheckResult::Pass(format!(
                 "api_url={}, mcp_source={}",

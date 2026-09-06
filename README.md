@@ -67,9 +67,9 @@ nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
 nexus deinit [--force]                  Remove all AI scaffold files from the workspace
 nexus shadow on|off|status              Manage Git exclusion of workspace agentic files
-nexus config show                       Display configuration
-nexus config set K=V                    Update a configuration value
-nexus config path                       Show the config file path
+nexus config show                       Display effective configuration (with provenance)
+nexus config set K=V [--local|--global] Update a configuration value
+nexus config path [--local|--global]    Show a config file path
 nexus upgrade                           Upgrade CLI to latest release version
 ```
 
@@ -98,6 +98,9 @@ nexus upgrade                           Upgrade CLI to latest release version
 | `nexus push`    | `--name`         | Custom fork name (default: auto-generated)     |
 | `nexus push`    | `--dry-run`      | Show what would be pushed without sending      |
 | `nexus push`    | `--workspace`    | Only push workspace files (default for now)    |
+| `nexus push`    | `--adopt-local`  | Publish local workspace as a new fork without a prior pull |
+| `nexus config set` | `--local`     | Write to project-local `.nexus/config.toml` instead of global |
+| `nexus config path` | `--local`   | Print the project-local config path instead of global |
 
 ### Project Inference Tokens (`nexus project link`)
 
@@ -143,6 +146,23 @@ Each push **archives the current active fork** and creates a new one. The
 fork name is either auto-generated (`push-2026-08-23T10-30-00`) or set
 via `--name`. Previous forks remain accessible in the dashboard.
 
+`nexus push` requires a prior `nexus pull --scope workspace` (it tracks
+which files came from Nexus via `.nexus/sync-manifest.json`, and refuses to
+push untracked files). If the local workspace was never pulled, or you need
+to publish local edits without risking an older server-side fork
+overwriting them, use `nexus push --adopt-local` to bootstrap a new fork
+directly from the current local files, bypassing that check:
+
+```bash
+nexus push --adopt-local --dry-run   # preview what would be adopted
+nexus push --adopt-local             # publish current local workspace as a new fork
+```
+
+`nexus push` also prints the effective backend (`Backend: <api_url>`)
+alongside the project ID, so a wrong `NEXUS_API_URL` / `--api-url` (project
+not on this environment) is diagnosable in one step, including under
+`--dry-run`.
+
 `nexus stash` provides temporary local backup before a `nexus pull --force`:
 
 ```bash
@@ -153,6 +173,42 @@ nexus stash list    # show all available stashes
 
 Stashes are stored locally in `.nexus/stash/<timestamp>/` with metadata.
 Multiple stashes can coexist; `pop` always restores the most recent one.
+
+### Status
+
+`nexus status` shows auth, workspace, and project state, with real
+server-side validation (not just a local echo):
+
+```bash
+nexus status
+```
+
+```
+>> Nexus Status
+
+  API URL:  https://nexus.gatewarden.eu (global)
+  Workspace: /path/to/project
+
+  Auth:     OK you@example.com (member)
+            Token: nxs_pat_****... 
+
+  Project:  OK My Project (my-project)
+            ID: 07303f0c-3713-4cb0-b03e-35f4db0c1acb
+```
+
+- **API URL** reports which layer supplied it (`flag`, `env`, `local`,
+  `global`, `default`) — see [Configuration](#configuration) below.
+- **Auth** verifies the token against the API (unchanged).
+- **Project** now makes a real API call to confirm the linked project
+  exists and is reachable at the effective `api_url`, instead of just
+  echoing back `.nexus/config.toml`. This catches a silent env-mismatch
+  (e.g. `api_url` resolved to production while the project only exists on
+  staging) that previously reported a false "OK":
+  - `ERR Not found at <api_url>` — the project isn't there; check
+    `NEXUS_API_URL` / `--api-url` / `nexus config show`, or re-link.
+  - `ERR Access denied at <api_url>` — reachable, but no permission.
+  - `-- ... unverified` — authentication already failed or no token is
+    configured, so the project binding cannot be confirmed.
 
 ### Preflight Checks
 
@@ -189,7 +245,8 @@ Global config is stored in `~/.config/nexus/config.toml`.
 | `run.launch_countdown_secs` | `5` | Seconds to count down after pre-launch checks before starting the tool. Set to `0` to skip the countdown and launch immediately. |
 
 The API URL can also be set via the `NEXUS_API_URL` environment variable.
-Resolution order: `--api-url` flag > `NEXUS_API_URL` env var > config.toml > default.
+Resolution order: `--api-url` flag > `NEXUS_API_URL` env var > project-local
+config > global config.toml > default.
 
 ```bash
 # Temporary staging session (no config change needed)
@@ -204,6 +261,46 @@ Use `nexus config set K=V` to update a value, e.g.:
 nexus config set run.launch_countdown_secs=3   # shorter countdown
 nexus config set run.launch_countdown_secs=0   # launch immediately
 ```
+
+#### Project-local config (`--local`)
+
+`nexus config` supports two layers, mirroring git's own `--local` /
+`--global` config precedence:
+
+- **Global** — `~/.config/nexus/config.toml` (machine-wide default, unchanged
+  from previous versions).
+- **Local** — `.nexus/config.toml` `[config]` section (this project only).
+  Supports `api_url`, `default_output`, and `no_color`.
+
+Any command run inside a directory with a `.nexus/config.toml` prefers the
+project-local value over the global one, falling back to global (then the
+compiled-in default) for any key the local file doesn't set:
+
+```bash
+# Scope a staging API URL to this project only — every other project on
+# this machine keeps using the global (e.g. production) api_url.
+nexus config set api_url=https://staging.example.com --local
+
+# Explicit global write (same as omitting the flag; symmetry with --local)
+nexus config set api_url=https://nexus.gatewarden.eu --global
+
+# See which layer is in effect for each key
+nexus config show
+#   api_url        = https://staging.example.com (local)
+#   default_output = table (global)
+#   no_color       = false (default)
+
+# Print a specific layer's file path (unflagged = global, unchanged)
+nexus config path            # ~/.config/nexus/config.toml
+nexus config path --local    # ./.nexus/config.toml
+```
+
+This is purely additive: existing global-only setups are unaffected, and
+`nexus config set K=V` without `--local`/`--global` behaves exactly as
+before. Use `--local` whenever you regularly juggle multiple projects
+across environments (e.g. a staging-only alpha-test repo alongside
+production-bound projects) so a wrong `api_url` can't leak between them.
+
 
 ## Project Structure
 

@@ -34,7 +34,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             force,
             ..
         } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             init::run(
                 path,
@@ -47,7 +47,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             .await?;
         }
         Command::Link { ref project_id } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             link::link(&api_url, project_id.as_deref()).await?;
         }
@@ -55,7 +55,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             link::unlink()?;
         }
         Command::Project { ref action } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             match action {
                 ProjectAction::Link {
@@ -99,7 +99,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             deinit::run(force || cli.yes)?;
         }
         Command::Login => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             auth::login(&api_url).await?;
         }
@@ -107,9 +107,12 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             auth::logout()?;
         }
         Command::Status => {
-            let config = nexus_core::config::Config::load()?;
-            let api_url = cli.resolve_api_url(&config);
-            auth::status(&api_url).await?;
+            let workspace = std::env::current_dir()?;
+            let effective =
+                nexus_core::config::Config::load_effective_with_provenance(Some(&workspace))?;
+            let api_url = cli.resolve_api_url(&effective.config);
+            let api_url_source = cli.resolve_api_url_source(&effective);
+            auth::status(&api_url, api_url_source).await?;
         }
         Command::Pull {
             ref project_id,
@@ -118,7 +121,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             with_actor_assets,
             skip_actor_assets,
         } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             // --skip-actor-assets takes precedence over --with-actor-assets
             let effective_with_assets = with_actor_assets && !skip_actor_assets;
@@ -134,26 +137,26 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Skills { ref action } => match action {
             SkillsAction::List { ref status, limit } => {
-                let config = nexus_core::config::Config::load()?;
+                let config = nexus_core::config::Config::load_effective(None)?;
                 let api_url = cli.resolve_api_url(&config);
                 let output = cli.resolve_output(&config);
                 skills_cmd::list(&api_url, status.as_deref(), *limit, output).await?;
             }
             SkillsAction::Export { ref project_id } => {
-                let config = nexus_core::config::Config::load()?;
+                let config = nexus_core::config::Config::load_effective(None)?;
                 let api_url = cli.resolve_api_url(&config);
                 skills_cmd::export(&api_url, project_id.as_deref()).await?;
             }
         },
         Command::Preflight => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             preflight::run(&api_url).await?;
         }
         Command::Config { action } => match action {
             ConfigAction::Show => config_cmd::show()?,
-            ConfigAction::Set { pair } => config_cmd::set(&pair)?,
-            ConfigAction::Path => config_cmd::path()?,
+            ConfigAction::Set { pair, local, .. } => config_cmd::set(&pair, local)?,
+            ConfigAction::Path { local, .. } => config_cmd::path(local)?,
         },
         Command::Upgrade => {
             upgrade::run()?;
@@ -171,12 +174,12 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             },
         },
         Command::Import { dry_run } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             import::run(&api_url, dry_run, cli.yes).await?;
         }
         Command::Sync { ref action } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             match action {
                 SyncAction::Status { ref project_id } => {
@@ -197,7 +200,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Git { ref action } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             // Resolve project ID from .nexus/config.toml
             let workspace = std::env::current_dir()?;
@@ -221,7 +224,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Actors { ref action } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             match action {
                 ActorsAction::List { ref project_id } => {
@@ -277,7 +280,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             workspace: _,
             adopt_local,
         } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             push::run(
                 &api_url,
@@ -306,7 +309,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             force,
             ref args,
         } => {
-            let config = nexus_core::config::Config::load()?;
+            let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             let default_tool = config.run.default_tool.clone();
             let countdown_secs = config.run.launch_countdown_secs;

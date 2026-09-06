@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-06
+
+### Added
+- **`nexus config` git-style `--local` / `--global` precedence** - `nexus config` now supports two layers, mirroring git's own config model:
+  - **Global** - `~/.config/nexus/config.toml` (machine-wide default, unchanged behavior).
+  - **Local** - the project-local `.nexus/config.toml` gains a `[config]` section supporting `api_url`, `default_output`, and `no_color`, scoped to the current project only.
+  - `nexus config set K=V --local` writes to the project-local file; `nexus config set K=V --global` (or no flag, unchanged default) writes to the global file.
+  - Read-side precedence for every command: `--api-url`/`--output` CLI flag > `NEXUS_API_URL` env var > project-local config > global config > compiled-in default. Any command run inside a directory with a `.nexus/config.toml` automatically prefers the local value, falling back to global then default for keys the local file doesn't set.
+  - `nexus config show` now prints per-key provenance (`local` / `global` / `default`) alongside both the global and (if present) local config file paths, so it's obvious at a glance which layer is in effect.
+  - `nexus config path` gained `--local` / `--global` flags for symmetry; the unflagged default is unchanged (prints the global path).
+  - This closes a real gap where juggling multiple projects across environments (e.g. a staging-only alpha-test project alongside production-bound projects) required either a one-off `--api-url` flag on every command, or a global `nexus config set api_url=...` that silently repointed every other project on the machine.
+
+### Fixed
+- **`nexus status` reported "Project OK" without any server-side validation** - the Project check previously just echoed the `.nexus/config.toml` binding back, so a workspace pointed at the wrong backend (e.g. `api_url` resolved to production while the linked project only exists on staging) got a clean bill of health with no way to detect the mismatch short of a later `pull`/`push` failure. `nexus status` now makes a real API call (`GET /api/mcp/projects/:id`) to confirm the project exists and is reachable at the effective `api_url`:
+  - `OK <name> (<slug>)` only when the server confirms the project.
+  - `ERR Not found at <api_url>` when the project does not exist there, with a hint to check `NEXUS_API_URL` / `--api-url` / `nexus config show` or re-link, distinct from an auth failure (different fix: rotate token vs. fix api_url/re-link).
+  - `ERR Access denied at <api_url>` on a permissions failure, distinct from "not found".
+  - `-- ... unverified` when authentication already failed or no token is configured, since the project binding cannot be confirmed without a valid session (avoids a redundant network call and misleading claims).
+  - The `API URL:` line now also reports which layer supplied it (`flag`, `env`, `local`, `global`, `default`), composing directly with the `--local`/`--global` config precedence above so a mismatch is diagnosable from `nexus status` alone.
+
 ## [0.15.1] - 2026-09-03
 
 ### Fixed

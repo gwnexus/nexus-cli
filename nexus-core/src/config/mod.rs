@@ -169,6 +169,48 @@ impl Default for Config {
     }
 }
 
+/// Which configuration layer supplied a resolved value.
+///
+/// Mirrors git's `--local` / `--global` provenance so `nexus config show`
+/// can indicate at a glance which layer is in effect for each key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Supplied by the project-local `.nexus/config.toml` `[config]` section.
+    Local,
+    /// Supplied by the global `~/.config/nexus/config.toml`.
+    Global,
+    /// Neither layer set this key; compiled-in default is in effect.
+    Default,
+}
+
+impl fmt::Display for ConfigSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => write!(f, "local"),
+            Self::Global => write!(f, "global"),
+            Self::Default => write!(f, "default"),
+        }
+    }
+}
+
+/// The effective configuration merged from the project-local and global
+/// layers, plus per-key provenance for display purposes.
+#[derive(Debug, Clone)]
+pub struct EffectiveConfig {
+    /// The merged configuration (local overrides applied on top of global).
+    pub config: Config,
+    /// Which layer supplied `api_url`.
+    pub api_url_source: ConfigSource,
+    /// Which layer supplied `default_output`.
+    pub default_output_source: ConfigSource,
+    /// Which layer supplied `no_color`.
+    pub no_color_source: ConfigSource,
+    /// Path to the project-local config file, if it exists.
+    pub local_path: Option<PathBuf>,
+    /// Path to the global config file (may not exist yet).
+    pub global_path: PathBuf,
+}
+
 impl Config {
     /// Returns the configuration directory path: `~/.config/nexus/`.
     pub fn dir() -> Result<PathBuf, Error> {
@@ -260,6 +302,64 @@ impl Config {
             ))),
         }
     }
+
+    /// Load the effective configuration for a working directory.
+    ///
+    /// Precedence (highest first, mirrors git's local -> global -> system model):
+    /// 1. Project-local `.nexus/config.toml` `[config]` section
+    /// 2. Global `~/.config/nexus/config.toml`
+    /// 3. Compiled-in defaults
+    ///
+    /// `workspace` defaults to the current working directory when `None`.
+    pub fn load_effective(workspace: Option<&std::path::Path>) -> Result<Config, Error> {
+        Ok(Self::load_effective_with_provenance(workspace)?.config)
+    }
+
+    /// Same as [`load_effective`](Self::load_effective), but also reports which
+    /// layer supplied each overridable key. Used by `nexus config show`.
+    pub fn load_effective_with_provenance(
+        workspace: Option<&std::path::Path>,
+    ) -> Result<EffectiveConfig, Error> {
+        let global_path = Self::path()?;
+        let global_exists = global_path.exists();
+        let mut config = Self::load()?;
+
+        let base_source = if global_exists {
+            ConfigSource::Global
+        } else {
+            ConfigSource::Default
+        };
+        let mut api_url_source = base_source;
+        let mut default_output_source = base_source;
+        let mut no_color_source = base_source;
+
+        let local_overrides = load_project_config(workspace)?.and_then(|pc| pc.config);
+        let local_path = project_config_path(workspace).ok().filter(|p| p.exists());
+
+        if let Some(overrides) = local_overrides {
+            if let Some(url) = overrides.api_url {
+                config.api_url = url;
+                api_url_source = ConfigSource::Local;
+            }
+            if let Some(fmt) = overrides.default_output {
+                config.default_output = fmt;
+                default_output_source = ConfigSource::Local;
+            }
+            if let Some(nc) = overrides.no_color {
+                config.no_color = nc;
+                no_color_source = ConfigSource::Local;
+            }
+        }
+
+        Ok(EffectiveConfig {
+            config,
+            api_url_source,
+            default_output_source,
+            no_color_source,
+            local_path,
+            global_path,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +416,55 @@ fn default_plugin_source() -> String {
     "github-raw".to_string()
 }
 
+/// Project-local overrides for a subset of global config keys, stored under
+/// the `[config]` section of `.nexus/config.toml`.
+///
+/// Written by `nexus config set --local KEY=VALUE`. Any key left unset here
+/// falls back to the global config, then to compiled-in defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalConfigOverrides {
+    /// Project-scoped override for the Nexus API base URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+
+    /// Project-scoped override for the default output format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_output: Option<OutputPreference>,
+
+    /// Project-scoped override for disabling colored output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_color: Option<bool>,
+}
+
+impl LocalConfigOverrides {
+    /// Update a single local override key by name.
+    /// Returns an error if the key is not supported for `--local` scope.
+    pub fn set(&mut self, key: &str, value: &str) -> Result<(), Error> {
+        match key {
+            "api_url" => {
+                self.api_url = Some(value.to_string());
+                Ok(())
+            }
+            "default_output" => {
+                self.default_output = Some(value.parse()?);
+                Ok(())
+            }
+            "no_color" => {
+                self.no_color = Some(
+                    value
+                        .parse::<bool>()
+                        .map_err(|_| Error::Config(format!("invalid bool value: '{}'", value)))?,
+                );
+                Ok(())
+            }
+            other => Err(Error::Config(format!(
+                "unknown local config key '{}', valid keys for --local: api_url, default_output, no_color",
+                other
+            ))),
+        }
+    }
+}
+
 /// The full `.nexus/config.toml` file structure.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectConfig {
@@ -332,6 +481,12 @@ pub struct ProjectConfig {
     /// Plugins to install into .opencode/plugins/ on init.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins: Option<std::collections::HashMap<String, PluginDef>>,
+
+    /// Project-local overrides for a subset of global config keys
+    /// (`api_url`, `default_output`, `no_color`). Written by
+    /// `nexus config set --local`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<LocalConfigOverrides>,
 }
 
 /// Returns the path to the project-local `.nexus/config.toml`,

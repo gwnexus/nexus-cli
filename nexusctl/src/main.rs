@@ -394,17 +394,43 @@ pub enum ProjectAction {
 /// Configuration subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
-    /// Show the current configuration.
+    /// Show the effective configuration, with per-key provenance
+    /// (local / global / default).
     Show,
 
     /// Set a configuration value (KEY=VALUE).
+    ///
+    /// By default writes to the global config
+    /// (`~/.config/nexus/config.toml`). Pass `--local` to write to the
+    /// project-local `.nexus/config.toml` instead, scoping the value to
+    /// this project only (mirrors `git config --local`).
     Set {
         /// Configuration key=value pair.
         pair: String,
+
+        /// Write to the project-local `.nexus/config.toml` instead of the
+        /// global config. Supports api_url, default_output, no_color.
+        #[arg(long, conflicts_with = "global")]
+        local: bool,
+
+        /// Write to the global config (default behavior; explicit for symmetry with --local).
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
     },
 
     /// Show the configuration file path.
-    Path,
+    ///
+    /// Without flags, prints the global config path (unchanged from
+    /// previous versions). Pass `--local` for the project-local path.
+    Path {
+        /// Print the project-local `.nexus/config.toml` path instead of the global one.
+        #[arg(long, conflicts_with = "global")]
+        local: bool,
+
+        /// Print the global config path (default behavior; explicit for symmetry with --local).
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+    },
 }
 
 /// Skills management subcommands.
@@ -555,6 +581,31 @@ impl Cli {
             }
         } else {
             config.api_url.clone()
+        }
+    }
+
+    /// Report which layer supplied the effective API URL: CLI flag, env var,
+    /// or the config layer reported by `Config::load_effective_with_provenance`
+    /// (local / global / default). Used by `nexus status` to make silent
+    /// env-mismatches diagnosable at a glance.
+    pub fn resolve_api_url_source(
+        &self,
+        effective: &nexus_core::config::EffectiveConfig,
+    ) -> &'static str {
+        if self.api_url.is_some() {
+            "flag"
+        } else if std::env::var("NEXUS_API_URL")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
+            "env"
+        } else {
+            match effective.api_url_source {
+                nexus_core::config::ConfigSource::Local => "local",
+                nexus_core::config::ConfigSource::Global => "global",
+                nexus_core::config::ConfigSource::Default => "default",
+            }
         }
     }
 }
@@ -904,9 +955,43 @@ mod tests {
             Cli::try_parse_from(["nexus", "config", "set", "api_url=https://custom.url"]).unwrap();
         match cli.command {
             Command::Config {
-                action: ConfigAction::Set { ref pair },
+                action:
+                    ConfigAction::Set {
+                        ref pair,
+                        local,
+                        global,
+                    },
             } => {
                 assert_eq!(pair, "api_url=https://custom.url");
+                assert!(!local);
+                assert!(!global);
+            }
+            _ => panic!("expected Config Set"),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_set_local() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "config",
+            "set",
+            "api_url=https://staging.example",
+            "--local",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Config {
+                action:
+                    ConfigAction::Set {
+                        ref pair,
+                        local,
+                        global,
+                    },
+            } => {
+                assert_eq!(pair, "api_url=https://staging.example");
+                assert!(local);
+                assert!(!global);
             }
             _ => panic!("expected Config Set"),
         }
@@ -917,8 +1002,25 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "config", "path"]).unwrap();
         match cli.command {
             Command::Config {
-                action: ConfigAction::Path,
-            } => {}
+                action: ConfigAction::Path { local, global },
+            } => {
+                assert!(!local);
+                assert!(!global);
+            }
+            _ => panic!("expected Config Path"),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_path_local() {
+        let cli = Cli::try_parse_from(["nexus", "config", "path", "--local"]).unwrap();
+        match cli.command {
+            Command::Config {
+                action: ConfigAction::Path { local, global },
+            } => {
+                assert!(local);
+                assert!(!global);
+            }
             _ => panic!("expected Config Path"),
         }
     }
@@ -934,6 +1036,66 @@ mod tests {
         let cli =
             Cli::try_parse_from(["nexus", "--api-url", "https://custom.api", "status"]).unwrap();
         assert_eq!(cli.api_url.as_deref(), Some("https://custom.api"));
+    }
+
+    #[test]
+    fn test_resolve_api_url_source_precedence() {
+        // Combined into a single test: NEXUS_API_URL is process-global state,
+        // so exercising "env" vs "no env" branches across separate #[test]
+        // functions racing on the default multi-threaded test runner is
+        // flaky. One test = one thread = deterministic ordering.
+        std::env::remove_var("NEXUS_API_URL");
+
+        // 1. CLI flag wins over everything, even if env is also set later.
+        let cli_flag =
+            Cli::try_parse_from(["nexus", "--api-url", "https://custom.api", "status"]).unwrap();
+        let effective = nexus_core::config::EffectiveConfig {
+            config: nexus_core::config::Config::default(),
+            api_url_source: nexus_core::config::ConfigSource::Local,
+            default_output_source: nexus_core::config::ConfigSource::Default,
+            no_color_source: nexus_core::config::ConfigSource::Default,
+            local_path: None,
+            global_path: nexus_core::config::Config::path().unwrap(),
+        };
+        assert_eq!(cli_flag.resolve_api_url_source(&effective), "flag");
+
+        // 2. Without a flag, NEXUS_API_URL env var wins over the config layer.
+        let cli_no_flag = Cli::try_parse_from(["nexus", "status"]).unwrap();
+        std::env::set_var("NEXUS_API_URL", "https://env.example.com");
+        assert_eq!(cli_no_flag.resolve_api_url_source(&effective), "env");
+        std::env::remove_var("NEXUS_API_URL");
+
+        // 3. Without a flag or env var, the config layer's own provenance
+        // (local / global / default) is reported as-is.
+        let local_effective = nexus_core::config::EffectiveConfig {
+            api_url_source: nexus_core::config::ConfigSource::Local,
+            ..effective
+        };
+        assert_eq!(
+            cli_no_flag.resolve_api_url_source(&local_effective),
+            "local"
+        );
+
+        let global_effective = nexus_core::config::EffectiveConfig {
+            api_url_source: nexus_core::config::ConfigSource::Global,
+            ..local_effective
+        };
+        assert_eq!(
+            cli_no_flag.resolve_api_url_source(&global_effective),
+            "global"
+        );
+
+        let default_effective = nexus_core::config::EffectiveConfig {
+            api_url_source: nexus_core::config::ConfigSource::Default,
+            ..global_effective
+        };
+        assert_eq!(
+            cli_no_flag.resolve_api_url_source(&default_effective),
+            "default"
+        );
+
+        // Leave no residue for other tests.
+        std::env::remove_var("NEXUS_API_URL");
     }
 
     #[test]

@@ -94,6 +94,7 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
         mcp: None,
         mcp_extra: None,
         plugins: None,
+        config: None,
     });
     project_config.project = Some(project_info);
     config::save_project_config(None, &project_config)?;

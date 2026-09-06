@@ -3,6 +3,7 @@
 use console::style;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::{resolve_token, Credentials, TOKEN_PREFIX};
+use nexus_core::error::Error as CoreError;
 
 /// Interactive login flow.
 ///
@@ -59,12 +60,21 @@ pub fn logout() -> anyhow::Result<()> {
 }
 
 /// Display current authentication and workspace status.
-pub async fn status(api_url: &str) -> anyhow::Result<()> {
+///
+/// `api_url_source` reports which layer supplied the effective API URL
+/// (`flag`, `env`, `local`, `global`, `default`), so a silent env-mismatch
+/// (e.g. project only exists on staging while `api_url` resolved to prod)
+/// is diagnosable from the same line that shows the URL itself.
+pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
     println!("{} Nexus Status", style(">>").bold().cyan());
     println!();
 
     // --- API URL ---
-    println!("  API URL:  {}", style(api_url).dim());
+    println!(
+        "  API URL:  {} ({})",
+        style(api_url).dim(),
+        style(api_url_source).dim()
+    );
 
     // --- Workspace ---
     let cwd = std::env::current_dir()?;
@@ -86,6 +96,7 @@ pub async fn status(api_url: &str) -> anyhow::Result<()> {
         .ok()
         .filter(|v| !v.is_empty())
         .is_some();
+    let mut auth_valid = false;
 
     match token {
         None => {
@@ -122,6 +133,7 @@ pub async fn status(api_url: &str) -> anyhow::Result<()> {
                         style(prefix).dim(),
                         style(source_label).dim()
                     );
+                    auth_valid = true;
                 }
                 Err(e) => {
                     println!(
@@ -143,17 +155,89 @@ pub async fn status(api_url: &str) -> anyhow::Result<()> {
     // --- Linked project ---
     match nexus_core::config::load_linked_project(None)? {
         Some(project) => {
-            println!(
-                "  Project:  {} {} ({})",
-                style("OK").bold().green(),
-                style(&project.name).bold(),
-                if !project.slug.is_empty() {
-                    &project.slug
+            // Verify the project actually exists on the configured api_url,
+            // rather than just echoing back the local .nexus/config.toml
+            // binding. Catches silent env-mismatch (e.g. api_url pointed at
+            // prod while the project only exists on staging).
+            if !auth_valid {
+                // Auth already failed/absent above; skip a second network
+                // call and don't imply a fresh check succeeded.
+                println!(
+                    "  Project:  {} {} ({}) — unverified",
+                    style("--").bold().yellow(),
+                    style(&project.name).bold(),
+                    if !project.slug.is_empty() {
+                        &project.slug
+                    } else {
+                        "-"
+                    }
+                );
+                println!("            ID: {}", style(&project.id).dim());
+                if token.is_none() {
+                    println!(
+                        "            Run 'nexus login' to verify this project exists at {}.",
+                        api_url
+                    );
                 } else {
-                    "-"
+                    println!("            Cannot verify: authentication failed above.");
                 }
-            );
-            println!("            ID: {}", style(&project.id).dim());
+            } else {
+                let client = NexusClient::new(api_url, token.clone())?;
+                match client.get_project(&project.id).await {
+                    Ok(_) => {
+                        println!(
+                            "  Project:  {} {} ({})",
+                            style("OK").bold().green(),
+                            style(&project.name).bold(),
+                            if !project.slug.is_empty() {
+                                &project.slug
+                            } else {
+                                "-"
+                            }
+                        );
+                        println!("            ID: {}", style(&project.id).dim());
+                    }
+                    Err(CoreError::NotFound(_)) => {
+                        println!(
+                            "  Project:  {} Not found at {}",
+                            style("ERR").bold().red(),
+                            api_url
+                        );
+                        println!(
+                            "            Configured: {} (id: {})",
+                            style(&project.name).bold(),
+                            style(&project.id).dim()
+                        );
+                        println!(
+                            "            This workspace may be pointed at the wrong backend. \
+                             Check NEXUS_API_URL / --api-url / 'nexus config show', \
+                             or re-link with 'nexus link'."
+                        );
+                    }
+                    Err(CoreError::Forbidden(msg)) => {
+                        println!(
+                            "  Project:  {} Access denied at {}: {}",
+                            style("ERR").bold().red(),
+                            api_url,
+                            msg
+                        );
+                        println!("            ID: {}", style(&project.id).dim());
+                    }
+                    Err(e) => {
+                        println!(
+                            "  Project:  {} Could not verify against {}: {}",
+                            style("!").bold().yellow(),
+                            api_url,
+                            e
+                        );
+                        println!(
+                            "            Local config: {} (id: {})",
+                            style(&project.name).bold(),
+                            style(&project.id).dim()
+                        );
+                    }
+                }
+            }
         }
         None => {
             println!(

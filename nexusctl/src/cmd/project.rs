@@ -407,6 +407,7 @@ fn ensure_workspace_linked(id: &str, name: &str, slug: &str) -> anyhow::Result<(
         mcp: None,
         mcp_extra: None,
         plugins: None,
+        config: None,
     });
     project_config.project = Some(ProjectInfo {
         id: id.to_string(),
