@@ -791,6 +791,15 @@ pub async fn run(
         .ok()
         .and_then(|r| r.model_routes.clone());
 
+    // Instructions paths to merge into opencode.json's top-level
+    // "instructions" array (e.g. "<agentic_root>/AGENTS.md"), so OpenCode
+    // loads the project's agent policy deterministically instead of relying
+    // on its own upward AGENTS.md auto-discovery.
+    let opencode_instructions = af_export_result
+        .as_ref()
+        .ok()
+        .and_then(|r| r.opencode_instructions.clone());
+
     // Write model-routes.json for traceability (ADR-0057)
     if let Some(ref routes) = model_routes_export {
         let generated_dir = workspace.join(&agentic_root).join("generated");
@@ -819,6 +828,7 @@ pub async fn run(
         &workspace,
         api_url,
         &effective_token,
+        &project_id,
         mcp_source,
         tool_flavor.as_deref(),
         &agentic_root,
@@ -827,6 +837,7 @@ pub async fn run(
         &opencode_agents,
         &opencode_default_model,
         &opencode_default_agent,
+        &opencode_instructions,
         force,
     )?;
 
@@ -1708,6 +1719,7 @@ fn write_mcp_configs(
     workspace: &Path,
     api_url: &str,
     token: &str,
+    project_id: &str,
     mcp_source: McpSource,
     tool_flavor: Option<&str>,
     agentic_root: &str,
@@ -1716,6 +1728,7 @@ fn write_mcp_configs(
     opencode_agents: &Option<serde_json::Value>,
     opencode_default_model: &Option<String>,
     opencode_default_agent: &Option<String>,
+    opencode_instructions: &Option<Vec<String>>,
     force: bool,
 ) -> anyhow::Result<()> {
     let opencode_path = workspace.join("opencode.json");
@@ -1736,22 +1749,40 @@ fn write_mcp_configs(
             || force
             || !plugin_mcp_servers.is_empty()
             || !providers.is_empty()
-            || opencode_agents.is_some();
+            || opencode_agents.is_some()
+            || opencode_instructions.is_some();
 
         if needs_write {
-            let mut mcp_block: serde_json::Map<String, serde_json::Value> = if exists && !force {
-                // Additive merge: load existing config
-                let content = fs::read_to_string(&opencode_path).unwrap_or_default();
-                let parsed: serde_json::Value = serde_json::from_str(&content)
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
-                parsed
-                    .get("mcp")
-                    .and_then(|v| v.as_object())
-                    .cloned()
-                    .unwrap_or_default()
+            // Parse the existing file once (if applicable) and reuse it for
+            // both the "mcp" merge and the "instructions" merge below.
+            let existing_parsed: Option<serde_json::Value> = if exists && !force {
+                fs::read_to_string(&opencode_path)
+                    .ok()
+                    .and_then(|content| serde_json::from_str(&content).ok())
             } else {
-                serde_json::Map::new()
+                None
             };
+
+            let mut mcp_block: serde_json::Map<String, serde_json::Value> = existing_parsed
+                .as_ref()
+                .and_then(|parsed| parsed.get("mcp"))
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+
+            // Preserve any pre-existing top-level "instructions" entries
+            // (e.g. user-added paths) so merging in the platform-managed
+            // entries below is additive, not a silent overwrite.
+            let existing_instructions: Vec<String> = existing_parsed
+                .as_ref()
+                .and_then(|parsed| parsed.get("instructions"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             // Nexus server (always present)
             let nexus_command = match mcp_source {
@@ -1779,6 +1810,7 @@ fn write_mcp_configs(
                     "environment": {
                         "NEXUS_API_URL": api_url,
                         "NEXUS_PRIVATE_TOKEN": token,
+                        "NEXUS_PROJECT_ID": project_id,
                         "NEXUS_SEC_OPENAI_API_KEY": openai_key_value
                     }
                 }),
@@ -1848,6 +1880,31 @@ fn write_mcp_configs(
             // https://opencode.ai/docs/agents/#json
             if let Some(agents) = opencode_agents {
                 opencode_obj.insert("agent".to_string(), agents.clone());
+            }
+
+            // Instructions paths (e.g. "<agentic_root>/AGENTS.md") merged into the
+            // top-level "instructions" array, so OpenCode loads them deterministically
+            // at session start instead of relying on its own upward AGENTS.md
+            // auto-discovery, which has no awareness of the agentic_root convention.
+            // Additive: preserves any pre-existing entries, append-only, deduped.
+            let mut merged_instructions = existing_instructions;
+            if let Some(paths) = opencode_instructions {
+                for path in paths {
+                    if !merged_instructions.contains(path) {
+                        merged_instructions.push(path.clone());
+                    }
+                }
+            }
+            if !merged_instructions.is_empty() {
+                opencode_obj.insert(
+                    "instructions".to_string(),
+                    serde_json::Value::Array(
+                        merged_instructions
+                            .into_iter()
+                            .map(serde_json::Value::String)
+                            .collect(),
+                    ),
+                );
             }
 
             // Global default model — DGX Spark local-first (ADR-0057)
@@ -2875,11 +2932,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_alt-token",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".nexus",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -2892,6 +2951,221 @@ mod tests {
         // mcp.json should be under .nexus/, not .claude/
         assert!(dir.join(".nexus/mcp.json").exists());
         assert!(!dir.join(".claude/mcp.json").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_includes_nexus_project_id() {
+        // Dispatch ef9b0b0e: NEXUS_PROJECT_ID must reach the nexus MCP server's
+        // environment block so agents can bind to the correct project without
+        // guessing via a project-listing tool.
+        let dir = temp_pull_dir("mcp-project-id");
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_project-id-token",
+            "07303f0c-3713-4cb0-b03e-35f4db0c1acb",
+            McpSource::Npm,
+            None,
+            ".nexus",
+            &HashMap::new(),
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            &None,
+            false,
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            parsed["mcp"]["nexus"]["environment"]["NEXUS_PROJECT_ID"],
+            "07303f0c-3713-4cb0-b03e-35f4db0c1acb"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_merges_opencode_instructions() {
+        // Dispatch d15aa6f5: opencode_instructions from af_export must merge
+        // into the top-level "instructions" array so OpenCode deterministically
+        // loads <agentic_root>/AGENTS.md instead of relying on its own upward
+        // auto-discovery (which has no awareness of the agentic_root convention).
+        let dir = temp_pull_dir("mcp-instructions-new");
+
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_instructions-token",
+            "test-project-id",
+            McpSource::Npm,
+            None,
+            ".nexus",
+            &HashMap::new(),
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            &Some(vec![".nexus/AGENTS.md".to_string()]),
+            false,
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let instructions: Vec<&str> = parsed["instructions"]
+            .as_array()
+            .expect("instructions should be an array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(instructions, vec![".nexus/AGENTS.md"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_preserves_existing_custom_instructions() {
+        // Additive merge: a user's own pre-existing "instructions" entries
+        // must survive, not be silently overwritten.
+        let dir = temp_pull_dir("mcp-instructions-preserve");
+
+        // Seed an existing opencode.json with a custom instructions entry
+        // and a plugin server, so the merge path (exists && !force) is taken.
+        let mut plugin_servers = HashMap::new();
+        plugin_servers.insert(
+            "task-master-ai".to_string(),
+            McpServerConfig {
+                command: vec!["npx".to_string()],
+                args: vec!["-y".to_string(), "task-master-ai@latest".to_string()],
+                env_keys: vec![],
+                environment: HashMap::new(),
+            },
+        );
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_instructions-token",
+            "test-project-id",
+            McpSource::Npm,
+            None,
+            ".nexus",
+            &plugin_servers,
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            &None,
+            false,
+        )
+        .unwrap();
+
+        // Manually inject a custom instructions entry, simulating a user edit.
+        let existing_content = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        let mut existing: serde_json::Value = serde_json::from_str(&existing_content).unwrap();
+        existing["instructions"] = serde_json::json!(["CUSTOM.md"]);
+        fs::write(
+            dir.join("opencode.json"),
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
+
+        // Re-run with opencode_instructions set and a new plugin server, to
+        // trigger needs_write via the additive-merge path (exists && !force).
+        let mut plugin_servers2 = plugin_servers.clone();
+        plugin_servers2.insert(
+            "other-plugin".to_string(),
+            McpServerConfig {
+                command: vec!["npx".to_string()],
+                args: vec![],
+                env_keys: vec![],
+                environment: HashMap::new(),
+            },
+        );
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_instructions-token",
+            "test-project-id",
+            McpSource::Npm,
+            None,
+            ".nexus",
+            &plugin_servers2,
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            &Some(vec![".nexus/AGENTS.md".to_string()]),
+            false,
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let instructions: Vec<&str> = parsed["instructions"]
+            .as_array()
+            .expect("instructions should be an array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(instructions.contains(&"CUSTOM.md"));
+        assert!(instructions.contains(&".nexus/AGENTS.md"));
+        assert_eq!(instructions.len(), 2, "no duplicate entries expected");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_instructions_dedup_on_rerun() {
+        // Running pull twice with the same opencode_instructions must not
+        // duplicate the entry in the instructions[] array.
+        let dir = temp_pull_dir("mcp-instructions-dedup");
+
+        let mut plugin_servers = HashMap::new();
+        plugin_servers.insert(
+            "task-master-ai".to_string(),
+            McpServerConfig {
+                command: vec!["npx".to_string()],
+                args: vec![],
+                env_keys: vec![],
+                environment: HashMap::new(),
+            },
+        );
+
+        for _ in 0..2 {
+            write_mcp_configs(
+                &dir,
+                "https://nexus.gatewarden.eu",
+                "nxs_pat_instructions-token",
+                "test-project-id",
+                McpSource::Npm,
+                None,
+                ".nexus",
+                &plugin_servers,
+                &HashMap::new(),
+                &None,
+                &None,
+                &None,
+                &Some(vec![".nexus/AGENTS.md".to_string()]),
+                false,
+            )
+            .unwrap();
+        }
+
+        let content = fs::read_to_string(dir.join("opencode.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let instructions: Vec<&str> = parsed["instructions"]
+            .as_array()
+            .expect("instructions should be an array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(instructions, vec![".nexus/AGENTS.md"]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2916,11 +3190,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_pull-test-token",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -2961,11 +3237,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_should-not-appear",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -2997,11 +3275,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_partial-token",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -3029,11 +3309,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_local-token",
+            "test-project-id",
             McpSource::Local,
             None,
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -3197,11 +3479,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_provider-token",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
             &HashMap::new(),
             &providers,
+            &None,
             &None,
             &None,
             &None,
@@ -3237,11 +3521,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_no-provider-token",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -3274,11 +3560,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_trigger-token",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
             &HashMap::new(),
             &providers,
+            &None,
             &None,
             &None,
             &None,
@@ -3303,11 +3591,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_no-claude-token",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
             &HashMap::new(),
             &providers,
+            &None,
             &None,
             &None,
             &None,
@@ -3346,11 +3636,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_coexist-token",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
             &plugins,
             &providers,
+            &None,
             &None,
             &None,
             &None,
@@ -3454,11 +3746,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_test",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
             &HashMap::new(),
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -3500,11 +3794,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_test",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".nexus",
             &plugin_servers,
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -3553,11 +3849,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_test",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".nexus",
             &plugin_servers,
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -3595,11 +3893,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_test",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".nexus",
             &plugin_servers,
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -3641,11 +3941,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_test",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".nexus",
             &plugin_servers,
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,
@@ -3685,11 +3987,13 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_test",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".nexus",
             &plugin_servers,
             &HashMap::new(),
+            &None,
             &None,
             &None,
             &None,

@@ -283,6 +283,7 @@ pub async fn run(
                 project_name,
                 &mcp_api_url,
                 tok,
+                pid,
                 mcp_source,
                 tool_flavor.as_deref(),
                 &agentic_root,
@@ -1159,11 +1160,13 @@ fn capitalize(s: &str) -> String {
 ///
 /// Generates both `opencode.json` (OpenCode) and `.claude/mcp.json` (Claude Code).
 /// Skips writing each file if it already exists (user-managed).
+#[allow(clippy::too_many_arguments)]
 fn write_mcp_configs(
     target: &Path,
     _project_name: &str,
     api_url: &str,
     token: &str,
+    project_id: &str,
     mcp_source: McpSource,
     tool_flavor: Option<&str>,
     agentic_root: &str,
@@ -1205,6 +1208,7 @@ fn write_mcp_configs(
       "environment": {{
         "NEXUS_API_URL": "{api_url}",
         "NEXUS_PRIVATE_TOKEN": "{token}",
+        "NEXUS_PROJECT_ID": "{project_id}",
         "NEXUS_SEC_OPENAI_API_KEY": "{openai_key}"
       }}
     }}
@@ -1214,6 +1218,7 @@ fn write_mcp_configs(
                 command_block = command_block,
                 api_url = api_url,
                 token = token,
+                project_id = project_id,
                 openai_key = openai_key_value,
             );
 
@@ -2169,6 +2174,7 @@ mod tests {
             "test-proj",
             "https://nexus.gatewarden.eu",
             "nxs_pat_test-token-1234567890",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",
@@ -2195,6 +2201,9 @@ mod tests {
         // NEXUS_PRIVATE_TOKEN must be a literal value, never an {env:} reference
         assert!(!oc.contains("{env:NEXUS_PRIVATE_TOKEN}"));
         assert!(!oc.contains("{env:NEXUS_API_URL}"));
+        // Dispatch ef9b0b0e: NEXUS_PROJECT_ID must be present so agents can
+        // bind to the correct project without guessing.
+        assert!(oc.contains("\"NEXUS_PROJECT_ID\": \"test-project-id\""));
         // NEXUS_SEC_OPENAI_API_KEY is intentionally an {env:} reference —
         // it is not a Nexus credential and should be resolved from the shell at runtime
         assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
@@ -2224,6 +2233,7 @@ mod tests {
             "test-proj",
             "https://nexus.gatewarden.eu",
             "nxs_pat_local-test-token",
+            "test-project-id",
             McpSource::Local,
             None,
             ".claude",
@@ -2259,6 +2269,7 @@ mod tests {
             "test-proj",
             "https://nexus.gatewarden.eu",
             "nxs_pat_skip-test-token",
+            "test-project-id",
             McpSource::Npm,
             None,
             ".claude",

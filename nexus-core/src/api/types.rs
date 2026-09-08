@@ -336,6 +336,13 @@ pub struct AgentFileExportResponse {
     /// Key is route alias, value is route metadata.
     #[serde(default)]
     pub model_routes: Option<serde_json::Value>,
+    /// Paths to merge into `opencode.json`'s top-level `"instructions"` array.
+    /// Typically `["<agentic_root>/AGENTS.md"]`, so OpenCode loads the
+    /// project's agent policy deterministically at session start instead of
+    /// relying on its own upward AGENTS.md auto-discovery, which has no
+    /// awareness of the `agentic_root` convention (default `.nexus/`).
+    #[serde(default)]
+    pub opencode_instructions: Option<Vec<String>>,
 }
 
 fn default_agentic_root() -> String {

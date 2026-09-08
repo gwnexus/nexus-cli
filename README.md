@@ -174,6 +174,40 @@ nexus stash list    # show all available stashes
 Stashes are stored locally in `.nexus/stash/<timestamp>/` with metadata.
 Multiple stashes can coexist; `pop` always restores the most recent one.
 
+### Generated `opencode.json`
+
+`nexus pull` / `nexus init` write the Nexus MCP server config into
+`opencode.json`'s `mcp.nexus` block:
+
+```json
+{
+  "mcp": {
+    "nexus": {
+      "type": "local",
+      "command": ["npx", "--yes", "@gwdn/nexus-mcp@latest"],
+      "environment": {
+        "NEXUS_API_URL": "https://nexus.gatewarden.eu",
+        "NEXUS_PRIVATE_TOKEN": "nxs_pat_...",
+        "NEXUS_PROJECT_ID": "07303f0c-3713-4cb0-b03e-35f4db0c1acb"
+      }
+    }
+  },
+  "instructions": [".nexus/AGENTS.md"]
+}
+```
+
+- **`NEXUS_PROJECT_ID`** gives the MCP server (and agents reading its
+  environment) an unambiguous project binding, so a session can't silently
+  land in the wrong project by guessing from a project-listing tool and
+  name/slug matching.
+- **`instructions`** is merged additively from the platform (typically
+  `<agentic_root>/AGENTS.md`), so OpenCode loads the project's agent policy
+  deterministically at session start — no dependency on OpenCode's own
+  upward `AGENTS.md` auto-discovery, which has no awareness of the
+  `agentic_root` convention (default `.nexus/`). Pre-existing custom entries
+  in `instructions[]` are preserved; re-running `pull` does not duplicate
+  entries already present.
+
 ### Status
 
 `nexus status` shows auth, workspace, and project state, with real

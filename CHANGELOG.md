@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-09-08
+
+### Fixed
+- **`opencode.json` MCP env missing `NEXUS_PROJECT_ID` -- agent could silently bind to the wrong project** - the generated `mcp.nexus.environment` block only ever contained `NEXUS_API_URL` and `NEXUS_PRIVATE_TOKEN`; with no project_id signal in the environment, an agent that lost track of which project it was working in had no reliable way to recover it short of guessing via a project-listing tool and name/slug matching. `nexus pull` and `nexus init` now also write `NEXUS_PROJECT_ID` (sourced from the `af_export` response / the resolved project id, which the CLI already has in hand) into that same environment block, so the correct project binding reaches the MCP server process deterministically.
+
+### Added
+- **Merge `opencode_instructions` into `opencode.json`'s `instructions[]` array** - `POST /api/mcp/agent-files` (`af_export`) can now return an `opencode_instructions` field (e.g. `["<agentic_root>/AGENTS.md"]`). `nexus pull` merges these paths into the top-level `instructions` array the same way `opencode_agents` is already merged into `agent`, so OpenCode loads the project's agent policy deterministically at session start instead of relying on its own upward `AGENTS.md` auto-discovery, which has no awareness of the `agentic_root` convention (default `.nexus/`) and was observed to non-deterministically miss the file across otherwise-identical runs. The merge is additive: pre-existing user entries in `instructions[]` are preserved, and re-running `pull` does not duplicate entries already present.
+
 ## [0.16.0] - 2026-09-06
 
 ### Added
