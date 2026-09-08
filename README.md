@@ -208,6 +208,33 @@ Multiple stashes can coexist; `pop` always restores the most recent one.
   in `instructions[]` are preserved; re-running `pull` does not duplicate
   entries already present.
 
+#### Model-routing warnings
+
+If the backend detects a divergence between the project's model routing and
+what the generated `opencode.json` can actually serve (e.g. an agent's model
+uses a provider Nexus can't verify, or a route-alias migration hasn't landed
+on this environment), `nexus pull` renders it before writing `opencode.json`:
+
+```
+   ! Nexus detected 3 model-routing warning(s) for this project:
+
+   • unverifiable_provider
+     Agent nexus-plan uses provider "github-copilot", which Nexus does not
+     declare in this opencode.json and cannot verify.
+     hint: Ensure "github-copilot" is configured in your own OpenCode
+     config, or retarget this agent to a Nexus-managed provider.
+
+   ? Continue anyway? [y/N]
+```
+
+- Interactive sessions get a single-keypress `[y/N]` prompt (default `N`).
+  Declining skips only the `opencode.json` / `<agentic_root>/mcp.json`
+  write; the rest of the pull (skills, directives, actors, etc.) still
+  completes.
+- `--yes` (or `--force`) bypasses the prompt and proceeds.
+- Non-interactive sessions (no TTY, e.g. CI) never block on this: warnings
+  are printed and the pull proceeds automatically.
+
 ### Status
 
 `nexus status` shows auth, workspace, and project state, with real

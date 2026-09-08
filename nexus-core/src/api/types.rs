@@ -343,6 +343,37 @@ pub struct AgentFileExportResponse {
     /// awareness of the `agentic_root` convention (default `.nexus/`).
     #[serde(default)]
     pub opencode_instructions: Option<Vec<String>>,
+    /// Warnings about model routing / provider configuration diverging from
+    /// what the generated `opencode.json` can actually serve (e.g. an agent's
+    /// model uses a provider Nexus cannot verify, or a route-alias migration
+    /// hasn't been applied on this backend). Absent when there is nothing to
+    /// report. The CLI renders these verbatim and gates the `opencode.json`
+    /// write on operator confirmation rather than re-deriving the analysis
+    /// client-side (only the backend knows execution_mode/agent_mode/gateway
+    /// availability).
+    #[serde(default)]
+    pub export_warnings: Option<Vec<ExportWarning>>,
+}
+
+/// A single warning surfaced by `af_export` about model routing / provider
+/// divergence. `code` is open-ended (the backend may add new codes); unknown
+/// codes should render generically rather than error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportWarning {
+    /// Warning code, e.g. `"unverifiable_provider"`, `"route_alias_missing"`,
+    /// `"gateway_unavailable"`, `"execution_mode_divergence"`.
+    pub code: String,
+    /// Human-readable, single-line, already user-facing message.
+    pub message: String,
+    /// Agent/slot the warning applies to, if any.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// The model id that triggered the warning, if any.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Suggested operator action, phrased as something to do.
+    #[serde(default)]
+    pub hint: Option<String>,
 }
 
 fn default_agentic_root() -> String {

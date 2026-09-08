@@ -12,6 +12,7 @@
 //! unless `--force` or `-y` is passed.
 
 use console::style;
+use nexus_core::api::ExportWarning;
 use nexus_core::api::McpServerConfig;
 use nexus_core::api::NexusClient;
 use nexus_core::api::ProviderConfig;
@@ -800,6 +801,16 @@ pub async fn run(
         .ok()
         .and_then(|r| r.opencode_instructions.clone());
 
+    // Model routing / provider divergence warnings from the backend (e.g. an
+    // agent's model uses a provider Nexus can't verify, or a route-alias
+    // migration hasn't been applied). Rendered verbatim and gated on operator
+    // confirmation before opencode.json is written -- see dispatch e0ee68d5.
+    let export_warnings = af_export_result
+        .as_ref()
+        .ok()
+        .and_then(|r| r.export_warnings.clone())
+        .unwrap_or_default();
+
     // Write model-routes.json for traceability (ADR-0057)
     if let Some(ref routes) = model_routes_export {
         let generated_dir = workspace.join(&agentic_root).join("generated");
@@ -823,23 +834,43 @@ pub async fn run(
         }
     }
 
-    // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
-    write_mcp_configs(
-        &workspace,
-        api_url,
-        &effective_token,
-        &project_id,
-        mcp_source,
-        tool_flavor.as_deref(),
-        &agentic_root,
-        &plugin_mcp_servers,
-        &providers,
-        &opencode_agents,
-        &opencode_default_model,
-        &opencode_default_agent,
-        &opencode_instructions,
-        force,
-    )?;
+    // Gate the opencode.json write on the operator confirming any
+    // model-routing warnings. Only relevant when opencode.json is actually
+    // going to be written (skipped entirely for the claude-cli-only flavor,
+    // since mcp.json carries no model/agent routing config).
+    let opencode_will_be_written = !matches!(tool_flavor.as_deref(), Some("claude-cli"));
+    let proceed_with_opencode = if opencode_will_be_written {
+        confirm_export_warnings(&export_warnings, force)?
+    } else {
+        true
+    };
+
+    if proceed_with_opencode {
+        // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
+        write_mcp_configs(
+            &workspace,
+            api_url,
+            &effective_token,
+            &project_id,
+            mcp_source,
+            tool_flavor.as_deref(),
+            &agentic_root,
+            &plugin_mcp_servers,
+            &providers,
+            &opencode_agents,
+            &opencode_default_model,
+            &opencode_default_agent,
+            &opencode_instructions,
+            force,
+        )?;
+    } else {
+        println!(
+            "   {} Skipped opencode.json / {}/mcp.json (declined after model-routing warning(s) above).",
+            style("--").bold().yellow(),
+            agentic_root
+        );
+        println!("            Re-run 'nexus pull' to retry once the warning(s) are addressed.");
+    }
 
     // Write .nexus/env from af_export.plugin_env (platform-managed, full overwrite)
     let plugin_env = af_export_result
@@ -1699,6 +1730,79 @@ fn confirm_overwrite() -> anyhow::Result<bool> {
     let answer = input.trim().to_lowercase();
 
     Ok(answer == "y" || answer == "yes")
+}
+
+/// Render `af_export`'s `export_warnings` grouped by code and gate the
+/// `opencode.json` write on operator confirmation.
+///
+/// Returns `true` if it's safe to proceed writing `opencode.json`, `false`
+/// if the operator declined. `bypass` (`--yes` / `--force`) skips the prompt
+/// outright. Never blocks in a non-interactive context (CI, piped input,
+/// no TTY): warnings are printed and the pull proceeds -- a loud log line
+/// beats a stuck pipeline.
+///
+/// Warnings are rendered verbatim from the backend, not re-derived
+/// client-side: only the backend knows execution_mode, agent_mode, gateway
+/// availability, and which provider blocks it actually emitted.
+fn confirm_export_warnings(warnings: &[ExportWarning], bypass: bool) -> anyhow::Result<bool> {
+    if warnings.is_empty() {
+        return Ok(true);
+    }
+
+    println!();
+    println!(
+        "   {} Nexus detected {} model-routing warning(s) for this project:",
+        style("!").bold().yellow(),
+        warnings.len()
+    );
+
+    // Group by code, preserving first-seen order.
+    let mut order: Vec<&str> = Vec::new();
+    let mut grouped: HashMap<&str, Vec<&ExportWarning>> = HashMap::new();
+    for w in warnings {
+        grouped
+            .entry(w.code.as_str())
+            .or_insert_with(|| {
+                order.push(w.code.as_str());
+                Vec::new()
+            })
+            .push(w);
+    }
+
+    for code in &order {
+        println!();
+        println!("   {} {}", style("•").bold().yellow(), style(code).bold());
+        for w in &grouped[code] {
+            println!("     {}", w.message);
+            if let Some(ref hint) = w.hint {
+                println!("     {} {}", style("hint:").dim(), style(hint).dim());
+            }
+        }
+    }
+    println!();
+
+    if bypass {
+        println!(
+            "   {} Continuing (--yes/--force): opencode.json will be written despite the warning(s) above.",
+            style("--yes").dim()
+        );
+        return Ok(true);
+    }
+
+    use std::io::IsTerminal;
+    if !io::stdin().is_terminal() {
+        println!(
+            "   {} Non-interactive session: proceeding despite the warning(s) above. Pass --yes to silence this notice.",
+            style("!").dim()
+        );
+        return Ok(true);
+    }
+
+    print!("   {} Continue anyway? [y/N] ", style("?").bold().cyan());
+    io::stdout().flush()?;
+    let ch = console::Term::stdout().read_char().unwrap_or('n');
+    println!("{}", ch);
+    Ok(ch == 'y' || ch == 'Y')
 }
 
 // ---------------------------------------------------------------------------
@@ -2953,6 +3057,67 @@ mod tests {
         assert!(!dir.join(".claude/mcp.json").exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // export_warnings gate (dispatch e0ee68d5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_confirm_export_warnings_empty_proceeds_without_prompt() {
+        // No warnings -> proceed silently, regardless of bypass.
+        assert!(confirm_export_warnings(&[], false).unwrap());
+        assert!(confirm_export_warnings(&[], true).unwrap());
+    }
+
+    #[test]
+    fn test_confirm_export_warnings_bypass_proceeds_without_prompt() {
+        let warnings = vec![ExportWarning {
+            code: "unverifiable_provider".to_string(),
+            message: "Agent nexus-plan uses provider \"github-copilot\".".to_string(),
+            agent: Some("nexus-plan".to_string()),
+            model: Some("github-copilot/claude-sonnet-4.6".to_string()),
+            hint: Some("Ensure github-copilot is configured.".to_string()),
+        }];
+        // --yes / --force bypass: must not attempt to read from stdin.
+        assert!(confirm_export_warnings(&warnings, true).unwrap());
+    }
+
+    #[test]
+    fn test_confirm_export_warnings_non_interactive_proceeds() {
+        // The test harness's stdin is not a TTY, so the non-bypass path must
+        // fall through to the "proceed, no hang" branch rather than blocking
+        // on a read that would never return in CI.
+        let warnings = vec![
+            ExportWarning {
+                code: "unverifiable_provider".to_string(),
+                message: "Agent nexus-plan uses provider \"github-copilot\".".to_string(),
+                agent: Some("nexus-plan".to_string()),
+                model: Some("github-copilot/claude-sonnet-4.6".to_string()),
+                hint: None,
+            },
+            ExportWarning {
+                code: "route_alias_missing".to_string(),
+                message: "Route alias \"balanced-fast\" is not seeded on this backend.".to_string(),
+                agent: None,
+                model: None,
+                hint: Some("Apply migration 0218.".to_string()),
+            },
+        ];
+        assert!(confirm_export_warnings(&warnings, false).unwrap());
+    }
+
+    #[test]
+    fn test_export_warning_unknown_code_deserializes() {
+        // `code` is open-ended; unknown codes must still deserialize (render
+        // generically) rather than error, per the dispatch's stability contract.
+        let json = r#"{"code":"some_future_code","message":"hello"}"#;
+        let warning: ExportWarning = serde_json::from_str(json).unwrap();
+        assert_eq!(warning.code, "some_future_code");
+        assert_eq!(warning.message, "hello");
+        assert!(warning.agent.is_none());
+        assert!(warning.model.is_none());
+        assert!(warning.hint.is_none());
     }
 
     #[test]

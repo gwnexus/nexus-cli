@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2] - 2026-09-08
+
+### Added
+- **Pull-time gate on `af_export` model-routing warnings** - `af_export` can now return an optional `export_warnings` array (e.g. an agent's model uses a provider Nexus can't verify, or a route-alias migration hasn't been applied on this backend). `nexus pull` renders these warnings verbatim, grouped by code with their hints, before writing `opencode.json` (and `<agentic_root>/mcp.json`), so a broken model/provider configuration is caught at pull time instead of surfacing mid-session as an opaque OpenCode error. Warnings are rendered as-is from the backend; the CLI does not re-derive the analysis client-side, since only the backend knows execution_mode, agent_mode, gateway availability, and the provider blocks it actually emitted.
+  - Interactive sessions get a single-keypress `Continue anyway? [y/N]` prompt (default `N` -- declining skips the `opencode.json` / `mcp.json` write only; the rest of the pull, e.g. skills and directives, still completes).
+  - `--yes` (or `--force`) bypasses the prompt and proceeds.
+  - Non-interactive sessions (no TTY on stdin, e.g. CI) never block: warnings are printed and the pull proceeds automatically.
+  - Unknown/future warning codes render generically rather than erroring, so this stays forward-compatible with new codes the backend may add.
+
 ## [0.16.1] - 2026-09-08
 
 ### Fixed
