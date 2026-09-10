@@ -664,7 +664,28 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    result
+    if let Err(e) = result {
+        // Print a clean, user-facing error (Display only, full cause chain,
+        // no backtrace) and exit non-zero via std::process::exit.
+        //
+        // We deliberately do NOT return the Err from main(): Rust's default
+        // Termination handler for a Result-returning main Debug-formats the
+        // error, and anyhow::Error's Debug impl includes a raw stack
+        // backtrace whenever RUST_BACKTRACE is set in the environment
+        // (common in dev shells / devbox). That backtrace is not actionable
+        // for CLI users and reads like a crash even for expected errors
+        // (e.g. an invalid auth token) -- see `nexus status`, which has
+        // always printed such errors cleanly via Display for this reason.
+        use console::style;
+        eprintln!();
+        eprintln!("{} {}", style("Error:").bold().red(), e);
+        for cause in e.chain().skip(1) {
+            eprintln!("  {} {}", style("Caused by:").dim(), cause);
+        }
+        std::process::exit(1);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

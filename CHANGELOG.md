@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.3] - 2026-09-10
+
+### Fixed
+- **Raw Rust stack backtrace printed alongside auth/API errors** - commands like `nexus pull` printed a `Stack backtrace:` block (with unhelpful, stripped-symbol frames such as `__mh_execute_header`) after errors like an invalid or missing API token, whenever `RUST_BACKTRACE` was set in the shell (common in dev shells / devbox). Root cause: `main()` returned the error up through Rust's default `Termination` handling, which Debug-formats `anyhow::Error` and includes any captured backtrace. `main()` now handles the dispatch error explicitly and prints only the clean, human-readable message (plus any cause chain) via `Display`, then exits with status 1 -- matching the clean error style `nexus status` already used. No behavior change for successful commands.
+
 ## [0.16.2] - 2026-09-08
 
 ### Added
