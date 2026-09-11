@@ -188,11 +188,28 @@ pub async fn run(
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
         // Race: collect stats vs. user pressing Ctrl+C to skip.
+        //
+        // git_head_sha/git_tags are synchronous (they call
+        // std::process::Command::output(), which blocks the current OS
+        // thread until the subprocess exits). Calling them directly inside
+        // this async block would run them to completion before the first
+        // real .await point, which prevents tokio::select! from ever
+        // noticing ctrl_c() completed until the git call itself returns --
+        // silently defeating the "Press Ctrl+C to skip" promise above for
+        // as long as that git call takes (including if a pager or a slow
+        // repo makes it take much longer than expected; see dispatch
+        // 479a4ab5). Running them via spawn_blocking moves the blocking
+        // work onto tokio's dedicated blocking thread pool, so ctrl_c() can
+        // actually win the race at any time.
+        let workspace_for_git = workspace.clone();
         let summary_result = tokio::select! {
             _ = tokio::signal::ctrl_c() => None,
             result = async {
-                let head_after = git_head_sha(&workspace);
-                let tags_after = git_tags(&workspace);
+                let (head_after, tags_after) = tokio::task::spawn_blocking(move || {
+                    (git_head_sha(&workspace_for_git), git_tags(&workspace_for_git))
+                })
+                .await
+                .unwrap_or((None, Vec::new()));
                 let (token_stats, activity_stats) = if !no_db {
                     fetch_session_stats(api_url, &workspace).await
                 } else {
@@ -793,8 +810,25 @@ fn print_session_summary(
 // Git helpers
 // ---------------------------------------------------------------------------
 
+/// Build a `git` command with `--no-pager` as the global flag.
+///
+/// Without this, a subprocess like `git diff --shortstat` can invoke a
+/// pager (e.g. `less`) whenever `core.pager`/`GIT_PAGER` forces one. The
+/// pager reads keypresses from the controlling terminal (`/dev/tty`), not
+/// from this process's stdin, so even though `Command::output()` does not
+/// inherit stdin, the pager still blocks waiting for a keypress -- which
+/// looked like `nexus run`'s post-session summary hanging indefinitely
+/// (dispatch 479a4ab5). `--no-pager` is a git global flag that overrides
+/// both `GIT_PAGER` and `core.pager` unconditionally, unlike setting
+/// `GIT_PAGER=cat` alone, which a `core.pager` override could still bypass.
+fn git_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("--no-pager");
+    cmd
+}
+
 fn git_head_sha(workspace: &Path) -> Option<String> {
-    std::process::Command::new("git")
+    git_command()
         .args(["rev-parse", "HEAD"])
         .current_dir(workspace)
         .output()
@@ -804,7 +838,7 @@ fn git_head_sha(workspace: &Path) -> Option<String> {
 }
 
 fn git_tags(workspace: &Path) -> Vec<String> {
-    std::process::Command::new("git")
+    git_command()
         .args(["tag", "--sort=creatordate"])
         .current_dir(workspace)
         .output()
@@ -821,7 +855,7 @@ fn git_tags(workspace: &Path) -> Vec<String> {
 }
 
 fn git_count_commits(workspace: &Path, since_sha: &str) -> Option<u64> {
-    std::process::Command::new("git")
+    git_command()
         .args(["rev-list", "--count", &format!("{since_sha}..HEAD")])
         .current_dir(workspace)
         .output()
@@ -836,7 +870,7 @@ fn git_count_commits(workspace: &Path, since_sha: &str) -> Option<u64> {
 }
 
 fn git_diff_stat(workspace: &Path, since_sha: &str) -> Option<String> {
-    std::process::Command::new("git")
+    git_command()
         .args(["diff", "--shortstat", since_sha, "HEAD"])
         .current_dir(workspace)
         .output()
@@ -1217,6 +1251,162 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Set up a temp git repo with one commit, returning (dir, head_sha).
+    fn tmp_git_repo(suffix: &str) -> (PathBuf, String) {
+        let dir = tmp_dir(suffix);
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap()
+        };
+        run(&["init", "--quiet", "-b", "main"]);
+        // Disable GPG signing for this repo regardless of the operator's
+        // global git config: commit.gpgsign=true (common on dev machines)
+        // makes `git commit` depend on gpg-agent, which can intermittently
+        // stall/fail under concurrent test execution and has no bearing on
+        // what these tests actually verify.
+        run(&["config", "commit.gpgsign", "false"]);
+        fs::write(dir.join("file.txt"), "hello\n").unwrap();
+        run(&["add", "file.txt"]);
+        run(&["commit", "-m", "initial"]);
+        let sha = String::from_utf8_lossy(&run(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+        (dir, sha)
+    }
+
+    // -------------------------------------------------------------------
+    // Git pager hang regression (dispatch 479a4ab5)
+    //
+    // A single git repo is configured with `pager.<cmd>=true` for diff,
+    // log, and tag (force paging unconditionally, regardless of isatty)
+    // and `core.pager` set to a command that blocks for a few seconds if
+    // actually invoked. Without `--no-pager`, these helpers would hang for
+    // that duration; with it, they must return promptly regardless of the
+    // pager config. All three git_* helpers share the same git_command()
+    // builder, so one repo configured for all three commands is exercised
+    // in a single test rather than three near-identical ones -- equivalent
+    // coverage with a third of the subprocess load on the test suite.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_git_helpers_ignore_forced_pager() {
+        let (dir, head) = tmp_git_repo("forced-pager");
+        for (key, value) in [
+            ("pager.diff", "true"),
+            ("pager.log", "true"),
+            ("pager.tag", "true"),
+            ("core.pager", "sleep 5"),
+        ] {
+            std::process::Command::new("git")
+                .args(["config", key, value])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        }
+
+        fs::write(dir.join("file.txt"), "hello\nworld\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "commit",
+                "-m",
+                "second",
+                "--author",
+                "Test <test@example.com>",
+            ])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let stat = git_diff_stat(&dir, &head);
+        let count = git_count_commits(&dir, &head);
+        let tags = git_tags(&dir);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_secs() < 3,
+            "git_diff_stat/git_count_commits/git_tags took {:?} combined, \
+             forced pager (sleep 5) was likely invoked",
+            elapsed
+        );
+        assert!(stat.is_some());
+        assert_eq!(count, Some(1));
+        assert!(tags.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------------------
+    // spawn_blocking mechanism (dispatch 479a4ab5)
+    //
+    // The post-session summary races stats collection against
+    // tokio::signal::ctrl_c() via tokio::select!. Proves the core
+    // mechanism relied on: wrapping a slow *synchronous* call in
+    // tokio::task::spawn_blocking lets a concurrent fast branch win a
+    // tokio::select! race, whereas calling it directly inline would block
+    // the executor and starve the other branch until it returns.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_select_resolves_via_fast_branch_when_slow_work_is_spawn_blocking() {
+        let start = std::time::Instant::now();
+
+        let result = tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => "fast",
+            _ = tokio::task::spawn_blocking(|| {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }) => "slow",
+        };
+
+        let elapsed = start.elapsed();
+        assert_eq!(result, "fast");
+        assert!(
+            elapsed.as_millis() < 500,
+            "select took {:?}; spawn_blocking should not have starved the fast branch",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_select_starves_fast_branch_without_spawn_blocking() {
+        // Negative control: the same race, but with the slow work called
+        // synchronously inline (as the code did before this fix). This
+        // documents *why* spawn_blocking is required -- without it, the
+        // executor thread is blocked executing the sync call and cannot
+        // poll the other branch until the sync call returns, even though
+        // that branch (a 20ms sleep) "completed" long before.
+        let start = std::time::Instant::now();
+
+        let result: &str = tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => "fast",
+            _ = async {
+                // Synchronous, blocking call directly inline -- the bug
+                // pattern this fix removes from the real summary-collection
+                // path.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            } => "slow",
+        };
+
+        let elapsed = start.elapsed();
+        // The "slow" branch still wins because the inline blocking call
+        // prevents the executor from ever observing that "fast" already
+        // completed until the blocking call itself returns.
+        assert_eq!(result, "slow");
+        assert!(elapsed.as_millis() >= 300);
     }
 
     #[test]

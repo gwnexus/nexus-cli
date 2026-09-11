@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.4] - 2026-09-11
+
+### Fixed
+- **`nexus run` post-session summary could appear to hang, unblocked only by a keypress** (dispatch 479a4ab5) - two independent, compounding issues in the post-session stats collection:
+  - `git_head_sha`/`git_tags` (used to detect commit/tag activity during the session) are synchronous calls (`std::process::Command::output()` blocks the current OS thread until the subprocess exits). They were called directly inside the `async` block raced against `tokio::signal::ctrl_c()` via `tokio::select!`. Since a synchronous call runs to completion before the block's first real `.await` point, it silently defeated the "Press Ctrl+C to skip" promise shown to the operator for as long as the git call took -- Ctrl+C could not be observed until the blocking call returned, no matter how long that was. Both calls are now dispatched via `tokio::task::spawn_blocking`, so the race is genuine and Ctrl+C actually works regardless of how long the underlying git call takes.
+  - All `git` subprocess invocations used for post-session stats (`git_head_sha`, `git_tags`, `git_count_commits`, `git_diff_stat`) and `nexus shadow`'s file-tracked-in-history check now pass `--no-pager`, so a `core.pager`/`GIT_PAGER` override that forces pagination can never make one of these calls wait on a keypress read from the controlling terminal.
+
+### Changed
+- Test suite: git-invoking test helpers (in `run.rs` and `shadow.rs`) now explicitly set `commit.gpgsign=false` on their temp repos. This removes a latent, pre-existing source of intermittent test flakiness on machines with `commit.gpgsign=true` set globally (common on dev machines), where concurrent test-suite `git commit` calls could contend for `gpg-agent` under parallel execution. No behavior change outside the test suite.
+
 ## [0.16.3] - 2026-09-10
 
 ### Fixed

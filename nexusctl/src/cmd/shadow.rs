@@ -494,7 +494,11 @@ fn is_file_tracked_in_history(path: &str) -> bool {
 /// Inner implementation — `workdir` overrides CWD for testability.
 fn is_file_tracked_in_history_in(path: &str, workdir: Option<&Path>) -> bool {
     let mut cmd = Command::new("git");
-    cmd.args(["log", "--oneline", "-1", "--", path]);
+    // --no-pager: `git log` can invoke a pager when core.pager/GIT_PAGER
+    // forces one, which blocks on a keypress read from the controlling
+    // terminal rather than erroring out (see dispatch 479a4ab5 / the
+    // identical fix in run.rs's git helpers).
+    cmd.args(["--no-pager", "log", "--oneline", "-1", "--", path]);
     if let Some(dir) = workdir {
         cmd.current_dir(dir);
     }
@@ -604,6 +608,16 @@ mod tests {
 
         Command::new("git")
             .args(["init", "-b", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        // Disable GPG signing for this repo regardless of the operator's
+        // global git config: commit.gpgsign=true (common on dev machines)
+        // makes `git commit` depend on gpg-agent, which can intermittently
+        // stall/fail under concurrent test execution and has no bearing on
+        // what these tests actually verify.
+        Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
             .current_dir(path)
             .output()
             .unwrap();
