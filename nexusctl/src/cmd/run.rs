@@ -1319,7 +1319,7 @@ mod tests {
             .current_dir(&dir)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        let commit_output = std::process::Command::new("git")
             .args([
                 "commit",
                 "-m",
@@ -1327,9 +1327,24 @@ mod tests {
                 "--author",
                 "Test <test@example.com>",
             ])
+            // Committer identity is required by git regardless of --author,
+            // and CI runners have no global user.name/user.email configured
+            // (unlike most dev machines) -- without these, this commit
+            // fails silently under .unwrap() (which only checks the io
+            // Result, not the process exit status), leaving `dir` at the
+            // initial commit and making every assertion below meaningless.
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
             .current_dir(&dir)
             .output()
             .unwrap();
+        assert!(
+            commit_output.status.success(),
+            "second commit failed: {}",
+            String::from_utf8_lossy(&commit_output.stderr)
+        );
 
         let start = std::time::Instant::now();
         let stat = git_diff_stat(&dir, &head);
