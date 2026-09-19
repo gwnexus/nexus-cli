@@ -13,10 +13,11 @@ use crate::api::types::{
     ActorAvatarResponse, ActorExportResponse, ActorGetResponse, ActorImportPayload,
     ActorImportResponse, ActorListResponse, AgentFileExportResponse, ApiError, AuthStatus,
     AuthStatusResponse, DirectiveExportResponse, FileStatusResponse, IdentityResponse,
-    InferenceTokenInfo, InferenceTokenIssueRequest, InferenceTokenResponse, ProjectDetailResponse,
-    ProjectListResponse, SkillExportResponse, SkillListResponse, SyncCheckResponse, SyncFileHash,
-    SyncResponse, SyncStatusResponse, TaskListResponse, WorkspaceExportResponse,
-    WorkspaceForkExportResponse, WorkspaceForksResponse, WorkspacePushResponse,
+    InferenceTokenInfo, InferenceTokenIssueRequest, InferenceTokenResponse, McpPreflightResponse,
+    ProjectDetailResponse, ProjectListResponse, SkillExportResponse, SkillListResponse,
+    SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse, TaskListResponse,
+    WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
+    WorkspacePushResponse,
 };
 use crate::Error;
 
@@ -192,6 +193,15 @@ impl NexusClient {
     /// Get a single project by ID to validate access.
     pub async fn get_project(&self, project_id: &str) -> Result<ProjectDetailResponse, Error> {
         let path = format!("/api/mcp/projects/{}", project_id);
+        self.get(&path).await
+    }
+
+    /// Live-verify MCP preflight state for a project: reachability, auth
+    /// validity, and which plugins (e.g. "headroom") are enabled server-side.
+    /// This is the same endpoint the `nexus-headroom-intercept` OpenCode
+    /// plugin calls at load time to gate transform-mode compression.
+    pub async fn mcp_preflight(&self, project_id: &str) -> Result<McpPreflightResponse, Error> {
+        let path = format!("/api/mcp/projects/{}/preflight", project_id);
         self.get(&path).await
     }
 

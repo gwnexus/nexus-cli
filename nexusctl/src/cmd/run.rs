@@ -122,12 +122,14 @@ pub async fn run(
     // ── 6. Pre-launch checks ─────────────────────────────────────────────────
     if !skip_checks {
         let should_continue = run_prelaunch_checks(
+            api_url,
             &workspace,
             effective_tool,
             &env_file_path,
             force,
             countdown_secs,
-        )?;
+        )
+        .await?;
         if !should_continue {
             return Ok(());
         }
@@ -310,7 +312,8 @@ fn print_env_table(
 // ---------------------------------------------------------------------------
 
 /// Run pre-launch checks and return `true` if the tool should be launched.
-fn run_prelaunch_checks(
+async fn run_prelaunch_checks(
+    api_url: &str,
     workspace: &Path,
     tool: &str,
     env_file: &Path,
@@ -335,9 +338,11 @@ fn run_prelaunch_checks(
 
     // Workspace
     let nexus_dir = workspace.join(".nexus");
+    let mut linked_project_id: Option<String> = None;
     let ws_check = if nexus_dir.exists() {
         match config::load_linked_project(Some(workspace)) {
             Ok(Some(p)) => {
+                linked_project_id = Some(p.id.clone());
                 CheckResult::Pass(format!("{} ({})", p.name, &p.id[..8.min(p.id.len())]))
             }
             Ok(None) => CheckResult::Warn("No project linked — run 'nexus link'".into()),
@@ -349,7 +354,8 @@ fn run_prelaunch_checks(
     checks.push(("Workspace", ws_check));
 
     // Auth
-    let auth_check = match resolve_token() {
+    let resolved_token = resolve_token();
+    let auth_check = match &resolved_token {
         Some(t) if t.len() > 8 => CheckResult::Pass(format!("{}...", &t[..8])),
         Some(_) => CheckResult::Pass("token present".into()),
         None => CheckResult::Fail("Not authenticated — run 'nexus login'".into()),
@@ -398,18 +404,53 @@ fn run_prelaunch_checks(
     };
     checks.push(("Tool", tool_check));
 
-    // Headroom mode
+    // Headroom — live-verified, not just env-var presence.
+    //
+    // Fix (Task a3bf595b, NEXUS-APP): this check previously only inspected
+    // whether HEADROOM_MODE=transform was set locally, which kept reporting
+    // PASS for weeks while the `nexus-headroom-intercept` OpenCode plugin was
+    // silently downgraded to observe mode by a stale/invalid token. We now
+    // call the same `/api/mcp/projects/{id}/preflight` endpoint the plugin
+    // itself uses, so a credential or reachability problem surfaces here
+    // *before* the tool launches, not just in a JSONL log file afterwards.
     let headroom_mode = env::var("HEADROOM_MODE")
         .ok()
         .or_else(|| parse_env_file(env_file).get("HEADROOM_MODE").cloned());
-    let headroom_check = match headroom_mode {
-        Some(ref m) if m == "transform" => CheckResult::Pass(format!("HEADROOM_MODE={}", m)),
-        Some(ref m) => CheckResult::Warn(format!(
+
+    let headroom_check = match (&headroom_mode, &linked_project_id, &resolved_token) {
+        (Some(m), _, _) if m != "transform" => CheckResult::Warn(format!(
             "HEADROOM_MODE={} (expected 'transform' for full compression)",
             m
         )),
-        None => {
+        (None, _, _) => {
             CheckResult::Warn("HEADROOM_MODE not set — headroom will use 'observe' mode".into())
+        }
+        (Some(_), None, _) => CheckResult::Warn(
+            "HEADROOM_MODE=transform, but no project linked to verify — run 'nexus link'".into(),
+        ),
+        (Some(_), _, None) => CheckResult::Warn(
+            "HEADROOM_MODE=transform, but not authenticated — run 'nexus login'".into(),
+        ),
+        (Some(m), Some(project_id), Some(token)) => {
+            match NexusClient::new(api_url, Some(token.clone())) {
+                Ok(client) => match client.mcp_preflight(project_id).await {
+                    Ok(preflight) if preflight.headroom_enabled => {
+                        CheckResult::Pass(format!("HEADROOM_MODE={} (preflight verified)", m))
+                    }
+                    Ok(_) => CheckResult::Fail(
+                        "HEADROOM_MODE=transform, but the 'headroom' plugin is not enabled \
+                         for this project on the Nexus platform"
+                            .into(),
+                    ),
+                    Err(e) => CheckResult::Fail(format!(
+                        "HEADROOM_MODE=transform, but live preflight failed: {} — the \
+                         nexus-headroom-intercept plugin will silently fall back to \
+                         'observe' mode (no compression). Run 'nexus status' / 'nexus login'.",
+                        e
+                    )),
+                },
+                Err(e) => CheckResult::Fail(format!("Could not build API client: {}", e)),
+            }
         }
     };
     checks.push(("Headroom", headroom_check));

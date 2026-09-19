@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.5] - 2026-09-19
+
+### Fixed
+- **`nexus run`'s "Headroom" pre-launch check was env-var-presence-only and could report PASS while the `nexus-headroom-intercept` OpenCode plugin was silently running in `observe` mode** (root-caused via NEXUS-APP Task `a3bf595b`: a stale/rotated global CLI token caused the plugin's own preflight call to fail, silently downgrading `transform` -> `observe` for weeks while this check kept showing `PASS  Headroom  HEADROOM_MODE=transform`). The check now live-verifies via the same `GET /api/mcp/projects/{id}/preflight` endpoint the plugin itself calls (new `NexusClient::mcp_preflight()` / `McpPreflightResponse`), using the already-resolved auth token and linked project id. It now distinguishes: no project linked, not authenticated, live preflight unreachable/unauthorized (`FAIL`, with a pointer to `nexus status` / `nexus login`), and headroom disabled server-side for the project (`FAIL`) from an actually-verified `transform` mode (`PASS ... (preflight verified)`).
+
 ## [0.16.4] - 2026-09-11
 
 ### Fixed

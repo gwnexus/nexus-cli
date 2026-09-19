@@ -422,6 +422,24 @@ pub struct ProjectDetailResponse {
     pub project: ProjectSummary,
 }
 
+/// Response from `GET /api/mcp/projects/{id}/preflight`.
+///
+/// This is the same endpoint the `nexus-headroom-intercept` OpenCode plugin
+/// calls at load time to gate transform-mode compression. Reusing it here lets
+/// `nexus run`'s pre-launch "Headroom" check live-verify reachability +
+/// project enablement instead of only checking whether HEADROOM_MODE=transform
+/// is set locally (see Task a3bf595b, NEXUS-APP: a stale/invalid token caused
+/// the plugin to silently downgrade to observe mode while this env-var-only
+/// check kept reporting PASS).
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpPreflightResponse {
+    pub project_id: String,
+    #[serde(default)]
+    pub plugins: Vec<String>,
+    #[serde(default)]
+    pub headroom_enabled: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Import (POST /api/mcp/import  action=import)
 // ---------------------------------------------------------------------------
