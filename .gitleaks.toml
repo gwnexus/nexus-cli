@@ -1,0 +1,18 @@
+# Gitleaks configuration for nexus-cli
+# Scans commits for leaked secrets before they reach the repository.
+
+title = "nexus-cli gitleaks config"
+
+[allowlist]
+  description = "Global allowlist"
+  # Synthetic tokens used in the test suite (auth_tests.rs, pull.rs tests, etc.)
+  # are not real credentials.
+  regexTarget = "match"
+  regexes = [
+    '''nxs_pat_test-token[A-Za-z0-9_-]*''',
+    '''nxs_pat_[a-z-]*-test-token''',
+    '''nxs_pat_pull-test-token''',
+    '''nxs_pat_abc1234567890abcdef''',
+    '''nxs_pat_abcdefghij''',
+    '''nxs_pat_testtoken123''',
+  ]
