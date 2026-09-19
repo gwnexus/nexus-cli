@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.6] - 2026-09-19
+
+### Added
+- **`nexus run` now auto-syncs project-scoped Nexus MCP credentials with the current global login** (Task a3bf595b, NEXUS-APP — "single place to maintain the token"). `opencode.json` and `.claude/mcp.json` deliberately bake a literal `NEXUS_API_URL`/`NEXUS_PRIVATE_TOKEN` (not an `{env:}` reference) so the MCP config keeps working even when the tool is launched without `nexus run` — that's an intentional, tested design, not a bug. The actual gap was that this baked copy silently drifted from the global login token whenever `nexus login` rotated it, with nothing short of a manual `nexus init`/`nexus pull` to fix it. `nexus run` already resolves the current, live-verified token on every invocation, so it now also rewrites the baked copy in place whenever it differs — only the two credential fields, no other formatting/keys touched, silent no-op when already in sync. In practice this means the user only ever manages one thing (`nexus login`), and every subsequent `nexus run` self-heals both `opencode.json` and `.claude/mcp.json`. Verified end-to-end against a deliberately-staled `opencode.json`: printed `refreshed Nexus credentials in: opencode.json`, rewrote the token, and the (also-new, see 0.16.5) live Headroom preflight check then passed. 4 new unit tests + full workspace suite (250/250) green.
+
 ## [0.16.5] - 2026-09-19
 
 ### Fixed
