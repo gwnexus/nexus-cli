@@ -63,6 +63,7 @@ pub async fn run(
         style(project_name).bold()
     );
     println!("   Target: {}", target.display());
+    println!("   API:    {}", style(api_url).dim());
 
     // Resolve project ID from CLI flag or linked project config
     let resolved_pid = config::resolve_project_id(project_id, Some(&target)).ok();
@@ -241,10 +242,10 @@ pub async fn run(
             match client.export_skills(pid).await {
                 Ok(export) => {
                     println!(
-                        "   {} Project: {} ({})",
+                        "   {} Project: {} {}",
                         style("+").bold().green(),
                         style(&export.project.name).bold(),
-                        export.project.slug
+                        style(format!("({})", pid)).dim()
                     );
                     println!(
                         "   {} {} skill(s) exported",

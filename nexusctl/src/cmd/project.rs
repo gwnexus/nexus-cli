@@ -247,11 +247,10 @@ pub async fn status(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
     let token = require_token()?;
     let client = NexusClient::new(api_url, Some(token))?;
 
-    println!(
-        "{} Project inference tokens for {}",
-        style(">>").bold().cyan(),
-        style(&project_id).dim()
-    );
+    println!("{} Project inference tokens", style(">>").bold().cyan());
+    let project_name =
+        crate::cmd::display::resolve_project_display_name(&client, &project_id, None).await;
+    crate::cmd::display::print_project_banner(api_url, &project_id, project_name.as_deref());
     println!();
 
     // Show which token is active locally.

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.8] - 2026-09-20
+
+### Added
+- **Project-scoped commands now show which API backend they are targeting and the project's human-readable name, not just its opaque UUID.** `nexus pull`, `nexus push`, `nexus sync status`, `nexus project status`, and `nexus init` now print a consistent `API: <url>` / `Project: <Name> (<uuid>)` banner up front. The name is resolved from the locally linked `.nexus/config.toml` when available (no extra network call), falling back to a live `GET /api/mcp/projects/{id}` lookup otherwise; the UUID always remains visible in parentheses for exact identification, and the raw UUID alone is still shown if the name cannot be resolved (e.g. offline). Addresses feedback that `nexus pull` (and siblings) only ever showed a bare project UUID with no indication of which API URL was in effect, making it hard to spot a workspace silently pointed at the wrong environment. New shared helper module `nexusctl::cmd::display` with 2 new unit tests; full workspace suite: 255/255 green.
+
 ## [0.16.7] - 2026-09-20
 
 ### Fixed

@@ -4,6 +4,7 @@ mod actors;
 mod auth;
 mod config_cmd;
 mod deinit;
+pub(crate) mod display;
 pub(crate) mod git;
 pub(crate) mod import;
 mod init;

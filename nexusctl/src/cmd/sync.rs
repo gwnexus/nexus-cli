@@ -55,7 +55,10 @@ pub async fn status(api_url: &str, cli_project_id: Option<&str>) -> anyhow::Resu
     let client = NexusClient::new(api_url, Some(token))?;
 
     println!("{} Checking sync status...", style(">>").bold().cyan());
-    println!("   Project: {}", style(&project_id).dim());
+    let project_name =
+        crate::cmd::display::resolve_project_display_name(&client, &project_id, Some(&workspace))
+            .await;
+    crate::cmd::display::print_project_banner(api_url, &project_id, project_name.as_deref());
     println!();
 
     // Load local manifest and compute current file hashes

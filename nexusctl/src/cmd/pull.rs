@@ -402,19 +402,22 @@ pub async fn run(
         }
     };
 
-    println!(
-        "{} Pulling from Nexus platform...",
-        style(">>").bold().cyan()
-    );
-    println!("   Project: {}", style(&project_id).dim());
-    println!();
-
     // Resolve authentication token
     let token = resolve_token().ok_or_else(|| {
         anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
     })?;
 
     let client = NexusClient::new(api_url, Some(token.clone()))?;
+
+    println!(
+        "{} Pulling from Nexus platform...",
+        style(">>").bold().cyan()
+    );
+    let project_name =
+        crate::cmd::display::resolve_project_display_name(&client, &project_id, Some(&workspace))
+            .await;
+    crate::cmd::display::print_project_banner(api_url, &project_id, project_name.as_deref());
+    println!();
 
     // Scope filter: if empty, pull everything. Otherwise only named scopes.
     let pull_all = scope.is_empty();
@@ -452,10 +455,10 @@ pub async fn run(
     let project_name = export.project.name.clone();
 
     println!(
-        "   {} Project: {} ({})",
+        "   {} Project: {} {}",
         style("+").bold().green(),
         style(&export.project.name).bold(),
-        export.project.slug
+        style(format!("({})", project_id)).dim()
     );
 
     if export.skills.is_empty() {

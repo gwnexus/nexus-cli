@@ -249,8 +249,10 @@ pub async fn run(
         "{} Detecting workspace changes...",
         style(">>").bold().cyan()
     );
-    println!("   Project: {}", style(&project_id).dim());
-    println!("   Backend: {}", style(api_url).dim());
+    let project_name =
+        crate::cmd::display::resolve_project_display_name(&client, &project_id, Some(&workspace))
+            .await;
+    crate::cmd::display::print_project_banner(api_url, &project_id, project_name.as_deref());
     println!();
 
     // Verify the project exists on the targeted backend before anything else.
