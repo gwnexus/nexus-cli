@@ -883,6 +883,10 @@ pub async fn run(
                 .ok()
                 .map(|r| r.agent_files.clone())
                 .unwrap_or_default();
+            let runtime_spec_for_claude = af_export_result
+                .as_ref()
+                .ok()
+                .and_then(|r| r.runtime_spec.as_ref());
             claude_render::render_claude_projection(
                 &workspace,
                 &project_name,
@@ -890,6 +894,7 @@ pub async fn run(
                 &export.skills,
                 &actors_for_claude,
                 &agent_files_for_claude,
+                runtime_spec_for_claude,
             )?;
         }
     } else {

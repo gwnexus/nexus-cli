@@ -148,11 +148,78 @@ pub fn write_claude_agents(
     Ok(written)
 }
 
+/// Write the provider/model routing catalog consumed by the Claude Code
+/// `routing-guard` plugin adapter (env var `NEXUS_ROUTING_GUARD_CATALOG_PATH`,
+/// NEXUS-APP dispatch 7a2d2adb, ADR-C05 Track B2). Sourced from
+/// `runtime_spec.model_routes` (ADR-C04/F1, af_export commit db5d053) —
+/// OpenCode's equivalent adapter reads the same data live from the SDK
+/// (`client.config.providers()`), so Claude Code needs it materialized to
+/// disk instead. Returns the workspace-relative path if written, `None` if
+/// no `runtime_spec` (or no `model_routes` within it) was available.
+pub fn write_routing_catalog(
+    target: &Path,
+    agentic_root: &str,
+    runtime_spec: Option<&serde_json::Value>,
+) -> anyhow::Result<Option<String>> {
+    let Some(routes) = runtime_spec.and_then(|rs| rs.get("model_routes")) else {
+        return Ok(None);
+    };
+    let generated_dir = target.join(agentic_root).join("generated");
+    fs::create_dir_all(&generated_dir)?;
+    let content = serde_json::to_string_pretty(&serde_json::json!({ "model_routes": routes }))?;
+    fs::write(generated_dir.join("routing-catalog.json"), content + "\n")?;
+    Ok(Some(format!(
+        "{}/generated/routing-catalog.json",
+        agentic_root
+    )))
+}
+
+/// Write the agent-routing table consumed by the Claude Code `routing-guard`
+/// plugin adapter (env var `NEXUS_ROUTING_GUARD_AGENTS_PATH`, NEXUS-APP
+/// dispatch 7a2d2adb). Sourced from `runtime_spec.actors` and
+/// `runtime_spec.primary_agents` — OpenCode's equivalent reads the live
+/// agent-routing table from `client.app.agents()`. Returns the
+/// workspace-relative path if written, `None` if `runtime_spec` had neither
+/// field.
+pub fn write_agent_routing(
+    target: &Path,
+    agentic_root: &str,
+    runtime_spec: Option<&serde_json::Value>,
+) -> anyhow::Result<Option<String>> {
+    let Some(rs) = runtime_spec else {
+        return Ok(None);
+    };
+    let actors = rs.get("actors");
+    let primary_agents = rs.get("primary_agents");
+    if actors.is_none() && primary_agents.is_none() {
+        return Ok(None);
+    }
+
+    let generated_dir = target.join(agentic_root).join("generated");
+    fs::create_dir_all(&generated_dir)?;
+    let content = serde_json::to_string_pretty(&serde_json::json!({
+        "actors": actors.cloned().unwrap_or(serde_json::Value::Array(vec![])),
+        "primary_agents": primary_agents.cloned().unwrap_or(serde_json::Value::Array(vec![])),
+    }))?;
+    fs::write(generated_dir.join("agent-routing.json"), content + "\n")?;
+    Ok(Some(format!(
+        "{}/generated/agent-routing.json",
+        agentic_root
+    )))
+}
+
 /// Write `.claude/settings.json` if it does not already exist (user-managed
 /// once created, never overwritten). Contains Claude runtime behavior only —
 /// no secrets, no OpenCode-specific statements (ADR-C04 "CLAUDE.md design").
-/// Returns `true` if the file was created.
-pub fn write_claude_settings(target: &Path) -> anyhow::Result<bool> {
+/// When `routing_catalog_path` / `agent_routing_path` are provided, an `env`
+/// block is included pointing the `routing-guard` plugin adapter at the
+/// generated catalog/routing files (NEXUS-APP dispatch 7a2d2adb). Returns
+/// `true` if the file was created.
+pub fn write_claude_settings(
+    target: &Path,
+    routing_catalog_path: Option<&str>,
+    agent_routing_path: Option<&str>,
+) -> anyhow::Result<bool> {
     let path = target.join(".claude").join("settings.json");
     if path.exists() {
         return Ok(false);
@@ -160,11 +227,37 @@ pub fn write_claude_settings(target: &Path) -> anyhow::Result<bool> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let content = r#"{
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "permissions": {}
-}
-"#;
+
+    let mut settings = serde_json::Map::new();
+    settings.insert(
+        "$schema".to_string(),
+        serde_json::Value::String(
+            "https://json.schemastore.org/claude-code-settings.json".to_string(),
+        ),
+    );
+    settings.insert(
+        "permissions".to_string(),
+        serde_json::Value::Object(serde_json::Map::new()),
+    );
+
+    let mut env = serde_json::Map::new();
+    if let Some(p) = routing_catalog_path {
+        env.insert(
+            "NEXUS_ROUTING_GUARD_CATALOG_PATH".to_string(),
+            serde_json::Value::String(p.to_string()),
+        );
+    }
+    if let Some(p) = agent_routing_path {
+        env.insert(
+            "NEXUS_ROUTING_GUARD_AGENTS_PATH".to_string(),
+            serde_json::Value::String(p.to_string()),
+        );
+    }
+    if !env.is_empty() {
+        settings.insert("env".to_string(), serde_json::Value::Object(env));
+    }
+
+    let content = serde_json::to_string_pretty(&serde_json::Value::Object(settings))? + "\n";
     fs::write(&path, content)?;
     Ok(true)
 }
@@ -240,6 +333,7 @@ pub fn render_claude_projection(
     skills: &[ExportedSkill],
     actors: &[ExportedActorFile],
     agent_files: &[ExportedAgentFile],
+    runtime_spec: Option<&serde_json::Value>,
 ) -> anyhow::Result<()> {
     let mut skills_written = 0;
     for skill in skills {
@@ -263,7 +357,22 @@ pub fn render_claude_projection(
         );
     }
 
-    if write_claude_settings(target)? {
+    // Routing-guard adapter inputs (NEXUS-APP dispatch 7a2d2adb, ADR-C05
+    // Track B2): only written when the backend supplies runtime_spec.
+    let routing_catalog_path = write_routing_catalog(target, agentic_root, runtime_spec)?;
+    if let Some(ref p) = routing_catalog_path {
+        println!("   {} {}", style("+").bold().green(), p);
+    }
+    let agent_routing_path = write_agent_routing(target, agentic_root, runtime_spec)?;
+    if let Some(ref p) = agent_routing_path {
+        println!("   {} {}", style("+").bold().green(), p);
+    }
+
+    if write_claude_settings(
+        target,
+        routing_catalog_path.as_deref(),
+        agent_routing_path.as_deref(),
+    )? {
         println!("   {} .claude/settings.json", style("+").bold().green());
     }
 
@@ -502,13 +611,13 @@ mod tests {
     fn test_write_claude_settings_creates_once() {
         let dir = temp_dir("settings");
 
-        let created = write_claude_settings(&dir).unwrap();
+        let created = write_claude_settings(&dir, None, None).unwrap();
         assert!(created);
         assert!(dir.join(".claude/settings.json").exists());
 
         // Simulate user edit, then re-run: must not overwrite.
         fs::write(dir.join(".claude/settings.json"), "user-edited").unwrap();
-        let created_again = write_claude_settings(&dir).unwrap();
+        let created_again = write_claude_settings(&dir, None, None).unwrap();
         assert!(!created_again);
         assert_eq!(
             fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
@@ -521,10 +630,105 @@ mod tests {
     #[test]
     fn test_write_claude_settings_contains_no_secrets() {
         let dir = temp_dir("settings-no-secrets");
-        write_claude_settings(&dir).unwrap();
+        write_claude_settings(&dir, None, None).unwrap();
         let content = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
         assert!(!content.contains("NEXUS_PRIVATE_TOKEN"));
         assert!(!content.contains("nxs_pat_"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_claude_settings_includes_routing_guard_env_when_provided() {
+        let dir = temp_dir("settings-routing-env");
+        write_claude_settings(
+            &dir,
+            Some(".nexus/generated/routing-catalog.json"),
+            Some(".nexus/generated/agent-routing.json"),
+        )
+        .unwrap();
+        let content = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        assert!(content.contains("NEXUS_ROUTING_GUARD_CATALOG_PATH"));
+        assert!(content.contains(".nexus/generated/routing-catalog.json"));
+        assert!(content.contains("NEXUS_ROUTING_GUARD_AGENTS_PATH"));
+        assert!(content.contains(".nexus/generated/agent-routing.json"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_claude_settings_omits_env_block_when_no_routing_paths() {
+        let dir = temp_dir("settings-no-env");
+        write_claude_settings(&dir, None, None).unwrap();
+        let content = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        assert!(!content.contains("\"env\""));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_routing_catalog_writes_model_routes() {
+        let dir = temp_dir("routing-catalog");
+        let runtime_spec = serde_json::json!({
+            "model_routes": [
+                {"route_alias": "fast", "provider": "openrouter", "model": "gpt-4o-mini", "lifecycle_status": "active"}
+            ]
+        });
+
+        let rel_path = write_routing_catalog(&dir, ".nexus", Some(&runtime_spec)).unwrap();
+        assert_eq!(
+            rel_path,
+            Some(".nexus/generated/routing-catalog.json".to_string())
+        );
+        let content =
+            fs::read_to_string(dir.join(".nexus/generated/routing-catalog.json")).unwrap();
+        assert!(content.contains("fast"));
+        assert!(content.contains("openrouter"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_routing_catalog_noop_without_runtime_spec() {
+        let dir = temp_dir("routing-catalog-none");
+        let rel_path = write_routing_catalog(&dir, ".nexus", None).unwrap();
+        assert_eq!(rel_path, None);
+        assert!(!dir.join(".nexus/generated/routing-catalog.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_routing_catalog_noop_when_model_routes_absent() {
+        let dir = temp_dir("routing-catalog-absent");
+        let runtime_spec = serde_json::json!({ "schema_version": 1 });
+        let rel_path = write_routing_catalog(&dir, ".nexus", Some(&runtime_spec)).unwrap();
+        assert_eq!(rel_path, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_agent_routing_writes_actors_and_primary_agents() {
+        let dir = temp_dir("agent-routing");
+        let runtime_spec = serde_json::json!({
+            "actors": [{"slug": "planner", "title": "Planner"}],
+            "primary_agents": [{"file_key": "af1", "name": "Lead"}]
+        });
+
+        let rel_path = write_agent_routing(&dir, ".nexus", Some(&runtime_spec)).unwrap();
+        assert_eq!(
+            rel_path,
+            Some(".nexus/generated/agent-routing.json".to_string())
+        );
+        let content = fs::read_to_string(dir.join(".nexus/generated/agent-routing.json")).unwrap();
+        assert!(content.contains("planner"));
+        assert!(content.contains("Lead"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_agent_routing_noop_when_neither_field_present() {
+        let dir = temp_dir("agent-routing-absent");
+        let runtime_spec = serde_json::json!({ "schema_version": 1 });
+        let rel_path = write_agent_routing(&dir, ".nexus", Some(&runtime_spec)).unwrap();
+        assert_eq!(rel_path, None);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -567,7 +771,8 @@ mod tests {
             route_alias: None,
         }];
 
-        render_claude_projection(&dir, "Test Project", ".nexus", &skills, &actors, &[]).unwrap();
+        render_claude_projection(&dir, "Test Project", ".nexus", &skills, &actors, &[], None)
+            .unwrap();
 
         assert!(dir.join("CLAUDE.md").exists());
         assert!(dir.join(".claude/settings.json").exists());
@@ -578,6 +783,35 @@ mod tests {
         assert!(dir.join(".claude/agents/planner.md").exists());
         // Hooks scaffolding is intentionally omitted in this pass.
         assert!(!dir.join(".claude/hooks").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_render_claude_projection_writes_routing_guard_inputs_when_runtime_spec_present() {
+        let dir = temp_dir("full-render-runtime-spec");
+        let skills = vec![sample_skill("nexus-init")];
+        let runtime_spec = serde_json::json!({
+            "model_routes": [{"route_alias": "fast", "provider": "openrouter", "model": "gpt-4o-mini"}],
+            "actors": [{"slug": "planner", "title": "Planner"}]
+        });
+
+        render_claude_projection(
+            &dir,
+            "Test Project",
+            ".nexus",
+            &skills,
+            &[],
+            &[],
+            Some(&runtime_spec),
+        )
+        .unwrap();
+
+        assert!(dir.join(".nexus/generated/routing-catalog.json").exists());
+        assert!(dir.join(".nexus/generated/agent-routing.json").exists());
+        let settings = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        assert!(settings.contains("NEXUS_ROUTING_GUARD_CATALOG_PATH"));
+        assert!(settings.contains("NEXUS_ROUTING_GUARD_AGENTS_PATH"));
 
         let _ = fs::remove_dir_all(&dir);
     }

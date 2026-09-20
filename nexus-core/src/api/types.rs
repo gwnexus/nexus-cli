@@ -353,6 +353,15 @@ pub struct AgentFileExportResponse {
     /// availability).
     #[serde(default)]
     pub export_warnings: Option<Vec<ExportWarning>>,
+    /// Runtime-neutral project spec (ADR-C04/F1, nexus-app commit db5d053).
+    /// Additive field: a `schema_version`-tagged JSON object projecting the
+    /// same underlying data (`model_routes`, `actors`, `primary_agents`,
+    /// `terminal_runtime`, etc.) into a shape shared by all terminal
+    /// renderers. Kept as an untyped `serde_json::Value` since the schema is
+    /// server-owned and may gain fields; consumers should read only the
+    /// sub-keys they need rather than assuming an exhaustive shape.
+    #[serde(default)]
+    pub runtime_spec: Option<serde_json::Value>,
 }
 
 /// A single warning surfaced by `af_export` about model routing / provider

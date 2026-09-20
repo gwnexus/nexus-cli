@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2] - 2026-09-20
+
+### Added
+- **`nexus init`/`nexus pull` now generate routing-guard adapter inputs for Claude Code projects** (NEXUS-APP dispatch 7a2d2adb, ADR-C05 Track B2). OpenCode's `routing-guard` plugin detects provider/model routing divergence live via the OpenCode SDK (`client.config.providers()`, `client.app.agents()`); Claude Code has no equivalent SDK surface, so its adapter instead reads two JSON files from disk. For `terminal_runtime=claude_code` / `claude-cli`-flavored projects where the backend supplies `runtime_spec` (ADR-C04/F1, additive af_export field, commit db5d053):
+  - `<agentic_root>/generated/routing-catalog.json` - sourced from `runtime_spec.model_routes`.
+  - `<agentic_root>/generated/agent-routing.json` - sourced from `runtime_spec.actors` and `runtime_spec.primary_agents`.
+  - `.claude/settings.json` (on first creation only) now includes an `env` block with `NEXUS_ROUTING_GUARD_CATALOG_PATH` / `NEXUS_ROUTING_GUARD_AGENTS_PATH` pointing at the two files above, so the plugin adapter finds them without extra user configuration.
+  - Fully additive and backward compatible: absent when the backend does not yet supply `runtime_spec` (older API versions), and does not change any existing `opencode.json` / `.mcp.json` / `.claude/skills/` / `.claude/agents/` behavior.
+  - New `nexus_core::api::AgentFileExportResponse::runtime_spec: Option<serde_json::Value>` field (additive, untyped since the schema is server-owned).
+  - 8 new unit tests covering catalog/routing-table generation, settings.json env injection (present and omitted), and the no-runtime_spec fallback. Full workspace suite: 279/279 green, no clippy warnings, cargo fmt clean.
+
 ## [0.17.1] - 2026-09-20
 
 ### Fixed
