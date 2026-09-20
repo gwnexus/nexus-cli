@@ -123,7 +123,7 @@ pub async fn run(
     // login (single source of truth: ~/.config/nexus/credentials.toml,
     // managed exclusively via 'nexus login') ──────────────────────────────
     //
-    // opencode.json / .claude/mcp.json intentionally bake a literal
+    // opencode.json / .mcp.json intentionally bake a literal
     // NEXUS_API_URL/NEXUS_PRIVATE_TOKEN (not an {env:} reference) so the MCP
     // config is self-sufficient even when the tool is launched without
     // 'nexus run' (e.g. directly from an IDE). That's a deliberate,
@@ -285,12 +285,12 @@ pub async fn run(
 }
 
 // ---------------------------------------------------------------------------
-// Credential sync — keep baked opencode.json / .claude/mcp.json Nexus MCP
+// Credential sync — keep baked opencode.json / .mcp.json Nexus MCP
 // credentials in sync with the current global login (Task a3bf595b, NEXUS-APP)
 // ---------------------------------------------------------------------------
 
 /// Patch the `mcp.nexus.environment` block of `opencode.json` (and, if
-/// present, the top-level `mcpServers.nexus.env` block of `.claude/mcp.json`)
+/// present, the top-level `mcpServers.nexus.env` block of `.mcp.json`)
 /// in place, only touching `NEXUS_API_URL`/`NEXUS_PRIVATE_TOKEN` and only if
 /// they differ from the currently-resolved values. Returns the list of
 /// relative paths that were actually rewritten (empty if already in sync or
@@ -340,8 +340,8 @@ fn sync_mcp_credentials(
         }
     }
 
-    // .claude/mcp.json: mcpServers.nexus.env.{NEXUS_API_URL,NEXUS_PRIVATE_TOKEN}
-    let claude_path = workspace.join(".claude").join("mcp.json");
+    // .mcp.json (project root): mcpServers.nexus.env.{NEXUS_API_URL,NEXUS_PRIVATE_TOKEN}
+    let claude_path = workspace.join(".mcp.json");
     if claude_path.is_file() {
         let raw = fs::read_to_string(&claude_path)?;
         if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) {
@@ -367,7 +367,7 @@ fn sync_mcp_credentials(
                 if dirty {
                     let out = serde_json::to_string_pretty(&root)?;
                     fs::write(&claude_path, out + "\n")?;
-                    changed.push(".claude/mcp.json".to_string());
+                    changed.push(".mcp.json".to_string());
                 }
             }
         }
@@ -1510,9 +1510,8 @@ mod tests {
     #[test]
     fn test_sync_mcp_credentials_updates_claude_mcp_json_too() {
         let dir = tmp_dir("sync_creds_claude");
-        fs::create_dir_all(dir.join(".claude")).unwrap();
         fs::write(
-            dir.join(".claude").join("mcp.json"),
+            dir.join(".mcp.json"),
             r#"{
   "mcpServers": {
     "nexus": {
@@ -1531,8 +1530,8 @@ mod tests {
 
         let changed =
             sync_mcp_credentials(&dir, "https://nexus.gatewarden.eu", "nxs_pat_NEW").unwrap();
-        assert_eq!(changed, vec![".claude/mcp.json".to_string()]);
-        let updated = fs::read_to_string(dir.join(".claude").join("mcp.json")).unwrap();
+        assert_eq!(changed, vec![".mcp.json".to_string()]);
+        let updated = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(updated.contains("nxs_pat_NEW"));
         assert!(!updated.contains("nxs_pat_OLD"));
     }

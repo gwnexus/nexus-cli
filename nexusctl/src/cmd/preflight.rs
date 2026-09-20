@@ -191,7 +191,7 @@ fn check_mcp_configs() -> CheckResult {
 
     // Check common MCP config locations
     let locations = [
-        (".claude/mcp.json", "Claude Code"),
+        (".mcp.json", "Claude Code"),
         ("opencode.json", "OpenCode"),
         (".cursor/mcp.json", "Cursor"),
     ];

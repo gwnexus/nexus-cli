@@ -1159,7 +1159,7 @@ fn capitalize(s: &str) -> String {
 /// `@gwdn/nexus-mcp` package via npx. When `Local`, it points to the
 /// local checkout at `tools/nexus-mcp/dist/server.js`.
 ///
-/// Generates both `opencode.json` (OpenCode) and `.claude/mcp.json` (Claude Code).
+/// Generates both `opencode.json` (OpenCode) and `.mcp.json` (Claude Code, project root).
 /// Skips writing each file if it already exists (user-managed).
 #[allow(clippy::too_many_arguments)]
 fn write_mcp_configs(
@@ -1170,7 +1170,7 @@ fn write_mcp_configs(
     project_id: &str,
     mcp_source: McpSource,
     tool_flavor: Option<&str>,
-    agentic_root: &str,
+    _agentic_root: &str,
 ) -> anyhow::Result<()> {
     let source_label = match mcp_source {
         McpSource::Npm => "npm (@gwdn/nexus-mcp)",
@@ -1234,15 +1234,14 @@ fn write_mcp_configs(
         }
     }
 
-    // --- Claude Code config ({agentic_root}/mcp.json) ---
+    // --- Claude Code config (.mcp.json at project root) ---
     if !skip_claude {
-        let claude_mcp_path = target.join(agentic_root).join("mcp.json");
+        let claude_mcp_path = target.join(".mcp.json");
 
         if claude_mcp_path.exists() {
             println!(
-                "   {} {}/mcp.json already exists, skipping",
-                style("--").yellow(),
-                agentic_root
+                "   {} .mcp.json already exists, skipping",
+                style("--").yellow()
             );
         } else {
             let (cmd, args) = match mcp_source {
@@ -1270,18 +1269,12 @@ fn write_mcp_configs(
                 token = token,
             );
 
-            // .claude/ directory should already exist from earlier init steps
-            if let Some(parent) = claude_mcp_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
             fs::write(&claude_mcp_path, claude_mcp_json)?;
             // SEC-002: ensure token-bearing config files are git-excluded
-            let mcp_rel = format!("{}/mcp.json", agentic_root);
-            shadow::ensure_git_excluded(&[&mcp_rel]);
+            shadow::ensure_git_excluded(&[".mcp.json"]);
             println!(
-                "   {} {}/mcp.json (MCP source: {})",
+                "   {} .mcp.json (MCP source: {})",
                 style("+").bold().green(),
-                agentic_root,
                 source_label,
             );
         }
@@ -1295,7 +1288,7 @@ fn write_mcp_configs(
 // ---------------------------------------------------------------------------
 
 /// Merge extra MCP servers from `[mcp_extra]` config into `opencode.json`
-/// and `{agentic_root}/mcp.json` (Claude Code format).
+/// and `.mcp.json` (Claude Code format, project root).
 ///
 /// Environment values containing `${env:VAR}` are resolved from the process
 /// environment first, then from `.env.local` in the project root as a
@@ -1304,7 +1297,7 @@ fn write_mcp_configs(
 fn merge_extra_mcp_servers(
     target: &Path,
     extras: &HashMap<String, ExtraMcpServer>,
-    agentic_root: &str,
+    _agentic_root: &str,
 ) -> anyhow::Result<()> {
     if extras.is_empty() {
         return Ok(());
@@ -1362,8 +1355,8 @@ fn merge_extra_mcp_servers(
         }
     }
 
-    // --- Claude Code ({agentic_root}/mcp.json) ---
-    let claude_mcp_path = target.join(agentic_root).join("mcp.json");
+    // --- Claude Code (.mcp.json at project root) ---
+    let claude_mcp_path = target.join(".mcp.json");
     if claude_mcp_path.exists() {
         let content = fs::read_to_string(&claude_mcp_path)?;
         let mut doc: serde_json::Value = serde_json::from_str(&content)?;
@@ -1386,9 +1379,8 @@ fn merge_extra_mcp_servers(
                 });
                 if let Some((existing_key, _)) = duplicate_key {
                     println!(
-                        "   {} {}/mcp.json: skipping '{}' — duplicate of existing '{}' (same command)",
+                        "   {} .mcp.json: skipping '{}' — duplicate of existing '{}' (same command)",
                         style("!").bold().yellow(),
-                        agentic_root,
                         name,
                         existing_key,
                     );
@@ -1397,9 +1389,8 @@ fn merge_extra_mcp_servers(
                 let entry = build_claude_entry(server, &dotenv);
                 servers.insert(name.clone(), serde_json::Value::Object(entry));
                 println!(
-                    "   {} {}/mcp.json: added MCP server '{}'",
+                    "   {} .mcp.json: added MCP server '{}'",
                     style("+").bold().green(),
-                    agentic_root,
                     name,
                 );
             }
@@ -2209,11 +2200,8 @@ mod tests {
         // it is not a Nexus credential and should be resolved from the shell at runtime
         assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
 
-        // .mcp.json must NOT be created (legacy root-level format)
-        assert!(!dir.join(".mcp.json").exists());
-
-        // .claude/mcp.json MUST be created
-        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        // .mcp.json MUST be created at project root (Claude Code project scope)
+        let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(cm.contains("\"mcpServers\""));
         assert!(cm.contains("@gwdn/nexus-mcp"));
         assert!(cm.contains("nxs_pat_test-token-1234567890"));
@@ -2247,8 +2235,8 @@ mod tests {
         assert!(!oc.contains("npx"));
         assert!(!oc.contains("@gwdn/nexus-mcp"));
 
-        // .claude/mcp.json must also exist with local path
-        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        // .mcp.json must also exist at project root with local path
+        let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(cm.contains("tools/nexus-mcp/dist/server.js"));
         assert!(cm.contains("\"command\": \"node\""));
 
@@ -2262,8 +2250,7 @@ mod tests {
 
         // Pre-create both config files with custom content
         fs::write(dir.join("opencode.json"), "user-managed content").unwrap();
-        fs::create_dir_all(dir.join(".claude")).unwrap();
-        fs::write(dir.join(".claude/mcp.json"), "user-managed claude").unwrap();
+        fs::write(dir.join(".mcp.json"), "user-managed claude").unwrap();
 
         write_mcp_configs(
             &dir,
@@ -2280,7 +2267,7 @@ mod tests {
         // Must NOT overwrite existing files
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert_eq!(oc, "user-managed content");
-        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert_eq!(cm, "user-managed claude");
 
         // Cleanup

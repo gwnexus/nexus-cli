@@ -1812,7 +1812,7 @@ fn confirm_export_warnings(warnings: &[ExportWarning], bypass: bool) -> anyhow::
 // MCP config generation
 // ---------------------------------------------------------------------------
 
-/// Write MCP server configs (`opencode.json`, `<agentic_root>/mcp.json`).
+/// Write MCP server configs (`opencode.json`, `.mcp.json` at project root).
 ///
 /// Behavior:
 /// - If the file does not exist: create it with the nexus MCP server + any
@@ -1829,7 +1829,7 @@ fn write_mcp_configs(
     project_id: &str,
     mcp_source: McpSource,
     tool_flavor: Option<&str>,
-    agentic_root: &str,
+    _agentic_root: &str,
     plugin_mcp_servers: &HashMap<String, McpServerConfig>,
     providers: &HashMap<String, ProviderConfig>,
     opencode_agents: &Option<serde_json::Value>,
@@ -1839,7 +1839,7 @@ fn write_mcp_configs(
     force: bool,
 ) -> anyhow::Result<()> {
     let opencode_path = workspace.join("opencode.json");
-    let claude_mcp_path = workspace.join(agentic_root).join("mcp.json");
+    let claude_mcp_path = workspace.join(".mcp.json");
 
     let skip_opencode = matches!(tool_flavor, Some("claude-cli"));
     let skip_claude = matches!(tool_flavor, Some("opencode"));
@@ -2072,7 +2072,7 @@ fn write_mcp_configs(
         }
     }
 
-    // ── <agentic_root>/mcp.json ────────────────────────────────────────────
+    // ── .mcp.json (project root, Claude Code project scope) ────────────────
     if !skip_claude {
         let exists = claude_mcp_path.exists();
         let needs_write = !exists || force || !plugin_mcp_servers.is_empty();
@@ -2150,23 +2150,18 @@ fn write_mcp_configs(
                 "mcpServers": servers_block
             });
 
-            if let Some(parent) = claude_mcp_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
             fs::write(
                 &claude_mcp_path,
                 serde_json::to_string_pretty(&claude_mcp_json)? + "\n",
             )?;
 
             // SEC-002: ensure token-bearing config files are git-excluded
-            let mcp_rel = format!("{}/mcp.json", agentic_root);
-            shadow::ensure_git_excluded(&[&mcp_rel]);
+            shadow::ensure_git_excluded(&[".mcp.json"]);
 
             let verb = if exists { "updated" } else { "created" };
             println!(
-                "   {} {}/mcp.json {} (MCP source: {}{})",
+                "   {} .mcp.json {} (MCP source: {}{})",
                 style("+").bold().green(),
-                agentic_root,
                 verb,
                 source_label,
                 if plugin_mcp_servers.is_empty() {
@@ -3055,9 +3050,9 @@ mod tests {
 
         // opencode.json should still be at root
         assert!(dir.join("opencode.json").exists());
-        // mcp.json should be under .nexus/, not .claude/
-        assert!(dir.join(".nexus/mcp.json").exists());
-        assert!(!dir.join(".claude/mcp.json").exists());
+        // .mcp.json is always at project root, regardless of agentic_root,
+        // per Claude Code's documented project-scope location.
+        assert!(dir.join(".mcp.json").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3385,8 +3380,8 @@ mod tests {
         // so the {env:} fallback must be used.
         assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
 
-        // .claude/mcp.json must exist
-        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        // .mcp.json must exist
+        let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(cm.contains("\"mcpServers\""));
         assert!(cm.contains("nxs_pat_pull-test-token"));
 
@@ -3399,7 +3394,7 @@ mod tests {
 
         // Pre-create both files
         fs::write(dir.join("opencode.json"), "existing-oc").unwrap();
-        fs::write(dir.join(".claude/mcp.json"), "existing-cm").unwrap();
+        fs::write(dir.join(".mcp.json"), "existing-cm").unwrap();
 
         write_mcp_configs(
             &dir,
@@ -3425,7 +3420,7 @@ mod tests {
             "existing-oc"
         );
         assert_eq!(
-            fs::read_to_string(dir.join(".claude/mcp.json")).unwrap(),
+            fs::read_to_string(dir.join(".mcp.json")).unwrap(),
             "existing-cm"
         );
 
@@ -3462,8 +3457,8 @@ mod tests {
             fs::read_to_string(dir.join("opencode.json")).unwrap(),
             "existing-oc"
         );
-        // .claude/mcp.json created
-        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        // .mcp.json created
+        let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(cm.contains("nxs_pat_partial-token"));
 
         let _ = fs::remove_dir_all(&dir);
@@ -3495,7 +3490,7 @@ mod tests {
         assert!(oc.contains("tools/nexus-mcp/dist/server.js"));
         assert!(!oc.contains("npx"));
 
-        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(cm.contains("\"command\": \"node\""));
         assert!(cm.contains("tools/nexus-mcp/dist/server.js"));
 
@@ -3774,7 +3769,7 @@ mod tests {
         .unwrap();
 
         // mcp.json must NOT contain provider config
-        let cm = fs::read_to_string(dir.join(".claude/mcp.json")).unwrap();
+        let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(
             !cm.contains("dgx-spark"),
             "providers must not appear in mcp.json"
@@ -4170,7 +4165,7 @@ mod tests {
         .unwrap();
 
         // mcp.json uses "command": string + "args": array (Claude Code format)
-        let cm = fs::read_to_string(dir.join(".nexus/mcp.json")).unwrap();
+        let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(
             cm.contains("\"command\": \"headroom\""),
             "mcp.json command must be the first element as a string"

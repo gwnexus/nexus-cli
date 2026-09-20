@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.8] - 2026-09-20
+## [0.16.9] - 2026-09-20
+
+### Fixed
+- **Claude Code project-scoped MCP config now renders to `.mcp.json` at the project root, not `<agentic_root>/mcp.json` (e.g. `.claude/mcp.json` or `.nexus/mcp.json`)** (NEXUS-APP dispatch b8e001e3, blocker for Track B1 "Claude Code renderer"). Per Claude Code's documented MCP installation scopes (code.claude.com/docs/en/mcp), a project-scoped, team-shared, git-committed MCP config must live at `.mcp.json` in the project root; the CLI previously wrote it under the configurable `agentic_root` instead, and a test in `init.rs` actively asserted that a root-level `.mcp.json` must NOT exist, treating the correct format as a "legacy" one. `nexus init`, `nexus pull`, and `nexus run`'s credential auto-sync now consistently read/write `.mcp.json` at the workspace root for the Claude Code projection; `nexus preflight`'s MCP config detection was updated to match. The OpenCode projection (`opencode.json`) and the `agentic_root`-relative convention for all other artifacts (skills, commands, directives, `CLAUDE.md`) are unaffected. `nexus deinit` already removed root `.mcp.json` correctly and required no change. Full workspace test suite (255/255) green, no clippy warnings.
+
 
 ### Added
 - **Project-scoped commands now show which API backend they are targeting and the project's human-readable name, not just its opaque UUID.** `nexus pull`, `nexus push`, `nexus sync status`, `nexus project status`, and `nexus init` now print a consistent `API: <url>` / `Project: <Name> (<uuid>)` banner up front. The name is resolved from the locally linked `.nexus/config.toml` when available (no extra network call), falling back to a live `GET /api/mcp/projects/{id}` lookup otherwise; the UUID always remains visible in parentheses for exact identification, and the raw UUID alone is still shown if the name cannot be resolved (e.g. offline). Addresses feedback that `nexus pull` (and siblings) only ever showed a bare project UUID with no indication of which API URL was in effect, making it hard to spot a workspace silently pointed at the wrong environment. New shared helper module `nexusctl::cmd::display` with 2 new unit tests; full workspace suite: 255/255 green.
