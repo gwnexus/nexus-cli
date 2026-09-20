@@ -1290,6 +1290,10 @@ fn write_mcp_configs(
         "NEXUS_API_URL": "{api_url}",
         "NEXUS_PRIVATE_TOKEN": "{token}"
       }}
+    }},
+    "nexus-local-tools": {{
+      "command": "nexus",
+      "args": ["mcp-local"]
     }}
   }}
 }}
@@ -2239,6 +2243,10 @@ mod tests {
         // Claude uses "command" + "args" format, not "command": [array]
         assert!(cm.contains("\"command\": \"npx\""));
         assert!(cm.contains("\"args\""));
+        // Local MCP server (dispatch af407643) must be registered alongside
+        // the bootstrap "nexus" entry.
+        assert!(cm.contains("\"nexus-local-tools\""));
+        assert!(cm.contains("\"mcp-local\""));
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);

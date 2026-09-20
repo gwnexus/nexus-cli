@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-09-20
+
+### Added
+- **`nexus mcp-local`: a local stdio MCP server exposing tools with no Claude Code custom-tool equivalent** (NEXUS-APP dispatch af407643). Claude Code has no custom-tool-registration hook, so MCP is the only path to a new agent-callable tool; nexus-mcp (the hosted server) correctly declined to own these since they need machine-local filesystem/session state a hosted server cannot have (nexus-mcp dispatch d22de820). `nexus mcp-local` is a hidden CLI subcommand speaking MCP's newline-delimited JSON-RPC 2.0 stdio transport, spawned automatically by Claude Code via a new `nexus-local-tools` entry generated in `.mcp.json` for Claude Code projects (alongside the existing `nexus`/`nexus-headroom` entries). Exposes:
+  - `nexus_headroom_intercept_retrieve` - reads the original uncompressed content behind a Headroom-compressed tool result, by content hash, from the project-local `.nexus/headroom-cache/<project_id>/<hash>.json` cache (nexus-oc-plugins' `OriginalStore` format). Supports an optional `query` argument to filter to matching lines, mirroring the equivalent OpenCode plugin tool. Hash input is validated (hex-only, bounded length) against path traversal.
+  - `nexus_cost_summary` - registered for tool discovery, but intentionally returns an honest "not yet available" message rather than fabricated numbers: the underlying cost/spend computation (Helicone-backed telemetry) lives in nexus-oc-plugins' `core/cost-control` (TypeScript) and nexus-cli has no local data source to read it from yet. Flagged back to NEXUS-APP as a follow-up (needs either a concrete local data file or an API endpoint).
+  - New `nexusctl::cmd::mcp_local` module, wired into both `.mcp.json` writers (`nexus init` and `nexus pull`, added if missing, never overwritten if the operator has customized the file). Logging and the CLI's own update-check are both suppressed/redirected to stderr for this subcommand so nothing but the JSON-RPC protocol itself ever reaches stdout.
+  - 11 new unit tests (protocol shape, hash validation incl. path-traversal rejection, cache-read and query-filter behavior, honest-unavailable cost summary). Full workspace suite: 290/290 green, no clippy warnings, cargo fmt clean.
+
 ## [0.17.2] - 2026-09-20
 
 ### Added

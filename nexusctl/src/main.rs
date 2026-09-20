@@ -170,6 +170,14 @@ pub enum Command {
     /// Upgrade the Nexus CLI to the latest release version.
     Upgrade,
 
+    /// Run a small local MCP server (stdio) exposing Nexus tools that need
+    /// filesystem/session-local access and have no Claude Code custom-tool
+    /// equivalent: `nexus_headroom_intercept_retrieve`, `nexus_cost_summary`.
+    /// Registered automatically in `.mcp.json` for Claude Code projects
+    /// (NEXUS-APP dispatch af407643); not intended for direct interactive use.
+    #[command(hide = true)]
+    McpLocal,
+
     /// Shadow (hide) AI/agentic scaffold files from Git tracking.
     Shadow {
         #[command(subcommand)]
@@ -650,16 +658,26 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::from_arg_matches(&Cli::command().about(about).get_matches())?;
 
-    // Initialize tracing
+    // Initialize tracing. `mcp-local` is a stdio JSON-RPC server: any stray
+    // log line on stdout would corrupt the protocol stream, so its logs are
+    // always routed to stderr regardless of the default writer.
     let filter = if cli.verbose {
         EnvFilter::new("debug")
     } else {
         EnvFilter::from_default_env().add_directive("nexus=info".parse()?)
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    if matches!(cli.command, Command::McpLocal) {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
 
     // Load config for update check
     let config = nexus_core::config::Config::load().unwrap_or_default();
@@ -669,7 +687,11 @@ async fn main() -> anyhow::Result<()> {
     // version is installed by the time the notice would appear, so showing it
     // is misleading.
     let is_upgrade_cmd = matches!(cli.command, Command::Upgrade);
-    let update_handle = if config.check_updates && !is_upgrade_cmd {
+    // McpLocal is a stdio JSON-RPC server (spawned by Claude Code / other
+    // MCP hosts): never spawn background work or emit anything besides the
+    // protocol itself on stdout.
+    let is_mcp_local_cmd = matches!(cli.command, Command::McpLocal);
+    let update_handle = if config.check_updates && !is_upgrade_cmd && !is_mcp_local_cmd {
         Some(tokio::spawn(async move {
             nexus_core::update_check::check_for_update(&config).await
         }))

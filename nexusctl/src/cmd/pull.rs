@@ -2140,6 +2140,20 @@ fn write_mcp_configs(
                 }),
             );
 
+            // Local MCP server (NEXUS-APP dispatch af407643): tools that
+            // need filesystem/session-local access and have no Claude Code
+            // custom-tool equivalent (nexus_headroom_intercept_retrieve,
+            // nexus_cost_summary). Added if missing, never overwritten if
+            // the operator has customized it.
+            servers_block
+                .entry("nexus-local-tools".to_string())
+                .or_insert_with(|| {
+                    serde_json::json!({
+                        "command": "nexus",
+                        "args": ["mcp-local"]
+                    })
+                });
+
             // Plugin servers
             for (name, cfg) in plugin_mcp_servers {
                 // Build env object: map env_keys to shell-style template variables ${KEY}
@@ -3415,6 +3429,10 @@ mod tests {
         let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(cm.contains("\"mcpServers\""));
         assert!(cm.contains("nxs_pat_pull-test-token"));
+        // Local MCP server (dispatch af407643) must be registered alongside
+        // the bootstrap "nexus" entry.
+        assert!(cm.contains("\"nexus-local-tools\""));
+        assert!(cm.contains("\"mcp-local\""));
 
         let _ = fs::remove_dir_all(&dir);
     }

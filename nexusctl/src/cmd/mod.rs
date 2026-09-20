@@ -10,6 +10,7 @@ pub(crate) mod git;
 pub(crate) mod import;
 mod init;
 mod link;
+pub(crate) mod mcp_local;
 pub(crate) mod preflight;
 pub(crate) mod project;
 pub(crate) mod pull;
@@ -162,6 +163,9 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         },
         Command::Upgrade => {
             upgrade::run()?;
+        }
+        Command::McpLocal => {
+            mcp_local::run().await?;
         }
         Command::Shadow { ref action } => match action {
             ShadowAction::On => shadow::on()?,
