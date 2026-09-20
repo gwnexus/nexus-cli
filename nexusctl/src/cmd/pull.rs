@@ -25,6 +25,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+use super::claude_render;
 use super::init::resolve_platform_plugins;
 use super::shadow;
 
@@ -866,6 +867,25 @@ pub async fn run(
             &opencode_instructions,
             force,
         )?;
+
+        // Render the native Claude Code projection (Track B1, ADR-C04/C06):
+        // CLAUDE.md, .claude/settings.json, .claude/skills/, .claude/agents/.
+        // Additive only; skipped entirely for the opencode-only flavor.
+        // .mcp.json itself was already written above by write_mcp_configs.
+        if !matches!(tool_flavor.as_deref(), Some("opencode")) {
+            let actors_for_claude = af_export_result
+                .as_ref()
+                .ok()
+                .map(|r| r.actors.clone())
+                .unwrap_or_default();
+            claude_render::render_claude_projection(
+                &workspace,
+                &project_name,
+                &agentic_root,
+                &export.skills,
+                &actors_for_claude,
+            )?;
+        }
     } else {
         println!(
             "   {} Skipped opencode.json / {}/mcp.json (declined after model-routing warning(s) above).",

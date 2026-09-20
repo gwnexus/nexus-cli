@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-20
+
+### Added
+- **Native Claude Code terminal renderer** (Track B1, NEXUS-APP Dispatch c7701485, ADR-C04/ADR-C06). `nexus init` and `nexus pull` now additionally generate a first-class Claude Code project projection alongside the existing OpenCode output, so a project works natively with `claude` in the terminal, not just via `nexus run`:
+  - Root `CLAUDE.md` (thin wrapper, created only if absent, never overwritten): bootstraps Claude Code into `<agentic_root>/AGENTS.md`, `<agentic_root>/directives.md`, and `.mcp.json`.
+  - `.claude/settings.json` (created only if absent): Claude runtime behavior only, contains no secrets and no OpenCode-specific statements.
+  - `.claude/skills/<canonical-id>/SKILL.md`: one native Claude Code project skill per canonical Nexus skill, with resource files carried over. Skill directory names become Claude Code's `/<canonical-id>` slash-commands.
+  - `.claude/agents/<slug>.md`: one native Claude Code sub-agent file per assigned project actor, reusing the same profile body already delivered for `<agentic_root>/actors/<slug>.md` (one canonical actor definition, two projections).
+  - `.claude/hooks/` is intentionally **not** generated in this pass: hook *behavior* (Headroom, Compaction Plus, Session Guard, Routing Guard, Cost Control adapters) is separate follow-up work (Track B2), and Claude Code does not require the directory to exist for a hookless project.
+  - New skill-naming migration: legacy `nx-*` canonical skill IDs are rendered under the `nexus-*` Claude Code command namespace (e.g. `nx-sec-scan` -> `.claude/skills/nexus-sec-scan/`), per ADR-C06 "Canonical command identity". `nexus-*` IDs pass through unchanged.
+  - Additive and opt-in by flavor: entirely skipped when a project's tool flavor is `opencode`-only; the existing OpenCode projection (`opencode.json`, `.opencode/commands/`) is completely unaffected in every flavor. `.mcp.json` at the project root (already fixed in v0.16.9) is the shared MCP config consumed by this renderer.
+  - New module `nexusctl::cmd::claude_render` with 12 new unit tests, including a skill-set parity check (no ID collisions from the `nx-*` -> `nexus-*` migration) per ADR-C04's acceptance criteria. Full workspace suite: 267/267 green, no clippy warnings.
+
 ## [0.16.9] - 2026-09-20
 
 ### Fixed

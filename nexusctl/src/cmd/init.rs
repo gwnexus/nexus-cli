@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::claude_render;
 use super::shadow;
 use crate::cmd::pull::{detect_importable_files, write_plugin_env_file};
 
@@ -257,6 +258,25 @@ pub async fn run(
                     for skill in &export.skills {
                         write_skill(&target, skill, &agentic_root)?;
                         write_command(&target, skill, &agentic_root)?;
+                    }
+
+                    // Render the native Claude Code projection (Track B1,
+                    // ADR-C04/C06): CLAUDE.md, .claude/settings.json,
+                    // .claude/skills/, .claude/agents/. Additive only;
+                    // skipped for the opencode-only flavor.
+                    if !matches!(tool_flavor.as_deref(), Some("opencode")) {
+                        let actors_for_claude = af_export_result
+                            .as_ref()
+                            .ok()
+                            .map(|r| r.actors.clone())
+                            .unwrap_or_default();
+                        claude_render::render_claude_projection(
+                            &target,
+                            project_name,
+                            &agentic_root,
+                            &export.skills,
+                            &actors_for_claude,
+                        )?;
                     }
                 }
                 Err(e) => {
