@@ -2,14 +2,20 @@
 
 use console::style;
 use nexus_core::api::NexusClient;
-use nexus_core::auth::{resolve_token, Credentials, TOKEN_PREFIX};
+use nexus_core::auth::{resolve_token_with_source, Credentials, TokenSource, TOKEN_PREFIX};
 use nexus_core::error::Error as CoreError;
 
 /// Interactive login flow.
 ///
 /// Prompts the user for a personal access token, validates the format,
 /// verifies it against the Nexus API, and stores the credentials.
-pub async fn login(api_url: &str) -> anyhow::Result<()> {
+///
+/// By default (`global == false`) the token is stored in the project-local
+/// `.nexus/credentials.toml` in the current workspace, scoping it to this
+/// project only. Pass `global == true` to write to the shared
+/// `~/.config/nexus/credentials.toml` instead (mirrors `nexus config set
+/// --global`), which never happens implicitly.
+pub async fn login(api_url: &str, global: bool) -> anyhow::Result<()> {
     println!("{} Nexus authentication", style(">>").bold().cyan());
     println!();
     println!(
@@ -34,12 +40,17 @@ pub async fn login(api_url: &str) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
 
-    // Store credentials
+    // Store credentials at the requested scope only.
+    let path = if global {
+        Credentials::global_path()?
+    } else {
+        Credentials::local_path(None)?
+    };
     let creds = Credentials {
         token,
         expires_at: None,
     };
-    creds.save()?;
+    creds.save_to(&path)?;
 
     println!();
     println!(
@@ -48,14 +59,45 @@ pub async fn login(api_url: &str) -> anyhow::Result<()> {
         style(&auth_status.user.email).bold(),
         auth_status.user.platform_role,
     );
+    println!(
+        "         Stored at {} scope: {}",
+        if global { "global" } else { "local" },
+        style(path.display()).dim()
+    );
 
     Ok(())
 }
 
 /// Remove stored credentials.
-pub fn logout() -> anyhow::Result<()> {
-    Credentials::remove()?;
-    println!("{} Credentials removed.", style("OK").bold().green());
+///
+/// By default (`global == false`) only the project-local
+/// `.nexus/credentials.toml` in the current workspace is removed; other
+/// projects' local credentials and the global credential store are never
+/// touched. Pass `global == true` to remove the shared global credentials
+/// instead.
+pub fn logout(global: bool) -> anyhow::Result<()> {
+    let path = if global {
+        Credentials::global_path()?
+    } else {
+        Credentials::local_path(None)?
+    };
+    let existed = path.exists();
+    Credentials::remove_at(&path)?;
+
+    if existed {
+        println!(
+            "{} Credentials removed ({} scope).",
+            style("OK").bold().green(),
+            if global { "global" } else { "local" }
+        );
+    } else {
+        println!(
+            "{} No {} credentials found at {}.",
+            style("--").bold().yellow(),
+            if global { "global" } else { "local" },
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -90,12 +132,9 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
     println!();
 
     // --- Auth status ---
-    // Resolve token via standard priority: env var > credentials.toml
-    let token = resolve_token();
-    let from_env = std::env::var("NEXUS_PRIVATE_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .is_some();
+    // Resolve token via standard priority: env var > local .nexus/credentials.toml > global credentials.toml
+    let resolved = resolve_token_with_source();
+    let token = resolved.as_ref().map(|(t, _)| t.clone());
     let mut auth_valid = false;
 
     match token {
@@ -113,7 +152,11 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
             } else {
                 "****".to_string()
             };
-            let source_label = if from_env { " (env)" } else { "" };
+            let source = resolved
+                .as_ref()
+                .map(|(_, s)| *s)
+                .unwrap_or(TokenSource::Global);
+            let source_label = format!(" ({})", source);
 
             // Verify against API
             let client = NexusClient::new(api_url, Some(t.clone()))?;

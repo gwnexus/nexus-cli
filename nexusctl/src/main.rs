@@ -90,10 +90,40 @@ pub enum Command {
     },
 
     /// Authenticate with the Nexus platform.
-    Login,
+    ///
+    /// By default stores the token in the project-local
+    /// `.nexus/credentials.toml` (mirrors `nexus config set --local`),
+    /// scoping it to this project only. Pass `--global` to store it in the
+    /// shared `~/.config/nexus/credentials.toml` instead.
+    Login {
+        /// Store in the project-local `.nexus/credentials.toml` (default behavior;
+        /// explicit for symmetry with --global).
+        #[arg(long, conflicts_with = "global")]
+        local: bool,
+
+        /// Store in the shared global `~/.config/nexus/credentials.toml`
+        /// instead of the project-local file.
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+    },
 
     /// Remove stored credentials.
-    Logout,
+    ///
+    /// By default only removes the project-local `.nexus/credentials.toml`
+    /// in the current workspace; other projects and the global credential
+    /// store are never touched. Pass `--global` to remove the shared
+    /// global credentials instead.
+    Logout {
+        /// Remove the project-local `.nexus/credentials.toml` (default
+        /// behavior; explicit for symmetry with --global).
+        #[arg(long, conflicts_with = "global")]
+        local: bool,
+
+        /// Remove the shared global `~/.config/nexus/credentials.toml`
+        /// instead of the project-local file.
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+    },
 
     /// Show current authentication and project status.
     Status,
@@ -944,13 +974,55 @@ mod tests {
     #[test]
     fn test_parse_login() {
         let cli = Cli::try_parse_from(["nexus", "login"]).unwrap();
-        assert!(matches!(cli.command, Command::Login));
+        match cli.command {
+            Command::Login { local, global } => {
+                assert!(!local);
+                assert!(!global);
+            }
+            _ => panic!("expected Login command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_login_global() {
+        let cli = Cli::try_parse_from(["nexus", "login", "--global"]).unwrap();
+        match cli.command {
+            Command::Login { local, global } => {
+                assert!(!local);
+                assert!(global);
+            }
+            _ => panic!("expected Login command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_login_local_and_global_conflict() {
+        let result = Cli::try_parse_from(["nexus", "login", "--local", "--global"]);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_logout() {
         let cli = Cli::try_parse_from(["nexus", "logout"]).unwrap();
-        assert!(matches!(cli.command, Command::Logout));
+        match cli.command {
+            Command::Logout { local, global } => {
+                assert!(!local);
+                assert!(!global);
+            }
+            _ => panic!("expected Logout command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logout_global() {
+        let cli = Cli::try_parse_from(["nexus", "logout", "--global"]).unwrap();
+        match cli.command {
+            Command::Logout { local, global } => {
+                assert!(!local);
+                assert!(global);
+            }
+            _ => panic!("expected Logout command"),
+        }
     }
 
     #[test]

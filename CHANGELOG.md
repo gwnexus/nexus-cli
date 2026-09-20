@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.7] - 2026-09-20
+
+### Fixed
+- **`nexus login`/`nexus logout` no longer leak PAT scope across projects** (NEXUS-APP dispatch 51f7e592: "nexus login: PAT scope leaks globally, overrides other projects' prod tokens"). Previously `Credentials` had a single flat global store at `~/.config/nexus/credentials.toml`, so logging in to any project silently overwrote the token used by every other authenticated project on the machine. `nexus login`/`nexus logout` now default to a project-local `.nexus/credentials.toml` in the current workspace (already git-excluded via `nexus shadow`), scoped to that project only, mirroring the local/global provenance model already used by `nexus config set --local/--global`. Pass `--global` to opt in to the shared, machine-wide credential store explicitly. Token resolution order is now: `NEXUS_PRIVATE_TOKEN` env var, then project-local `.nexus/credentials.toml`, then global `~/.config/nexus/credentials.toml`. `nexus status` now reports which layer (`env`/`local`/`global`) supplied the active token. Added regression tests asserting that logging in/out of one project's local scope never mutates another project's local credentials.
+
 ## [0.16.6] - 2026-09-19
 
 ### Added

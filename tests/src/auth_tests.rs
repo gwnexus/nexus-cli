@@ -3,8 +3,8 @@
 use nexus_core::auth::{Credentials, TOKEN_PREFIX};
 
 #[test]
-fn test_credentials_path_uses_xdg_style() {
-    let path = Credentials::path().unwrap();
+fn test_credentials_global_path_uses_xdg_style() {
+    let path = Credentials::global_path().unwrap();
     let path_str = path.to_string_lossy();
 
     // Should use ~/.config/nexus/, NOT platform-specific directories
@@ -19,6 +19,51 @@ fn test_credentials_path_uses_xdg_style() {
         !path_str.contains("Library/Application Support"),
         "should not use macOS Library path"
     );
+}
+
+#[test]
+fn test_credentials_local_path_is_project_scoped() {
+    let workspace = tempfile::tempdir().unwrap();
+    let path = Credentials::local_path(Some(workspace.path())).unwrap();
+
+    assert_eq!(
+        path,
+        workspace.path().join(".nexus").join("credentials.toml")
+    );
+}
+
+#[test]
+fn test_local_credentials_scope_isolation_across_projects() {
+    // Regression test for the PAT scope leak: logging in to one project
+    // (local scope) must never mutate another project's stored token.
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+
+    let path_a = Credentials::local_path(Some(project_a.path())).unwrap();
+    let path_b = Credentials::local_path(Some(project_b.path())).unwrap();
+
+    let creds_a = Credentials {
+        token: "nxs_pat_project_a_prod_token_0000".to_string(),
+        expires_at: None,
+    };
+    let creds_b = Credentials {
+        token: "nxs_pat_project_b_staging_token_00".to_string(),
+        expires_at: None,
+    };
+
+    creds_a.save_to(&path_a).unwrap();
+    creds_b.save_to(&path_b).unwrap();
+
+    let loaded_a = Credentials::load_from(&path_a).unwrap().unwrap();
+    let loaded_b = Credentials::load_from(&path_b).unwrap().unwrap();
+
+    assert_eq!(loaded_a.token, creds_a.token);
+    assert_eq!(loaded_b.token, creds_b.token);
+
+    // Logout of project B must not remove project A's credentials.
+    Credentials::remove_at(&path_b).unwrap();
+    assert!(Credentials::load_from(&path_a).unwrap().is_some());
+    assert!(Credentials::load_from(&path_b).unwrap().is_none());
 }
 
 #[test]

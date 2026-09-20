@@ -98,13 +98,13 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Deinit { force } => {
             deinit::run(force || cli.yes)?;
         }
-        Command::Login => {
+        Command::Login { global, .. } => {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
-            auth::login(&api_url).await?;
+            auth::login(&api_url, global).await?;
         }
-        Command::Logout => {
-            auth::logout()?;
+        Command::Logout { global, .. } => {
+            auth::logout(global)?;
         }
         Command::Status => {
             let workspace = std::env::current_dir()?;

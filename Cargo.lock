@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-core"
-version = "0.16.6"
+version = "0.16.7"
 dependencies = [
  "dirs",
  "open",
@@ -788,6 +788,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml",
@@ -797,18 +798,19 @@ dependencies = [
 
 [[package]]
 name = "nexus-tests"
-version = "0.16.6"
+version = "0.16.7"
 dependencies = [
  "anyhow",
  "nexus-core",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
 ]
 
 [[package]]
 name = "nexusctl"
-version = "0.16.6"
+version = "0.16.7"
 dependencies = [
  "anyhow",
  "clap",
