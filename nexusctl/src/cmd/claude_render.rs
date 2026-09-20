@@ -16,11 +16,12 @@
 //! projection (`opencode.json`, `.opencode/`) or the `agentic_root`-relative
 //! canonical paths (`<agentic_root>/skills/`, `<agentic_root>/actors/`).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use console::style;
-use nexus_core::api::{ExportedActorFile, ExportedSkill};
+use nexus_core::api::{ExportedActorFile, ExportedAgentFile, ExportedSkill};
 
 /// Map a canonical Nexus skill ID to the public Claude Code command
 /// namespace. Legacy `nx-*` skill IDs are migrated to `nexus-*`
@@ -77,20 +78,71 @@ source: nexus-platform
     Ok(())
 }
 
+/// Derive an actor slug from an `ExportedAgentFile`'s `target_path`, if that
+/// file lives directly under an `.../actors/` directory (e.g.
+/// `.nexus/actors/technical-project-manager.md` -> `technical-project-manager`).
+///
+/// Some backend versions deliver actor-based project actors exclusively
+/// through the generic `agent_files` list (with `target_path` already
+/// pointing at `<agentic_root>/actors/<slug>.md`) rather than through the
+/// dedicated `actors` field on the af_export response — the dedicated field
+/// can be empty even when actors are assigned (NEXUS-APP dispatch c7701485
+/// follow-up: actor_based + claude-cli projects reported empty
+/// `.claude/agents/` despite `.nexus/actors/*.md` rendering correctly via
+/// this exact `agent_files` path). Both sources must be considered.
+pub fn actor_slug_from_agent_file(target_path: &str) -> Option<String> {
+    let path = Path::new(target_path);
+    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        return None;
+    }
+    let parent_is_actors = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n == "actors")
+        .unwrap_or(false);
+    if !parent_is_actors {
+        return None;
+    }
+    path.file_stem().map(|s| s.to_string_lossy().to_string())
+}
+
 /// Write all assigned actors as native Claude Code sub-agent definitions:
-/// `.claude/agents/<slug>.md`. Reuses the same profile markdown body
-/// already delivered for `<agentic_root>/actors/<slug>.md` — one canonical
-/// actor definition, two projections. Returns the number of files written.
-pub fn write_claude_agents(target: &Path, actors: &[ExportedActorFile]) -> anyhow::Result<usize> {
-    if actors.is_empty() {
+/// `.claude/agents/<slug>.md`. Merges two possible data sources so no
+/// backend response shape leaves this empty:
+///
+/// 1. The dedicated `actors` field on af_export (`ExportedActorFile`).
+/// 2. Generic `agent_files` entries whose `target_path` lives under an
+///    `.../actors/` directory (see `actor_slug_from_agent_file`).
+///
+/// Reuses the same profile markdown body already delivered for
+/// `<agentic_root>/actors/<slug>.md` — one canonical actor definition, two
+/// projections. Returns the number of files written.
+pub fn write_claude_agents(
+    target: &Path,
+    actors: &[ExportedActorFile],
+    agent_files: &[ExportedAgentFile],
+) -> anyhow::Result<usize> {
+    let mut by_slug: BTreeMap<String, String> = BTreeMap::new();
+
+    for actor in actors {
+        by_slug.insert(actor.slug.clone(), actor.body.clone());
+    }
+    for af in agent_files {
+        if let Some(slug) = actor_slug_from_agent_file(&af.target_path) {
+            by_slug.entry(slug).or_insert_with(|| af.body.clone());
+        }
+    }
+
+    if by_slug.is_empty() {
         return Ok(0);
     }
+
     let agents_dir = target.join(".claude").join("agents");
     fs::create_dir_all(&agents_dir)?;
 
     let mut written = 0;
-    for actor in actors {
-        fs::write(agents_dir.join(format!("{}.md", actor.slug)), &actor.body)?;
+    for (slug, body) in &by_slug {
+        fs::write(agents_dir.join(format!("{}.md", slug)), body)?;
         written += 1;
     }
     Ok(written)
@@ -180,12 +232,14 @@ servers are configured in `.mcp.json`.
 /// hook *behavior* is Track B2 (Nexus plugin Claude adapter, ADR-C05) and
 /// Claude Code does not require the directory to exist for a hookless
 /// project to function.
+#[allow(clippy::too_many_arguments)]
 pub fn render_claude_projection(
     target: &Path,
     project_name: &str,
     agentic_root: &str,
     skills: &[ExportedSkill],
     actors: &[ExportedActorFile],
+    agent_files: &[ExportedAgentFile],
 ) -> anyhow::Result<()> {
     let mut skills_written = 0;
     for skill in skills {
@@ -200,7 +254,7 @@ pub fn render_claude_projection(
         );
     }
 
-    let agents_written = write_claude_agents(target, actors)?;
+    let agents_written = write_claude_agents(target, actors, agent_files)?;
     if agents_written > 0 {
         println!(
             "   {} .claude/agents/ ({} agent(s))",
@@ -324,7 +378,7 @@ mod tests {
             },
         ];
 
-        let written = write_claude_agents(&dir, &actors).unwrap();
+        let written = write_claude_agents(&dir, &actors, &[]).unwrap();
         assert_eq!(written, 2);
         assert!(dir.join(".claude/agents/planner.md").exists());
         assert!(dir.join(".claude/agents/reviewer.md").exists());
@@ -339,9 +393,108 @@ mod tests {
     #[test]
     fn test_write_claude_agents_noop_when_empty() {
         let dir = temp_dir("agents-empty");
-        let written = write_claude_agents(&dir, &[]).unwrap();
+        let written = write_claude_agents(&dir, &[], &[]).unwrap();
         assert_eq!(written, 0);
         assert!(!dir.join(".claude/agents").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_actor_slug_from_agent_file_matches_actors_dir() {
+        assert_eq!(
+            actor_slug_from_agent_file(".nexus/actors/technical-project-manager.md"),
+            Some("technical-project-manager".to_string())
+        );
+        assert_eq!(
+            actor_slug_from_agent_file(".claude/actors/planner.md"),
+            Some("planner".to_string())
+        );
+    }
+
+    #[test]
+    fn test_actor_slug_from_agent_file_ignores_non_actor_paths() {
+        assert_eq!(actor_slug_from_agent_file(".nexus/AGENTS.md"), None);
+        assert_eq!(actor_slug_from_agent_file("CLAUDE.md"), None);
+        assert_eq!(
+            actor_slug_from_agent_file(".nexus/primary-agents/lead.md"),
+            None
+        );
+        assert_eq!(actor_slug_from_agent_file(".nexus/actors/notes.txt"), None);
+    }
+
+    /// Regression test for NEXUS-APP dispatch c7701485 follow-up:
+    /// actor-based + claude-cli projects delivered actor profiles
+    /// exclusively through `agent_files` (generic export list), with an
+    /// empty dedicated `actors` field. `.claude/agents/` must still be
+    /// populated from that source.
+    #[test]
+    fn test_write_claude_agents_falls_back_to_agent_files_when_actors_field_empty() {
+        let dir = temp_dir("agents-from-agent-files");
+        let agent_files = vec![
+            ExportedAgentFile {
+                file_key: "af1".to_string(),
+                target_path: ".nexus/actors/technical-project-manager.md".to_string(),
+                name: "Technical Project Manager".to_string(),
+                description: None,
+                category: "agent".to_string(),
+                version: 1,
+                body: "# Technical Project Manager".to_string(),
+                content_hash: None,
+                agent_file_id: None,
+            },
+            ExportedAgentFile {
+                file_key: "af2".to_string(),
+                target_path: ".nexus/AGENTS.md".to_string(),
+                name: "AGENTS".to_string(),
+                description: None,
+                category: "agent".to_string(),
+                version: 1,
+                body: "# Not an actor".to_string(),
+                content_hash: None,
+                agent_file_id: None,
+            },
+        ];
+
+        // Dedicated `actors` field is empty, as observed in the field report.
+        let written = write_claude_agents(&dir, &[], &agent_files).unwrap();
+        assert_eq!(written, 1);
+        assert!(dir
+            .join(".claude/agents/technical-project-manager.md")
+            .exists());
+        // AGENTS.md itself must not be mistaken for an actor file.
+        assert!(!dir.join(".claude/agents/AGENTS.md").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_claude_agents_merges_actors_field_and_agent_files_without_duplicates() {
+        let dir = temp_dir("agents-merge");
+        let actors = vec![ExportedActorFile {
+            slug: "planner".to_string(),
+            name: "Planner".to_string(),
+            role: "primary".to_string(),
+            body: "# Planner (from actors field)".to_string(),
+            avatar: None,
+            route_alias: None,
+        }];
+        let agent_files = vec![ExportedAgentFile {
+            file_key: "af1".to_string(),
+            target_path: ".nexus/actors/reviewer.md".to_string(),
+            name: "Reviewer".to_string(),
+            description: None,
+            category: "agent".to_string(),
+            version: 1,
+            body: "# Reviewer (from agent_files)".to_string(),
+            content_hash: None,
+            agent_file_id: None,
+        }];
+
+        let written = write_claude_agents(&dir, &actors, &agent_files).unwrap();
+        assert_eq!(written, 2);
+        assert!(dir.join(".claude/agents/planner.md").exists());
+        assert!(dir.join(".claude/agents/reviewer.md").exists());
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -414,7 +567,7 @@ mod tests {
             route_alias: None,
         }];
 
-        render_claude_projection(&dir, "Test Project", ".nexus", &skills, &actors).unwrap();
+        render_claude_projection(&dir, "Test Project", ".nexus", &skills, &actors, &[]).unwrap();
 
         assert!(dir.join("CLAUDE.md").exists());
         assert!(dir.join(".claude/settings.json").exists());

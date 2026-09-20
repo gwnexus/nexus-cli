@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-09-20
+
+### Fixed
+- **`.claude/agents/` was not rendered at all for `agent_mode=actor_based` + `claude-cli`-flavored projects** (NEXUS-APP dispatch c7701485 follow-up, found during live staging verification of v0.17.0). Root cause: the Claude Code renderer's actor writer only read the dedicated `actors` field on the af_export response (`ExportedActorFile`), but some backend project configurations deliver actor profiles exclusively through the generic `agent_files` list instead, with `target_path` already pointing at `<agentic_root>/actors/<slug>.md` (the same mechanism used for `AGENTS.md`/`directives.md`). That field can be empty even when actors are assigned and `<agentic_root>/actors/*.md` renders correctly via `agent_files`, since the two are actually different af_export fields. `write_claude_agents()` now merges both sources: the dedicated `actors` field and any `agent_files` entry whose `target_path` lives directly under an `.../actors/` directory (`.md` files only, so `AGENTS.md`/`CLAUDE.md` are never mistaken for actor profiles), deduplicated by slug. Verified against the reported repro (6 actors, `agent_mode=actor_based`, `agent_owner=claude-cli`): `.mcp.json`, `.claude/skills/`, and the OpenCode-side `.nexus/actors/*.md` were already confirmed correct in v0.17.0 and are unaffected by this fix. 4 new unit tests (regression test reproduces the exact reported shape: `agent_files`-only delivery, `actors` field empty). Full workspace suite: 271/271 green, no clippy warnings.
+
 ## [0.17.0] - 2026-09-20
 
 ### Added

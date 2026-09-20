@@ -270,12 +270,18 @@ pub async fn run(
                             .ok()
                             .map(|r| r.actors.clone())
                             .unwrap_or_default();
+                        let agent_files_for_claude = af_export_result
+                            .as_ref()
+                            .ok()
+                            .map(|r| r.agent_files.clone())
+                            .unwrap_or_default();
                         claude_render::render_claude_projection(
                             &target,
                             project_name,
                             &agentic_root,
                             &export.skills,
                             &actors_for_claude,
+                            &agent_files_for_claude,
                         )?;
                     }
                 }
