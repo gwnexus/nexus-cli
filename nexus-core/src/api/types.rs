@@ -362,6 +362,58 @@ pub struct AgentFileExportResponse {
     /// sub-keys they need rather than assuming an exhaustive shape.
     #[serde(default)]
     pub runtime_spec: Option<serde_json::Value>,
+    /// Claude Code hook adapter scripts (Track B3, NEXUS-APP dispatch
+    /// 2d5017f7). Additive field: mirrors how OpenCode plugin sources are
+    /// already embedded server-side (`headroom-intercept-plugin.ts` etc.)
+    /// and written out to `.opencode/plugins/*.ts` -- nexus-app/
+    /// nexus-oc-plugins own the bundled script content and versioning;
+    /// nexus-cli is a thin consumer that writes each `body` to its
+    /// `target_path` and wires `hook_events` into `.claude/settings.json`.
+    #[serde(default)]
+    pub claude_hook_adapters: Option<Vec<ClaudeHookAdapter>>,
+}
+
+/// A single Claude Code hook adapter script to materialize on disk
+/// (Track B3, NEXUS-APP dispatch 2d5017f7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeHookAdapter {
+    /// Canonical plugin name (e.g. "session-guard", "headroom-intercept",
+    /// "compaction-plus", "routing-guard", "cost-control").
+    pub plugin_name: String,
+    /// Path, relative to the project root, where the adapter script should
+    /// be written (e.g. ".claude/hooks/nexus-session-guard.mjs").
+    pub target_path: String,
+    /// The bundled adapter script source (single file, `core/*` deps
+    /// inlined). Read via stdin at runtime by the script itself -- the
+    /// only CLI argument the script needs is the hook subcommand (see
+    /// `ClaudeHookEvent::event`).
+    pub body: String,
+    /// Hook event registrations this adapter should be wired to in
+    /// `.claude/settings.json`'s `hooks` block. One adapter may register
+    /// against multiple events (e.g. `headroom-intercept` on both
+    /// `PostToolUse` and `Stop`).
+    pub hook_events: Vec<ClaudeHookEvent>,
+}
+
+/// A single Claude Code hook event registration for a `ClaudeHookAdapter`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeHookEvent {
+    /// Claude Code hook event name in the platform's own PascalCase
+    /// (e.g. "PreToolUse", "PostToolUse", "Stop", "SessionStart",
+    /// "UserPromptSubmit", "PreCompact"). Converted to kebab-case by the
+    /// CLI when building the invocation command (`PostToolUse` ->
+    /// `post-tool-use`), per the adapters' own `process.argv[2]` contract.
+    pub event: String,
+    /// Optional tool/command matcher (Claude Code hook matcher syntax,
+    /// e.g. `"Edit|Write|Bash"` or `"nexus_.*|headroom_.*"`). Omitted for
+    /// events that don't use one (`SessionStart`, `Stop`,
+    /// `UserPromptSubmit` per the current adapters).
+    #[serde(default)]
+    pub matcher: Option<String>,
+    /// Optional timeout in seconds for the hook command. None of the
+    /// current adapters set one; reserved for future use.
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 /// A single warning surfaced by `af_export` about model routing / provider

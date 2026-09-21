@@ -21,7 +21,7 @@ use std::fs;
 use std::path::Path;
 
 use console::style;
-use nexus_core::api::{ExportedActorFile, ExportedAgentFile, ExportedSkill};
+use nexus_core::api::{ClaudeHookAdapter, ExportedActorFile, ExportedAgentFile, ExportedSkill};
 
 /// Map a canonical Nexus skill ID to the public Claude Code command
 /// namespace. Legacy `nx-*` skill IDs are migrated to `nexus-*`
@@ -208,6 +208,155 @@ pub fn write_agent_routing(
     )))
 }
 
+/// Convert a Claude Code hook event name from PascalCase to kebab-case,
+/// matching the adapters' own `process.argv[2]` subcommand contract
+/// (confirmed against adapter source, NEXUS-APP dispatch 2d5017f7:
+/// `PostToolUse` -> `post-tool-use`, `PreCompact` -> `pre-compact`).
+fn kebab_case_event(event: &str) -> String {
+    let mut out = String::with_capacity(event.len() + 4);
+    for (i, c) in event.chars().enumerate() {
+        if c.is_uppercase() {
+            if i != 0 {
+                out.push('-');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Write each Claude Code hook adapter's bundled script to its
+/// `target_path` (NEXUS-APP dispatch 2d5017f7, Track B3). Platform-managed
+/// generated code: always (re)written, matching how `.opencode/plugins/*.ts`
+/// is kept in sync on every `nexus pull`. Returns the number of scripts
+/// written.
+pub fn write_claude_hook_adapters(
+    target: &Path,
+    adapters: &[ClaudeHookAdapter],
+) -> anyhow::Result<usize> {
+    let mut written = 0;
+    for adapter in adapters {
+        let path = target.join(&adapter.target_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, &adapter.body)?;
+        written += 1;
+    }
+    Ok(written)
+}
+
+/// Merge hook registrations for each adapter into `.claude/settings.json`'s
+/// `hooks` block (NEXUS-APP dispatch 2d5017f7, Track B3).
+///
+/// Idempotent per plugin, and safe to run against an already-existing,
+/// operator-customized `settings.json` (unlike the `env` block, which is
+/// create-once-only): for each `(event, adapter)` pair, only appends a new
+/// `{matcher, hooks: [...]}` entry to that event's array if no existing
+/// entry's command already references the adapter's `target_path`. Never
+/// replaces or removes an existing entry. Multiple plugins may register
+/// against the same event (e.g. `headroom-intercept` and `cost-control`
+/// both on `Stop`) as independent array entries — confirmed live against a
+/// real Claude Code session, per the dispatch's verification notes.
+///
+/// Returns the number of new hook entries appended (0 if nothing changed;
+/// the file is only rewritten when this is non-zero).
+pub fn merge_claude_hooks(target: &Path, adapters: &[ClaudeHookAdapter]) -> anyhow::Result<usize> {
+    if adapters.is_empty() {
+        return Ok(0);
+    }
+
+    let settings_path = target.join(".claude").join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let raw = fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if !settings.is_object() {
+        settings = serde_json::json!({});
+    }
+    let settings_obj = settings.as_object_mut().expect("just ensured object");
+    let hooks = settings_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !hooks.is_object() {
+        *hooks = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let hooks_obj = hooks.as_object_mut().expect("just ensured object");
+
+    let mut appended = 0;
+    for adapter in adapters {
+        for hook_event in &adapter.hook_events {
+            let event_array = hooks_obj
+                .entry(hook_event.event.clone())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if !event_array.is_array() {
+                *event_array = serde_json::Value::Array(Vec::new());
+            }
+            let event_array = event_array.as_array_mut().expect("just ensured array");
+
+            let already_registered = event_array.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.contains(&adapter.target_path))
+                        })
+                    })
+                    .unwrap_or(false)
+            });
+            if already_registered {
+                continue;
+            }
+
+            let command = format!(
+                "node \"${{CLAUDE_PROJECT_DIR}}/{}\" {}",
+                adapter.target_path,
+                kebab_case_event(&hook_event.event)
+            );
+            let mut hook_command = serde_json::json!({
+                "type": "command",
+                "command": command,
+            });
+            if let Some(timeout) = hook_event.timeout {
+                hook_command["timeout"] = serde_json::json!(timeout);
+            }
+
+            let mut new_entry = serde_json::Map::new();
+            if let Some(ref matcher) = hook_event.matcher {
+                new_entry.insert(
+                    "matcher".to_string(),
+                    serde_json::Value::String(matcher.clone()),
+                );
+            }
+            new_entry.insert(
+                "hooks".to_string(),
+                serde_json::Value::Array(vec![hook_command]),
+            );
+
+            event_array.push(serde_json::Value::Object(new_entry));
+            appended += 1;
+        }
+    }
+
+    if appended > 0 {
+        if let Some(parent) = settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(&settings)? + "\n";
+        fs::write(&settings_path, content)?;
+    }
+
+    Ok(appended)
+}
+
 /// Write `.claude/settings.json` if it does not already exist (user-managed
 /// once created, never overwritten). Contains Claude runtime behavior only —
 /// no secrets, no OpenCode-specific statements (ADR-C04 "CLAUDE.md design").
@@ -334,6 +483,7 @@ pub fn render_claude_projection(
     actors: &[ExportedActorFile],
     agent_files: &[ExportedAgentFile],
     runtime_spec: Option<&serde_json::Value>,
+    hook_adapters: &[ClaudeHookAdapter],
 ) -> anyhow::Result<()> {
     let mut skills_written = 0;
     for skill in skills {
@@ -378,6 +528,25 @@ pub fn render_claude_projection(
 
     if write_claude_root_md(target, project_name, agentic_root)? {
         println!("   {} CLAUDE.md", style("+").bold().green());
+    }
+
+    // Claude Code hook adapter scripts (NEXUS-APP dispatch 2d5017f7, Track
+    // B3): only present when the backend supplies claude_hook_adapters.
+    let scripts_written = write_claude_hook_adapters(target, hook_adapters)?;
+    if scripts_written > 0 {
+        println!(
+            "   {} .claude/hooks/ ({} adapter script(s))",
+            style("+").bold().green(),
+            scripts_written
+        );
+    }
+    let hooks_appended = merge_claude_hooks(target, hook_adapters)?;
+    if hooks_appended > 0 {
+        println!(
+            "   {} .claude/settings.json (+{} hook registration(s))",
+            style("+").bold().green(),
+            hooks_appended
+        );
     }
 
     Ok(())
@@ -771,8 +940,17 @@ mod tests {
             route_alias: None,
         }];
 
-        render_claude_projection(&dir, "Test Project", ".nexus", &skills, &actors, &[], None)
-            .unwrap();
+        render_claude_projection(
+            &dir,
+            "Test Project",
+            ".nexus",
+            &skills,
+            &actors,
+            &[],
+            None,
+            &[],
+        )
+        .unwrap();
 
         assert!(dir.join("CLAUDE.md").exists());
         assert!(dir.join(".claude/settings.json").exists());
@@ -804,6 +982,7 @@ mod tests {
             &[],
             &[],
             Some(&runtime_spec),
+            &[],
         )
         .unwrap();
 
@@ -837,5 +1016,257 @@ mod tests {
         assert!(canonical_ids.contains("nexus-init"));
         assert!(canonical_ids.contains("nexus-sec-scan"));
         assert!(canonical_ids.contains("nexus-code-review"));
+    }
+
+    // -------------------------------------------------------------------
+    // Track B3 (NEXUS-APP dispatch 2d5017f7): hook adapter distribution
+    // -------------------------------------------------------------------
+
+    fn sample_adapter(plugin_name: &str, target_path: &str) -> ClaudeHookAdapter {
+        ClaudeHookAdapter {
+            plugin_name: plugin_name.to_string(),
+            target_path: target_path.to_string(),
+            body: format!("// {} adapter body", plugin_name),
+            hook_events: vec![],
+        }
+    }
+
+    #[test]
+    fn test_kebab_case_event_matches_confirmed_adapter_contract() {
+        assert_eq!(kebab_case_event("PostToolUse"), "post-tool-use");
+        assert_eq!(kebab_case_event("PreCompact"), "pre-compact");
+        assert_eq!(kebab_case_event("PostCompact"), "post-compact");
+        assert_eq!(kebab_case_event("SessionStart"), "session-start");
+        assert_eq!(kebab_case_event("UserPromptSubmit"), "user-prompt-submit");
+        assert_eq!(kebab_case_event("Stop"), "stop");
+    }
+
+    #[test]
+    fn test_write_claude_hook_adapters_writes_scripts() {
+        let dir = temp_dir("hook-adapters-write");
+        let mut adapter = sample_adapter("session-guard", ".claude/hooks/nexus-session-guard.mjs");
+        adapter.body = "export default function() {}".to_string();
+
+        let written = write_claude_hook_adapters(&dir, &[adapter]).unwrap();
+        assert_eq!(written, 1);
+        let content =
+            fs::read_to_string(dir.join(".claude/hooks/nexus-session-guard.mjs")).unwrap();
+        assert_eq!(content, "export default function() {}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_claude_hook_adapters_resyncs_on_rerun() {
+        // Platform-managed generated code: always rewritten, unlike
+        // CLAUDE.md/settings.json which are create-once-only.
+        let dir = temp_dir("hook-adapters-resync");
+        let mut adapter = sample_adapter("session-guard", ".claude/hooks/nexus-session-guard.mjs");
+        adapter.body = "// v1".to_string();
+        write_claude_hook_adapters(&dir, &[adapter.clone()]).unwrap();
+
+        adapter.body = "// v2".to_string();
+        write_claude_hook_adapters(&dir, &[adapter]).unwrap();
+
+        let content =
+            fs::read_to_string(dir.join(".claude/hooks/nexus-session-guard.mjs")).unwrap();
+        assert_eq!(content, "// v2");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_appends_matcher_and_command() {
+        let dir = temp_dir("hooks-merge-basic");
+        let adapter = ClaudeHookAdapter {
+            plugin_name: "session-guard".to_string(),
+            target_path: ".claude/hooks/nexus-session-guard.mjs".to_string(),
+            body: String::new(),
+            hook_events: vec![nexus_core::api::ClaudeHookEvent {
+                event: "PostToolUse".to_string(),
+                matcher: Some("Edit|Write|Bash".to_string()),
+                timeout: None,
+            }],
+        };
+
+        let appended = merge_claude_hooks(&dir, std::slice::from_ref(&adapter)).unwrap();
+        assert_eq!(appended, 1);
+
+        let settings = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        assert!(settings.contains("\"PostToolUse\""));
+        assert!(settings.contains("\"matcher\": \"Edit|Write|Bash\""));
+        assert!(settings.contains("nexus-session-guard.mjs"));
+        assert!(settings.contains("post-tool-use"));
+        assert!(settings.contains("${CLAUDE_PROJECT_DIR}"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_two_plugins_same_event_both_kept() {
+        // Confirmed live against a real Claude Code session (dispatch
+        // 2d5017f7): multiple plugins may register independent array
+        // entries under the same event key.
+        let dir = temp_dir("hooks-merge-multi");
+        let headroom = ClaudeHookAdapter {
+            plugin_name: "headroom-intercept".to_string(),
+            target_path: ".claude/hooks/nexus-headroom-intercept.mjs".to_string(),
+            body: String::new(),
+            hook_events: vec![nexus_core::api::ClaudeHookEvent {
+                event: "Stop".to_string(),
+                matcher: None,
+                timeout: None,
+            }],
+        };
+        let cost_control = ClaudeHookAdapter {
+            plugin_name: "cost-control".to_string(),
+            target_path: ".claude/hooks/nexus-cost-control.mjs".to_string(),
+            body: String::new(),
+            hook_events: vec![nexus_core::api::ClaudeHookEvent {
+                event: "Stop".to_string(),
+                matcher: None,
+                timeout: None,
+            }],
+        };
+
+        let appended = merge_claude_hooks(&dir, &[headroom, cost_control]).unwrap();
+        assert_eq!(appended, 2);
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let stop_entries = settings["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop_entries.len(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_is_idempotent_on_rerun() {
+        let dir = temp_dir("hooks-merge-idempotent");
+        let adapter = ClaudeHookAdapter {
+            plugin_name: "session-guard".to_string(),
+            target_path: ".claude/hooks/nexus-session-guard.mjs".to_string(),
+            body: String::new(),
+            hook_events: vec![nexus_core::api::ClaudeHookEvent {
+                event: "PostToolUse".to_string(),
+                matcher: Some("Edit|Write".to_string()),
+                timeout: None,
+            }],
+        };
+
+        let first = merge_claude_hooks(&dir, std::slice::from_ref(&adapter)).unwrap();
+        assert_eq!(first, 1);
+        let second = merge_claude_hooks(&dir, std::slice::from_ref(&adapter)).unwrap();
+        assert_eq!(
+            second, 0,
+            "re-running with the same adapter must not duplicate the entry"
+        );
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+            1
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_preserves_operator_customization() {
+        // Must never touch/remove an entry the operator hand-edited, even
+        // for events/plugins nexus-cli also wants to register into.
+        let dir = temp_dir("hooks-merge-preserve");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{
+  "permissions": {},
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "MyCustomTool", "hooks": [{ "type": "command", "command": "echo custom" }] }
+    ]
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let adapter = ClaudeHookAdapter {
+            plugin_name: "session-guard".to_string(),
+            target_path: ".claude/hooks/nexus-session-guard.mjs".to_string(),
+            body: String::new(),
+            hook_events: vec![nexus_core::api::ClaudeHookEvent {
+                event: "PostToolUse".to_string(),
+                matcher: Some("Edit|Write".to_string()),
+                timeout: None,
+            }],
+        };
+
+        merge_claude_hooks(&dir, &[adapter]).unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let entries = settings["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(
+            entries.len(),
+            2,
+            "operator entry must be preserved, new one appended"
+        );
+        assert!(entries
+            .iter()
+            .any(|e| e["matcher"] == "MyCustomTool" && e["hooks"][0]["command"] == "echo custom"));
+        assert!(entries.iter().any(|e| e["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("nexus-session-guard.mjs")));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_noop_when_no_adapters() {
+        let dir = temp_dir("hooks-merge-empty");
+        let appended = merge_claude_hooks(&dir, &[]).unwrap();
+        assert_eq!(appended, 0);
+        assert!(!dir.join(".claude/settings.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_render_claude_projection_writes_hook_adapters_and_registers_hooks() {
+        let dir = temp_dir("full-render-hook-adapters");
+        let adapter = ClaudeHookAdapter {
+            plugin_name: "routing-guard".to_string(),
+            target_path: ".claude/hooks/nexus-routing-guard.mjs".to_string(),
+            body: "// routing-guard adapter".to_string(),
+            hook_events: vec![nexus_core::api::ClaudeHookEvent {
+                event: "SessionStart".to_string(),
+                matcher: None,
+                timeout: None,
+            }],
+        };
+
+        render_claude_projection(
+            &dir,
+            "Test Project",
+            ".nexus",
+            &[],
+            &[],
+            &[],
+            None,
+            &[adapter],
+        )
+        .unwrap();
+
+        assert!(dir.join(".claude/hooks/nexus-routing-guard.mjs").exists());
+        let settings = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        assert!(settings.contains("\"SessionStart\""));
+        assert!(settings.contains("session-start"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

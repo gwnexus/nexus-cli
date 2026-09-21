@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-09-21
+
+### Added
+- **Distribution for Claude Code plugin hook adapters** (Track B3, NEXUS-APP dispatch 2d5017f7). Previously `nexus pull`/`nexus init` had no way to get the actual `session-guard`/`headroom-intercept`/`compaction-plus`/`routing-guard`/`cost-control` adapter scripts onto a Claude Code project's disk, or to wire them into `.claude/settings.json`'s `hooks` block -- verified live end-to-end only via a manual, machine-specific workaround. Mirrors the existing OpenCode plugin distribution pattern (`.opencode/plugins/*.ts`, embedded server-side and written out by the CLI):
+  - New additive `af_export` field `claude_hook_adapters: Option<Vec<ClaudeHookAdapter>>` (`nexus_core::api`): each entry carries a `plugin_name`, `target_path` (e.g. `.claude/hooks/nexus-session-guard.mjs`), the bundled single-file `body`, and a list of `hook_events` (`event`, optional `matcher`, optional `timeout`). nexus-cli is a thin consumer -- nexus-app/nexus-oc-plugins own the bundled script content and versioning.
+  - `nexus init`/`nexus pull` now write each adapter's `body` to its `target_path` under `.claude/hooks/` (platform-managed generated code, always re-synced on every pull, like `.opencode/plugins/*.ts`).
+  - `.claude/settings.json`'s `hooks` block is merged idempotently, keyed by plugin: a new `{matcher, hooks: [...]}` entry is appended per `(event, adapter)` pair only if no existing entry's command already references that adapter's `target_path`; existing entries (including operator-hand-written ones) are never touched or removed. Unlike the `env` block (routing-guard follow-up, create-once-only), this merge runs on every `nexus pull`/`nexus init`, including against an already-existing `settings.json` -- confirmed multiple plugins can validly share the same event key as independent array entries (e.g. `headroom-intercept` and `cost-control` both on `Stop`).
+  - Hook event names are converted from Claude Code's PascalCase to the adapters' own kebab-case `argv[2]` subcommand contract (`PostToolUse` -> `post-tool-use`), confirmed directly against the adapter source; the hook payload itself is always read from stdin by the script, never passed as an argument.
+  - No new `nexus preflight` check added: the existing generic Node.js check already covers this (Node is already a hard requirement for the npm-sourced MCP server).
+  - 9 new unit tests: kebab-case conversion, script writing/re-sync, hooks-block merge (basic, idempotency, multi-plugin-same-event, operator-customization preservation, no-op with zero adapters), and a full-render integration test. Full workspace suite: 302/302 green, no clippy warnings, cargo fmt clean.
+
 ## [0.18.1] - 2026-09-21
 
 ### Added
