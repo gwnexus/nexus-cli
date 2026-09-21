@@ -228,26 +228,194 @@ fn current_project_id(workspace: &std::path::Path) -> Result<String, String> {
         })
 }
 
-/// `nexus_cost_summary` is registered for tool discovery, but has no real
-/// implementation yet: the actual cost/spend computation
-/// (`core/cost-control`, Helicone-backed) lives in nexus-oc-plugins
-/// (TypeScript) and nexus-cli has no local data source to read it from
-/// today (no API endpoint, no local telemetry file). Returns an honest
-/// "not available" result rather than fabricated numbers -- see NEXUS-APP
-/// dispatch af407643 follow-up for the data-source handoff this needs
-/// before it can be implemented for real.
+/// `nexus_cost_summary`: on-demand markdown cost/spend summary for the
+/// current session, queried live from Helicone (NEXUS-APP dispatch
+/// af407643 follow-up: there is no local file with real cost data --
+/// `.nexus/cost-control-state.json` only tracks debounce bookkeeping --
+/// the actual numbers come from a direct Helicone API call, per the exact
+/// spec nexus-oc-plugins' `core/cost-control/helicone.ts` uses).
+///
+/// Degrades gracefully (returns an honest message, never an error) when
+/// `HELICONE_API_KEY` or a session ID is not available in this process's
+/// environment -- `HELICONE_API_KEY` is an optional plugin prerequisite,
+/// and a missing session ID just means there is nothing to summarize yet.
 async fn cost_summary() -> Result<String, String> {
-    Ok(
-        "Cost summary is not yet available from nexus-cli's local MCP server: \
-the underlying cost/spend computation depends on a data source \
-(Helicone-backed telemetry, currently owned by nexus-oc-plugins' \
-core/cost-control) that nexus-cli does not have access to today. This \
-tool is registered for discovery but intentionally returns no fabricated \
-numbers. See NEXUS-APP dispatch af407643 for the follow-up needed (a \
-concrete local data file or API endpoint nexus-cli can read from) before \
-this can be implemented."
-            .to_string(),
-    )
+    let api_key = std::env::var("HELICONE_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let session_id = std::env::var("HELICONE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("NEXUS_SESSION_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+    cost_summary_with(api_key.as_deref(), session_id.as_deref()).await
+}
+
+/// Testable core of `nexus_cost_summary`, with credentials injected rather
+/// than read from the process environment (avoids mutating global env vars
+/// from tests, which would race under parallel test execution).
+async fn cost_summary_with(
+    api_key: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<String, String> {
+    let Some(api_key) = api_key else {
+        return Ok(
+            "Cost summary is not available: HELICONE_API_KEY is not set in this \
+process's environment. This is an optional Nexus plugin prerequisite -- set it in \
+`.env.nexus.local` (or wherever `nexus-local-tools` inherits its environment from) \
+to enable cost/spend queries."
+                .to_string(),
+        );
+    };
+    let Some(session_id) = session_id else {
+        return Ok(
+            "Cost summary is not available: no Helicone/Nexus session ID found in \
+this process's environment (HELICONE_SESSION_ID or NEXUS_SESSION_ID)."
+                .to_string(),
+        );
+    };
+
+    let client = reqwest::Client::new();
+    let body = json!({
+        "filter": {
+            "request": {
+                "properties": { "Helicone-Session-Id": { "equals": session_id } }
+            }
+        },
+        "limit": 1000,
+        "offset": 0,
+        "sort": { "created_at": "desc" }
+    });
+
+    let resp = client
+        .post("https://api.helicone.ai/v1/request/query")
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Helicone API request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Helicone API returned {}: {}", status, text));
+    }
+
+    let parsed: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("could not parse Helicone response: {}", e))?;
+
+    let data = parsed
+        .get("data")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(format_cost_summary(session_id, &data))
+}
+
+/// Aggregate Helicone request entries (per `core/cost-control/helicone.ts`'s
+/// response shape: `request.{model,prompt_tokens,completion_tokens,
+/// prompt_cache_read_tokens,prompt_cache_write_tokens,helicone_cost}`) into
+/// a markdown cost/spend summary, grouped by model. Pure and independently
+/// testable (no network access).
+fn format_cost_summary(session_id: &str, data: &[Value]) -> String {
+    if data.is_empty() {
+        return format!(
+            "No Helicone request data found for session `{}`.",
+            session_id
+        );
+    }
+
+    #[derive(Default)]
+    struct ModelTotals {
+        requests: u64,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        cost: f64,
+    }
+
+    let mut per_model: std::collections::BTreeMap<String, ModelTotals> =
+        std::collections::BTreeMap::new();
+    let mut grand_total = ModelTotals::default();
+
+    for entry in data {
+        let req = entry.get("request").cloned().unwrap_or(Value::Null);
+        let model = req
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let prompt_tokens = req
+            .get("prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let completion_tokens = req
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cache_read_tokens = req
+            .get("prompt_cache_read_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cache_write_tokens = req
+            .get("prompt_cache_write_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cost = req
+            .get("helicone_cost")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        let totals = per_model.entry(model).or_default();
+        totals.requests += 1;
+        totals.prompt_tokens += prompt_tokens;
+        totals.completion_tokens += completion_tokens;
+        totals.cache_read_tokens += cache_read_tokens;
+        totals.cache_write_tokens += cache_write_tokens;
+        totals.cost += cost;
+
+        grand_total.requests += 1;
+        grand_total.prompt_tokens += prompt_tokens;
+        grand_total.completion_tokens += completion_tokens;
+        grand_total.cache_read_tokens += cache_read_tokens;
+        grand_total.cache_write_tokens += cache_write_tokens;
+        grand_total.cost += cost;
+    }
+
+    let mut md = String::new();
+    md.push_str(&format!("# Cost Summary (session `{}`)\n\n", session_id));
+    md.push_str(&format!("**Total requests:** {}\n\n", grand_total.requests));
+    md.push_str("| Model | Requests | Prompt tokens | Completion tokens | Cache read | Cache write | Cost (USD) |\n");
+    md.push_str("|---|---|---|---|---|---|---|\n");
+    for (model, t) in &per_model {
+        md.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | ${:.4} |\n",
+            model,
+            t.requests,
+            t.prompt_tokens,
+            t.completion_tokens,
+            t.cache_read_tokens,
+            t.cache_write_tokens,
+            t.cost
+        ));
+    }
+    md.push_str(&format!(
+        "\n**Totals:** {} prompt tokens, {} completion tokens, {} cache-read tokens, {} cache-write tokens, ${:.4} total cost\n",
+        grand_total.prompt_tokens,
+        grand_total.completion_tokens,
+        grand_total.cache_read_tokens,
+        grand_total.cache_write_tokens,
+        grand_total.cost
+    ));
+
+    md
 }
 
 #[cfg(test)]
@@ -379,9 +547,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cost_summary_returns_honest_not_available_message() {
-        let result = cost_summary().await.unwrap();
-        assert!(result.contains("not yet available"));
-        assert!(result.contains("af407643"));
+    async fn test_cost_summary_missing_api_key_is_honest_not_error() {
+        let result = cost_summary_with(None, Some("session-1")).await.unwrap();
+        assert!(result.contains("HELICONE_API_KEY"));
+        assert!(!result.contains("error"));
+    }
+
+    #[tokio::test]
+    async fn test_cost_summary_missing_session_id_is_honest_not_error() {
+        let result = cost_summary_with(Some("key"), None).await.unwrap();
+        assert!(result.contains("session ID"));
+    }
+
+    #[test]
+    fn test_format_cost_summary_empty_data() {
+        let summary = format_cost_summary("session-1", &[]);
+        assert!(summary.contains("No Helicone request data"));
+        assert!(summary.contains("session-1"));
+    }
+
+    #[test]
+    fn test_format_cost_summary_aggregates_by_model() {
+        let data = vec![
+            json!({
+                "request": {
+                    "model": "gpt-4o-mini",
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "prompt_cache_read_tokens": 10,
+                    "prompt_cache_write_tokens": 5,
+                    "helicone_cost": 0.01
+                }
+            }),
+            json!({
+                "request": {
+                    "model": "gpt-4o-mini",
+                    "prompt_tokens": 200,
+                    "completion_tokens": 100,
+                    "prompt_cache_read_tokens": 0,
+                    "prompt_cache_write_tokens": 0,
+                    "helicone_cost": 0.02
+                }
+            }),
+            json!({
+                "request": {
+                    "model": "claude-sonnet-5",
+                    "prompt_tokens": 500,
+                    "completion_tokens": 300,
+                    "helicone_cost": 0.15
+                }
+            }),
+        ];
+
+        let summary = format_cost_summary("session-42", &data);
+
+        assert!(summary.contains("session-42"));
+        assert!(summary.contains("**Total requests:** 3"));
+        assert!(summary.contains("gpt-4o-mini"));
+        assert!(summary.contains("claude-sonnet-5"));
+        // gpt-4o-mini totals: 300 prompt, 150 completion, 2 requests, $0.03
+        assert!(summary.contains("| gpt-4o-mini | 2 | 300 | 150 | 10 | 5 | $0.0300 |"));
+        // claude-sonnet-5: 1 request, no cache tokens (default 0)
+        assert!(summary.contains("| claude-sonnet-5 | 1 | 500 | 300 | 0 | 0 | $0.1500 |"));
+        // Grand total cost: 0.01 + 0.02 + 0.15 = 0.18
+        assert!(summary.contains("$0.1800 total cost"));
     }
 }

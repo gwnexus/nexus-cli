@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-09-21
+
+### Added
+- **`nexus_cost_summary` (local MCP server) now implements real Helicone-backed cost/spend queries** (NEXUS-APP dispatch af407643 follow-up). Per the exact spec supplied (`core/cost-control/helicone.ts`): queries `POST https://api.helicone.ai/v1/request/query` filtered by `Helicone-Session-Id`, aggregates `prompt_tokens`/`completion_tokens`/`prompt_cache_read_tokens`/`prompt_cache_write_tokens`/`helicone_cost` per model, and renders a markdown table plus grand totals. Reads `HELICONE_API_KEY` and `HELICONE_SESSION_ID`/`NEXUS_SESSION_ID` from the process environment; degrades gracefully with an honest, non-error message (not a crash, not fabricated numbers) when either is absent, matching the existing plugin's documented graceful-degradation behavior for an optional prerequisite. 6 new unit tests (credential-injected, no env-var mutation to keep parallel test execution safe): both graceful-degradation paths and markdown aggregation across multiple models. Full workspace suite: 293/293 green, no clippy warnings, cargo fmt clean.
+
 ## [0.18.0] - 2026-09-20
 
 ### Added
