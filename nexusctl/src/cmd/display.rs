@@ -76,6 +76,7 @@ mod tests {
                     id: project_id.to_string(),
                     name: "NEXUS-CLI".to_string(),
                     slug: "nexus-cli".to_string(),
+                    agent_owner: None,
                 }),
                 ..Default::default()
             },

@@ -433,3 +433,51 @@ fn test_config_source_display() {
     assert_eq!(ConfigSource::Global.to_string(), "global");
     assert_eq!(ConfigSource::Default.to_string(), "default");
 }
+
+// ---------------------------------------------------------------------------
+// agent_owner-driven run.default_tool (NEXUS-APP dispatch dfd4e655)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_run_config_default_tool_is_unset_by_default() {
+    // "Unset" must be distinguishable from an explicit "opencode", otherwise
+    // `nexus run` cannot tell whether it may derive the tool from agent_owner.
+    let run = nexus_core::config::RunConfig::default();
+    assert_eq!(run.default_tool, None);
+}
+
+#[test]
+fn test_run_config_default_tool_roundtrip_and_omitted_when_unset() {
+    let config = Config::default();
+    let serialized = toml::to_string_pretty(&config).unwrap();
+    assert!(
+        !serialized.contains("default_tool"),
+        "unset default_tool must not be written back: {serialized}"
+    );
+
+    let mut config = Config::default();
+    config.set("run.default_tool", "claude").unwrap();
+    let serialized = toml::to_string_pretty(&config).unwrap();
+    let deserialized: Config = toml::from_str(&serialized).unwrap();
+    assert_eq!(deserialized.run.default_tool.as_deref(), Some("claude"));
+}
+
+#[test]
+fn test_run_config_reads_pre_existing_explicit_default_tool() {
+    // Config files written before this change carry an explicit value; it must
+    // keep winning over any agent_owner derivation.
+    let config: Config = toml::from_str("[run]\ndefault_tool = \"opencode\"\n").unwrap();
+    assert_eq!(config.run.default_tool.as_deref(), Some("opencode"));
+}
+
+#[test]
+fn test_tool_for_agent_owner() {
+    use nexus_core::config::tool_for_agent_owner;
+    assert_eq!(tool_for_agent_owner(Some("claude-cli")), "claude");
+    assert_eq!(tool_for_agent_owner(Some("opencode")), "opencode");
+    // "both" is ambiguous and unknown/absent flavors are legacy workspaces:
+    // all stay on the platform default.
+    assert_eq!(tool_for_agent_owner(Some("both")), "opencode");
+    assert_eq!(tool_for_agent_owner(Some("something-else")), "opencode");
+    assert_eq!(tool_for_agent_owner(None), "opencode");
+}

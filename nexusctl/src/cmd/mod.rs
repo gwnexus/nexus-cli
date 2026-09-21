@@ -329,7 +329,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 skip_checks || force,
                 force,
                 args,
-                &default_tool,
+                default_tool.as_deref(),
                 countdown_secs,
             )
             .await?;

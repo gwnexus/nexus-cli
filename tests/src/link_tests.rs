@@ -33,6 +33,7 @@ fn test_save_and_load_project_config() {
             id: "fdc7a78c-d0b9-46fd-8206-9fc57301de2d".to_string(),
             name: "My Nexus Project".to_string(),
             slug: "my-nexus-project".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -73,6 +74,7 @@ fn test_save_project_config_creates_nexus_dir() {
             id: "abc".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -116,6 +118,7 @@ fn test_remove_project_section() {
             id: "to-be-removed".to_string(),
             name: "Removal Target".to_string(),
             slug: "removal-target".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -194,6 +197,7 @@ fn test_resolve_project_id_from_config() {
             id: "fdc7a78c-d0b9-46fd-8206-9fc57301de2d".to_string(),
             name: "Test Project".to_string(),
             slug: "test-project".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -220,6 +224,7 @@ fn test_resolve_project_id_with_flag_override() {
             id: "config-id-111".to_string(),
             name: "Config Project".to_string(),
             slug: "config-proj".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -268,6 +273,7 @@ fn test_resolve_project_id_skips_empty_cli_flag() {
             id: "real-id".to_string(),
             name: "Real".to_string(),
             slug: "real".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -294,6 +300,7 @@ fn test_resolve_project_id_skips_empty_config_id() {
             id: "".to_string(),
             name: "Empty".to_string(),
             slug: "empty".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -323,6 +330,7 @@ fn test_project_config_toml_content() {
             id: "uuid-123".to_string(),
             name: "Content Check".to_string(),
             slug: "content-check".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -357,6 +365,7 @@ fn test_save_overwrites_existing_config() {
             id: "first-id".to_string(),
             name: "First".to_string(),
             slug: "first".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -371,6 +380,7 @@ fn test_save_overwrites_existing_config() {
             id: "second-id".to_string(),
             name: "Second".to_string(),
             slug: "second".to_string(),
+            agent_owner: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -389,4 +399,67 @@ fn test_save_overwrites_existing_config() {
 
     // Cleanup
     let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Cached agent_owner tool flavor (NEXUS-APP dispatch dfd4e655)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_agent_owner_roundtrip() {
+    use nexus_core::config::{load_agent_owner, update_agent_owner};
+    let dir = temp_dir("agent-owner-roundtrip");
+
+    let config = ProjectConfig {
+        project: Some(ProjectInfo {
+            id: "fdc7a78c-d0b9-46fd-8206-9fc57301de2d".to_string(),
+            name: "Claude Project".to_string(),
+            slug: "claude-project".to_string(),
+            agent_owner: None,
+        }),
+        mcp: None,
+        mcp_extra: None,
+        plugins: None,
+        config: None,
+    };
+    save_project_config(Some(&dir), &config).unwrap();
+    assert_eq!(load_agent_owner(Some(&dir)), None);
+
+    assert!(update_agent_owner(Some(&dir), Some("claude-cli")).unwrap());
+    assert_eq!(load_agent_owner(Some(&dir)).as_deref(), Some("claude-cli"));
+
+    // Idempotent: no rewrite when the cached value already matches.
+    assert!(!update_agent_owner(Some(&dir), Some("claude-cli")).unwrap());
+    // A backend that supplies nothing must not clobber the cached value.
+    assert!(!update_agent_owner(Some(&dir), None).unwrap());
+    assert_eq!(load_agent_owner(Some(&dir)).as_deref(), Some("claude-cli"));
+
+    // A flavor change is picked up.
+    assert!(update_agent_owner(Some(&dir), Some("opencode")).unwrap());
+    assert_eq!(load_agent_owner(Some(&dir)).as_deref(), Some("opencode"));
+}
+
+#[test]
+fn test_agent_owner_absent_in_legacy_config() {
+    use nexus_core::config::load_agent_owner;
+    let dir = temp_dir("agent-owner-legacy");
+    fs::create_dir_all(dir.join(".nexus")).unwrap();
+    // A config.toml written before the field existed must still parse.
+    fs::write(
+        dir.join(".nexus").join("config.toml"),
+        "[project]\nid = \"fdc7a78c-d0b9-46fd-8206-9fc57301de2d\"\nname = \"Legacy\"\n",
+    )
+    .unwrap();
+
+    let loaded = load_project_config(Some(&dir)).unwrap().unwrap();
+    assert_eq!(loaded.project.unwrap().agent_owner, None);
+    assert_eq!(load_agent_owner(Some(&dir)), None);
+}
+
+#[test]
+fn test_agent_owner_noop_without_linked_project() {
+    use nexus_core::config::{load_agent_owner, update_agent_owner};
+    let dir = temp_dir("agent-owner-unlinked");
+    assert!(!update_agent_owner(Some(&dir), Some("claude-cli")).unwrap());
+    assert_eq!(load_agent_owner(Some(&dir)), None);
 }

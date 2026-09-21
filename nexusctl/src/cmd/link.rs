@@ -86,6 +86,10 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
         id: selected_project.id.clone(),
         name: selected_project.name.clone(),
         slug: selected_project.slug.clone().unwrap_or_default(),
+        agent_owner: selected_project
+            .agent_owner
+            .clone()
+            .filter(|v| !v.is_empty()),
     };
 
     // Load existing config or create new

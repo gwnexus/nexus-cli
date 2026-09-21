@@ -14,6 +14,10 @@ use crate::Error;
 /// Default Nexus API base URL.
 const DEFAULT_API_URL: &str = "https://nexus.gatewarden.eu";
 
+/// Tool binary `nexus run` launches when neither `--tool`, an explicit
+/// `run.default_tool`, nor the project's `agent_owner` selects something else.
+pub const DEFAULT_RUN_TOOL: &str = "opencode";
+
 /// Output format preference, stored in config and resolved from CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -126,10 +130,6 @@ fn default_check_updates() -> bool {
     true
 }
 
-fn default_run_tool() -> String {
-    "opencode".to_string()
-}
-
 fn default_launch_countdown_secs() -> u64 {
     5
 }
@@ -137,9 +137,14 @@ fn default_launch_countdown_secs() -> u64 {
 /// Configuration for `nexus run` stored in `[run]` section of `~/.config/nexus/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
-    /// Default tool binary to launch (default: "opencode").
-    #[serde(default = "default_run_tool")]
-    pub default_tool: String,
+    /// Default tool binary to launch.
+    ///
+    /// `None` means "not configured": `nexus run` then derives the binary from
+    /// the linked project's `agent_owner` (`claude` for `claude-cli`,
+    /// [`DEFAULT_RUN_TOOL`] otherwise). An explicit value always wins over the
+    /// derivation; `--tool` always wins over both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_tool: Option<String>,
 
     /// Seconds to count down after pre-launch checks before starting the tool (default: 5).
     /// Set to 0 to skip the countdown and launch immediately.
@@ -150,7 +155,7 @@ pub struct RunConfig {
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
-            default_tool: default_run_tool(),
+            default_tool: None,
             launch_countdown_secs: default_launch_countdown_secs(),
         }
     }
@@ -287,7 +292,7 @@ impl Config {
                 Ok(())
             }
             "run.default_tool" => {
-                self.run.default_tool = value.to_string();
+                self.run.default_tool = Some(value.to_string());
                 Ok(())
             }
             "run.launch_countdown_secs" => {
@@ -379,6 +384,18 @@ pub struct ProjectInfo {
     /// URL-safe project slug.
     #[serde(default)]
     pub slug: String,
+
+    /// Tool flavor owned by this project: `"opencode"`, `"claude-cli"`, or
+    /// `"both"`. Mirrors the backend's `agent_owner` and is refreshed by
+    /// `nexus link`, `nexus init`, and `nexus pull`.
+    ///
+    /// Cached locally so launch-time commands (`nexus run`, `nexus preflight`)
+    /// can pick the right artifacts and binary without a network round-trip.
+    /// `None` means "not known yet" (workspace linked before this field
+    /// existed, or the backend did not supply it) and callers must fall back
+    /// to OpenCode behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_owner: Option<String>,
 }
 
 /// Extra MCP server definition for `[mcp_extra.<name>]` in config.toml.
@@ -553,7 +570,59 @@ pub fn load_linked_project(from: Option<&std::path::Path>) -> Result<Option<Proj
     }
 }
 
-/// Resolve a project ID from multiple sources (highest priority first):
+/// Cache the project's `agent_owner` tool flavor in `.nexus/config.toml`.
+///
+/// Called by `nexus link`, `nexus init`, and `nexus pull` — every command that
+/// already learns the flavor from the backend — so launch-time commands can
+/// read it without a network round-trip. No-op when nothing is linked, when
+/// the backend supplied no value, or when the cached value already matches.
+/// Returns `true` when the file was rewritten.
+pub fn update_agent_owner(
+    from: Option<&std::path::Path>,
+    agent_owner: Option<&str>,
+) -> Result<bool, Error> {
+    let Some(owner) = agent_owner.filter(|v| !v.is_empty()) else {
+        return Ok(false);
+    };
+    let Some(mut pc) = load_project_config(from)? else {
+        return Ok(false);
+    };
+    let Some(project) = pc.project.as_mut() else {
+        return Ok(false);
+    };
+    if project.agent_owner.as_deref() == Some(owner) {
+        return Ok(false);
+    }
+    project.agent_owner = Some(owner.to_string());
+    save_project_config(from, &pc)?;
+    Ok(true)
+}
+
+/// Load the cached `agent_owner` tool flavor for the linked project, if known.
+///
+/// Reads `[project].agent_owner` from `.nexus/config.toml`. Returns `None`
+/// when no project is linked, the workspace predates the field, or the
+/// backend never supplied a value — in which case callers must fall back to
+/// OpenCode behaviour.
+pub fn load_agent_owner(from: Option<&std::path::Path>) -> Option<String> {
+    load_linked_project(from)
+        .ok()
+        .flatten()
+        .and_then(|p| p.agent_owner)
+        .filter(|v| !v.is_empty())
+}
+
+/// Map an `agent_owner` tool flavor to the binary `nexus run` should launch.
+///
+/// `"both"` and unknown values resolve to OpenCode, which stays the platform
+/// default when a project has not committed to a single runtime.
+pub fn tool_for_agent_owner(agent_owner: Option<&str>) -> &'static str {
+    match agent_owner {
+        Some("claude-cli") => "claude",
+        _ => DEFAULT_RUN_TOOL,
+    }
+}
+
 /// 1. Explicit CLI flag (`--project-id`)
 /// 2. `.nexus/config.toml` `[project].id`
 ///

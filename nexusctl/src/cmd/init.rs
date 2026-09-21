@@ -220,6 +220,11 @@ pub async fn run(
             let tool_flavor = project_detail
                 .as_ref()
                 .and_then(|d| d.project.agent_owner.clone());
+
+            // Cache the flavor in .nexus/config.toml so launch-time commands
+            // (`nexus run`, `nexus preflight`) can pick the right artifacts and
+            // binary offline (NEXUS-APP dispatch dfd4e655).
+            let _ = config::update_agent_owner(Some(&target), tool_flavor.as_deref());
             let agentic_root = project_detail
                 .as_ref()
                 .and_then(|d| d.project.agentic_root.clone())
@@ -681,10 +686,18 @@ fn create_nexus_dir(
                     .unwrap_or(true);
 
                 if needs_update {
+                    // Preserve the cached tool flavor: it is refreshed
+                    // separately via config::update_agent_owner once the
+                    // backend has been queried.
+                    let cached_owner = existing
+                        .project
+                        .as_ref()
+                        .and_then(|p| p.agent_owner.clone());
                     existing.project = Some(config::ProjectInfo {
                         id: id.to_string(),
                         name: project_name.to_string(),
                         slug: String::new(),
+                        agent_owner: cached_owner,
                     });
                     config::save_project_config(Some(target), &existing)?;
                 }

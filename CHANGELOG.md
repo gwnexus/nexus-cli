@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-09-21
+
+### Added
+- **`nexus run` and `nexus preflight` now respect the project's `agent_owner`** instead of assuming OpenCode (NEXUS-APP dispatch dfd4e655). `nexus run --tool claude` already worked mechanically, but every surrounding check was OpenCode-specific, so a `claude-cli` project got actively misleading output.
+- `[project].agent_owner` is cached in `.nexus/config.toml` by `nexus link`, `nexus init`, and `nexus pull`, so launch-time commands resolve the tool flavor without a network round-trip. `nexus run` additionally refreshes it from `af_export` when it is talking to the backend anyway (no extra request). New `nexus_core::config` helpers: `load_agent_owner`, `update_agent_owner`, `tool_for_agent_owner`.
+- `nexus preflight` checks for the `claude` binary, gated on `agent_owner` being `claude-cli` or `both`. OpenCode-only projects are never told to install a binary they do not launch.
+
+### Changed
+- The `nexus run` pre-launch MCP config check inspects the artifact that actually applies to the flavor: root `.mcp.json` for `claude-cli`, `opencode.json` for `opencode`, both for `both`. Previously a `claude-cli` project was warned "No opencode.json - run 'nexus init'" about a file it is never supposed to have.
+- The post-session Headroom section detects the Claude Code hook adapter under `.claude/hooks/` (shipped in 0.19.0, Track B3) in addition to the OpenCode plugin at `.opencode/plugins/nexus-headroom-intercept.ts`. The adapter file name is server-supplied, so detection matches on the plugin name rather than a fixed path.
+- `run.default_tool` is now optional (`Option<String>`), so "not configured" is distinguishable from an explicit `"opencode"`. Resolution order for `nexus run`: `--tool` > explicit `run.default_tool` > `agent_owner` (`claude-cli` -> `claude`) > `opencode`. Existing config files with an explicit `default_tool` are unaffected; an unset value is no longer written back to `~/.config/nexus/config.toml`.
+- `both` and unknown/absent flavors continue to resolve to `opencode`. Workspaces linked before `agent_owner` was cached behave exactly as before until the next `nexus link` / `nexus init` / `nexus pull`.
+
+### Notes
+- Out of scope per the dispatch: no job/queue/daemon semantics, no headless plumbing or result write-back (those belong to ADR-0107 delegation work), and no changes to `claude_render.rs` or `.mcp.json` generation.
+
 ## [0.19.0] - 2026-09-21
 
 ### Added

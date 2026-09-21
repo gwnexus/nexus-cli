@@ -755,6 +755,11 @@ pub async fn run(
         }
     };
 
+    // Cache the flavor in .nexus/config.toml so launch-time commands
+    // (`nexus run`, `nexus preflight`) can pick the right artifacts and binary
+    // offline (NEXUS-APP dispatch dfd4e655).
+    let _ = nexus_core::config::update_agent_owner(Some(&workspace), tool_flavor.as_deref());
+
     let plugin_mcp_servers = af_export_result
         .as_ref()
         .ok()

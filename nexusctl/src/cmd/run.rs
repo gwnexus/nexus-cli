@@ -44,11 +44,16 @@ pub async fn run(
     skip_checks: bool,
     force: bool,
     args: &[String],
-    default_tool: &str,
+    default_tool: Option<&str>,
     countdown_secs: u64,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
     let agentic_root = resolve_agentic_root(&workspace);
+
+    // Tool flavor this project is owned by ("opencode" / "claude-cli" / "both").
+    // Cached in .nexus/config.toml by link/init/pull, refreshed below from
+    // af_export when we talk to the backend anyway.
+    let mut agent_owner = config::load_agent_owner(Some(&workspace));
 
     // ── 1. Load .nexus/env (plugin defaults from last pull) ────────────────
     let env_file_path = workspace.join(&agentic_root).join("env");
@@ -63,6 +68,9 @@ pub async fn run(
                 if !project_id.is_empty() {
                     if let Ok(af_export) = client.export_agent_files(&project_id).await {
                         // Merge: af_export wins (fresher)
+                        if let Some(owner) = af_export.agent_owner.filter(|v| !v.is_empty()) {
+                            agent_owner = Some(owner);
+                        }
                         for (k, v) in af_export.plugin_env {
                             plugin_env.insert(k, v);
                         }
@@ -99,7 +107,8 @@ pub async fn run(
         }
     }
 
-    let effective_tool = tool.unwrap_or(default_tool);
+    let effective_tool = resolve_effective_tool(tool, default_tool, agent_owner.as_deref());
+    let effective_tool = effective_tool.as_str();
 
     // ── 5. Dry-run / show-env output ─────────────────────────────────────────
     if dry_run || show_env {
@@ -162,6 +171,7 @@ pub async fn run(
             api_url,
             &workspace,
             effective_tool,
+            agent_owner.as_deref(),
             &env_file_path,
             force,
             countdown_secs,
@@ -273,6 +283,7 @@ pub async fn run(
                     run_start_epoch,
                     token_stats.as_ref(),
                     activity_stats.as_ref(),
+                    agent_owner.as_deref(),
                 );
             }
             None => {
@@ -437,6 +448,93 @@ fn print_env_table(
 }
 
 // ---------------------------------------------------------------------------
+// Tool-flavor resolution
+// ---------------------------------------------------------------------------
+
+/// Decide which binary `nexus run` launches.
+///
+/// Priority (highest first), per NEXUS-APP dispatch dfd4e655:
+/// 1. `--tool <bin>` on the command line
+/// 2. an explicit `run.default_tool` in `~/.config/nexus/config.toml`
+/// 3. the linked project's `agent_owner` (`claude-cli` -> `claude`)
+/// 4. [`config::DEFAULT_RUN_TOOL`]
+fn resolve_effective_tool(
+    cli_tool: Option<&str>,
+    configured_default: Option<&str>,
+    agent_owner: Option<&str>,
+) -> String {
+    if let Some(t) = cli_tool.filter(|t| !t.is_empty()) {
+        return t.to_string();
+    }
+    if let Some(t) = configured_default.filter(|t| !t.is_empty()) {
+        return t.to_string();
+    }
+    config::tool_for_agent_owner(agent_owner).to_string()
+}
+
+/// Does this project's flavor include Claude Code?
+fn wants_claude(agent_owner: Option<&str>) -> bool {
+    matches!(agent_owner, Some("claude-cli") | Some("both"))
+}
+
+/// Does this project's flavor include OpenCode?
+///
+/// Unknown/absent flavors count as OpenCode, preserving pre-dfd4e655 behaviour
+/// for workspaces linked before `agent_owner` was cached locally.
+fn wants_opencode(agent_owner: Option<&str>) -> bool {
+    !matches!(agent_owner, Some("claude-cli"))
+}
+
+/// Check the MCP config artifact(s) that actually matter for this project's
+/// tool flavor.
+///
+/// Before dispatch dfd4e655 this unconditionally inspected `opencode.json` and
+/// told `claude-cli` projects to "run 'nexus init'" for a file they are never
+/// supposed to have. The authoritative artifact is `opencode.json` for
+/// OpenCode and the root `.mcp.json` for Claude Code (`both` needs each).
+fn mcp_config_check(workspace: &Path, agent_owner: Option<&str>) -> CheckResult {
+    let mut expected: Vec<&str> = Vec::new();
+    if wants_opencode(agent_owner) {
+        expected.push("opencode.json");
+    }
+    if wants_claude(agent_owner) {
+        expected.push(".mcp.json");
+    }
+
+    let mut configured: Vec<&str> = Vec::new();
+    let mut no_nexus_block: Vec<&str> = Vec::new();
+    let mut missing: Vec<&str> = Vec::new();
+
+    for name in &expected {
+        let path = workspace.join(name);
+        if !path.exists() {
+            missing.push(name);
+        } else if fs::read_to_string(&path)
+            .unwrap_or_default()
+            .contains("\"nexus\"")
+        {
+            configured.push(name);
+        } else {
+            no_nexus_block.push(name);
+        }
+    }
+
+    if !missing.is_empty() {
+        return CheckResult::Warn(format!(
+            "No {} — run 'nexus init' or 'nexus pull'",
+            missing.join(", ")
+        ));
+    }
+    if !no_nexus_block.is_empty() {
+        return CheckResult::Warn(format!(
+            "{} exists but no nexus MCP block",
+            no_nexus_block.join(", ")
+        ));
+    }
+    CheckResult::Pass(format!("{} (nexus MCP configured)", configured.join(", ")))
+}
+
+// ---------------------------------------------------------------------------
 // Pre-launch checks
 // ---------------------------------------------------------------------------
 
@@ -445,6 +543,7 @@ async fn run_prelaunch_checks(
     api_url: &str,
     workspace: &Path,
     tool: &str,
+    agent_owner: Option<&str>,
     env_file: &Path,
     force: bool,
     countdown_secs: u64,
@@ -491,19 +590,10 @@ async fn run_prelaunch_checks(
     };
     checks.push(("Auth", auth_check));
 
-    // MCP Config
-    let oc_path = workspace.join("opencode.json");
-    let mcp_check = if oc_path.exists() {
-        let content = fs::read_to_string(&oc_path).unwrap_or_default();
-        if content.contains("\"nexus\"") {
-            CheckResult::Pass("opencode.json (nexus MCP configured)".into())
-        } else {
-            CheckResult::Warn("opencode.json exists but no nexus MCP block".into())
-        }
-    } else {
-        CheckResult::Warn("No opencode.json — run 'nexus init' or 'nexus pull'".into())
-    };
-    checks.push(("MCP Config", mcp_check));
+    // MCP Config — which artifact is authoritative depends on the project's
+    // tool flavor (NEXUS-APP dispatch dfd4e655): OpenCode reads opencode.json,
+    // Claude Code reads the root .mcp.json written by `claude_render`.
+    checks.push(("MCP Config", mcp_config_check(workspace, agent_owner)));
 
     // Plugin Env
     let env_check = if env_file.exists() {
@@ -777,6 +867,33 @@ fn exec_tool(tool: &str, args: &[String]) -> anyhow::Result<()> {
 // Post-session summary
 // ---------------------------------------------------------------------------
 
+/// Is a headroom adapter installed in this workspace for the project's flavor?
+///
+/// OpenCode ships it as `.opencode/plugins/nexus-headroom-intercept.ts`.
+/// Claude Code ships it as a hook adapter under `.claude/hooks/` (v0.19.0,
+/// Track B3) whose file name is server-supplied, so match on the plugin name
+/// rather than a fixed path.
+fn headroom_adapter_installed(workspace: &Path, agent_owner: Option<&str>) -> bool {
+    if wants_opencode(agent_owner)
+        && workspace
+            .join(".opencode/plugins/nexus-headroom-intercept.ts")
+            .exists()
+    {
+        return true;
+    }
+    if wants_claude(agent_owner) {
+        if let Ok(entries) = fs::read_dir(workspace.join(".claude").join("hooks")) {
+            return entries.flatten().any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains("headroom")
+            });
+        }
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 fn print_session_summary(
     workspace: &Path,
@@ -789,6 +906,7 @@ fn print_session_summary(
     run_start_epoch: u64,
     token_stats: Option<&TokenStats>,
     activity_stats: Option<&ActivityStats>,
+    agent_owner: Option<&str>,
 ) {
     let hrs = elapsed.as_secs() / 3600;
     let mins = (elapsed.as_secs() % 3600) / 60;
@@ -863,10 +981,8 @@ fn print_session_summary(
 
     // Headroom stats from .nexus/headroom-intercept.jsonl
     // Only show this section if headroom is configured for this workspace
-    let headroom_active = env::var("HEADROOM_MODE").is_ok()
-        || workspace
-            .join(".opencode/plugins/nexus-headroom-intercept.ts")
-            .exists();
+    let headroom_active =
+        env::var("HEADROOM_MODE").is_ok() || headroom_adapter_installed(workspace, agent_owner);
     let headroom = read_headroom_stats(workspace, run_start_epoch);
     if headroom_active || headroom.is_some() {
         println!();
@@ -1938,5 +2054,147 @@ mod tests {
         let s = stats.unwrap();
         assert_eq!(s.mode, "transform");
         assert_eq!(s.compressions, 7);
+    }
+
+    // -------------------------------------------------------------------
+    // agent_owner-aware launch behaviour (NEXUS-APP dispatch dfd4e655)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_effective_tool_cli_flag_always_wins() {
+        assert_eq!(
+            resolve_effective_tool(Some("zed"), Some("opencode"), Some("claude-cli")),
+            "zed"
+        );
+    }
+
+    #[test]
+    fn test_effective_tool_explicit_config_beats_agent_owner() {
+        assert_eq!(
+            resolve_effective_tool(None, Some("opencode"), Some("claude-cli")),
+            "opencode"
+        );
+    }
+
+    #[test]
+    fn test_effective_tool_derived_from_claude_cli_flavor() {
+        assert_eq!(
+            resolve_effective_tool(None, None, Some("claude-cli")),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn test_effective_tool_defaults_to_opencode_for_other_flavors() {
+        // "both" is deliberately ambiguous and stays on the platform default;
+        // an unlinked/legacy workspace (None) must behave exactly as before.
+        assert_eq!(resolve_effective_tool(None, None, Some("both")), "opencode");
+        assert_eq!(
+            resolve_effective_tool(None, None, Some("opencode")),
+            "opencode"
+        );
+        assert_eq!(resolve_effective_tool(None, None, None), "opencode");
+    }
+
+    #[test]
+    fn test_mcp_config_check_claude_project_reads_root_mcp_json() {
+        let dir = tmp_dir("mcp_check_claude");
+        fs::write(dir.join(".mcp.json"), r#"{"mcpServers":{"nexus":{}}}"#).unwrap();
+
+        // Regression: this used to warn "No opencode.json" for a claude-cli
+        // project, a file such a project is never supposed to have.
+        match mcp_config_check(&dir, Some("claude-cli")) {
+            CheckResult::Pass(msg) => {
+                assert!(msg.contains(".mcp.json"), "unexpected message: {msg}");
+                assert!(!msg.contains("opencode.json"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_config_check_claude_project_ignores_missing_opencode_json() {
+        let dir = tmp_dir("mcp_check_claude_no_oc");
+        // No .mcp.json and no opencode.json: the warning must name the
+        // artifact that actually applies to this flavor.
+        match mcp_config_check(&dir, Some("claude-cli")) {
+            CheckResult::Warn(msg) => {
+                assert!(msg.contains(".mcp.json"), "unexpected message: {msg}");
+                assert!(!msg.contains("opencode.json"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_config_check_opencode_project_unchanged() {
+        let dir = tmp_dir("mcp_check_oc");
+        fs::write(dir.join("opencode.json"), r#"{"mcp":{"nexus":{}}}"#).unwrap();
+        assert!(matches!(
+            mcp_config_check(&dir, Some("opencode")),
+            CheckResult::Pass(_)
+        ));
+        // Unknown flavor (workspace linked before agent_owner was cached)
+        // must keep the pre-dfd4e655 behaviour.
+        assert!(matches!(mcp_config_check(&dir, None), CheckResult::Pass(_)));
+    }
+
+    #[test]
+    fn test_mcp_config_check_both_flavor_requires_each_artifact() {
+        let dir = tmp_dir("mcp_check_both");
+        fs::write(dir.join("opencode.json"), r#"{"mcp":{"nexus":{}}}"#).unwrap();
+        match mcp_config_check(&dir, Some("both")) {
+            CheckResult::Warn(msg) => assert!(msg.contains(".mcp.json"), "unexpected: {msg}"),
+            other => panic!("expected Warn, got {other:?}"),
+        }
+        fs::write(dir.join(".mcp.json"), r#"{"mcpServers":{"nexus":{}}}"#).unwrap();
+        assert!(matches!(
+            mcp_config_check(&dir, Some("both")),
+            CheckResult::Pass(_)
+        ));
+    }
+
+    #[test]
+    fn test_mcp_config_check_present_but_no_nexus_block() {
+        let dir = tmp_dir("mcp_check_no_block");
+        fs::write(dir.join(".mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
+        match mcp_config_check(&dir, Some("claude-cli")) {
+            CheckResult::Warn(msg) => assert!(msg.contains("no nexus MCP block"), "got {msg}"),
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_headroom_adapter_detected_under_claude_hooks() {
+        let dir = tmp_dir("headroom_claude");
+        let hooks = dir.join(".claude").join("hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        // File name is server-supplied (Track B3), so match on plugin name.
+        fs::write(hooks.join("nexus-headroom-intercept.mjs"), "// adapter").unwrap();
+
+        assert!(headroom_adapter_installed(&dir, Some("claude-cli")));
+        assert!(headroom_adapter_installed(&dir, Some("both")));
+        // An opencode-only project must not be credited with a Claude adapter.
+        assert!(!headroom_adapter_installed(&dir, Some("opencode")));
+    }
+
+    #[test]
+    fn test_headroom_adapter_detected_under_opencode_plugins() {
+        let dir = tmp_dir("headroom_opencode");
+        let plugins = dir.join(".opencode").join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(plugins.join("nexus-headroom-intercept.ts"), "// plugin").unwrap();
+
+        assert!(headroom_adapter_installed(&dir, Some("opencode")));
+        assert!(headroom_adapter_installed(&dir, None));
+        assert!(!headroom_adapter_installed(&dir, Some("claude-cli")));
+    }
+
+    #[test]
+    fn test_headroom_adapter_absent() {
+        let dir = tmp_dir("headroom_none");
+        fs::create_dir_all(dir.join(".claude").join("hooks")).unwrap();
+        assert!(!headroom_adapter_installed(&dir, Some("claude-cli")));
+        assert!(!headroom_adapter_installed(&dir, Some("opencode")));
     }
 }

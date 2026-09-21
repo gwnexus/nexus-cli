@@ -98,6 +98,29 @@ fn check_npx() -> CheckResult {
     }
 }
 
+/// Check: Claude Code CLI.
+///
+/// Only meaningful for projects whose `agent_owner` includes `claude-cli`
+/// (NEXUS-APP dispatch dfd4e655) — OpenCode-only projects must not be told to
+/// install a binary they never launch, so callers skip the check entirely by
+/// passing a flavor that does not want Claude.
+fn check_claude() -> CheckResult {
+    match cmd_version("claude", &["--version"]) {
+        Some(v) => CheckResult::Pass(v),
+        None => CheckResult::Fail(
+            "claude not found -- install from https://claude.com/product/claude-code".into(),
+        ),
+    }
+}
+
+/// Does the linked project's `agent_owner` include Claude Code?
+fn project_wants_claude() -> bool {
+    matches!(
+        nexus_core::config::load_agent_owner(None).as_deref(),
+        Some("claude-cli") | Some("both")
+    )
+}
+
 /// Check: Nexus CLI config
 fn check_config() -> (CheckResult, Option<Config>) {
     match Config::load_effective(None) {
@@ -226,6 +249,12 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
     print_check("npm", &npm);
     let npx = check_npx();
     print_check("npx", &npx);
+    // Only surfaced for claude-cli / both projects: an OpenCode-only workspace
+    // has no reason to require the Claude binary (dispatch dfd4e655).
+    let claude = project_wants_claude().then(check_claude);
+    if let Some(ref c) = claude {
+        print_check("claude", c);
+    }
     println!();
 
     // ── Config & Auth ──
@@ -247,7 +276,7 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
     println!();
 
     // ── Summary ──
-    let all_checks = [
+    let mut all_checks: Vec<&CheckResult> = vec![
         &git,
         &node,
         &npm,
@@ -258,6 +287,9 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
         &workspace,
         &mcp,
     ];
+    if let Some(ref c) = claude {
+        all_checks.push(c);
+    }
     let fail_count = all_checks.iter().filter(|c| c.is_fail()).count();
     let warn_count = all_checks
         .iter()

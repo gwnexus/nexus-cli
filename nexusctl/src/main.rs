@@ -262,7 +262,8 @@ pub enum Command {
     /// exits, prints a session summary with duration and git activity.
     /// Shell vars already set are never overwritten.
     Run {
-        /// Tool binary to launch (default: opencode, or config run.default_tool).
+        /// Tool binary to launch. Defaults to config run.default_tool, else
+        /// the linked project's agent_owner (claude-cli -> claude), else opencode.
         #[arg(short, long)]
         tool: Option<String>,
 
