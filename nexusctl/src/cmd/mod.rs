@@ -313,6 +313,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             exec,
             skip_checks,
             force,
+            ref account,
             ref args,
         } => {
             let config = nexus_core::config::Config::load_effective(None)?;
@@ -331,6 +332,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 args,
                 default_tool.as_deref(),
                 countdown_secs,
+                account.as_deref(),
             )
             .await?;
         }

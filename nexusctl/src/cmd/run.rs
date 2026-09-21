@@ -46,6 +46,7 @@ pub async fn run(
     args: &[String],
     default_tool: Option<&str>,
     countdown_secs: u64,
+    account: Option<&str>,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
     let agentic_root = resolve_agentic_root(&workspace);
@@ -109,6 +110,35 @@ pub async fn run(
 
     let effective_tool = resolve_effective_tool(tool, default_tool, agent_owner.as_deref());
     let effective_tool = effective_tool.as_str();
+
+    // ── 4.5. Named Claude account (`--account`, NEXUS-APP dispatch ad6e0176)
+    // ──────────────────────────────────────────────────────────────────────
+    //
+    // Explicit only, never automatic: a single name per invocation, or the
+    // existing default (`~/.claude`) when none is given. Scoped to
+    // claude-cli/both projects; ignored (with a warning) elsewhere, since
+    // CLAUDE_CONFIG_DIR has no effect on any other tool.
+    let claude_config_dir: Option<std::path::PathBuf> = match account {
+        Some(name) => {
+            if !wants_claude(agent_owner.as_deref()) {
+                println!(
+                    "   {} --account '{}' has no effect: this project's agent_owner \
+                     is not claude-cli/both.",
+                    style("!").bold().yellow(),
+                    name
+                );
+                None
+            } else {
+                validate_account_name(name)?;
+                let dir = claude_account_dir(&config::Config::dir()?, name);
+                fs::create_dir_all(&dir).with_context(|| {
+                    format!("could not create account directory {}", dir.display())
+                })?;
+                Some(dir)
+            }
+        }
+        None => None,
+    };
 
     // ── 5. Dry-run / show-env output ─────────────────────────────────────────
     if dry_run || show_env {
@@ -175,6 +205,7 @@ pub async fn run(
             &env_file_path,
             force,
             countdown_secs,
+            account,
         )
         .await?;
         if !should_continue {
@@ -206,6 +237,23 @@ pub async fn run(
             continue;
         }
         env::set_var(key, value);
+    }
+
+    // Named Claude account (see step 4.5): set after the general injection
+    // loop so it is never mistaken for a plugin/secret var, and skip if the
+    // shell already has CLAUDE_CONFIG_DIR set (never overwrite an
+    // explicitly-set shell var, same rule as the injection loop above).
+    if let Some(dir) = &claude_config_dir {
+        if env::var("CLAUDE_CONFIG_DIR").is_ok() {
+            println!(
+                "   {} CLAUDE_CONFIG_DIR is already set in the shell — \
+                 --account '{}' ignored to avoid overriding it.",
+                style("!").bold().yellow(),
+                account.unwrap_or_default()
+            );
+        } else {
+            env::set_var("CLAUDE_CONFIG_DIR", dir);
+        }
     }
 
     // ── 8. Launch the tool ───────────────────────────────────────────────────
@@ -485,6 +533,65 @@ fn wants_opencode(agent_owner: Option<&str>) -> bool {
     !matches!(agent_owner, Some("claude-cli"))
 }
 
+// ---------------------------------------------------------------------------
+// Named Claude account switching (`--account`, NEXUS-APP dispatch ad6e0176)
+// ---------------------------------------------------------------------------
+//
+// Claude Code derives its Keychain credential storage key from
+// `CLAUDE_CONFIG_DIR` (verified live against a fresh directory demanding its
+// own `/login`). Pointing different invocations at different directories
+// under `~/.config/nexus/claude-accounts/<name>/` gives each named account
+// its own isolated login and OAuth refresh cycle, entirely client-side —
+// Nexus never stores or is aware of which account is selected.
+//
+// Hard constraint from the dispatch: explicit only, never automatic. There
+// is deliberately no rotation, no quota/rate-limit detection, and no
+// fallback list here — a single name per invocation, or the existing
+// default (`~/.claude`) when no name is given.
+
+/// Validate an `--account <name>` value before it is used to build a path.
+///
+/// Rejects anything that could escape `~/.config/nexus/claude-accounts/`
+/// (path separators, `..`, empty names) or that is not a plain identifier.
+/// This is a local directory-naming safeguard, not a security boundary
+/// against a hostile filesystem — consistent with the rest of the CLI's
+/// treatment of user-supplied path components.
+fn validate_account_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("--account name must not be empty");
+    }
+    if name == "." || name == ".." {
+        anyhow::bail!("--account name '{}' is not a valid directory name", name);
+    }
+    let is_valid = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !is_valid {
+        anyhow::bail!(
+            "--account name '{}' must contain only letters, digits, '-', or '_'",
+            name
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the `CLAUDE_CONFIG_DIR` for a validated `--account <name>`.
+fn claude_account_dir(config_dir: &Path, name: &str) -> std::path::PathBuf {
+    config_dir.join("claude-accounts").join(name)
+}
+
+/// Check to surface which Claude account (if any) is active, so the operator
+/// is not guessing which Keychain identity `claude` will use.
+fn account_check(agent_owner: Option<&str>, account: Option<&str>) -> Option<CheckResult> {
+    if !wants_claude(agent_owner) {
+        return None;
+    }
+    Some(match account {
+        Some(name) => CheckResult::Pass(format!("'{}' (CLAUDE_CONFIG_DIR override)", name)),
+        None => CheckResult::Pass("default (~/.claude)".into()),
+    })
+}
+
 /// Check the MCP config artifact(s) that actually matter for this project's
 /// tool flavor.
 ///
@@ -602,6 +709,7 @@ fn billing_auth_check_with(
 // ---------------------------------------------------------------------------
 
 /// Run pre-launch checks and return `true` if the tool should be launched.
+#[allow(clippy::too_many_arguments)]
 async fn run_prelaunch_checks(
     api_url: &str,
     workspace: &Path,
@@ -610,6 +718,7 @@ async fn run_prelaunch_checks(
     env_file: &Path,
     force: bool,
     countdown_secs: u64,
+    account: Option<&str>,
 ) -> anyhow::Result<bool> {
     println!();
     println!("{} Nexus Pre-launch Check", style(">>").bold().cyan());
@@ -660,6 +769,12 @@ async fn run_prelaunch_checks(
 
     // Billing Auth — hard-stop, not bypassable via --force (see below).
     checks.push(("Billing Auth", billing_auth_check(agent_owner)));
+
+    // Account — which named Claude account (if any) is active, so the
+    // operator is not guessing which Keychain identity `claude` will use.
+    if let Some(result) = account_check(agent_owner, account) {
+        checks.push(("Account", result));
+    }
 
     // Plugin Env
     let env_check = if env_file.exists() {
@@ -1982,6 +2097,7 @@ mod tests {
                 exec,
                 skip_checks,
                 force,
+                account,
                 args,
             } => {
                 assert!(tool.is_none());
@@ -1991,7 +2107,21 @@ mod tests {
                 assert!(!exec);
                 assert!(!skip_checks);
                 assert!(!force);
+                assert!(account.is_none());
                 assert!(args.is_empty());
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_parse_cli_run_with_account() {
+        use crate::{Cli, Command};
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["nexus", "run", "--account", "work"]).unwrap();
+        match cli.command {
+            Command::Run { account, .. } => {
+                assert_eq!(account.as_deref(), Some("work"));
             }
             _ => panic!("expected Run"),
         }
@@ -2245,6 +2375,78 @@ mod tests {
         match mcp_config_check(&dir, Some("claude-cli")) {
             CheckResult::Warn(msg) => assert!(msg.contains("no nexus MCP block"), "got {msg}"),
             other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    // ── Named Claude account switching (NEXUS-APP dispatch ad6e0176) ───────
+
+    #[test]
+    fn test_validate_account_name_accepts_plain_identifiers() {
+        assert!(validate_account_name("work").is_ok());
+        assert!(validate_account_name("personal-2").is_ok());
+        assert!(validate_account_name("test_acct01").is_ok());
+    }
+
+    #[test]
+    fn test_validate_account_name_rejects_empty() {
+        assert!(validate_account_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_account_name_rejects_dot_segments() {
+        assert!(validate_account_name(".").is_err());
+        assert!(validate_account_name("..").is_err());
+    }
+
+    #[test]
+    fn test_validate_account_name_rejects_path_traversal() {
+        // Must not be usable to escape ~/.config/nexus/claude-accounts/.
+        assert!(validate_account_name("../escape").is_err());
+        assert!(validate_account_name("foo/bar").is_err());
+        assert!(validate_account_name("foo\\bar").is_err());
+        assert!(validate_account_name("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_validate_account_name_rejects_other_special_chars() {
+        assert!(validate_account_name("has space").is_err());
+        assert!(validate_account_name("has.dot").is_err());
+        assert!(validate_account_name("has:colon").is_err());
+    }
+
+    #[test]
+    fn test_claude_account_dir_is_scoped_under_config_dir() {
+        let config_dir = Path::new("/home/user/.config/nexus");
+        let dir = claude_account_dir(config_dir, "work");
+        assert_eq!(
+            dir,
+            Path::new("/home/user/.config/nexus/claude-accounts/work")
+        );
+    }
+
+    #[test]
+    fn test_account_check_none_for_non_claude_project() {
+        // Must be entirely absent from the checks panel for OpenCode-only
+        // and unknown-flavor projects, regardless of --account.
+        assert!(account_check(Some("opencode"), Some("work")).is_none());
+        assert!(account_check(None, Some("work")).is_none());
+    }
+
+    #[test]
+    fn test_account_check_named_account_for_claude_project() {
+        match account_check(Some("claude-cli"), Some("work")) {
+            Some(CheckResult::Pass(msg)) => assert!(msg.contains("work"), "got {msg}"),
+            other => panic!("expected Some(Pass), got {other:?}"),
+        }
+        // "both" flavor also gets the check.
+        assert!(account_check(Some("both"), Some("work")).is_some());
+    }
+
+    #[test]
+    fn test_account_check_default_for_claude_project_without_account() {
+        match account_check(Some("claude-cli"), None) {
+            Some(CheckResult::Pass(msg)) => assert!(msg.contains("default"), "got {msg}"),
+            other => panic!("expected Some(Pass), got {other:?}"),
         }
     }
 

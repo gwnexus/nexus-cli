@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-09-21
+
+### Added
+- **`nexus run --account <name>`: named Claude Code account switching for multiple Claude Max subscriptions** (NEXUS-APP dispatch ad6e0176, queued behind and built after the 8de19c71/v0.20.2 billing-auth fixes). Claude Code derives its Keychain credential storage key from `CLAUDE_CONFIG_DIR`; pointing an invocation at a Nexus-managed directory under `~/.config/nexus/claude-accounts/<name>/` gives that name its own isolated login and OAuth refresh cycle, entirely client-side. Nexus never stores or is aware of which account is selected; this is a pure local runtime convenience, scoped strictly to `claude-cli`/`both` projects (`agent_owner` gate via `wants_claude()`), and has no effect (with a warning) elsewhere. Without `--account`, behavior is unchanged (default `~/.claude`). A new "Account" entry in the `nexus run` pre-launch check panel shows which account name (or the default) is active, so the operator is not guessing.
+- **Explicit only, by design**: a single named account per invocation, never automatic. There is no quota/rate-limit detection, no rotation list, and no fallback-on-failure logic, matching the operator's own posture of manually switching between their own subscriptions rather than tooling silently deciding for them. An already-set `CLAUDE_CONFIG_DIR` in the shell is never overwritten.
+- Account names are validated before use (`validate_account_name`): plain alphanumeric/`-`/`_` identifiers only, rejecting empty names, `.`/`..`, and path separators, so a name cannot escape `~/.config/nexus/claude-accounts/`.
+
 ## [0.20.2] - 2026-09-21
 
 ### Fixed

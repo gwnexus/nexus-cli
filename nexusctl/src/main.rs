@@ -291,6 +291,14 @@ pub enum Command {
         #[arg(short, long)]
         force: bool,
 
+        /// Named Claude Code account (sets CLAUDE_CONFIG_DIR to an isolated
+        /// directory under ~/.config/nexus/claude-accounts/<name>/, giving
+        /// this invocation its own Keychain login). Only applies to
+        /// claude-cli/both projects. Explicit only: no automatic switching,
+        /// no rotation. Omit for the existing default (~/.claude).
+        #[arg(long)]
+        account: Option<String>,
+
         /// Extra arguments forwarded verbatim to the tool.
         #[arg(last = true)]
         args: Vec<String>,
