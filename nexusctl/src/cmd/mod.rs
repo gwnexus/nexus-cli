@@ -326,7 +326,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 show_env,
                 no_db,
                 exec,
-                skip_checks || force,
+                should_skip_prelaunch_checks(skip_checks, force),
                 force,
                 args,
                 default_tool.as_deref(),
@@ -336,4 +336,45 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether `nexus run` should skip pre-launch checks (the "Nexus Pre-launch
+/// Check" panel, `run_prelaunch_checks`) entirely.
+///
+/// `--force` only skips the interactive "N checks failed, continue anyway?"
+/// confirmation prompt after checks have been shown (documented as
+/// "non-interactive/CI mode"); it must NOT imply `--skip-checks`. Some
+/// checks (e.g. Billing Auth, NEXUS-APP dispatch 8de19c71) are deliberately
+/// not bypassable by `--force` and rely on `run_prelaunch_checks` actually
+/// running to enforce that. A prior version of this call site computed
+/// `skip_checks || force`, which skipped the whole check function --
+/// including the force-proof checks inside it -- whenever `--force` was
+/// passed alone, silently defeating the guarantee those checks exist to
+/// provide (regression reported as a follow-up to 8de19c71).
+fn should_skip_prelaunch_checks(skip_checks: bool, _force: bool) -> bool {
+    skip_checks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_prelaunch_checks;
+
+    #[test]
+    fn test_force_alone_does_not_skip_prelaunch_checks() {
+        // The exact regression: --force without --skip-checks must still
+        // run run_prelaunch_checks, so force-proof checks (e.g. Billing
+        // Auth) get a chance to fire.
+        assert!(!should_skip_prelaunch_checks(false, true));
+    }
+
+    #[test]
+    fn test_skip_checks_flag_skips_prelaunch_checks_regardless_of_force() {
+        assert!(should_skip_prelaunch_checks(true, false));
+        assert!(should_skip_prelaunch_checks(true, true));
+    }
+
+    #[test]
+    fn test_neither_flag_runs_prelaunch_checks() {
+        assert!(!should_skip_prelaunch_checks(false, false));
+    }
 }

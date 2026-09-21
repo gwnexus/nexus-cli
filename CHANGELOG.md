@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.2] - 2026-09-21
+
+### Fixed
+- **`nexus run --force` no longer skips pre-launch checks entirely** (regression follow-up to NEXUS-APP dispatch 8de19c71, found and reproduced live by NEXUS-APP within minutes of the v0.20.1 release). The `Command::Run` dispatch in `mod.rs` computed `skip_checks || force`, so passing `--force` alone (without `--skip-checks`) skipped the whole `run_prelaunch_checks` panel, including the just-shipped Billing Auth check that is deliberately not supposed to be bypassable by `--force`. `--force` is documented as "skip pre-launch confirmation prompt (non-interactive/CI mode)" and must not imply skipping the checks themselves. Extracted the call-site mapping into `should_skip_prelaunch_checks(skip_checks, force)` (now `skip_checks` alone) with 3 dedicated regression tests pinning the exact bug shape, since the previous fix's unit tests exercised `run_prelaunch_checks`'s internal logic in isolation and could not see this call-site wiring bug.
+
 ## [0.20.1] - 2026-09-21
 
 ### Fixed
