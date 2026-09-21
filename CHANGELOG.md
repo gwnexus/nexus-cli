@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1] - 2026-09-21
+
+### Fixed
+- **`nexus run` now hard-fails when an inherited `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` would silently defeat a Claude Max subscription** (NEXUS-APP dispatch 8de19c71). Claude Code's auth precedence puts these credentials ahead of the Keychain OAuth subscription login: if either is present and non-empty, `claude` authenticates via metered API-key billing instead of the Max subscription, with no warning or error in the common case. Nexus workspaces commonly carry `ANTHROPIC_API_KEY` in `.env.nexus.local` for unrelated reasons (BYOK provider keys, other tooling), and `nexus run` already injects those vars into the process environment before spawning the tool, so this was the default shape of such a workspace, not a contrived edge case. This new "Billing Auth" pre-launch check is scoped strictly to `claude-cli`/`both` projects (`direct_provider`/`nexus_gateway` projects rely on `ANTHROPIC_API_KEY` and are unaffected), and unlike every other pre-launch check it is deliberately NOT bypassable via `--force`: this is a billing-correctness bug, not a UX rough edge.
+
 ## [0.20.0] - 2026-09-21
 
 ### Added

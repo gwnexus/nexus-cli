@@ -534,6 +534,69 @@ fn mcp_config_check(workspace: &Path, agent_owner: Option<&str>) -> CheckResult 
     CheckResult::Pass(format!("{} (nexus MCP configured)", configured.join(", ")))
 }
 
+/// Check whether an inherited API-key credential would silently defeat a
+/// Claude Max subscription (NEXUS-APP dispatch 8de19c71).
+///
+/// Claude Code's auth precedence puts `ANTHROPIC_API_KEY` /
+/// `ANTHROPIC_AUTH_TOKEN` ahead of the Keychain OAuth subscription login: if
+/// either is present and non-empty in the environment `claude` inherits, it
+/// authenticates via metered API-key billing instead of the Max
+/// subscription, with no warning or error in the common case. Nexus
+/// workspaces commonly carry `ANTHROPIC_API_KEY` in `.env.nexus.local` for
+/// unrelated reasons (BYOK provider keys, other tooling), and `nexus run`
+/// already injects those vars into the process environment before spawning
+/// the tool, so this is the default shape of such a workspace, not a
+/// contrived edge case.
+///
+/// This is a billing-correctness bug, not a UX rough edge, and unlike the
+/// other pre-launch checks it is NOT bypassable via `--force` (enforced by
+/// the caller in `run_prelaunch_checks`). Scoped strictly to `claude-cli`
+/// projects; `direct_provider`/`nexus_gateway` projects rely on this
+/// variable being present and are unaffected (`agent_owner` is never
+/// `claude-cli` for them).
+fn billing_auth_check(agent_owner: Option<&str>) -> CheckResult {
+    let has_var = |name: &str| env::var(name).map(|v| !v.is_empty()).unwrap_or(false);
+    billing_auth_check_with(
+        agent_owner,
+        has_var("ANTHROPIC_API_KEY"),
+        has_var("ANTHROPIC_AUTH_TOKEN"),
+    )
+}
+
+/// Pure core of [`billing_auth_check`], parameterized on credential
+/// presence instead of reading process env directly, so tests can exercise
+/// it without mutating global env state (avoids parallel-test flakiness).
+fn billing_auth_check_with(
+    agent_owner: Option<&str>,
+    has_api_key: bool,
+    has_auth_token: bool,
+) -> CheckResult {
+    if !wants_claude(agent_owner) {
+        return CheckResult::Pass("n/a (not a Claude Code project)".into());
+    }
+
+    let mut offending: Vec<&str> = Vec::new();
+    if has_api_key {
+        offending.push("ANTHROPIC_API_KEY");
+    }
+    if has_auth_token {
+        offending.push("ANTHROPIC_AUTH_TOKEN");
+    }
+
+    if offending.is_empty() {
+        return CheckResult::Pass(
+            "no API-key credentials set (Max subscription auth active)".into(),
+        );
+    }
+
+    CheckResult::Fail(format!(
+        "{} is set — Claude Code will use metered API-key billing instead of your \
+         Max subscription. Unset it for this session or remove it from \
+         .env.nexus.local before running.",
+        offending.join(", ")
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Pre-launch checks
 // ---------------------------------------------------------------------------
@@ -594,6 +657,9 @@ async fn run_prelaunch_checks(
     // tool flavor (NEXUS-APP dispatch dfd4e655): OpenCode reads opencode.json,
     // Claude Code reads the root .mcp.json written by `claude_render`.
     checks.push(("MCP Config", mcp_config_check(workspace, agent_owner)));
+
+    // Billing Auth — hard-stop, not bypassable via --force (see below).
+    checks.push(("Billing Auth", billing_auth_check(agent_owner)));
 
     // Plugin Env
     let env_check = if env_file.exists() {
@@ -681,6 +747,24 @@ async fn run_prelaunch_checks(
         print_check(label, result);
     }
     println!();
+
+    // Billing-auth failures are a silent-billing-bypass class of bug, not a
+    // convenience warning: refuse to launch even with --force. An inherited
+    // ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN cannot be safely stripped here
+    // either, since it may be legitimately needed elsewhere in the same
+    // shell (a different tool, or a non-Claude-Max project run from the
+    // same terminal) — the user must decide, not us.
+    if checks
+        .iter()
+        .any(|(label, c)| *label == "Billing Auth" && c.is_fail())
+    {
+        println!(
+            "  {} Billing-auth check failed — this is not bypassable with --force.",
+            style("ABORT").bold().red()
+        );
+        println!();
+        return Ok(false);
+    }
 
     let fail_count = checks.iter().filter(|(_, c)| c.is_fail()).count();
     let warn_count = checks.iter().filter(|(_, c)| c.is_warn()).count();
@@ -2162,6 +2246,98 @@ mod tests {
             CheckResult::Warn(msg) => assert!(msg.contains("no nexus MCP block"), "got {msg}"),
             other => panic!("expected Warn, got {other:?}"),
         }
+    }
+
+    // ── billing_auth_check: hard-stop on inherited API-key auth for
+    // claude-cli projects (NEXUS-APP dispatch 8de19c71) ────────────────────
+
+    #[test]
+    fn test_billing_auth_check_non_claude_project_is_na_regardless_of_env() {
+        // direct_provider/nexus_gateway projects rely on ANTHROPIC_API_KEY
+        // being present; must never be flagged.
+        assert!(matches!(
+            billing_auth_check_with(Some("opencode"), true, true),
+            CheckResult::Pass(_)
+        ));
+        assert!(matches!(
+            billing_auth_check_with(None, true, true),
+            CheckResult::Pass(_)
+        ));
+    }
+
+    #[test]
+    fn test_billing_auth_check_claude_project_clean_env_passes() {
+        assert!(matches!(
+            billing_auth_check_with(Some("claude-cli"), false, false),
+            CheckResult::Pass(_)
+        ));
+        assert!(matches!(
+            billing_auth_check_with(Some("both"), false, false),
+            CheckResult::Pass(_)
+        ));
+    }
+
+    #[test]
+    fn test_billing_auth_check_claude_project_api_key_fails() {
+        match billing_auth_check_with(Some("claude-cli"), true, false) {
+            CheckResult::Fail(msg) => {
+                assert!(msg.contains("ANTHROPIC_API_KEY"), "unexpected: {msg}");
+                assert!(!msg.contains("ANTHROPIC_AUTH_TOKEN"), "unexpected: {msg}");
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_billing_auth_check_claude_project_auth_token_fails() {
+        match billing_auth_check_with(Some("claude-cli"), false, true) {
+            CheckResult::Fail(msg) => assert!(msg.contains("ANTHROPIC_AUTH_TOKEN"), "got {msg}"),
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_billing_auth_check_both_flavor_also_hard_fails() {
+        assert!(matches!(
+            billing_auth_check_with(Some("both"), true, false),
+            CheckResult::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn test_billing_auth_check_reports_both_offending_vars() {
+        match billing_auth_check_with(Some("claude-cli"), true, true) {
+            CheckResult::Fail(msg) => {
+                assert!(msg.contains("ANTHROPIC_API_KEY"), "got {msg}");
+                assert!(msg.contains("ANTHROPIC_AUTH_TOKEN"), "got {msg}");
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_billing_auth_hard_stop_is_not_bypassable_by_force() {
+        // Guards the exact contract the dispatch requested: a Billing Auth
+        // failure must abort even when `force` is true, unlike every other
+        // pre-launch check. This test asserts the invariant at the level of
+        // the check-result classification the abort branch keys off of, so
+        // a future refactor of run_prelaunch_checks cannot silently fold
+        // this check back into the generic --force-bypassable fail path.
+        let checks: Vec<(&str, CheckResult)> = vec![
+            ("Workspace", CheckResult::Pass("ok".into())),
+            (
+                "Billing Auth",
+                billing_auth_check_with(Some("claude-cli"), true, false),
+            ),
+        ];
+        let billing_auth_failed = checks
+            .iter()
+            .any(|(label, c)| *label == "Billing Auth" && c.is_fail());
+        assert!(
+            billing_auth_failed,
+            "Billing Auth check must be classified as Fail so the hard-stop \
+             branch (which ignores --force) fires"
+        );
     }
 
     #[test]
