@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1] - 2026-09-22
+
+### Added
+- **`nexus run --account default`: reserved alias for the implicit `~/.claude` identity** (NEXUS-APP dispatch c0523ebe, follow-up to `--account` in v0.21.0). Previously the only way to use the already-logged-in default Claude identity was to omit `--account` entirely; every literal name unconditionally created a new, unauthenticated directory. `--account default` now behaves identically to omitting the flag (no `CLAUDE_CONFIG_DIR` override, no directory created), so scripts and aliases can always pass an explicit `--account <name>` regardless of how many real named accounts currently exist. Never warned about on non-`claude-cli` projects (unlike a real name), and never treated as a creatable/reservable slot: a literal `default` directory under `claude-accounts/` can never be created via `--account`. The pre-launch check panel shows `default (~/.claude, explicit)` to confirm the explicit choice was honored, distinct from the implicit `default (~/.claude)` shown when `--account` is omitted.
+- The `--account` resolution logic was split into a pure decision core (`resolve_account`) separate from directory creation, so the `default`-alias behavior, the non-claude-project warning, and the real-account-name path are each independently unit tested without filesystem or network I/O.
+
 ## [0.21.0] - 2026-09-21
 
 ### Added

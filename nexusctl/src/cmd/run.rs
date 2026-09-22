@@ -118,27 +118,27 @@ pub async fn run(
     // existing default (`~/.claude`) when none is given. Scoped to
     // claude-cli/both projects; ignored (with a warning) elsewhere, since
     // CLAUDE_CONFIG_DIR has no effect on any other tool.
-    let claude_config_dir: Option<std::path::PathBuf> = match account {
-        Some(name) => {
-            if !wants_claude(agent_owner.as_deref()) {
+    let claude_config_dir: Option<std::path::PathBuf> =
+        match resolve_account(&config::Config::dir()?, agent_owner.as_deref(), account)? {
+            AccountResolution::NoOverride {
+                warn_ignored: Some(name),
+            } => {
                 println!(
                     "   {} --account '{}' has no effect: this project's agent_owner \
-                     is not claude-cli/both.",
+                 is not claude-cli/both.",
                     style("!").bold().yellow(),
                     name
                 );
                 None
-            } else {
-                validate_account_name(name)?;
-                let dir = claude_account_dir(&config::Config::dir()?, name);
+            }
+            AccountResolution::NoOverride { warn_ignored: None } => None,
+            AccountResolution::Selected(dir) => {
                 fs::create_dir_all(&dir).with_context(|| {
                     format!("could not create account directory {}", dir.display())
                 })?;
                 Some(dir)
             }
-        }
-        None => None,
-    };
+        };
 
     // ── 5. Dry-run / show-env output ─────────────────────────────────────────
     if dry_run || show_env {
@@ -549,6 +549,19 @@ fn wants_opencode(agent_owner: Option<&str>) -> bool {
 // fallback list here — a single name per invocation, or the existing
 // default (`~/.claude`) when no name is given.
 
+/// Reserved `--account` value meaning "explicitly select the implicit
+/// default identity" (`~/.claude`, no `CLAUDE_CONFIG_DIR` override).
+///
+/// Functionally identical to omitting `--account` entirely, so a caller can
+/// always write `--account <name>` in scripts/aliases regardless of how many
+/// real named accounts currently exist (NEXUS-APP dispatch c0523ebe). Never
+/// treated as a creatable directory name: this alias is matched before
+/// [`validate_account_name`]/[`claude_account_dir`] are ever consulted for
+/// it, so a literal directory named `default` under `claude-accounts/` is
+/// never created via this path, and a real `--account default` slot can
+/// never be provisioned.
+const DEFAULT_ACCOUNT_ALIAS: &str = "default";
+
 /// Validate an `--account <name>` value before it is used to build a path.
 ///
 /// Rejects anything that could escape `~/.config/nexus/claude-accounts/`
@@ -580,6 +593,49 @@ fn claude_account_dir(config_dir: &Path, name: &str) -> std::path::PathBuf {
     config_dir.join("claude-accounts").join(name)
 }
 
+/// Outcome of deciding what `--account <name>` means for this invocation,
+/// before any filesystem I/O. Kept separate from directory creation
+/// (performed by the caller only for `Selected`) so the decision itself —
+/// including the reserved `default` alias and the non-claude-project case —
+/// can be unit tested without touching disk.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountResolution {
+    /// No `CLAUDE_CONFIG_DIR` override: `~/.claude` is used as-is. Covers no
+    /// `--account`, the `default` alias, and — carrying the name to warn
+    /// about — a real name on a project that is not claude-cli/both.
+    NoOverride { warn_ignored: Option<String> },
+    /// A validated real account name; the caller creates `dir` before use.
+    Selected(std::path::PathBuf),
+}
+
+/// Pure decision core for `--account` resolution (NEXUS-APP dispatches
+/// ad6e0176, c0523ebe). See [`AccountResolution`] for what each outcome
+/// means.
+fn resolve_account(
+    config_dir: &Path,
+    agent_owner: Option<&str>,
+    account: Option<&str>,
+) -> anyhow::Result<AccountResolution> {
+    match account {
+        None => Ok(AccountResolution::NoOverride { warn_ignored: None }),
+        Some(name) if name == DEFAULT_ACCOUNT_ALIAS => {
+            Ok(AccountResolution::NoOverride { warn_ignored: None })
+        }
+        Some(name) => {
+            if !wants_claude(agent_owner) {
+                Ok(AccountResolution::NoOverride {
+                    warn_ignored: Some(name.to_string()),
+                })
+            } else {
+                validate_account_name(name)?;
+                Ok(AccountResolution::Selected(claude_account_dir(
+                    config_dir, name,
+                )))
+            }
+        }
+    }
+}
+
 /// Check to surface which Claude account (if any) is active, so the operator
 /// is not guessing which Keychain identity `claude` will use.
 fn account_check(agent_owner: Option<&str>, account: Option<&str>) -> Option<CheckResult> {
@@ -587,6 +643,9 @@ fn account_check(agent_owner: Option<&str>, account: Option<&str>) -> Option<Che
         return None;
     }
     Some(match account {
+        Some(name) if name == DEFAULT_ACCOUNT_ALIAS => {
+            CheckResult::Pass("default (~/.claude, explicit)".into())
+        }
         Some(name) => CheckResult::Pass(format!("'{}' (CLAUDE_CONFIG_DIR override)", name)),
         None => CheckResult::Pass("default (~/.claude)".into()),
     })
@@ -2447,6 +2506,106 @@ mod tests {
         match account_check(Some("claude-cli"), None) {
             Some(CheckResult::Pass(msg)) => assert!(msg.contains("default"), "got {msg}"),
             other => panic!("expected Some(Pass), got {other:?}"),
+        }
+    }
+
+    // ── "default" alias for the implicit identity (NEXUS-APP dispatch
+    // c0523ebe): --account default must behave exactly like omitting
+    // --account, so scripts can always pass an explicit name. ─────────────
+
+    #[test]
+    fn test_resolve_account_default_alias_is_no_override() {
+        let config_dir = Path::new("/home/user/.config/nexus");
+        assert_eq!(
+            resolve_account(config_dir, Some("claude-cli"), Some("default")).unwrap(),
+            AccountResolution::NoOverride { warn_ignored: None }
+        );
+    }
+
+    #[test]
+    fn test_resolve_account_default_alias_identical_to_no_account() {
+        let config_dir = Path::new("/home/user/.config/nexus");
+        let with_default = resolve_account(config_dir, Some("claude-cli"), Some("default"));
+        let without_flag = resolve_account(config_dir, Some("claude-cli"), None);
+        assert_eq!(with_default.unwrap(), without_flag.unwrap());
+    }
+
+    #[test]
+    fn test_resolve_account_default_alias_no_warning_on_non_claude_project() {
+        // Unlike a real name, "default" never attempts to create or select
+        // anything, so it must not warn even outside claude-cli/both.
+        let config_dir = Path::new("/home/user/.config/nexus");
+        assert_eq!(
+            resolve_account(config_dir, Some("opencode"), Some("default")).unwrap(),
+            AccountResolution::NoOverride { warn_ignored: None }
+        );
+        assert_eq!(
+            resolve_account(config_dir, None, Some("default")).unwrap(),
+            AccountResolution::NoOverride { warn_ignored: None }
+        );
+    }
+
+    #[test]
+    fn test_resolve_account_default_alias_never_creates_a_directory() {
+        // resolve_account is pure (no fs I/O); a Selected(dir) result is the
+        // only outcome the caller creates a directory for. Asserting
+        // NoOverride here is precisely the guarantee that no
+        // ".../claude-accounts/default" directory is ever created.
+        let config_dir = Path::new("/home/user/.config/nexus");
+        assert!(matches!(
+            resolve_account(config_dir, Some("claude-cli"), Some("default")).unwrap(),
+            AccountResolution::NoOverride { .. }
+        ));
+    }
+
+    #[test]
+    fn test_resolve_account_real_name_is_selected_and_scoped() {
+        let config_dir = Path::new("/home/user/.config/nexus");
+        match resolve_account(config_dir, Some("claude-cli"), Some("work")).unwrap() {
+            AccountResolution::Selected(dir) => assert_eq!(
+                dir,
+                Path::new("/home/user/.config/nexus/claude-accounts/work")
+            ),
+            other => panic!("expected Selected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_account_real_name_on_non_claude_project_warns() {
+        let config_dir = Path::new("/home/user/.config/nexus");
+        assert_eq!(
+            resolve_account(config_dir, Some("opencode"), Some("work")).unwrap(),
+            AccountResolution::NoOverride {
+                warn_ignored: Some("work".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_account_no_flag_is_no_override_without_warning() {
+        let config_dir = Path::new("/home/user/.config/nexus");
+        assert_eq!(
+            resolve_account(config_dir, Some("claude-cli"), None).unwrap(),
+            AccountResolution::NoOverride { warn_ignored: None }
+        );
+    }
+
+    #[test]
+    fn test_account_check_default_alias_distinct_text_from_no_account() {
+        // Cosmetic distinction only — both represent the identical
+        // no-override case, but the operator should see their explicit
+        // choice was honored rather than silently ignored.
+        let explicit = account_check(Some("claude-cli"), Some("default"));
+        let implicit = account_check(Some("claude-cli"), None);
+        match (explicit, implicit) {
+            (Some(CheckResult::Pass(a)), Some(CheckResult::Pass(b))) => {
+                assert_ne!(
+                    a, b,
+                    "expected distinct text for explicit vs implicit default"
+                );
+                assert!(a.contains("default") && b.contains("default"));
+            }
+            other => panic!("expected both Some(Pass), got {other:?}"),
         }
     }
 
