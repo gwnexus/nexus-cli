@@ -469,6 +469,14 @@ pub struct GitConfig {
     pub user_email: Option<String>,
     pub signing_key: Option<String>,
     pub commit_gpgsign: Option<bool>,
+    /// Whether Claude Code should add a `Co-Authored-By: Claude ...`
+    /// trailer to commits (uninverted, Claude Code's own semantics: `true`
+    /// means the trailer is added). `None` for projects created before this
+    /// field existed on the backend; rendered as suppressed (`false`) by
+    /// the Claude Code renderer, not left to Claude Code's own default
+    /// (NEXUS-APP dispatch 84e38bd7).
+    #[serde(default)]
+    pub include_co_authored_by: Option<bool>,
 }
 
 /// Wrapper for project list API response.

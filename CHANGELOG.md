@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.2] - 2026-09-23
+
+### Fixed
+- **Claude Code no longer silently adds a `Co-Authored-By: Claude ...` trailer to commits** (NEXUS-APP dispatch 84e38bd7, escalated to a hard blocking requirement). Previously this depended entirely on an agent remembering the project directive against AI self-references on every single commit, which kept being missed. `includeCoAuthoredBy` (Claude Code's own runtime setting for this, verified against the shipped `cli.js`) is now written into `.claude/settings.json` from the project's `git_config.include_co_authored_by`, uninverted in Claude Code's own semantics (`true` means the trailer is added). Absent means suppress: a project with no value configured (created before this shipped) gets `includeCoAuthoredBy: false` written, not Claude Code's own default, since the whole point is that operators must not have to remember to configure this per project.
+- The merge runs on every `nexus init`/`nexus pull`, not just at first creation, and is safe against an already-existing, operator-customized `settings.json`: only the `includeCoAuthoredBy` key is touched, every other key (including the `hooks` block from Track B3) is preserved verbatim. New `nexus_core::api::GitConfig::include_co_authored_by` field (additive, `serde(default)`, no schema change on the wire since `git_config` already reaches the CLI through the existing project-detail endpoint).
+
 ## [0.21.1] - 2026-09-22
 
 ### Added

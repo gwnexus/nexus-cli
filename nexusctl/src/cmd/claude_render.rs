@@ -357,6 +357,60 @@ pub fn merge_claude_hooks(target: &Path, adapters: &[ClaudeHookAdapter]) -> anyh
     Ok(appended)
 }
 
+/// Merge `includeCoAuthoredBy` into `.claude/settings.json` from the
+/// project's `git_config.include_co_authored_by` (NEXUS-APP dispatch
+/// 84e38bd7). Stored uninverted in Claude Code's own semantics: `true`
+/// means the `Co-Authored-By: Claude ...` trailer is added.
+///
+/// A hard operator requirement ("must never appear"), not a cosmetic
+/// preference, so this runs on every init/pull and merges into an
+/// already-existing, operator-customized `settings.json` exactly like
+/// [`merge_claude_hooks`] — unlike the `env` block in
+/// [`write_claude_settings`], which is create-once-only. Every other key,
+/// including the `hooks` block, is preserved verbatim; only
+/// `includeCoAuthoredBy` is touched.
+///
+/// `include` is `None` for any project created before this field existed
+/// on the backend. Absent means suppress: `false` is written, not Claude
+/// Code's own default, since the entire point of this field is that
+/// operators must not have to remember to configure it per project (the
+/// original directive-only version of this requirement was exactly the
+/// "have to remember every time" failure mode this change replaces).
+///
+/// Returns `true` if the file was created or its `includeCoAuthoredBy`
+/// value changed; `false` if it already matched (idempotent, avoids
+/// needless rewrites on every pull).
+pub fn merge_claude_co_authored_by(target: &Path, include: Option<bool>) -> anyhow::Result<bool> {
+    let resolved = include.unwrap_or(false);
+    let settings_path = target.join(".claude").join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let raw = fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !settings.is_object() {
+        settings = serde_json::json!({});
+    }
+    let obj = settings.as_object_mut().expect("just ensured object");
+
+    if obj.get("includeCoAuthoredBy").and_then(|v| v.as_bool()) == Some(resolved) {
+        return Ok(false);
+    }
+
+    obj.insert(
+        "includeCoAuthoredBy".to_string(),
+        serde_json::Value::Bool(resolved),
+    );
+
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(&settings)? + "\n";
+    fs::write(&settings_path, content)?;
+    Ok(true)
+}
+
 /// Write `.claude/settings.json` if it does not already exist (user-managed
 /// once created, never overwritten). Contains Claude runtime behavior only —
 /// no secrets, no OpenCode-specific statements (ADR-C04 "CLAUDE.md design").
@@ -484,6 +538,7 @@ pub fn render_claude_projection(
     agent_files: &[ExportedAgentFile],
     runtime_spec: Option<&serde_json::Value>,
     hook_adapters: &[ClaudeHookAdapter],
+    include_co_authored_by: Option<bool>,
 ) -> anyhow::Result<()> {
     let mut skills_written = 0;
     for skill in skills {
@@ -546,6 +601,17 @@ pub fn render_claude_projection(
             "   {} .claude/settings.json (+{} hook registration(s))",
             style("+").bold().green(),
             hooks_appended
+        );
+    }
+
+    // Co-authored-by trailer suppression (NEXUS-APP dispatch 84e38bd7):
+    // hard operator requirement, absent-means-suppress, merges alongside
+    // the hooks block above rather than replacing the file.
+    if merge_claude_co_authored_by(target, include_co_authored_by)? {
+        println!(
+            "   {} .claude/settings.json (includeCoAuthoredBy: {})",
+            style("+").bold().green(),
+            include_co_authored_by.unwrap_or(false)
         );
     }
 
@@ -949,6 +1015,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         )
         .unwrap();
 
@@ -983,6 +1050,7 @@ mod tests {
             &[],
             Some(&runtime_spec),
             &[],
+            None,
         )
         .unwrap();
 
@@ -1071,6 +1139,108 @@ mod tests {
         let content =
             fs::read_to_string(dir.join(".claude/hooks/nexus-session-guard.mjs")).unwrap();
         assert_eq!(content, "// v2");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── merge_claude_co_authored_by: hard suppression of the
+    // Co-Authored-By trailer (NEXUS-APP dispatch 84e38bd7) ─────────────────
+
+    #[test]
+    fn test_merge_co_authored_by_absent_means_suppress() {
+        // No settings.json yet, no git_config value at all: must still be
+        // written as false, not left for Claude Code's own default.
+        let dir = temp_dir("coauthor-absent");
+        let changed = merge_claude_co_authored_by(&dir, None).unwrap();
+        assert!(changed);
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["includeCoAuthoredBy"], false);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_co_authored_by_explicit_false() {
+        let dir = temp_dir("coauthor-false");
+        merge_claude_co_authored_by(&dir, Some(false)).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["includeCoAuthoredBy"], false);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_co_authored_by_explicit_true() {
+        let dir = temp_dir("coauthor-true");
+        merge_claude_co_authored_by(&dir, Some(true)).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["includeCoAuthoredBy"], true);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_co_authored_by_updates_existing_value() {
+        // Must overwrite a stale/incorrect value on re-pull, not just skip
+        // because the key already exists — this is a correctness flag, not
+        // a create-once default.
+        let dir = temp_dir("coauthor-update");
+        merge_claude_co_authored_by(&dir, Some(true)).unwrap();
+        let changed = merge_claude_co_authored_by(&dir, Some(false)).unwrap();
+        assert!(changed);
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["includeCoAuthoredBy"], false);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_co_authored_by_is_idempotent() {
+        let dir = temp_dir("coauthor-idempotent");
+        assert!(merge_claude_co_authored_by(&dir, Some(false)).unwrap());
+        // Second call with the same resolved value must be a no-op.
+        assert!(!merge_claude_co_authored_by(&dir, Some(false)).unwrap());
+        assert!(!merge_claude_co_authored_by(&dir, None).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_co_authored_by_preserves_other_keys_including_hooks() {
+        // Must merge alongside the hooks block and any operator
+        // customization, never replace the file.
+        let dir = temp_dir("coauthor-preserve");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{
+  "permissions": {},
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "MyCustomTool", "hooks": [{ "type": "command", "command": "echo custom" }] }
+    ]
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        merge_claude_co_authored_by(&dir, Some(false)).unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["includeCoAuthoredBy"], false);
+        assert_eq!(
+            settings["hooks"]["PostToolUse"][0]["matcher"],
+            "MyCustomTool"
+        );
+        assert!(settings["permissions"].is_object());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1259,6 +1429,7 @@ mod tests {
             &[],
             None,
             &[adapter],
+            None,
         )
         .unwrap();
 

@@ -289,6 +289,10 @@ pub async fn run(
                             .ok()
                             .and_then(|r| r.claude_hook_adapters.clone())
                             .unwrap_or_default();
+                        let include_co_authored_by = project_detail
+                            .as_ref()
+                            .and_then(|d| d.project.git_config.as_ref())
+                            .and_then(|g| g.include_co_authored_by);
                         claude_render::render_claude_projection(
                             &target,
                             project_name,
@@ -298,6 +302,7 @@ pub async fn run(
                             &agent_files_for_claude,
                             runtime_spec_for_claude,
                             &hook_adapters_for_claude,
+                            include_co_authored_by,
                         )?;
                     }
                 }

@@ -897,6 +897,15 @@ pub async fn run(
                 .ok()
                 .and_then(|r| r.claude_hook_adapters.clone())
                 .unwrap_or_default();
+            // Same project-detail fetch pattern already used below for git
+            // identity application (line ~1363): af_export does not carry
+            // git_config, so this is a dedicated, cheap lookup.
+            let include_co_authored_by = client
+                .get_project(&project_id)
+                .await
+                .ok()
+                .and_then(|d| d.project.git_config)
+                .and_then(|g| g.include_co_authored_by);
             claude_render::render_claude_projection(
                 &workspace,
                 &project_name,
@@ -906,6 +915,7 @@ pub async fn run(
                 &agent_files_for_claude,
                 runtime_spec_for_claude,
                 &hook_adapters_for_claude,
+                include_co_authored_by,
             )?;
         }
     } else {
