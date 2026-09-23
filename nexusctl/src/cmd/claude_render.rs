@@ -34,6 +34,42 @@ pub fn canonical_claude_skill_id(skill_id: &str) -> String {
     }
 }
 
+/// Strip a leading YAML frontmatter block (`---\n...\n---`) from `body`, if
+/// present.
+///
+/// `ExportedSkill.body` (and agent-file bodies) already come back from the
+/// backend with their own frontmatter block baked in (nexus-app's own
+/// `stripFrontmatter()`, `src/lib/skill-frontmatter.ts`). Every local writer
+/// in this CLI (`write_claude_skill` here, and `write_skill` in
+/// `init.rs`/`pull.rs`) rebuilds its own frontmatter around `body` — using
+/// this side's canonicalized `skill_id` for Claude Code, plus fields the
+/// backend's copy may not carry — so the backend's block must be removed
+/// first, or it is duplicated verbatim underneath the local one
+/// (NEXUS-APP dispatch 5ddd6355, confirmed live: a `.nexus/skills/nx-init/
+/// SKILL.md` in this very repo carried two stacked frontmatter blocks
+/// before this fix).
+///
+/// Only strips a block that starts at the very beginning of `body` (after
+/// leading whitespace) with a `---` line and closes with another `---`
+/// line; returns `body` unchanged otherwise (no frontmatter, or a body that
+/// merely contains a `---` horizontal rule further down).
+pub(crate) fn strip_frontmatter(body: &str) -> &str {
+    let trimmed = body.trim_start();
+    let Some(after_open) = trimmed.strip_prefix("---\n") else {
+        return body;
+    };
+    let Some(close_pos) = after_open.find("\n---") else {
+        return body;
+    };
+    let after_close = &after_open[close_pos + "\n---".len()..];
+    // The closing delimiter must end the line (EOF or a newline) rather
+    // than just happen to prefix a longer line (e.g. "----" or "--- foo").
+    if !(after_close.is_empty() || after_close.starts_with('\n')) {
+        return body;
+    }
+    after_close.trim_start_matches('\n')
+}
+
 /// Write a single skill as a native Claude Code project skill:
 /// `.claude/skills/<canonical-id>/SKILL.md` (+ any resource files).
 /// The directory name becomes the `/<canonical-id>` slash-command in
@@ -43,16 +79,19 @@ pub fn write_claude_skill(target: &Path, skill: &ExportedSkill) -> anyhow::Resul
     let skill_dir = target.join(".claude").join("skills").join(&canonical_id);
     fs::create_dir_all(&skill_dir)?;
 
-    let body = skill
+    let raw_body = skill
         .body
         .as_deref()
         .unwrap_or("<!-- No skill body defined -->");
+    let body = strip_frontmatter(raw_body);
 
     let content = format!(
         r#"---
 skill_id: {skill_id}
 name: {name}
+description: {description}
 version: {version}
+command_slug: {command_slug}
 source: nexus-platform
 ---
 
@@ -60,7 +99,9 @@ source: nexus-platform
 "#,
         skill_id = canonical_id,
         name = skill.name,
+        description = yaml_escape(skill.description.as_deref().unwrap_or("")),
         version = skill.version,
+        command_slug = skill.command_slug.as_deref().unwrap_or("none"),
         body = body,
     );
 
@@ -76,6 +117,15 @@ source: nexus-platform
     }
 
     Ok(())
+}
+
+/// Quote and escape a string for safe use as a YAML flow scalar in the
+/// frontmatter templates in this file. Skill descriptions are free text and
+/// may contain `:` or other characters that break an unquoted YAML scalar;
+/// `name`/`version`/`command_slug` are left unquoted to match the existing,
+/// already-shipped template style.
+pub(crate) fn yaml_escape(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Derive an actor slug from an `ExportedAgentFile`'s `target_path`, if that
@@ -647,6 +697,47 @@ mod tests {
         }
     }
 
+    // ── strip_frontmatter / yaml_escape (NEXUS-APP dispatch 5ddd6355) ──────
+
+    #[test]
+    fn test_strip_frontmatter_removes_leading_block() {
+        let body = "---\nskill_id: nx-init\nname: Init\n---\n\n# Instructions\n\nDo it.";
+        assert_eq!(strip_frontmatter(body), "# Instructions\n\nDo it.");
+    }
+
+    #[test]
+    fn test_strip_frontmatter_no_block_returns_unchanged() {
+        let body = "# Instructions\n\nDo it.\n\n---\n\nA horizontal rule, not frontmatter.";
+        assert_eq!(strip_frontmatter(body), body);
+    }
+
+    #[test]
+    fn test_strip_frontmatter_empty_body() {
+        assert_eq!(strip_frontmatter(""), "");
+    }
+
+    #[test]
+    fn test_strip_frontmatter_only_frontmatter_no_content() {
+        let body = "---\nskill_id: x\n---\n";
+        assert_eq!(strip_frontmatter(body), "");
+    }
+
+    #[test]
+    fn test_strip_frontmatter_does_not_match_longer_dash_runs() {
+        // "----" is not a valid frontmatter delimiter; must not be treated
+        // as one and must not corrupt the body.
+        let body = "----\nnot frontmatter\n----\n";
+        assert_eq!(strip_frontmatter(body), body);
+    }
+
+    #[test]
+    fn test_yaml_escape_quotes_and_escapes() {
+        assert_eq!(yaml_escape("simple"), "\"simple\"");
+        assert_eq!(yaml_escape("has: a colon"), "\"has: a colon\"");
+        assert_eq!(yaml_escape("has \"quotes\""), "\"has \\\"quotes\\\"\"");
+        assert_eq!(yaml_escape(""), "\"\"");
+    }
+
     #[test]
     fn test_canonical_claude_skill_id_migrates_nx_prefix() {
         assert_eq!(canonical_claude_skill_id("nx-init"), "nexus-init");
@@ -678,6 +769,71 @@ mod tests {
             fs::read_to_string(dir.join(".claude/skills/nexus-sec-scan/SKILL.md")).unwrap();
         assert!(content.contains("skill_id: nexus-sec-scan"));
         assert!(content.contains("Do the thing."));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_claude_skill_includes_description_and_command_slug() {
+        // NEXUS-APP dispatch 5ddd6355: these were silently dropped in
+        // favor of a hardcoded local template.
+        let dir = temp_dir("skill-desc-slug");
+        let skill = sample_skill("nexus-init");
+
+        write_claude_skill(&dir, &skill).unwrap();
+
+        let content = fs::read_to_string(dir.join(".claude/skills/nexus-init/SKILL.md")).unwrap();
+        assert!(content.contains(r#"description: "desc""#), "got: {content}");
+        assert!(
+            content.contains("command_slug: nexus-init"),
+            "got: {content}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_claude_skill_absent_description_and_command_slug() {
+        let dir = temp_dir("skill-no-desc-slug");
+        let mut skill = sample_skill("nexus-bare");
+        skill.description = None;
+        skill.command_slug = None;
+
+        write_claude_skill(&dir, &skill).unwrap();
+
+        let content = fs::read_to_string(dir.join(".claude/skills/nexus-bare/SKILL.md")).unwrap();
+        assert!(content.contains(r#"description: """#), "got: {content}");
+        assert!(content.contains("command_slug: none"), "got: {content}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_claude_skill_strips_duplicate_backend_frontmatter() {
+        // Reproduces the exact defect confirmed live in this repo
+        // (.nexus/skills/nx-init/SKILL.md carried two stacked frontmatter
+        // blocks): the backend's ExportedSkill.body already embeds its own
+        // frontmatter, which must not be duplicated underneath the local
+        // template's own block.
+        let dir = temp_dir("skill-dup-frontmatter");
+        let mut skill = sample_skill("nexus-dup");
+        skill.body = Some(
+            "---\nskill_id: nexus-dup\nname: Test Skill\nversion: 1\n\
+             command_slug: nexus-dup\nsource: nexus-platform\n---\n\n\
+             # Instructions\n\nDo the thing."
+                .to_string(),
+        );
+
+        write_claude_skill(&dir, &skill).unwrap();
+
+        let content = fs::read_to_string(dir.join(".claude/skills/nexus-dup/SKILL.md")).unwrap();
+        assert_eq!(
+            content.matches("---").count(),
+            2,
+            "expected exactly one frontmatter block (opening + closing '---'), got: {content}"
+        );
+        assert!(content.contains("Do the thing."));
+        assert!(!content.contains("source: nexus-platform\nsource: nexus-platform"));
 
         let _ = fs::remove_dir_all(&dir);
     }

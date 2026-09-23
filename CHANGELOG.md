@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.3] - 2026-09-23
+
+### Fixed
+- **Skill `SKILL.md` writers no longer discard the backend's `description` and `command_slug`, and no longer duplicate frontmatter** (NEXUS-APP dispatch 5ddd6355). All three local skill writers (`write_claude_skill` in the Claude Code renderer, and `write_skill` in both `nexus init` and `nexus pull`) rebuild their own frontmatter block around `ExportedSkill.body` using a hardcoded local template that only carried `skill_id`/`name`/`version`/`source` (plus `command_slug` in the OpenCode writers only). `description` was dropped everywhere, which meant Claude Code's `/` command palette fell back to a raw slug or a blank summary instead of the platform-configured one-line description.
+- Investigating this surfaced a second, more serious defect confirmed live in this repo's own `.nexus/skills/` workspace state: `ExportedSkill.body` already carries its own frontmatter block from the backend, which the local template was duplicating verbatim underneath its own, producing two stacked frontmatter blocks in the same file. New `claude_render::strip_frontmatter()` removes the backend's block before the local template rebuilds its own; used by all three writers.
+- `description` is now written as a quoted, escaped YAML string (new `claude_render::yaml_escape()`) since free-text descriptions may contain `:` or other characters that break an unquoted YAML scalar; absent means an empty string is written, not the field being omitted, so the frontmatter shape stays uniform across skills.
+
 ## [0.21.2] - 2026-09-23
 
 ### Fixed

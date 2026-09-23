@@ -2269,11 +2269,13 @@ fn write_skill(
         .body
         .as_deref()
         .unwrap_or("<!-- No skill body defined -->");
+    let body = claude_render::strip_frontmatter(body);
 
     let content = format!(
         r#"---
 skill_id: {skill_id}
 name: {name}
+description: {description}
 version: {version}
 command_slug: {command_slug}
 source: nexus-platform
@@ -2283,6 +2285,7 @@ source: nexus-platform
 "#,
         skill_id = skill.skill_id,
         name = skill.name,
+        description = claude_render::yaml_escape(skill.description.as_deref().unwrap_or("")),
         version = skill.version,
         command_slug = skill.command_slug.as_deref().unwrap_or("none"),
         body = body,
@@ -2524,6 +2527,72 @@ pub fn write_tasks(
 mod tests {
     use super::*;
     use nexus_core::api::ExportedDirective;
+
+    fn temp_dir(suffix: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("nexus-pull-test-{}-{}", std::process::id(), suffix));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_write_skill_includes_description_and_command_slug() {
+        // NEXUS-APP dispatch 5ddd6355: same defect as init.rs's write_skill.
+        let dir = temp_dir("write-skill");
+        let skill = nexus_core::api::ExportedSkill {
+            skill_id: "nx-test-skill".to_string(),
+            name: "Test Skill".to_string(),
+            description: Some("A test skill".to_string()),
+            version: 1,
+            body: Some("Do the thing.".to_string()),
+            command_slug: Some("nexus-test-skill".to_string()),
+            pinned: false,
+            resources: vec![],
+        };
+
+        write_skill(&dir, &skill, ".claude").unwrap();
+
+        let content =
+            fs::read_to_string(dir.join(".claude/skills/nx-test-skill/SKILL.md")).unwrap();
+        assert!(content.contains(r#"description: "A test skill""#));
+        assert!(content.contains("command_slug: nexus-test-skill"));
+        assert!(content.contains("Do the thing."));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_skill_strips_duplicate_backend_frontmatter() {
+        let dir = temp_dir("write-skill-dup-frontmatter");
+        let skill = nexus_core::api::ExportedSkill {
+            skill_id: "nx-dup".to_string(),
+            name: "Test Skill".to_string(),
+            description: Some("A test skill".to_string()),
+            version: 1,
+            body: Some(
+                "---\nskill_id: nx-dup\nname: Test Skill\nversion: 1\n\
+                 command_slug: nexus-dup\nsource: nexus-platform\n---\n\n\
+                 Do the thing."
+                    .to_string(),
+            ),
+            command_slug: Some("nexus-dup".to_string()),
+            pinned: false,
+            resources: vec![],
+        };
+
+        write_skill(&dir, &skill, ".claude").unwrap();
+
+        let content = fs::read_to_string(dir.join(".claude/skills/nx-dup/SKILL.md")).unwrap();
+        assert_eq!(
+            content.matches("---").count(),
+            2,
+            "expected exactly one frontmatter block, got: {content}"
+        );
+        assert!(content.contains("Do the thing."));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_render_directives_groups_by_category() {
