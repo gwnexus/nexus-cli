@@ -461,6 +461,100 @@ pub fn merge_claude_co_authored_by(target: &Path, include: Option<bool>) -> anyh
     Ok(true)
 }
 
+/// Read-only, side-effect-free Nexus MCP tools pre-approved by default so a
+/// fresh Claude Code session doesn't hit an approval prompt for the calls
+/// every session-bootstrap skill makes in its first few turns (`/nexus-init`,
+/// `/nexus-dispatch-sweep`). Deliberately excludes anything that creates,
+/// mutates, or deletes platform state (`session_append`/`session_create`
+/// included on the same "expected every session, low risk" basis as the
+/// read-only calls, per the allowlist Claude Code itself had already
+/// accumulated live in a real project's `settings.local.json` before this
+/// change existed) — decision-bearing actions (`adr_create`, `adr_decide`,
+/// `task_create`, `dispatch_create`, `dispatch_resolve`, `sk_update`,
+/// `doc_ingest`, `doc_delete`, etc.) stay behind an explicit per-session
+/// approval on purpose.
+const BASELINE_MCP_PERMISSIONS: &[&str] = &[
+    "mcp__nexus__session_list",
+    "mcp__nexus__session_create",
+    "mcp__nexus__session_append",
+    "mcp__nexus__kb_memory",
+    "mcp__nexus__kb_search",
+    "mcp__nexus__kb_get",
+    "mcp__nexus__dispatch_sweep",
+    "mcp__nexus__dispatch_inbox",
+    "mcp__nexus__dispatch_get",
+    "mcp__nexus__task_list",
+    "mcp__nexus__sk_list",
+    "mcp__nexus__sk_get",
+    "mcp__nexus__pd_list",
+    "mcp__nexus__project_list",
+];
+
+/// Merge the baseline read-only MCP permission allowlist into
+/// `.claude/settings.json`'s `permissions.allow` array (NEXUS-APP dispatch
+/// TBD, follow-up to run-1 claude-cli diagnostic pass).
+///
+/// Safe to run against an already-existing, operator-customized
+/// `settings.json`, exactly like [`merge_claude_hooks`] and
+/// [`merge_claude_co_authored_by`]: only appends entries from
+/// [`BASELINE_MCP_PERMISSIONS`] that aren't already present (by exact
+/// string match) in `permissions.allow`. Never removes or reorders any
+/// existing entry, so an operator who already broadened or narrowed their
+/// own allowlist keeps full control — this only lowers the floor, it never
+/// raises it above whatever the operator has already granted.
+///
+/// Returns the number of new entries appended (0 if nothing changed; the
+/// file is only rewritten when this is non-zero).
+pub fn merge_claude_baseline_permissions(target: &Path) -> anyhow::Result<usize> {
+    let settings_path = target.join(".claude").join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let raw = fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !settings.is_object() {
+        settings = serde_json::json!({});
+    }
+    let settings_obj = settings.as_object_mut().expect("just ensured object");
+
+    let permissions = settings_obj
+        .entry("permissions")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !permissions.is_object() {
+        *permissions = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let permissions_obj = permissions.as_object_mut().expect("just ensured object");
+
+    let allow = permissions_obj
+        .entry("allow")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !allow.is_array() {
+        *allow = serde_json::Value::Array(Vec::new());
+    }
+    let allow_arr = allow.as_array_mut().expect("just ensured array");
+
+    let mut appended = 0;
+    for entry in BASELINE_MCP_PERMISSIONS {
+        let already_present = allow_arr.iter().any(|v| v.as_str() == Some(*entry));
+        if already_present {
+            continue;
+        }
+        allow_arr.push(serde_json::Value::String((*entry).to_string()));
+        appended += 1;
+    }
+
+    if appended > 0 {
+        if let Some(parent) = settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(&settings)? + "\n";
+        fs::write(&settings_path, content)?;
+    }
+
+    Ok(appended)
+}
+
 /// Write `.claude/settings.json` if it does not already exist (user-managed
 /// once created, never overwritten). Contains Claude runtime behavior only —
 /// no secrets, no OpenCode-specific statements (ADR-C04 "CLAUDE.md design").
@@ -662,6 +756,20 @@ pub fn render_claude_projection(
             "   {} .claude/settings.json (includeCoAuthoredBy: {})",
             style("+").bold().green(),
             include_co_authored_by.unwrap_or(false)
+        );
+    }
+
+    // Baseline read-only MCP permission allowlist (follow-up to the run-1
+    // claude-cli diagnostic pass): reduces first-session approval-prompt
+    // friction for the calls every session-bootstrap skill makes. Merges
+    // alongside the hooks/includeCoAuthoredBy blocks, never replaces the
+    // file, never touches an operator's own additions.
+    let permissions_appended = merge_claude_baseline_permissions(target)?;
+    if permissions_appended > 0 {
+        println!(
+            "   {} .claude/settings.json (+{} baseline permission(s))",
+            style("+").bold().green(),
+            permissions_appended
         );
     }
 
@@ -1559,6 +1667,120 @@ mod tests {
         let appended = merge_claude_hooks(&dir, &[]).unwrap();
         assert_eq!(appended, 0);
         assert!(!dir.join(".claude/settings.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_baseline_permissions_creates_file_and_appends_all_entries() {
+        let dir = temp_dir("permissions-merge-basic");
+        let appended = merge_claude_baseline_permissions(&dir).unwrap();
+        assert_eq!(appended, BASELINE_MCP_PERMISSIONS.len());
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        assert_eq!(allow.len(), BASELINE_MCP_PERMISSIONS.len());
+        for entry in BASELINE_MCP_PERMISSIONS {
+            assert!(
+                allow.iter().any(|v| v.as_str() == Some(*entry)),
+                "missing baseline entry: {entry}"
+            );
+        }
+        // Explicitly confirm nothing destructive is pre-approved.
+        assert!(!allow
+            .iter()
+            .any(|v| v.as_str().is_some_and(|s| s.contains("delete")
+                || s.contains("adr_decide")
+                || s.contains("dispatch_resolve")
+                || s.contains("sk_update"))));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_baseline_permissions_is_idempotent_on_rerun() {
+        let dir = temp_dir("permissions-merge-idempotent");
+        let first = merge_claude_baseline_permissions(&dir).unwrap();
+        assert_eq!(first, BASELINE_MCP_PERMISSIONS.len());
+        let second = merge_claude_baseline_permissions(&dir).unwrap();
+        assert_eq!(
+            second, 0,
+            "re-running against an already-merged file must not duplicate entries"
+        );
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        assert_eq!(allow.len(), BASELINE_MCP_PERMISSIONS.len());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_baseline_permissions_preserves_operator_additions() {
+        // An operator who already broadened their own allowlist (e.g. via
+        // Claude Code's own "don't ask again" flow writing into
+        // settings.json directly, or a hand edit) must keep every entry
+        // they added -- this only ever raises the floor, never resets it.
+        let dir = temp_dir("permissions-merge-preserve");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{
+  "permissions": {
+    "allow": ["mcp__nexus__task_create", "Bash(npm run *)"]
+  },
+  "hooks": {}
+}
+"#,
+        )
+        .unwrap();
+
+        let appended = merge_claude_baseline_permissions(&dir).unwrap();
+        assert_eq!(appended, BASELINE_MCP_PERMISSIONS.len());
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        assert!(allow.iter().any(|v| v == "mcp__nexus__task_create"));
+        assert!(allow.iter().any(|v| v == "Bash(npm run *)"));
+        assert_eq!(allow.len(), BASELINE_MCP_PERMISSIONS.len() + 2);
+        assert!(settings["hooks"].is_object());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_baseline_permissions_does_not_duplicate_operator_added_baseline_entry() {
+        // If the operator already has one of the baseline entries (e.g.
+        // Claude Code itself already wrote it into settings.local.json and
+        // the operator copied it up, or they added it by hand), merging
+        // must recognize it as already-present rather than duplicating it.
+        let dir = temp_dir("permissions-merge-no-dup");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{ "permissions": { "allow": ["mcp__nexus__session_list"] } }"#,
+        )
+        .unwrap();
+
+        let appended = merge_claude_baseline_permissions(&dir).unwrap();
+        assert_eq!(appended, BASELINE_MCP_PERMISSIONS.len() - 1);
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        let session_list_count = allow
+            .iter()
+            .filter(|v| v.as_str() == Some("mcp__nexus__session_list"))
+            .count();
+        assert_eq!(session_list_count, 1, "must not duplicate the entry");
+        assert_eq!(allow.len(), BASELINE_MCP_PERMISSIONS.len());
+
         let _ = fs::remove_dir_all(&dir);
     }
 
