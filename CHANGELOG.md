@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - 2026-09-24
+
+Completes the CCX (Claude Code Experience) CLI scope of NEXUS-APP ADR-0117 (dispatch 99f335e8).
+
+### Added
+- **Per-file CCX reconciliation in `nexus pull`.** New `af_export.ccx: { bundle, version, revision, compatibility.claudeCode }` field. When present, `agent_files` with category `claude_experience` are no longer written unconditionally: each is classified against the CCX lock (`<agentic_root>/claude/manifest.lock.json`) as create/clean/updated/drifted/conflict/unmanaged/adopt/orphaned and handled per the dispatch's state table. Local edits and never-managed files are kept and reported. Orphaned files (still locked, no longer sent) are deleted only if unmodified. The lock records bundle metadata and the sha256 of the exact bytes written, and is rewritten once, only after every CCX file was reconciled. When `ccx` is absent, nothing CCX-specific happens and an existing lock is left untouched.
+- **Migration rule:** on the first CCX-aware pull (no lock, or a v0.25.x lock without a revision), hashes from `.nexus/sync-manifest.json` stand in for lock hashes, so files written by earlier CLIs are recognised as managed.
+- **`nexus pull --force` / `--force-unmanaged` for CCX files.** `--force` overwrites drifted/conflicting files, deletes modified orphans, and replaces a locally edited `CLAUDE.md` block; `--force-unmanaged` additionally replaces files never managed by Nexus. `-y/--yes` deliberately does not imply either, so accepting prompts never discards local edits.
+- **`CLAUDE.md` managed block conflict handling.** The sha256 of the block text is recorded in the lock; if the block was edited locally and a different block arrives, it is kept and reported as CONFLICT unless `--force`.
+- **CCX section in the pull output** (CREATE/UPDATE/CLEAN/DRIFTED/CONFLICT/UNMANAGED/ADOPT/ORPHANED per file, the `CLAUDE.md` block, a SETTINGS line per managed key, and a HOOKS line per removed hook adapter).
+- **`nexus claude status`**: read-only overview (only network call: `af_export`) of desired vs. locked bundle revision, per-file state, managed settings keys, `CLAUDE.md` block, `claude --version` vs. `compatibility.claudeCode` (warns outside the range), enabled plugins vs. `claude plugin list --json` (skipped if unavailable), and the last headroom `session_summary`. Supports `--output json`. Exit 0 when clean, 1 when changes are pending or conflicts exist.
+- **`nexus claude diff`**: unified diff (local vs. desired) for every non-clean CCX file, key-level diff for managed settings, and the `CLAUDE.md` block. No writes; same exit codes.
+- **`nexus claude launch`**: runs `<agentic_root>/claude/nexus-claude.kdl` through the regular `nexus run --tool zellij -- --layout <file>` path (all pre-launch checks and env injection) when the layout exists and zellij is on PATH; otherwise falls back to `nexus run --tool claude` with a hint. Supports `--account`, `--force`, `--skip-checks`.
+
+### Fixed
+- `classify_file_state()` classified a locked file whose local content already equals the desired content as CONFLICT when the lock hash was stale (e.g. after a pull that wrote files but failed before saving the lock). It is now CLEAN, per the dispatch's table (`clean: L == D`).
+- Settings reconciliation now also drops array entries of a **still-managed** key that Nexus previously added but no longer sends (e.g. one entry removed from `permissions.deny`), keeping operator-added entries.
+- The CCX lock's `applied_at` is now an ISO 8601 UTC timestamp (was epoch seconds).
+
+### Changed
+- `merge_claude_generic_settings()` now delegates to a pure `apply_generic_settings()`, which `nexus claude status`/`diff` run on a copy, so the commands never disagree with what a pull would do.
+- New workspace dependency: `similar` (unified diffs).
+
+30 new unit tests (every state-table row through the pull wiring incl. pull-twice-all-clean, drifted then `--force` restore, orphan deletion/keep/drop, sync-manifest migration incl. a v0.25.x settings-only lock, path traversal rejection, lock untouched on apply error, `CLAUDE.md` block conflict/force/update, still-managed array entry removal, settings change descriptions, version range and plugin list parsing, CLI parsing). 619/619 tests passing, clippy/fmt clean.
+
 ## [0.25.1] - 2026-09-24
 
 ### Added

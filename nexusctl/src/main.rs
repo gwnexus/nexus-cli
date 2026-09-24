@@ -134,9 +134,16 @@ pub enum Command {
         #[arg(long)]
         project_id: Option<String>,
 
-        /// Overwrite existing files without confirmation.
+        /// Overwrite existing files without confirmation. For Claude Code
+        /// Experience (CCX) files this also overwrites local edits
+        /// (drifted/conflict) and deletes modified orphaned files.
         #[arg(short, long)]
         force: bool,
+
+        /// Like --force for CCX files, and additionally replace CCX files
+        /// that exist locally but were never managed by Nexus.
+        #[arg(long)]
+        force_unmanaged: bool,
 
         /// Limit pull to specific scope(s): skills, directives, agents, workspace, tasks.
         /// Can be specified multiple times. If omitted, pulls everything.
@@ -150,6 +157,12 @@ pub enum Command {
         /// Skip actor asset download (metadata only). This is the default.
         #[arg(long)]
         skip_actor_assets: bool,
+    },
+
+    /// Claude Code Experience (CCX) bundle: status, diff, and launch.
+    Claude {
+        #[command(subcommand)]
+        action: ClaudeAction,
     },
 
     /// Skills management subcommands.
@@ -302,6 +315,44 @@ pub enum Command {
         /// Extra arguments forwarded verbatim to the tool.
         #[arg(last = true)]
         args: Vec<String>,
+    },
+}
+
+/// Claude Code Experience (CCX) subcommands (NEXUS-APP ADR-0117).
+#[derive(Debug, Subcommand)]
+pub enum ClaudeAction {
+    /// Show the CCX bundle state (per-file state, managed settings, Claude
+    /// Code version, plugins, last headroom summary). Read-only. Exits 1
+    /// when changes are pending or conflicts exist. Supports --output json.
+    Status {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Show unified diffs (local vs. desired) for every non-clean CCX file,
+    /// managed settings key, and the CLAUDE.md block. Read-only. Exits 1
+    /// when differences exist.
+    Diff {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Launch Claude Code in the CCX zellij layout via `nexus run` (falls
+    /// back to `nexus run --tool claude` when no layout or zellij exists).
+    Launch {
+        /// Skip pre-launch checks.
+        #[arg(long)]
+        skip_checks: bool,
+
+        /// Skip pre-launch confirmation prompt (non-interactive/CI mode).
+        #[arg(short, long)]
+        force: bool,
+
+        /// Named Claude Code account (see `nexus run --account`).
+        #[arg(long)]
+        account: Option<String>,
     },
 }
 
@@ -1290,6 +1341,57 @@ mod tests {
         match cli.command {
             Command::Pull { force, .. } => assert!(force),
             _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_force_unmanaged() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--force-unmanaged"]).unwrap();
+        match cli.command {
+            Command::Pull {
+                force,
+                force_unmanaged,
+                ..
+            } => {
+                assert!(!force);
+                assert!(force_unmanaged);
+            }
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_claude_subcommands() {
+        let cli = Cli::try_parse_from(["nexus", "--output", "json", "claude", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Claude {
+                action: ClaudeAction::Status { .. }
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "claude", "diff"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Claude {
+                action: ClaudeAction::Diff { .. }
+            }
+        ));
+        let cli =
+            Cli::try_parse_from(["nexus", "claude", "launch", "--account", "work", "-f"]).unwrap();
+        match cli.command {
+            Command::Claude {
+                action:
+                    ClaudeAction::Launch {
+                        force,
+                        skip_checks,
+                        account,
+                    },
+            } => {
+                assert!(force);
+                assert!(!skip_checks);
+                assert_eq!(account.as_deref(), Some("work"));
+            }
+            _ => panic!("expected Claude Launch command"),
         }
     }
 

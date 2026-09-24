@@ -381,6 +381,32 @@ pub struct AgentFileExportResponse {
     /// and never rewritten by the CLI.
     #[serde(default)]
     pub claude_md_managed_block: Option<String>,
+    /// Claude Code Experience bundle metadata (NEXUS-APP ADR-0117, dispatch
+    /// 99f335e8). `None` when CCX is disabled or this is not a Claude
+    /// project; then nothing CCX-specific happens and any existing lock is
+    /// left untouched. When present, `agent_files` entries with category
+    /// `"claude_experience"` are reconciled against the CCX lock instead of
+    /// being written unconditionally.
+    #[serde(default)]
+    pub ccx: Option<CcxBundleInfo>,
+}
+
+/// `af_export.ccx`: identifies the CCX bundle revision being delivered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CcxBundleInfo {
+    pub bundle: String,
+    pub version: String,
+    pub revision: String,
+    #[serde(default)]
+    pub compatibility: CcxBundleCompatibility,
+}
+
+/// `af_export.ccx.compatibility`: supported Claude Code version range
+/// (space-separated comparators, e.g. `">=2.1.257 <3.0.0"`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CcxBundleCompatibility {
+    #[serde(default, rename = "claudeCode")]
+    pub claude_code: Option<String>,
 }
 
 /// Generic, forward-compatible `.claude/settings.json` merge spec

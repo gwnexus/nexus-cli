@@ -353,7 +353,7 @@ pub(crate) fn print_nexus_run_hint(workspace: &Path) {
 
 /// Convert days since Unix epoch to (year, month, day). Used for ISO 8601 timestamps
 /// in `.nexus/env` without requiring the `chrono` crate.
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+pub(crate) fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     // Gregorian proleptic calendar — good enough for dates in our range
     let mut y = 1970u64;
     loop {
@@ -438,6 +438,7 @@ pub async fn run(
     mcp_source: McpSource,
     scope: &[String],
     with_actor_assets: bool,
+    ccx_force: super::ccx::ForceMode,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -640,6 +641,11 @@ pub async fn run(
             } else {
                 let mut af_written = 0;
                 for af in &af_export.agent_files {
+                    // CCX files are reconciled against the CCX lock below
+                    // (NEXUS-APP ADR-0117, dispatch 99f335e8).
+                    if af_export.ccx.is_some() && af.category == super::ccx::CCX_CATEGORY {
+                        continue;
+                    }
                     let target_path = workspace.join(&af.target_path);
 
                     // Hard block: protected files are NEVER overwritten
@@ -941,6 +947,7 @@ pub async fn run(
         );
     }
 
+    let mut claude_report: Option<claude_render::ClaudeProjectionReport> = None;
     let proceed_with_opencode = if opencode_will_be_written {
         confirm_export_warnings(&export_warnings, force)?
     } else {
@@ -999,7 +1006,7 @@ pub async fn run(
                 .ok()
                 .and_then(|d| d.project.git_config)
                 .and_then(|g| g.include_co_authored_by);
-            claude_render::render_claude_projection(
+            claude_report = Some(claude_render::render_claude_projection(
                 &workspace,
                 &project_name,
                 &agentic_root,
@@ -1017,7 +1024,8 @@ pub async fn run(
                     .as_ref()
                     .ok()
                     .and_then(|r| r.claude_md_managed_block.as_deref()),
-            )?;
+                ccx_force != super::ccx::ForceMode::None,
+            )?);
         }
     } else {
         println!(
@@ -1026,6 +1034,20 @@ pub async fn run(
             agentic_root
         );
         println!("            Re-run 'nexus pull' to retry once the warning(s) are addressed.");
+    }
+
+    // CCX files (NEXUS-APP ADR-0117, dispatch 99f335e8): reconciled against
+    // the CCX lock; the lock is only rewritten once everything succeeded.
+    let mut ccx_outcomes: Vec<super::ccx::FileOutcome> = Vec::new();
+    if let Ok(ref af_export) = af_export_result {
+        if let Some(ref info) = af_export.ccx {
+            let lock = super::ccx::load_lock(&workspace, &agentic_root);
+            let desired = super::ccx::ccx_files(&af_export.agent_files);
+            let plans = super::ccx::plan_files(&workspace, &desired, lock.as_ref(), &manifest)?;
+            let (outcomes, files) = super::ccx::apply_file_plans(&workspace, &plans, ccx_force)?;
+            super::ccx::record_ccx_in_lock(&workspace, &agentic_root, info, files)?;
+            ccx_outcomes = outcomes;
+        }
     }
 
     // Write .nexus/env from af_export.plugin_env (platform-managed, full overwrite)
@@ -1516,6 +1538,17 @@ pub async fn run(
         }
     }
 
+    if let Ok(ref af_export) = af_export_result {
+        if let Some(ref info) = af_export.ccx {
+            print_ccx_summary(
+                info,
+                &ccx_outcomes,
+                claude_report.as_ref(),
+                af_export.claude_settings.as_ref(),
+            );
+        }
+    }
+
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
 
@@ -1562,6 +1595,93 @@ pub async fn run(
     print_nexus_run_hint(&workspace);
 
     Ok(())
+}
+
+/// Print the Claude Code Experience section of the pull output (NEXUS-APP
+/// ADR-0117, dispatch 99f335e8).
+fn print_ccx_summary(
+    info: &nexus_core::api::CcxBundleInfo,
+    outcomes: &[super::ccx::FileOutcome],
+    claude_report: Option<&claude_render::ClaudeProjectionReport>,
+    claude_settings: Option<&nexus_core::api::ClaudeSettingsSpec>,
+) {
+    println!();
+    println!(
+        "{} {}@{} ({})",
+        style("Claude Code Experience:").bold(),
+        info.bundle,
+        info.version,
+        info.revision
+    );
+    for outcome in outcomes {
+        let (label, note) = super::ccx::outcome_label(outcome);
+        let label = format!("{label:<9}");
+        let label = match outcome.state {
+            super::ccx::FileState::Clean | super::ccx::FileState::Adopt => style(label).dim(),
+            super::ccx::FileState::Create | super::ccx::FileState::Updated => style(label).green(),
+            _ => style(label).yellow(),
+        };
+        if note.is_empty() {
+            println!("  {} {}", label, outcome.target_path);
+        } else {
+            println!(
+                "  {} {}   {}",
+                label,
+                outcome.target_path,
+                style(note).dim()
+            );
+        }
+    }
+    let Some(report) = claude_report else {
+        return;
+    };
+    match report.claude_md {
+        claude_render::ClaudeMdOutcome::Written(_) => {
+            println!(
+                "  {} CLAUDE.md (nexus-managed block)",
+                style(format!("{:<9}", "UPDATE")).green()
+            )
+        }
+        claude_render::ClaudeMdOutcome::Unchanged(_) => {
+            println!(
+                "  {} CLAUDE.md (nexus-managed block)",
+                style(format!("{:<9}", "CLEAN")).dim()
+            )
+        }
+        claude_render::ClaudeMdOutcome::Conflict => println!(
+            "  {} CLAUDE.md (nexus-managed block)   {}",
+            style(format!("{:<9}", "CONFLICT")).yellow(),
+            style("modified locally, run nexus claude diff").dim()
+        ),
+        claude_render::ClaudeMdOutcome::Skipped => {}
+    }
+    if !report.settings_changes.is_empty() {
+        println!(
+            "  {} {}",
+            style(format!("{:<9}", "SETTINGS")).cyan(),
+            report.settings_changes.join(", ")
+        );
+    }
+    let nexus_core_plugin = claude_settings
+        .and_then(|s| s.values.get("enabledPlugins"))
+        .and_then(|v| v.as_object())
+        .is_some_and(|plugins| {
+            plugins
+                .iter()
+                .any(|(id, on)| id.starts_with("nexus-core@") && on.as_bool() == Some(true))
+        });
+    for plugin in &report.removed_hook_plugins {
+        println!(
+            "  {} {} removed ({})",
+            style(format!("{:<9}", "HOOKS")).cyan(),
+            plugin,
+            if nexus_core_plugin {
+                "now provided by nexus-core"
+            } else {
+                "no longer sent"
+            }
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

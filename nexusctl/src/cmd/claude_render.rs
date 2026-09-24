@@ -532,10 +532,9 @@ pub fn merge_claude_co_authored_by(target: &Path, include: Option<bool>) -> anyh
 /// `"permissions.deny"`), they are unioned rather than replaced outright,
 /// so an operator's own entries are preserved alongside Nexus's.
 ///
-/// Not yet implemented here (tracked as a nexus-cli follow-up pending the
-/// CCX lock/manifest from ADR-0117 item 3): removing a key that Nexus
-/// used to manage but no longer sends. Every call is purely additive/
-/// replacing for whatever `managed_keys` this particular `spec` lists.
+/// Keys (or array entries) Nexus used to manage per `previous` (the CCX
+/// lock) but no longer sends are removed, see
+/// [`super::ccx::reconcile_settings_removed_keys`].
 ///
 /// Returns the number of managed keys whose value actually changed (0 if
 /// nothing changed or `spec` is `None`; the file is only rewritten when
@@ -562,13 +561,37 @@ pub fn merge_claude_generic_settings(
         settings = serde_json::json!({});
     }
 
+    let changed = apply_generic_settings(&mut settings, spec, previous);
+    if changed > 0 {
+        if let Some(parent) = settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(&settings)? + "\n";
+        fs::write(&settings_path, content)?;
+    }
+
+    Ok(changed)
+}
+
+/// The pure part of [`merge_claude_generic_settings`]: apply `spec` (and
+/// the removal rules against `previous`) to an in-memory `settings.json`
+/// value. Returns the number of keys/paths changed. Also used read-only on
+/// a copy by `nexus claude status`/`diff`.
+pub fn apply_generic_settings(
+    settings: &mut serde_json::Value,
+    spec: Option<&ClaudeSettingsSpec>,
+    previous: Option<&ClaudeSettingsSpec>,
+) -> usize {
+    if !settings.is_object() {
+        *settings = serde_json::json!({});
+    }
     let mut changed = 0usize;
     if let Some(spec) = spec {
         for key_path in &spec.managed_keys {
             let Some(new_value) = spec.values.get(key_path) else {
                 continue;
             };
-            let merged_value = match (json_get_path(&settings, key_path), new_value) {
+            let merged_value = match (json_get_path(settings, key_path), new_value) {
                 (
                     Some(serde_json::Value::Array(existing_arr)),
                     serde_json::Value::Array(new_arr),
@@ -583,8 +606,8 @@ pub fn merge_claude_generic_settings(
                 }
                 _ => new_value.clone(),
             };
-            if json_get_path(&settings, key_path) != Some(&merged_value) {
-                json_set_path(&mut settings, key_path, merged_value);
+            if json_get_path(settings, key_path) != Some(&merged_value) {
+                json_set_path(settings, key_path, merged_value);
                 changed += 1;
             }
         }
@@ -593,17 +616,9 @@ pub fn merge_claude_generic_settings(
     // Remove a key/array-entries Nexus used to manage but no longer sends
     // (NEXUS-APP ADR-0117 follow-up, dispatch 99f335e8): never clobbers a
     // value the operator changed since it was last recorded.
-    changed += super::ccx::reconcile_settings_removed_keys(&mut settings, spec, previous);
+    changed += super::ccx::reconcile_settings_removed_keys(settings, spec, previous);
 
-    if changed > 0 {
-        if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(&settings)? + "\n";
-        fs::write(&settings_path, content)?;
-    }
-
-    Ok(changed)
+    changed
 }
 
 /// Read a value at a dot-separated path (e.g. `"permissions.deny"`) inside
@@ -640,6 +655,34 @@ fn json_set_path(value: &mut serde_json::Value, path: &str, new_value: serde_jso
 const CLAUDE_MD_MANAGED_BEGIN: &str = "<!-- BEGIN:nexus-managed -->";
 const CLAUDE_MD_MANAGED_END: &str = "<!-- END:nexus-managed -->";
 
+/// Result of [`merge_claude_md_managed_block`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeMdOutcome {
+    /// No block was sent (or the markers are malformed); nothing touched.
+    Skipped,
+    /// The block already matched. Carries the sha256 of the block text.
+    Unchanged(String),
+    /// The block was created or replaced. Carries the sha256 of the block
+    /// text now on disk.
+    Written(String),
+    /// The block was edited locally since the CLI last wrote it and a
+    /// different block arrived: kept as is (without `--force`).
+    Conflict,
+}
+
+/// The exact text between the managed-block markers, if both are present
+/// and in order.
+pub fn claude_md_block_text(content: &str) -> Option<&str> {
+    let start = content.find(CLAUDE_MD_MANAGED_BEGIN)? + CLAUDE_MD_MANAGED_BEGIN.len();
+    let end = content.find(CLAUDE_MD_MANAGED_END)?;
+    (end >= start).then(|| &content[start..end])
+}
+
+/// The block text as the CLI writes it between the markers.
+pub fn claude_md_desired_block_text(block: &str) -> String {
+    format!("\n{}\n", block.trim())
+}
+
 /// Maintain a Nexus-managed block inside the root `CLAUDE.md` between
 /// `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers
 /// (NEXUS-APP ADR-0117 "CCX", dispatch bb782869). Everything outside the
@@ -655,13 +698,18 @@ const CLAUDE_MD_MANAGED_END: &str = "<!-- END:nexus-managed -->";
 /// created containing only the managed block (the create-once bootstrap
 /// template itself is [`write_claude_root_md`]'s job, called separately).
 ///
-/// Returns `true` if the file was created or its managed content changed.
+/// `locked_sha256` is the block hash recorded in the CCX lock (dispatch
+/// 99f335e8): if the text between the markers no longer matches it (edited
+/// locally) and a different block arrives, the block is kept and
+/// [`ClaudeMdOutcome::Conflict`] returned, unless `force` is set.
 pub fn merge_claude_md_managed_block(
     target: &Path,
     managed_block: Option<&str>,
-) -> anyhow::Result<bool> {
+    locked_sha256: Option<&str>,
+    force: bool,
+) -> anyhow::Result<ClaudeMdOutcome> {
     let Some(block) = managed_block else {
-        return Ok(false);
+        return Ok(ClaudeMdOutcome::Skipped);
     };
     let path = target.join("CLAUDE.md");
     let existing = if path.exists() {
@@ -669,18 +717,29 @@ pub fn merge_claude_md_managed_block(
     } else {
         String::new()
     };
+    let desired = claude_md_desired_block_text(block);
+    let desired_sha = nexus_core::hash::sha256_hex(&desired);
 
     let new_content = match (
         existing.find(CLAUDE_MD_MANAGED_BEGIN),
         existing.find(CLAUDE_MD_MANAGED_END),
     ) {
         (Some(start), Some(end_marker_start)) if end_marker_start > start => {
+            let current = &existing[start + CLAUDE_MD_MANAGED_BEGIN.len()..end_marker_start];
+            if current == desired {
+                return Ok(ClaudeMdOutcome::Unchanged(desired_sha));
+            }
+            let edited_locally =
+                locked_sha256.is_some_and(|k| nexus_core::hash::sha256_hex(current) != k);
+            if edited_locally && !force {
+                return Ok(ClaudeMdOutcome::Conflict);
+            }
             let end = end_marker_start + CLAUDE_MD_MANAGED_END.len();
             format!(
-                "{}{}\n{}\n{}{}",
+                "{}{}{}{}{}",
                 &existing[..start],
                 CLAUDE_MD_MANAGED_BEGIN,
-                block.trim(),
+                desired,
                 CLAUDE_MD_MANAGED_END,
                 &existing[end..]
             )
@@ -688,30 +747,24 @@ pub fn merge_claude_md_managed_block(
         (Some(_), Some(_)) => {
             // Malformed markers (END before BEGIN): don't attempt to
             // merge into a file we can't safely parse -- leave it alone.
-            return Ok(false);
+            return Ok(ClaudeMdOutcome::Skipped);
         }
         _ => {
             // No markers yet: insert the block at the top, once,
             // preserving any pre-existing content (including other
             // tools' own managed blocks) below it untouched.
             format!(
-                "{}\n{}\n{}\n\n{}",
-                CLAUDE_MD_MANAGED_BEGIN,
-                block.trim(),
-                CLAUDE_MD_MANAGED_END,
-                existing
+                "{}{}{}\n\n{}",
+                CLAUDE_MD_MANAGED_BEGIN, desired, CLAUDE_MD_MANAGED_END, existing
             )
         }
     };
 
-    if new_content == existing {
-        return Ok(false);
-    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(&path, new_content)?;
-    Ok(true)
+    Ok(ClaudeMdOutcome::Written(desired_sha))
 }
 
 /// Read-only, side-effect-free Nexus MCP tools pre-approved by default so a
@@ -925,6 +978,9 @@ servers are configured in `.mcp.json`.
 /// hook *behavior* is Track B2 (Nexus plugin Claude adapter, ADR-C05) and
 /// Claude Code does not require the directory to exist for a hookless
 /// project to function.
+///
+/// `force` lets a locally edited `CLAUDE.md` managed block be replaced
+/// (CCX conflict rule, dispatch 99f335e8).
 #[allow(clippy::too_many_arguments)]
 pub fn render_claude_projection(
     target: &Path,
@@ -938,7 +994,8 @@ pub fn render_claude_projection(
     include_co_authored_by: Option<bool>,
     claude_settings: Option<&ClaudeSettingsSpec>,
     claude_md_managed_block: Option<&str>,
-) -> anyhow::Result<()> {
+    force: bool,
+) -> anyhow::Result<ClaudeProjectionReport> {
     let mut skills_written = 0;
     for skill in skills {
         write_claude_skill(target, skill)?;
@@ -1077,8 +1134,15 @@ pub fn render_claude_projection(
     // Nexus no longer manages (dispatch 99f335e8 follow-up); the lock is
     // updated afterward to reflect what is now managed.
     let previous_settings = super::ccx::load_lock(target, agentic_root).and_then(|l| l.settings);
+    let settings_before = read_claude_settings(target);
     let generic_settings_changed =
         merge_claude_generic_settings(target, claude_settings, previous_settings.as_ref())?;
+    let settings_changes = super::ccx::describe_settings_changes(
+        &settings_before,
+        &read_claude_settings(target),
+        claude_settings,
+        previous_settings.as_ref(),
+    );
     if generic_settings_changed > 0 {
         println!(
             "   {} .claude/settings.json (+{} managed key(s))",
@@ -1089,15 +1153,62 @@ pub fn render_claude_projection(
     super::ccx::record_settings_in_lock(target, agentic_root, claude_settings)?;
 
     // Root CLAUDE.md managed block (NEXUS-APP ADR-0117 "CCX"): everything
-    // outside the markers is user-owned and never rewritten.
-    if merge_claude_md_managed_block(target, claude_md_managed_block)? {
-        println!(
-            "   {} CLAUDE.md (nexus-managed block)",
-            style("+").bold().green()
-        );
+    // outside the markers is user-owned and never rewritten. A block edited
+    // locally since the last write is kept unless `force` (dispatch
+    // 99f335e8); its lock hash then stays as is, so it keeps reporting.
+    let locked_block_sha =
+        super::ccx::load_lock(target, agentic_root).and_then(|l| l.claude_md_block_sha256);
+    let claude_md = merge_claude_md_managed_block(
+        target,
+        claude_md_managed_block,
+        locked_block_sha.as_deref(),
+        force,
+    )?;
+    match &claude_md {
+        ClaudeMdOutcome::Written(sha) => {
+            println!(
+                "   {} CLAUDE.md (nexus-managed block)",
+                style("+").bold().green()
+            );
+            super::ccx::record_claude_md_block_in_lock(target, agentic_root, sha)?;
+        }
+        ClaudeMdOutcome::Unchanged(sha) => {
+            super::ccx::record_claude_md_block_in_lock(target, agentic_root, sha)?;
+        }
+        ClaudeMdOutcome::Conflict => {
+            println!(
+                "   {} CLAUDE.md nexus-managed block modified locally, kept (run nexus claude diff; nexus pull --force replaces it)",
+                style("!").bold().yellow()
+            );
+        }
+        ClaudeMdOutcome::Skipped => {}
     }
 
-    Ok(())
+    Ok(ClaudeProjectionReport {
+        removed_hook_plugins,
+        settings_changes,
+        claude_md,
+    })
+}
+
+/// What [`render_claude_projection`] changed that the CCX pull summary
+/// reports on.
+#[derive(Debug)]
+pub struct ClaudeProjectionReport {
+    /// Hook adapters removed because they are no longer sent.
+    pub removed_hook_plugins: Vec<String>,
+    /// One entry per (current or previously) managed settings key, see
+    /// [`super::ccx::describe_settings_changes`].
+    pub settings_changes: Vec<String>,
+    pub claude_md: ClaudeMdOutcome,
+}
+
+/// Current `.claude/settings.json` as JSON (`{}` if absent or invalid).
+pub fn read_claude_settings(target: &Path) -> serde_json::Value {
+    fs::read_to_string(target.join(".claude").join("settings.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
 }
 
 #[cfg(test)]
@@ -1606,6 +1717,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -1643,6 +1755,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -2057,6 +2170,7 @@ mod tests {
             None,
             Some(&first_settings),
             None,
+            false,
         )
         .unwrap();
 
@@ -2078,6 +2192,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -2097,8 +2212,8 @@ mod tests {
     #[test]
     fn test_merge_claude_md_none_block_is_noop() {
         let dir = temp_dir("claudemd-none");
-        let changed = merge_claude_md_managed_block(&dir, None).unwrap();
-        assert!(!changed);
+        let changed = merge_claude_md_managed_block(&dir, None, None, false).unwrap();
+        assert_eq!(changed, ClaudeMdOutcome::Skipped);
         assert!(!dir.join("CLAUDE.md").exists());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2106,8 +2221,9 @@ mod tests {
     #[test]
     fn test_merge_claude_md_creates_file_with_markers() {
         let dir = temp_dir("claudemd-create");
-        let changed = merge_claude_md_managed_block(&dir, Some("Nexus rules here.")).unwrap();
-        assert!(changed);
+        let changed =
+            merge_claude_md_managed_block(&dir, Some("Nexus rules here."), None, false).unwrap();
+        assert!(matches!(changed, ClaudeMdOutcome::Written(_)));
         let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
         assert!(content.contains(CLAUDE_MD_MANAGED_BEGIN));
         assert!(content.contains(CLAUDE_MD_MANAGED_END));
@@ -2124,7 +2240,7 @@ mod tests {
         )
         .unwrap();
 
-        merge_claude_md_managed_block(&dir, Some("Nexus rules here.")).unwrap();
+        merge_claude_md_managed_block(&dir, Some("Nexus rules here."), None, false).unwrap();
 
         let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
         assert!(content.contains("Nexus rules here."));
@@ -2150,8 +2266,9 @@ mod tests {
         )
         .unwrap();
 
-        let changed = merge_claude_md_managed_block(&dir, Some("new content")).unwrap();
-        assert!(changed);
+        let changed =
+            merge_claude_md_managed_block(&dir, Some("new content"), None, false).unwrap();
+        assert!(matches!(changed, ClaudeMdOutcome::Written(_)));
 
         let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
         assert!(content.contains("new content"));
@@ -2165,9 +2282,18 @@ mod tests {
     #[test]
     fn test_merge_claude_md_is_idempotent() {
         let dir = temp_dir("claudemd-idempotent");
-        assert!(merge_claude_md_managed_block(&dir, Some("stable content")).unwrap());
-        let second = merge_claude_md_managed_block(&dir, Some("stable content")).unwrap();
-        assert!(!second, "re-sending the same block must be a no-op");
+        let first =
+            merge_claude_md_managed_block(&dir, Some("stable content"), None, false).unwrap();
+        let ClaudeMdOutcome::Written(sha) = first else {
+            panic!("expected Written, got {first:?}");
+        };
+        let second =
+            merge_claude_md_managed_block(&dir, Some("stable content"), Some(&sha), false).unwrap();
+        assert_eq!(
+            second,
+            ClaudeMdOutcome::Unchanged(sha),
+            "re-sending the same block must be a no-op"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2182,12 +2308,61 @@ mod tests {
         )
         .unwrap();
 
-        merge_claude_md_managed_block(&dir, Some("nexus stuff")).unwrap();
+        merge_claude_md_managed_block(&dir, Some("nexus stuff"), None, false).unwrap();
 
         let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
         assert!(content.contains("nexus stuff"));
         assert!(content.contains("nextjs stuff"));
         assert!(content.contains("BEGIN:nextjs-agent-rules"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_md_conflict_when_block_edited_locally() {
+        let dir = temp_dir("claudemd-conflict");
+        let ClaudeMdOutcome::Written(sha) =
+            merge_claude_md_managed_block(&dir, Some("v1"), None, false).unwrap()
+        else {
+            panic!("expected Written");
+        };
+        let path = dir.join("CLAUDE.md");
+        let edited = fs::read_to_string(&path).unwrap().replace("v1", "my edit");
+        fs::write(&path, &edited).unwrap();
+
+        // New block arrives, local block edited since the lock: keep it.
+        let outcome = merge_claude_md_managed_block(&dir, Some("v2"), Some(&sha), false).unwrap();
+        assert_eq!(outcome, ClaudeMdOutcome::Conflict);
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+
+        // --force replaces it.
+        let outcome = merge_claude_md_managed_block(&dir, Some("v2"), Some(&sha), true).unwrap();
+        assert!(matches!(outcome, ClaudeMdOutcome::Written(_)));
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("v2"));
+        assert!(!content.contains("my edit"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_md_updates_unedited_block_and_records_new_hash() {
+        let dir = temp_dir("claudemd-update");
+        let ClaudeMdOutcome::Written(sha) =
+            merge_claude_md_managed_block(&dir, Some("v1"), None, false).unwrap()
+        else {
+            panic!("expected Written");
+        };
+        let outcome = merge_claude_md_managed_block(&dir, Some("v2"), Some(&sha), false).unwrap();
+        assert_eq!(
+            outcome,
+            ClaudeMdOutcome::Written(nexus_core::hash::sha256_hex(&claude_md_desired_block_text(
+                "v2"
+            )))
+        );
+        let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+        assert_eq!(
+            claude_md_block_text(&content),
+            Some(claude_md_desired_block_text("v2").as_str())
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2702,6 +2877,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 

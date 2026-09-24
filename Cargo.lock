@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-core"
-version = "0.25.1"
+version = "0.26.0"
 dependencies = [
  "dirs",
  "open",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-tests"
-version = "0.25.1"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "nexus-core",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "nexusctl"
-version = "0.25.1"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -822,6 +822,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "similar",
  "tempfile",
  "tokio",
  "tracing",
@@ -1339,6 +1340,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "slab"

@@ -7,8 +7,14 @@ use sha2::{Digest, Sha256};
 /// Matches the server-side `computeContentHash` function used by
 /// `af_status` and `ws_push` endpoints.
 pub fn sha256_hex(content: &str) -> String {
+    sha256_hex_bytes(content.as_bytes())
+}
+
+/// Compute a lowercase hex SHA-256 hash of raw bytes (no normalization),
+/// for hashing files exactly as they exist on disk.
+pub fn sha256_hex_bytes(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
+    hasher.update(content);
     format!("{:x}", hasher.finalize())
 }
 

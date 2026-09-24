@@ -1884,21 +1884,24 @@ fn format_number(n: u64) -> String {
 // ---------------------------------------------------------------------------
 
 /// Parsed headroom session summary from `.nexus/headroom-intercept.jsonl`.
-struct HeadroomSummary {
-    mode: String,
-    compressions: u64,
-    locally_applied: u64,
-    observations: u64,
-    skips: u64,
-    passthroughs: u64,
-    potential_saved_tokens: u64,
-    cache_integrity_failures: u64,
+pub(crate) struct HeadroomSummary {
+    pub(crate) mode: String,
+    pub(crate) compressions: u64,
+    pub(crate) locally_applied: u64,
+    pub(crate) observations: u64,
+    pub(crate) skips: u64,
+    pub(crate) passthroughs: u64,
+    pub(crate) potential_saved_tokens: u64,
+    pub(crate) cache_integrity_failures: u64,
 }
 
 /// Read the last `session_summary` event from `.nexus/headroom-intercept.jsonl`
 /// that was written after `run_start_epoch` (Unix seconds). Falls back to the
 /// very last `session_summary` in the file if timestamp filtering fails.
-fn read_headroom_stats(workspace: &Path, run_start_epoch: u64) -> Option<HeadroomSummary> {
+pub(crate) fn read_headroom_stats(
+    workspace: &Path,
+    run_start_epoch: u64,
+) -> Option<HeadroomSummary> {
     let jsonl_path = workspace.join(".nexus").join("headroom-intercept.jsonl");
     let content = fs::read_to_string(&jsonl_path).ok()?;
 
@@ -2052,7 +2055,7 @@ pub(crate) fn parse_env_file(path: &Path) -> HashMap<String, String> {
 }
 
 /// Resolve agentic root — fall back to `.nexus`.
-fn resolve_agentic_root(_workspace: &Path) -> String {
+pub(crate) fn resolve_agentic_root(_workspace: &Path) -> String {
     ".nexus".to_string()
 }
 

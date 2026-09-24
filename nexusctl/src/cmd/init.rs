@@ -311,6 +311,7 @@ pub async fn run(
                                 .as_ref()
                                 .ok()
                                 .and_then(|r| r.claude_md_managed_block.as_deref()),
+                            force,
                         )?;
                     }
                 }

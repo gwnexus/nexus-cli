@@ -3,6 +3,7 @@
 mod actors;
 mod auth;
 pub(crate) mod ccx;
+mod claude_cmd;
 pub(crate) mod claude_render;
 mod config_cmd;
 mod deinit;
@@ -24,8 +25,9 @@ pub(crate) mod sync;
 mod upgrade;
 
 use crate::{
-    ActorAvatarAction, ActorsAction, Cli, Command, ConfigAction, GitAction, ProjectAction,
-    ShadowAction, SkillsAction, StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
+    ActorAvatarAction, ActorsAction, ClaudeAction, Cli, Command, ConfigAction, GitAction,
+    ProjectAction, ShadowAction, SkillsAction, StashAction, SyncAction, WorkspaceAction,
+    WorkspaceShadowAction,
 };
 
 /// Dispatch the parsed CLI command to the appropriate handler.
@@ -121,6 +123,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Pull {
             ref project_id,
             force,
+            force_unmanaged,
             ref scope,
             with_actor_assets,
             skip_actor_assets,
@@ -136,8 +139,46 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 config.mcp_source,
                 scope,
                 effective_with_assets,
+                // Only the explicit flags, never -y: accepting prompts must
+                // not discard local edits to CCX files.
+                ccx::ForceMode::from_flags(force, force_unmanaged),
             )
             .await?;
+        }
+        Command::Claude { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            let code = match action {
+                ClaudeAction::Status { ref project_id } => {
+                    let json = matches!(
+                        cli.resolve_output(&config),
+                        nexus_core::OutputPreference::Json
+                    );
+                    claude_cmd::status(&api_url, project_id.as_deref(), json).await?
+                }
+                ClaudeAction::Diff { ref project_id } => {
+                    claude_cmd::diff(&api_url, project_id.as_deref()).await?
+                }
+                ClaudeAction::Launch {
+                    skip_checks,
+                    force,
+                    ref account,
+                } => {
+                    claude_cmd::launch(
+                        &api_url,
+                        *skip_checks,
+                        *force,
+                        config.run.launch_countdown_secs,
+                        account.as_deref(),
+                        cli.yes,
+                    )
+                    .await?;
+                    0
+                }
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
         Command::Skills { ref action } => match action {
             SkillsAction::List { ref status, limit } => {
