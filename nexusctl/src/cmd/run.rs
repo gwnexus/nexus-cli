@@ -27,7 +27,40 @@ use nexus_core::api::NexusClient;
 use nexus_core::auth::resolve_token;
 use nexus_core::config;
 
+use super::git;
 use super::preflight::{cmd_version, print_check, CheckResult};
+
+/// Environment variables carrying a GitHub token that must be stripped from
+/// the child process when a per-project `gh` profile is active (NEXUS-APP
+/// dispatch 8776d208), so an ambient shell credential cannot silently
+/// authenticate `gh`/tools that shell out to it as the wrong account
+/// underneath the selected profile.
+const GH_TOKEN_ENV_VARS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// Resolved plan for a per-project `gh` CLI profile: which `GH_CONFIG_DIR`
+/// to use, an optional `GH_HOST` override for non-github.com hosts, and
+/// which ambient token env vars need to be stripped from the child.
+struct GhEnvPlan {
+    config_dir: std::path::PathBuf,
+    host_override: Option<String>,
+    tokens_to_remove: Vec<&'static str>,
+}
+
+/// Whether `gh.host` needs an explicit `GH_HOST` override: only for a
+/// GitHub Enterprise Server host, never for the default `github.com`
+/// (case-insensitive, matching the backend's own lower-casing).
+fn gh_host_override(host: &str) -> Option<String> {
+    if host.eq_ignore_ascii_case("github.com") {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -61,6 +94,9 @@ pub async fn run(
     let mut plugin_env = parse_env_file(&env_file_path);
 
     // ── 2. If !--no-db, refresh from af_export (fresher than file) ─────────
+    // Also fetch git_config (af_export does not carry it) so a per-project
+    // `gh` CLI profile (NEXUS-APP dispatch 8776d208) can be applied below.
+    let mut git_config: Option<nexus_core::api::GitConfig> = None;
     if !no_db {
         if let Some(token) = resolve_token() {
             if let Ok(client) = NexusClient::new(api_url, Some(token)) {
@@ -75,6 +111,9 @@ pub async fn run(
                         for (k, v) in af_export.plugin_env {
                             plugin_env.insert(k, v);
                         }
+                    }
+                    if let Ok(detail) = client.get_project(&project_id).await {
+                        git_config = detail.project.git_config;
                     }
                 }
             }
@@ -140,9 +179,39 @@ pub async fn run(
             }
         };
 
+    // ── 4.6. Per-project gh CLI profile (NEXUS-APP dispatch 8776d208) ──────
+    // ──────────────────────────────────────────────────────────────────────
+    //
+    // Applies to all tools, not just Claude Code. The GitHub token itself
+    // never leaves the operator's machine and never touches Nexus; the
+    // project only declares which local `gh` profile (its own
+    // `GH_CONFIG_DIR`) to select. Any ambient GH_TOKEN/GITHUB_TOKEN/... in
+    // the parent shell is stripped from the child so it cannot silently
+    // authenticate `gh` as the wrong account underneath the selected
+    // profile.
+    let gh_plan = git_config
+        .as_ref()
+        .and_then(|g| g.gh.as_ref())
+        .map(|gh| -> anyhow::Result<GhEnvPlan> {
+            let dir = git::ensure_gh_profile_dir(&config::Config::dir()?, &gh.profile)?;
+            let host_override = gh_host_override(&gh.host);
+            let tokens_present: Vec<&'static str> = GH_TOKEN_ENV_VARS
+                .iter()
+                .copied()
+                .filter(|v| env::var(v).is_ok())
+                .collect();
+            Ok(GhEnvPlan {
+                config_dir: dir,
+                host_override,
+                tokens_to_remove: tokens_present,
+            })
+        })
+        .transpose()?;
+
     // ── 5. Dry-run / show-env output ─────────────────────────────────────────
     if dry_run || show_env {
         print_env_table(&workspace, effective_tool, &to_inject, &skipped, args);
+        print_gh_env_plan(gh_plan.as_ref());
         if dry_run {
             return Ok(());
         }
@@ -206,6 +275,8 @@ pub async fn run(
             force,
             countdown_secs,
             account,
+            git_config.as_ref().and_then(|g| g.gh.as_ref()),
+            gh_plan.as_ref().map(|p| p.config_dir.as_path()),
         )
         .await?;
         if !should_continue {
@@ -253,6 +324,27 @@ pub async fn run(
             );
         } else {
             env::set_var("CLAUDE_CONFIG_DIR", dir);
+        }
+    }
+
+    // Per-project gh CLI profile (see step 4.6): set GH_CONFIG_DIR/GH_HOST
+    // and strip any ambient token env vars so a leaked shell credential
+    // cannot silently authenticate `gh` as the wrong account underneath the
+    // selected profile. Applies to all tools, not just Claude Code.
+    if let Some(plan) = &gh_plan {
+        env::set_var("GH_CONFIG_DIR", &plan.config_dir);
+        if let Some(host) = &plan.host_override {
+            env::set_var("GH_HOST", host);
+        }
+        for var in &plan.tokens_to_remove {
+            env::remove_var(var);
+        }
+        if !plan.tokens_to_remove.is_empty() {
+            println!(
+                "   {} removed {} from the environment (per-project gh profile active)",
+                style("~").bold().yellow(),
+                plan.tokens_to_remove.join(", ")
+            );
         }
     }
 
@@ -492,6 +584,33 @@ fn print_env_table(
             format!(" {}", args.join(" "))
         }
     );
+    println!();
+}
+
+/// Print the resolved per-project `gh` profile plan for `--dry-run`/
+/// `--show-env` (NEXUS-APP dispatch 8776d208): the `GH_CONFIG_DIR` (and
+/// `GH_HOST`, if overridden) that will be set, and the *names* of any
+/// ambient token env vars that will be removed from the child (never the
+/// values). No-op when no `gh` profile is configured for this project.
+fn print_gh_env_plan(plan: Option<&GhEnvPlan>) {
+    let Some(plan) = plan else {
+        return;
+    };
+    println!("   gh profile:");
+    println!(
+        "     {:<36} = {}",
+        style("GH_CONFIG_DIR").bold(),
+        plan.config_dir.display()
+    );
+    if let Some(host) = &plan.host_override {
+        println!("     {:<36} = {}", style("GH_HOST").bold(), host);
+    }
+    if !plan.tokens_to_remove.is_empty() {
+        println!(
+            "     removed from child env: {}",
+            plan.tokens_to_remove.join(", ")
+        );
+    }
     println!();
 }
 
@@ -778,6 +897,8 @@ async fn run_prelaunch_checks(
     force: bool,
     countdown_secs: u64,
     account: Option<&str>,
+    gh: Option<&nexus_core::api::GhConfig>,
+    gh_profile_dir: Option<&Path>,
 ) -> anyhow::Result<bool> {
     println!();
     println!("{} Nexus Pre-launch Check", style(">>").bold().cyan());
@@ -833,6 +954,24 @@ async fn run_prelaunch_checks(
     // operator is not guessing which Keychain identity `claude` will use.
     if let Some(result) = account_check(agent_owner, account) {
         checks.push(("Account", result));
+    }
+
+    // gh Auth — warn (never block) if the project's configured gh profile
+    // has no cached login for its host yet (NEXUS-APP dispatch 8776d208).
+    if let (Some(gh), Some(profile_dir)) = (gh, gh_profile_dir) {
+        let result = if git::gh_is_authenticated(profile_dir, &gh.host) {
+            CheckResult::Pass(format!("'{}' profile authenticated", gh.profile))
+        } else {
+            CheckResult::Warn(format!(
+                "'{}' profile not logged in to {} -- run: \
+                 GH_CONFIG_DIR={} gh auth login --hostname {}",
+                gh.profile,
+                gh.host,
+                profile_dir.display(),
+                gh.host
+            ))
+        };
+        checks.push(("gh Auth", result));
     }
 
     // Plugin Env
@@ -1789,6 +1928,40 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+
+    // -------------------------------------------------------------------
+    // Per-project gh CLI profile (NEXUS-APP dispatch 8776d208)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_gh_host_override_none_for_github_com() {
+        assert_eq!(gh_host_override("github.com"), None);
+        // Case-insensitive, matching the backend's own lower-casing.
+        assert_eq!(gh_host_override("GitHub.COM"), None);
+    }
+
+    #[test]
+    fn test_gh_host_override_some_for_enterprise_host() {
+        assert_eq!(
+            gh_host_override("github.internal.example.com"),
+            Some("github.internal.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_gh_token_env_vars_are_exactly_the_expected_four() {
+        // Regression pin: these are the exact variables the dispatch
+        // requires stripped from the child when a gh profile is active.
+        assert_eq!(
+            GH_TOKEN_ENV_VARS,
+            &[
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN"
+            ]
+        );
+    }
 
     // -------------------------------------------------------------------
     // sync_mcp_credentials (Task a3bf595b, NEXUS-APP)

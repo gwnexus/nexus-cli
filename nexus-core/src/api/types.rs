@@ -477,6 +477,37 @@ pub struct GitConfig {
     /// (NEXUS-APP dispatch 84e38bd7).
     #[serde(default)]
     pub include_co_authored_by: Option<bool>,
+    /// Per-project GitHub CLI (`gh`) profile (NEXUS-APP dispatch 8776d208).
+    /// `None` for projects that have not configured one.
+    #[serde(default)]
+    pub gh: Option<GhConfig>,
+}
+
+/// Per-project GitHub CLI (`gh`) profile.
+///
+/// The GitHub token itself never leaves the operator's machine and never
+/// passes through the Nexus backend: this only records which local `gh`
+/// profile (a dedicated `GH_CONFIG_DIR`) a project should use, so multiple
+/// projects can cleanly use different GitHub identities on the same
+/// machine (NEXUS-APP dispatch 8776d208).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhConfig {
+    /// Lower-cased hostname; `github.com` unless this is a GitHub
+    /// Enterprise Server project. Validated and normalized server-side.
+    #[serde(default = "default_gh_host")]
+    pub host: String,
+    /// Expected GitHub login for this profile (informational; used by
+    /// `nexus git verify` to detect a mismatched login). Validated
+    /// server-side.
+    pub user: Option<String>,
+    /// Local `gh` CLI profile name (`^[a-z0-9][a-z0-9._-]{0,63}$`,
+    /// validated server-side). Always present when `gh` is present;
+    /// defaults to the lower-cased login on the backend.
+    pub profile: String,
+}
+
+fn default_gh_host() -> String {
+    "github.com".to_string()
 }
 
 /// Wrapper for project list API response.

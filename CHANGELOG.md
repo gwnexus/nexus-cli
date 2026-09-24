@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-09-24
+
+### Added
+- **Per-project `gh` CLI profile support** (NEXUS-APP dispatch 8776d208, targeting the nexus-app 0.14.0 release). Projects can now declare `git_config.gh = { host, user, profile }`; the GitHub token itself never leaves the operator's machine and never passes through the Nexus backend, only the local profile name is recorded.
+  - `nexus run` (all tools, not just Claude Code): when `git_config.gh` is set, launches the child process with `GH_CONFIG_DIR=~/.config/nexus/gh-profiles/<profile>` (created with `0700` permissions if missing) and strips `GH_TOKEN`/`GITHUB_TOKEN`/`GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` from the child environment, printing a one-line notice naming which variables were removed. Sets `GH_HOST` for a non-`github.com` host. Never modifies the parent shell, never runs `gh auth switch`, never writes a token to disk. `--show-env`/`--dry-run` show `GH_CONFIG_DIR`/`GH_HOST` and the names (not values) of any removed token variables.
+  - New "gh Auth" pre-launch check: warns (never blocks) if the profile has no cached login for its host yet, printing the exact one-time command to run (`GH_CONFIG_DIR=... gh auth login --hostname <host>`).
+  - `nexus git verify` gained a `gh` check: resolves the active login via `gh api user --jq .login --hostname <host>` under the profile's isolated `GH_CONFIG_DIR` and reports ok / mismatch (active vs. expected) / not logged in / `gh` not installed. `nexus git apply` is unchanged for `gh` (login is interactive by design; nothing to apply).
+  - New `nexus_core::api::GhConfig` type and `GitConfig.gh: Option<GhConfig>` field (additive, no wire schema change).
+
+### Confirmed
+- `includeCoAuthoredBy` (shipped in v0.21.2): a missing `git_config.include_co_authored_by` is, and continues to be, treated as `false` (suppressed), matching nexus-app's own migration backfill for existing projects.
+
 ## [0.21.4] - 2026-09-24
 
 ### Added
