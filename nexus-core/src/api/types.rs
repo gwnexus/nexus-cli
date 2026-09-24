@@ -389,7 +389,7 @@ pub struct AgentFileExportResponse {
 /// carries the JSON value to set at each path. Kept untyped per key
 /// (`serde_json::Value`) since the Claude Code settings schema is
 /// server-owned and evolves independently of the CLI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeSettingsSpec {
     pub managed_keys: Vec<String>,
     pub values: serde_json::Map<String, serde_json::Value>,

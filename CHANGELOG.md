@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-09-24
+
+### Added
+- **CCX lock foundation and settings-key removal** (NEXUS-APP ADR-0117 follow-up, dispatch 99f335e8), closing the gap explicitly flagged as missing in v0.24.0: `merge_claude_generic_settings()` now removes a `.claude/settings.json` key (or array entries) that Nexus used to manage but no longer sends, without ever touching a value the operator changed themselves. New `<agentic_root>/claude/manifest.lock.json` (CLI-owned, atomic write via temp file + rename) records the settings state from the last pull; on the next pull, any key present in the lock but absent from the new `claude_settings.managed_keys` is removed if (and only if) its current value still matches what the lock recorded, and for array values only the lock's own entries are removed, leaving operator additions untouched.
+- New `nexusctl::cmd::ccx` module also includes `classify_file_state()`, the full per-file reconciliation state machine (create/clean/updated/drifted/conflict/unmanaged/adopt/orphaned) specified in dispatch 99f335e8, built and unit tested against every row of the state table now so the next phase is pure wiring rather than new design. Not yet consumed by `nexus pull`.
+
+### Deferred
+- Per-file CCX pull wiring (writing CCX-governed files with lock-tracked hashes, the migration-adoption rule, `--force`/`--force-unmanaged` semantics, orphan deletion), the CLAUDE.md-block conflict path, the CCX pull output section, and the three new `nexus claude status`/`diff`/`launch` commands remain open, tracked against the same follow-up dispatch. The lock format's `bundle`/`version`/`revision` fields are `Option`al for now (populated once that wiring lands) so the lock can already track settings-merge history on its own in the meantime.
+
+15 new unit tests (lock round-trip incl. atomic-write and corrupt-file handling, all 8 state-table rows, settings-key removal across scalar/array/still-managed/no-previous cases, and 2 end-to-end tests through `merge_claude_generic_settings`/`render_claude_projection` simulating two pulls). 585/585 tests passing, clippy/fmt clean.
+
 ## [0.24.0] - 2026-09-24
 
 ### Added

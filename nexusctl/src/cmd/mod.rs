@@ -2,6 +2,7 @@
 
 mod actors;
 mod auth;
+pub(crate) mod ccx;
 pub(crate) mod claude_render;
 mod config_cmd;
 mod deinit;

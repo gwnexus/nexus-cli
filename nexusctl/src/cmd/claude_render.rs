@@ -485,11 +485,11 @@ pub fn merge_claude_co_authored_by(target: &Path, include: Option<bool>) -> anyh
 pub fn merge_claude_generic_settings(
     target: &Path,
     spec: Option<&ClaudeSettingsSpec>,
+    previous: Option<&ClaudeSettingsSpec>,
 ) -> anyhow::Result<usize> {
-    let Some(spec) = spec else {
-        return Ok(0);
-    };
-    if spec.managed_keys.is_empty() {
+    let spec_has_keys = spec.is_some_and(|s| !s.managed_keys.is_empty());
+    let previous_has_keys = previous.is_some_and(|p| !p.managed_keys.is_empty());
+    if !spec_has_keys && !previous_has_keys {
         return Ok(0);
     }
 
@@ -505,27 +505,37 @@ pub fn merge_claude_generic_settings(
     }
 
     let mut changed = 0usize;
-    for key_path in &spec.managed_keys {
-        let Some(new_value) = spec.values.get(key_path) else {
-            continue;
-        };
-        let merged_value = match (json_get_path(&settings, key_path), new_value) {
-            (Some(serde_json::Value::Array(existing_arr)), serde_json::Value::Array(new_arr)) => {
-                let mut merged = existing_arr.clone();
-                for item in new_arr {
-                    if !merged.contains(item) {
-                        merged.push(item.clone());
+    if let Some(spec) = spec {
+        for key_path in &spec.managed_keys {
+            let Some(new_value) = spec.values.get(key_path) else {
+                continue;
+            };
+            let merged_value = match (json_get_path(&settings, key_path), new_value) {
+                (
+                    Some(serde_json::Value::Array(existing_arr)),
+                    serde_json::Value::Array(new_arr),
+                ) => {
+                    let mut merged = existing_arr.clone();
+                    for item in new_arr {
+                        if !merged.contains(item) {
+                            merged.push(item.clone());
+                        }
                     }
+                    serde_json::Value::Array(merged)
                 }
-                serde_json::Value::Array(merged)
+                _ => new_value.clone(),
+            };
+            if json_get_path(&settings, key_path) != Some(&merged_value) {
+                json_set_path(&mut settings, key_path, merged_value);
+                changed += 1;
             }
-            _ => new_value.clone(),
-        };
-        if json_get_path(&settings, key_path) != Some(&merged_value) {
-            json_set_path(&mut settings, key_path, merged_value);
-            changed += 1;
         }
     }
+
+    // Remove a key/array-entries Nexus used to manage but no longer sends
+    // (NEXUS-APP ADR-0117 follow-up, dispatch 99f335e8): never clobbers a
+    // value the operator changed since it was last recorded.
+    changed += super::ccx::reconcile_settings_removed_keys(&mut settings, spec, previous);
 
     if changed > 0 {
         if let Some(parent) = settings_path.parent() {
@@ -963,8 +973,13 @@ pub fn render_claude_projection(
     // Generic Nexus-managed settings.json keys (NEXUS-APP ADR-0117 "CCX"):
     // statusline, attribution, permissions.deny, plugin enablement, known
     // marketplaces. Merges alongside everything above; only present keys
-    // change, nothing else in the file is touched.
-    let generic_settings_changed = merge_claude_generic_settings(target, claude_settings)?;
+    // change, nothing else in the file is touched. The CCX lock's
+    // previously-recorded settings state (if any) drives removal of a key
+    // Nexus no longer manages (dispatch 99f335e8 follow-up); the lock is
+    // updated afterward to reflect what is now managed.
+    let previous_settings = super::ccx::load_lock(target, agentic_root).and_then(|l| l.settings);
+    let generic_settings_changed =
+        merge_claude_generic_settings(target, claude_settings, previous_settings.as_ref())?;
     if generic_settings_changed > 0 {
         println!(
             "   {} .claude/settings.json (+{} managed key(s))",
@@ -972,6 +987,7 @@ pub fn render_claude_projection(
             generic_settings_changed
         );
     }
+    super::ccx::record_settings_in_lock(target, agentic_root, claude_settings)?;
 
     // Root CLAUDE.md managed block (NEXUS-APP ADR-0117 "CCX"): everything
     // outside the markers is user-owned and never rewritten.
@@ -1739,7 +1755,7 @@ mod tests {
     #[test]
     fn test_merge_generic_settings_none_spec_is_noop() {
         let dir = temp_dir("ccx-none");
-        let appended = merge_claude_generic_settings(&dir, None).unwrap();
+        let appended = merge_claude_generic_settings(&dir, None, None).unwrap();
         assert_eq!(appended, 0);
         assert!(!dir.join(".claude/settings.json").exists());
         let _ = fs::remove_dir_all(&dir);
@@ -1755,7 +1771,7 @@ mod tests {
                 serde_json::json!({"type": "command", "command": "node hud.mjs"}),
             )],
         );
-        let changed = merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        let changed = merge_claude_generic_settings(&dir, Some(&spec), None).unwrap();
         assert_eq!(changed, 1);
 
         let settings: serde_json::Value =
@@ -1776,7 +1792,7 @@ mod tests {
                 serde_json::json!(["Read(./.env)", "Read(./.env.*)"]),
             )],
         );
-        merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        merge_claude_generic_settings(&dir, Some(&spec), None).unwrap();
 
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
@@ -1804,7 +1820,7 @@ mod tests {
             &["permissions.deny"],
             &[("permissions.deny", serde_json::json!(["Read(./.env)"]))],
         );
-        merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        merge_claude_generic_settings(&dir, Some(&spec), None).unwrap();
 
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
@@ -1824,9 +1840,9 @@ mod tests {
             &["permissions.deny"],
             &[("permissions.deny", serde_json::json!(["Read(./.env)"]))],
         );
-        let first = merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        let first = merge_claude_generic_settings(&dir, Some(&spec), None).unwrap();
         assert_eq!(first, 1);
-        let second = merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        let second = merge_claude_generic_settings(&dir, Some(&spec), None).unwrap();
         assert_eq!(second, 0, "re-sending the same array must not duplicate it");
 
         let settings: serde_json::Value =
@@ -1854,7 +1870,7 @@ mod tests {
                 serde_json::json!({"nexus-core@gatewarden-nexus": true}),
             )],
         );
-        merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        merge_claude_generic_settings(&dir, Some(&spec), None).unwrap();
 
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
@@ -1878,8 +1894,102 @@ mod tests {
             managed_keys: vec!["statusLine".to_string()],
             values: serde_json::Map::new(),
         };
-        let changed = merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        let changed = merge_claude_generic_settings(&dir, Some(&spec), None).unwrap();
         assert_eq!(changed, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_generic_settings_removes_key_dropped_from_previous() {
+        // End-to-end through merge_claude_generic_settings itself (not
+        // just ccx::reconcile_settings_removed_keys directly): a key that
+        // was previously managed and is no longer sent gets removed.
+        let dir = temp_dir("ccx-removes-via-previous");
+        let previous = sample_ccx_spec(
+            &["statusLine"],
+            &[(
+                "statusLine",
+                serde_json::json!({"type": "command", "command": "node hud.mjs"}),
+            )],
+        );
+        // First call establishes the file with the managed key present.
+        merge_claude_generic_settings(&dir, Some(&previous), None).unwrap();
+        assert!(fs::read_to_string(dir.join(".claude/settings.json"))
+            .unwrap()
+            .contains("hud.mjs"));
+
+        // Second call: statusLine is no longer in the new spec at all.
+        let current = sample_ccx_spec(&[], &[]);
+        let changed = merge_claude_generic_settings(&dir, Some(&current), Some(&previous)).unwrap();
+        assert_eq!(changed, 1);
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert!(settings.get("statusLine").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_render_claude_projection_removes_settings_key_across_two_pulls() {
+        // Full round trip through render_claude_projection + the CCX
+        // lock: first "pull" writes a managed key and records it in the
+        // lock; second "pull" (simulating the backend no longer sending
+        // that key) removes it via the lock's recorded previous state.
+        let dir = temp_dir("ccx-two-pulls");
+        let first_settings = sample_ccx_spec(
+            &["statusLine"],
+            &[(
+                "statusLine",
+                serde_json::json!({"type": "command", "command": "node hud.mjs"}),
+            )],
+        );
+
+        render_claude_projection(
+            &dir,
+            "Test Project",
+            ".nexus",
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            Some(&first_settings),
+            None,
+        )
+        .unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert!(settings.get("statusLine").is_some());
+
+        // Second pull: backend stops sending claude_settings entirely.
+        render_claude_projection(
+            &dir,
+            "Test Project",
+            ".nexus",
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert!(
+            settings.get("statusLine").is_none(),
+            "statusLine should have been removed once no longer sent"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 
