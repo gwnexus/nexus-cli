@@ -848,6 +848,32 @@ pub async fn run(
     // going to be written (skipped entirely for the claude-cli-only flavor,
     // since mcp.json carries no model/agent routing config).
     let opencode_will_be_written = !matches!(tool_flavor.as_deref(), Some("claude-cli"));
+
+    // Stale-projection warning (follow-up to the run-1 claude-cli
+    // diagnostic pass): pull is intentionally additive-only and never
+    // deletes a toolstack projection on its own, so switching a project's
+    // agent_owner (e.g. "both"/"opencode" -> "claude-cli") leaves the
+    // no-longer-selected projection's files orphaned on disk instead of
+    // removing them. Surface this loudly instead of silently leaving stale
+    // duplicated files for the operator to discover later.
+    if matches!(tool_flavor.as_deref(), Some("claude-cli")) && workspace.join(".opencode").exists()
+    {
+        println!(
+            "   {} .opencode/ still present but agent_owner is now \"claude-cli\" -- \
+             these files are stale (pull never deletes an unselected projection). \
+             Remove .opencode/ manually if it's no longer needed.",
+            style("!").bold().yellow()
+        );
+    }
+    if matches!(tool_flavor.as_deref(), Some("opencode")) && workspace.join(".claude").exists() {
+        println!(
+            "   {} .claude/ still present but agent_owner is now \"opencode\" -- \
+             these files are stale (pull never deletes an unselected projection). \
+             Remove .claude/ manually if it's no longer needed.",
+            style("!").bold().yellow()
+        );
+    }
+
     let proceed_with_opencode = if opencode_will_be_written {
         confirm_export_warnings(&export_warnings, force)?
     } else {
