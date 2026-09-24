@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.1] - 2026-09-24
+
+### Added
+- **Hook adapter removal when Nexus stops managing one** (NEXUS-APP ADR-0117 follow-up, dispatch 99f335e8, the same "stopped sending" problem as the v0.25.0 settings-key removal), e.g. when a project enables the `nexus-core` Claude Code plugin which carries the same five hooks and `claude_hook_adapters` becomes empty as a result. `merge_claude_hooks()` now records each adapter's registrations (event/matcher/command) and hook-file SHA-256 in the CCX lock (`<agentic_root>/claude/manifest.lock.json`), and on a later pull removes only the exact `.claude/settings.json` hook entries Nexus itself wrote (matched on event, matcher, and command) plus the corresponding file under `.claude/hooks/` -- but only if that file's content on disk still matches what Nexus last wrote there. An operator's own hook entries and any locally-modified hook script are left untouched.
+
+4 new unit tests (removal of an entry no longer present, preservation of an operator-customized hook file, preservation of an operator's own settings entry for the same event, and confirmation a still-managed adapter is never reported as removed). 589/589 tests passing, clippy/fmt clean.
+
 ## [0.25.0] - 2026-09-24
 
 ### Added

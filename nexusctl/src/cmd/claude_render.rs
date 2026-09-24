@@ -25,6 +25,8 @@ use nexus_core::api::{
     ClaudeHookAdapter, ClaudeSettingsSpec, ExportedActorFile, ExportedAgentFile, ExportedSkill,
 };
 
+use super::ccx;
+
 /// Map a canonical Nexus skill ID to the public Claude Code command
 /// namespace. Legacy `nx-*` skill IDs are migrated to `nexus-*`
 /// (ADR-C06 "Canonical command identity"); IDs already in the `nexus-*`
@@ -313,11 +315,37 @@ pub fn write_claude_hook_adapters(
 /// both on `Stop`) as independent array entries — confirmed live against a
 /// real Claude Code session, per the dispatch's verification notes.
 ///
-/// Returns the number of new hook entries appended (0 if nothing changed;
-/// the file is only rewritten when this is non-zero).
-pub fn merge_claude_hooks(target: &Path, adapters: &[ClaudeHookAdapter]) -> anyhow::Result<usize> {
-    if adapters.is_empty() {
-        return Ok(0);
+/// Returns `(appended, removed_plugin_names)`: the number of new hook
+/// entries appended, and the plugin names of any adapters that were
+/// previously Nexus-managed (per `previous_hooks`, from the CCX lock) but
+/// are no longer in `adapters` -- e.g. because the `nexus-core` Claude
+/// plugin now provides the same hooks (NEXUS-APP dispatch 99f335e8
+/// follow-up). For each such adapter, only the exact settings.json hook
+/// entries Nexus itself wrote (matched on event/matcher/command) are
+/// removed -- anything an operator added is left alone -- and the hook
+/// script file under `.claude/hooks/` is deleted only if its content on
+/// disk still matches what Nexus last wrote there (the "orphaned" rule:
+/// never delete a file the operator modified).
+///
+/// The file is only rewritten when `appended > 0` or something was
+/// actually removed.
+pub fn merge_claude_hooks(
+    target: &Path,
+    adapters: &[ClaudeHookAdapter],
+    previous_hooks: Option<&std::collections::BTreeMap<String, ccx::CcxLockHookEntry>>,
+) -> anyhow::Result<(usize, Vec<String>)> {
+    let removable: Vec<&ccx::CcxLockHookEntry> = previous_hooks
+        .map(|prev| {
+            let current_paths: std::collections::HashSet<&str> =
+                adapters.iter().map(|a| a.target_path.as_str()).collect();
+            prev.values()
+                .filter(|entry| !current_paths.contains(entry.target_path.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if adapters.is_empty() && removable.is_empty() {
+        return Ok((0, Vec::new()));
     }
 
     let settings_path = target.join(".claude").join("settings.json");
@@ -339,6 +367,36 @@ pub fn merge_claude_hooks(target: &Path, adapters: &[ClaudeHookAdapter]) -> anyh
         *hooks = serde_json::Value::Object(serde_json::Map::new());
     }
     let hooks_obj = hooks.as_object_mut().expect("just ensured object");
+
+    let mut removed_plugin_names = Vec::new();
+    for entry in &removable {
+        for reg in &entry.registrations {
+            if let Some(event_array) = hooks_obj.get_mut(&reg.event).and_then(|v| v.as_array_mut())
+            {
+                event_array.retain(|item| {
+                    let matcher_matches =
+                        item.get("matcher").and_then(|m| m.as_str()) == reg.matcher.as_deref();
+                    let command_matches =
+                        item.get("hooks")
+                            .and_then(|h| h.as_array())
+                            .is_some_and(|hooks| {
+                                hooks.iter().any(|h| {
+                                    h.get("command").and_then(|c| c.as_str())
+                                        == Some(reg.command.as_str())
+                                })
+                            });
+                    !(matcher_matches && command_matches)
+                });
+            }
+        }
+        let script_path = target.join(&entry.target_path);
+        if let Ok(content) = fs::read_to_string(&script_path) {
+            if nexus_core::hash::sha256_hex(&content) == entry.file_sha256 {
+                let _ = fs::remove_file(&script_path);
+            }
+        }
+        removed_plugin_names.push(entry.plugin_name.clone());
+    }
 
     let mut appended = 0;
     for adapter in adapters {
@@ -398,7 +456,7 @@ pub fn merge_claude_hooks(target: &Path, adapters: &[ClaudeHookAdapter]) -> anyh
         }
     }
 
-    if appended > 0 {
+    if appended > 0 || !removed_plugin_names.is_empty() {
         if let Some(parent) = settings_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -406,7 +464,7 @@ pub fn merge_claude_hooks(target: &Path, adapters: &[ClaudeHookAdapter]) -> anyh
         fs::write(&settings_path, content)?;
     }
 
-    Ok(appended)
+    Ok((appended, removed_plugin_names))
 }
 
 /// Merge `includeCoAuthoredBy` into `.claude/settings.json` from the
@@ -936,7 +994,11 @@ pub fn render_claude_projection(
             scripts_written
         );
     }
-    let hooks_appended = merge_claude_hooks(target, hook_adapters)?;
+    let previous_hooks = ccx::load_lock(target, agentic_root)
+        .map(|l| l.hooks)
+        .unwrap_or_default();
+    let (hooks_appended, removed_hook_plugins) =
+        merge_claude_hooks(target, hook_adapters, Some(&previous_hooks))?;
     if hooks_appended > 0 {
         println!(
             "   {} .claude/settings.json (+{} hook registration(s))",
@@ -944,6 +1006,43 @@ pub fn render_claude_projection(
             hooks_appended
         );
     }
+    // Hook adapter removal (NEXUS-APP dispatch 99f335e8 follow-up): an
+    // adapter previously managed by Nexus that is no longer sent, e.g.
+    // because the nexus-core Claude plugin now provides the same hooks.
+    for plugin_name in &removed_hook_plugins {
+        println!(
+            "   {} .claude/settings.json / .claude/hooks/ ({} removed -- no longer sent)",
+            style("-").bold().yellow(),
+            plugin_name
+        );
+    }
+    let new_hooks: std::collections::BTreeMap<String, ccx::CcxLockHookEntry> = hook_adapters
+        .iter()
+        .map(|a| {
+            (
+                a.target_path.clone(),
+                ccx::CcxLockHookEntry {
+                    plugin_name: a.plugin_name.clone(),
+                    target_path: a.target_path.clone(),
+                    file_sha256: nexus_core::hash::sha256_hex(&a.body),
+                    registrations: a
+                        .hook_events
+                        .iter()
+                        .map(|e| ccx::CcxLockHookRegistration {
+                            event: e.event.clone(),
+                            matcher: e.matcher.clone(),
+                            command: format!(
+                                "node \"${{CLAUDE_PROJECT_DIR}}/{}\" {}",
+                                a.target_path,
+                                kebab_case_event(&e.event)
+                            ),
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    ccx::record_hooks_in_lock(target, agentic_root, new_hooks)?;
 
     // Co-authored-by trailer suppression (NEXUS-APP dispatch 84e38bd7):
     // hard operator requirement, absent-means-suppress, merges alongside
@@ -2106,7 +2205,8 @@ mod tests {
             }],
         };
 
-        let appended = merge_claude_hooks(&dir, std::slice::from_ref(&adapter)).unwrap();
+        let (appended, _removed) =
+            merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
         assert_eq!(appended, 1);
 
         let settings = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
@@ -2146,7 +2246,8 @@ mod tests {
             }],
         };
 
-        let appended = merge_claude_hooks(&dir, &[headroom, cost_control]).unwrap();
+        let (appended, _removed) =
+            merge_claude_hooks(&dir, &[headroom, cost_control], None).unwrap();
         assert_eq!(appended, 2);
 
         let settings: serde_json::Value =
@@ -2172,9 +2273,11 @@ mod tests {
             }],
         };
 
-        let first = merge_claude_hooks(&dir, std::slice::from_ref(&adapter)).unwrap();
+        let (first, _removed) =
+            merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
         assert_eq!(first, 1);
-        let second = merge_claude_hooks(&dir, std::slice::from_ref(&adapter)).unwrap();
+        let (second, _removed) =
+            merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
         assert_eq!(
             second, 0,
             "re-running with the same adapter must not duplicate the entry"
@@ -2222,7 +2325,7 @@ mod tests {
             }],
         };
 
-        merge_claude_hooks(&dir, &[adapter]).unwrap();
+        merge_claude_hooks(&dir, &[adapter], None).unwrap();
 
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
@@ -2247,9 +2350,215 @@ mod tests {
     #[test]
     fn test_merge_claude_hooks_noop_when_no_adapters() {
         let dir = temp_dir("hooks-merge-empty");
-        let appended = merge_claude_hooks(&dir, &[]).unwrap();
+        let (appended, _removed) = merge_claude_hooks(&dir, &[], None).unwrap();
         assert_eq!(appended, 0);
         assert!(!dir.join(".claude/settings.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── merge_claude_hooks removal (NEXUS-APP dispatch 99f335e8
+    // follow-up: hook adapter removal e.g. when nexus-core takes over) ────
+
+    fn hook_lock_entry(
+        plugin_name: &str,
+        target_path: &str,
+        body: &str,
+        events: &[(&str, Option<&str>)],
+    ) -> (String, ccx::CcxLockHookEntry) {
+        (
+            target_path.to_string(),
+            ccx::CcxLockHookEntry {
+                plugin_name: plugin_name.to_string(),
+                target_path: target_path.to_string(),
+                file_sha256: nexus_core::hash::sha256_hex(body),
+                registrations: events
+                    .iter()
+                    .map(|(event, matcher)| ccx::CcxLockHookRegistration {
+                        event: (*event).to_string(),
+                        matcher: matcher.map(|s| s.to_string()),
+                        command: format!(
+                            "node \"${{CLAUDE_PROJECT_DIR}}/{}\" {}",
+                            target_path,
+                            kebab_case_event(event)
+                        ),
+                    })
+                    .collect(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_removes_adapter_no_longer_present() {
+        let dir = temp_dir("hooks-removal-basic");
+        let body = "// headroom hook script";
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(dir.join(".claude/hooks/nexus-headroom-intercept.mjs"), body).unwrap();
+
+        // Pre-seed settings.json exactly as merge_claude_hooks would have
+        // written it originally.
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "Stop": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/nexus-headroom-intercept.mjs\" stop"
+                        }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let previous = std::collections::BTreeMap::from([hook_lock_entry(
+            "headroom-intercept",
+            ".claude/hooks/nexus-headroom-intercept.mjs",
+            body,
+            &[("Stop", None)],
+        )]);
+
+        // adapters is now empty: nexus-core took over, no adapters sent.
+        let (appended, removed) = merge_claude_hooks(&dir, &[], Some(&previous)).unwrap();
+        assert_eq!(appended, 0);
+        assert_eq!(removed, vec!["headroom-intercept".to_string()]);
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["hooks"]["Stop"].as_array().unwrap().len(),
+            0,
+            "the Nexus-written Stop entry must be removed"
+        );
+        assert!(
+            !dir.join(".claude/hooks/nexus-headroom-intercept.mjs")
+                .exists(),
+            "unmodified hook file must be deleted"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_removal_preserves_operator_customized_file() {
+        // "Orphaned" rule: if the local hook file no longer matches what
+        // Nexus last wrote, it must NOT be deleted -- the operator has
+        // customized it, and deleting a file they edited would lose work.
+        let dir = temp_dir("hooks-removal-preserve-file");
+        let original_body = "// original nexus body";
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(
+            dir.join(".claude/hooks/nexus-headroom-intercept.mjs"),
+            "// operator customized this file",
+        )
+        .unwrap();
+        fs::write(dir.join(".claude/settings.json"), r#"{"hooks": {}}"#).unwrap();
+
+        let previous = std::collections::BTreeMap::from([hook_lock_entry(
+            "headroom-intercept",
+            ".claude/hooks/nexus-headroom-intercept.mjs",
+            original_body,
+            &[("Stop", None)],
+        )]);
+
+        merge_claude_hooks(&dir, &[], Some(&previous)).unwrap();
+
+        assert!(
+            dir.join(".claude/hooks/nexus-headroom-intercept.mjs")
+                .exists(),
+            "operator-modified hook file must survive"
+        );
+        let content =
+            fs::read_to_string(dir.join(".claude/hooks/nexus-headroom-intercept.mjs")).unwrap();
+        assert_eq!(content, "// operator customized this file");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_removal_preserves_operator_settings_entries() {
+        // Only the exact entry Nexus wrote (matching command) is removed;
+        // an operator's own entry for the same event must survive.
+        let dir = temp_dir("hooks-removal-preserve-settings");
+        let body = "// headroom hook script";
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(dir.join(".claude/hooks/nexus-headroom-intercept.mjs"), body).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [{
+                                "type": "command",
+                                "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/nexus-headroom-intercept.mjs\" stop"
+                            }]
+                        },
+                        {
+                            "hooks": [{"type": "command", "command": "echo operator-own-hook"}]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let previous = std::collections::BTreeMap::from([hook_lock_entry(
+            "headroom-intercept",
+            ".claude/hooks/nexus-headroom-intercept.mjs",
+            body,
+            &[("Stop", None)],
+        )]);
+
+        merge_claude_hooks(&dir, &[], Some(&previous)).unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let stop_entries = settings["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(
+            stop_entries.len(),
+            1,
+            "operator's own Stop entry must survive"
+        );
+        assert_eq!(
+            stop_entries[0]["hooks"][0]["command"],
+            "echo operator-own-hook"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_still_managed_adapter_is_not_removed() {
+        let dir = temp_dir("hooks-removal-still-managed");
+        let adapter = ClaudeHookAdapter {
+            plugin_name: "headroom-intercept".to_string(),
+            target_path: ".claude/hooks/nexus-headroom-intercept.mjs".to_string(),
+            body: "// v2".to_string(),
+            hook_events: vec![nexus_core::api::ClaudeHookEvent {
+                event: "Stop".to_string(),
+                matcher: None,
+                timeout: None,
+            }],
+        };
+        let previous = std::collections::BTreeMap::from([hook_lock_entry(
+            "headroom-intercept",
+            ".claude/hooks/nexus-headroom-intercept.mjs",
+            "// v1",
+            &[("Stop", None)],
+        )]);
+
+        let (appended, removed) = merge_claude_hooks(&dir, &[adapter], Some(&previous)).unwrap();
+        assert_eq!(appended, 1);
+        assert!(
+            removed.is_empty(),
+            "still-managed adapter must not be reported as removed"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 

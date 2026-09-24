@@ -55,6 +55,33 @@ pub struct CcxLock {
     pub settings: Option<ClaudeSettingsSpec>,
     #[serde(default)]
     pub claude_md_block_sha256: Option<String>,
+    /// Nexus-managed Claude Code hook adapters recorded on the last pull
+    /// (NEXUS-APP dispatch 99f335e8 follow-up: hook adapter removal when
+    /// e.g. the `nexus-core` Claude plugin takes over the same hooks),
+    /// keyed by `target_path`.
+    #[serde(default)]
+    pub hooks: std::collections::BTreeMap<String, CcxLockHookEntry>,
+}
+
+/// A single Nexus-managed Claude Code hook adapter as recorded in the CCX
+/// lock: enough to find and remove exactly what Nexus added to
+/// `.claude/settings.json`'s `hooks` block, and to know whether the hook
+/// script file on disk is still exactly what Nexus wrote (safe to delete)
+/// or was modified locally (leave it, report instead).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CcxLockHookEntry {
+    pub plugin_name: String,
+    pub target_path: String,
+    pub file_sha256: String,
+    pub registrations: Vec<CcxLockHookRegistration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CcxLockHookRegistration {
+    pub event: String,
+    #[serde(default)]
+    pub matcher: Option<String>,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,7 +141,42 @@ pub fn record_settings_in_lock(
     agentic_root: &str,
     settings: Option<&ClaudeSettingsSpec>,
 ) -> anyhow::Result<()> {
-    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(|| CcxLock {
+    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+
+    if lock.settings.as_ref() == settings {
+        return Ok(());
+    }
+
+    lock.settings = settings.cloned();
+    lock.applied_at = chrono_like_now();
+    save_lock(workspace, agentic_root, &lock)
+}
+
+/// Record the current set of Nexus-managed Claude Code hook adapters as
+/// the new "previously managed" state in the CCX lock (NEXUS-APP dispatch
+/// 99f335e8 follow-up), so a later pull can tell which entries in
+/// `.claude/settings.json`'s `hooks` block, and which files under
+/// `.claude/hooks/`, Nexus itself put there and is safe to remove once it
+/// stops sending them (e.g. when the `nexus-core` Claude plugin takes
+/// over the same hooks).
+pub fn record_hooks_in_lock(
+    workspace: &Path,
+    agentic_root: &str,
+    hooks: std::collections::BTreeMap<String, CcxLockHookEntry>,
+) -> anyhow::Result<()> {
+    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+
+    if lock.hooks == hooks {
+        return Ok(());
+    }
+
+    lock.hooks = hooks;
+    lock.applied_at = chrono_like_now();
+    save_lock(workspace, agentic_root, &lock)
+}
+
+fn empty_lock() -> CcxLock {
+    CcxLock {
         schema: 1,
         bundle: None,
         version: None,
@@ -124,15 +186,8 @@ pub fn record_settings_in_lock(
         files: std::collections::BTreeMap::new(),
         settings: None,
         claude_md_block_sha256: None,
-    });
-
-    if lock.settings.as_ref() == settings {
-        return Ok(());
+        hooks: std::collections::BTreeMap::new(),
     }
-
-    lock.settings = settings.cloned();
-    lock.applied_at = chrono_like_now();
-    save_lock(workspace, agentic_root, &lock)
 }
 
 /// A UTC timestamp string in the same shape as the dispatch's example
@@ -375,6 +430,7 @@ mod tests {
             )]),
             settings: None,
             claude_md_block_sha256: None,
+            hooks: std::collections::BTreeMap::new(),
         }
     }
 
