@@ -371,6 +371,28 @@ pub struct AgentFileExportResponse {
     /// `target_path` and wires `hook_events` into `.claude/settings.json`.
     #[serde(default)]
     pub claude_hook_adapters: Option<Vec<ClaudeHookAdapter>>,
+    /// Generic `.claude/settings.json` merge spec (NEXUS-APP ADR-0117
+    /// "CCX"). Additive field; `None` for backends that don't send it yet.
+    #[serde(default)]
+    pub claude_settings: Option<ClaudeSettingsSpec>,
+    /// Markdown to maintain inside the root `CLAUDE.md` between
+    /// `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers
+    /// (NEXUS-APP ADR-0117). Everything outside the markers is user-owned
+    /// and never rewritten by the CLI.
+    #[serde(default)]
+    pub claude_md_managed_block: Option<String>,
+}
+
+/// Generic, forward-compatible `.claude/settings.json` merge spec
+/// (NEXUS-APP ADR-0117 "CCX"). `managed_keys` lists dot-paths into
+/// `settings.json` that Nexus owns (e.g. `"permissions.deny"`); `values`
+/// carries the JSON value to set at each path. Kept untyped per key
+/// (`serde_json::Value`) since the Claude Code settings schema is
+/// server-owned and evolves independently of the CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeSettingsSpec {
+    pub managed_keys: Vec<String>,
+    pub values: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A single Claude Code hook adapter script to materialize on disk

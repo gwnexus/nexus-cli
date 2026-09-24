@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-09-24
+
+### Added
+- **Generic `.claude/settings.json` merge from `af_export.claude_settings`** (NEXUS-APP ADR-0117 "CCX", dispatch bb782869). New `claude_settings: { managed_keys, values }` af_export field; new `merge_claude_generic_settings()` sets/replaces each managed dot-path (e.g. `permissions.deny`, `statusLine`, `attribution`, `enabledPlugins`, `extraKnownMarketplaces`) on every init/pull. Array values under a managed path are unioned with any existing entries rather than replaced, so an operator's own `permissions.deny` rules are preserved alongside Nexus's. `attribution` (Claude Code 2.1.281+) is delivered through this generic mechanism; the existing `includeCoAuthoredBy` write (v0.21.2) is unchanged for older CLIs.
+- **Root `CLAUDE.md` managed block.** New `claude_md_managed_block` af_export field (markdown); new `merge_claude_md_managed_block()` maintains it between `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers on every init/pull. Everything outside the markers is user-owned and never rewritten; if no markers exist yet, the block is inserted at the top once, preserving the rest of the file (including other tools' own managed blocks, e.g. a Next.js `nextjs-agent-rules` block) untouched below it.
+- **Path traversal hardening for `write_agent_file`.** The existing guard only rejected `..` components; a `target_path` that was merely *absolute* (e.g. `/etc/passwd`) previously slipped past it, since `Path::join` on an absolute path replaces the base entirely rather than nesting under it. New `validate_agent_file_target_path()` rejects any absolute path component in addition to `..`, then confirms in depth that the joined, lexically-normalized result still starts with the workspace root. Used by both `nexus init` and `nexus pull`.
+
+### Deferred
+- The CCX lock/manifest (`.nexus/claude/manifest.lock.json`, per-file clean/updated/conflict/create/unmanaged state, `--force-unmanaged`) and the new `nexus claude status`/`nexus claude diff`/`nexus claude launch` commands from the same ADR-0117 dispatch are a substantially larger, separate subsystem and are not part of this release. `merge_claude_generic_settings()` does not yet remove a managed key that a project stops sending (needs the lock to track prior state) -- every call is purely additive/replacing for whatever `managed_keys` the current `af_export` lists. Tracked as nexus-cli follow-up work.
+
+25 new unit tests (path hardening, generic settings merge across top-level/nested/array-union/idempotency/preservation cases, CLAUDE.md managed-block creation/replacement/coexistence). 572/572 tests passing, clippy/fmt clean.
+
 ## [0.23.0] - 2026-09-24
 
 ### Changed

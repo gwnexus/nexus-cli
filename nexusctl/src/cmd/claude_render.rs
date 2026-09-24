@@ -21,7 +21,9 @@ use std::fs;
 use std::path::Path;
 
 use console::style;
-use nexus_core::api::{ClaudeHookAdapter, ExportedActorFile, ExportedAgentFile, ExportedSkill};
+use nexus_core::api::{
+    ClaudeHookAdapter, ClaudeSettingsSpec, ExportedActorFile, ExportedAgentFile, ExportedSkill,
+};
 
 /// Map a canonical Nexus skill ID to the public Claude Code command
 /// namespace. Legacy `nx-*` skill IDs are migrated to `nexus-*`
@@ -461,6 +463,189 @@ pub fn merge_claude_co_authored_by(target: &Path, include: Option<bool>) -> anyh
     Ok(true)
 }
 
+/// Merge a generic, forward-compatible set of Nexus-managed keys into
+/// `.claude/settings.json` (NEXUS-APP ADR-0117 "CCX", dispatch bb782869).
+///
+/// Runs on every init/pull, not create-once (same pattern as
+/// [`merge_claude_hooks`]/[`merge_claude_co_authored_by`]): for each dot
+/// path in `spec.managed_keys`, the corresponding value from
+/// `spec.values` is set/replaced at that path. If both the existing value
+/// and the new value at a path are JSON arrays (e.g.
+/// `"permissions.deny"`), they are unioned rather than replaced outright,
+/// so an operator's own entries are preserved alongside Nexus's.
+///
+/// Not yet implemented here (tracked as a nexus-cli follow-up pending the
+/// CCX lock/manifest from ADR-0117 item 3): removing a key that Nexus
+/// used to manage but no longer sends. Every call is purely additive/
+/// replacing for whatever `managed_keys` this particular `spec` lists.
+///
+/// Returns the number of managed keys whose value actually changed (0 if
+/// nothing changed or `spec` is `None`; the file is only rewritten when
+/// this is non-zero).
+pub fn merge_claude_generic_settings(
+    target: &Path,
+    spec: Option<&ClaudeSettingsSpec>,
+) -> anyhow::Result<usize> {
+    let Some(spec) = spec else {
+        return Ok(0);
+    };
+    if spec.managed_keys.is_empty() {
+        return Ok(0);
+    }
+
+    let settings_path = target.join(".claude").join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let raw = fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !settings.is_object() {
+        settings = serde_json::json!({});
+    }
+
+    let mut changed = 0usize;
+    for key_path in &spec.managed_keys {
+        let Some(new_value) = spec.values.get(key_path) else {
+            continue;
+        };
+        let merged_value = match (json_get_path(&settings, key_path), new_value) {
+            (Some(serde_json::Value::Array(existing_arr)), serde_json::Value::Array(new_arr)) => {
+                let mut merged = existing_arr.clone();
+                for item in new_arr {
+                    if !merged.contains(item) {
+                        merged.push(item.clone());
+                    }
+                }
+                serde_json::Value::Array(merged)
+            }
+            _ => new_value.clone(),
+        };
+        if json_get_path(&settings, key_path) != Some(&merged_value) {
+            json_set_path(&mut settings, key_path, merged_value);
+            changed += 1;
+        }
+    }
+
+    if changed > 0 {
+        if let Some(parent) = settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(&settings)? + "\n";
+        fs::write(&settings_path, content)?;
+    }
+
+    Ok(changed)
+}
+
+/// Read a value at a dot-separated path (e.g. `"permissions.deny"`) inside
+/// a JSON object tree, without creating anything.
+fn json_get_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for part in path.split('.') {
+        current = current.as_object()?.get(part)?;
+    }
+    Some(current)
+}
+
+/// Set a value at a dot-separated path inside a JSON object tree,
+/// creating intermediate objects as needed (replacing anything at an
+/// intermediate step that is not already an object).
+fn json_set_path(value: &mut serde_json::Value, path: &str, new_value: serde_json::Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = value;
+    for (i, part) in parts.iter().enumerate() {
+        if !current.is_object() {
+            *current = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let obj = current.as_object_mut().expect("just ensured object");
+        if i == parts.len() - 1 {
+            obj.insert((*part).to_string(), new_value);
+            return;
+        }
+        current = obj
+            .entry((*part).to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    }
+}
+
+const CLAUDE_MD_MANAGED_BEGIN: &str = "<!-- BEGIN:nexus-managed -->";
+const CLAUDE_MD_MANAGED_END: &str = "<!-- END:nexus-managed -->";
+
+/// Maintain a Nexus-managed block inside the root `CLAUDE.md` between
+/// `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers
+/// (NEXUS-APP ADR-0117 "CCX", dispatch bb782869). Everything outside the
+/// markers is user-owned and never rewritten.
+///
+/// Runs on every init/pull (unlike [`write_claude_root_md`], which is
+/// create-once for the file as a whole). If the file already has markers,
+/// only the content between them is replaced. If the file exists but has
+/// no markers yet, the block is inserted at the top once, and the file's
+/// existing content is preserved below it untouched -- this coexists with
+/// other tools' own managed blocks (e.g. a Next.js `nextjs-agent-rules`
+/// block) further down the file. If the file doesn't exist at all, it is
+/// created containing only the managed block (the create-once bootstrap
+/// template itself is [`write_claude_root_md`]'s job, called separately).
+///
+/// Returns `true` if the file was created or its managed content changed.
+pub fn merge_claude_md_managed_block(
+    target: &Path,
+    managed_block: Option<&str>,
+) -> anyhow::Result<bool> {
+    let Some(block) = managed_block else {
+        return Ok(false);
+    };
+    let path = target.join("CLAUDE.md");
+    let existing = if path.exists() {
+        fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
+
+    let new_content = match (
+        existing.find(CLAUDE_MD_MANAGED_BEGIN),
+        existing.find(CLAUDE_MD_MANAGED_END),
+    ) {
+        (Some(start), Some(end_marker_start)) if end_marker_start > start => {
+            let end = end_marker_start + CLAUDE_MD_MANAGED_END.len();
+            format!(
+                "{}{}\n{}\n{}{}",
+                &existing[..start],
+                CLAUDE_MD_MANAGED_BEGIN,
+                block.trim(),
+                CLAUDE_MD_MANAGED_END,
+                &existing[end..]
+            )
+        }
+        (Some(_), Some(_)) => {
+            // Malformed markers (END before BEGIN): don't attempt to
+            // merge into a file we can't safely parse -- leave it alone.
+            return Ok(false);
+        }
+        _ => {
+            // No markers yet: insert the block at the top, once,
+            // preserving any pre-existing content (including other
+            // tools' own managed blocks) below it untouched.
+            format!(
+                "{}\n{}\n{}\n\n{}",
+                CLAUDE_MD_MANAGED_BEGIN,
+                block.trim(),
+                CLAUDE_MD_MANAGED_END,
+                existing
+            )
+        }
+    };
+
+    if new_content == existing {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, new_content)?;
+    Ok(true)
+}
+
 /// Read-only, side-effect-free Nexus MCP tools pre-approved by default so a
 /// fresh Claude Code session doesn't hit an approval prompt for the calls
 /// every session-bootstrap skill makes in its first few turns (`/nexus-init`,
@@ -683,6 +868,8 @@ pub fn render_claude_projection(
     runtime_spec: Option<&serde_json::Value>,
     hook_adapters: &[ClaudeHookAdapter],
     include_co_authored_by: Option<bool>,
+    claude_settings: Option<&ClaudeSettingsSpec>,
+    claude_md_managed_block: Option<&str>,
 ) -> anyhow::Result<()> {
     let mut skills_written = 0;
     for skill in skills {
@@ -770,6 +957,28 @@ pub fn render_claude_projection(
             "   {} .claude/settings.json (+{} baseline permission(s))",
             style("+").bold().green(),
             permissions_appended
+        );
+    }
+
+    // Generic Nexus-managed settings.json keys (NEXUS-APP ADR-0117 "CCX"):
+    // statusline, attribution, permissions.deny, plugin enablement, known
+    // marketplaces. Merges alongside everything above; only present keys
+    // change, nothing else in the file is touched.
+    let generic_settings_changed = merge_claude_generic_settings(target, claude_settings)?;
+    if generic_settings_changed > 0 {
+        println!(
+            "   {} .claude/settings.json (+{} managed key(s))",
+            style("+").bold().green(),
+            generic_settings_changed
+        );
+    }
+
+    // Root CLAUDE.md managed block (NEXUS-APP ADR-0117 "CCX"): everything
+    // outside the markers is user-owned and never rewritten.
+    if merge_claude_md_managed_block(target, claude_md_managed_block)? {
+        println!(
+            "   {} CLAUDE.md (nexus-managed block)",
+            style("+").bold().green()
         );
     }
 
@@ -1280,6 +1489,8 @@ mod tests {
             None,
             &[],
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1314,6 +1525,8 @@ mod tests {
             &[],
             Some(&runtime_spec),
             &[],
+            None,
+            None,
             None,
         )
         .unwrap();
@@ -1506,6 +1719,266 @@ mod tests {
         );
         assert!(settings["permissions"].is_object());
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── merge_claude_generic_settings (NEXUS-APP ADR-0117 "CCX",
+    // dispatch bb782869) ────────────────────────────────────────────────
+
+    fn sample_ccx_spec(keys: &[&str], values: &[(&str, serde_json::Value)]) -> ClaudeSettingsSpec {
+        let mut map = serde_json::Map::new();
+        for (k, v) in values {
+            map.insert((*k).to_string(), v.clone());
+        }
+        ClaudeSettingsSpec {
+            managed_keys: keys.iter().map(|s| s.to_string()).collect(),
+            values: map,
+        }
+    }
+
+    #[test]
+    fn test_merge_generic_settings_none_spec_is_noop() {
+        let dir = temp_dir("ccx-none");
+        let appended = merge_claude_generic_settings(&dir, None).unwrap();
+        assert_eq!(appended, 0);
+        assert!(!dir.join(".claude/settings.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_generic_settings_sets_top_level_key() {
+        let dir = temp_dir("ccx-top-level");
+        let spec = sample_ccx_spec(
+            &["statusLine"],
+            &[(
+                "statusLine",
+                serde_json::json!({"type": "command", "command": "node hud.mjs"}),
+            )],
+        );
+        let changed = merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        assert_eq!(changed, 1);
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["statusLine"]["command"], "node hud.mjs");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_generic_settings_sets_nested_dot_path() {
+        let dir = temp_dir("ccx-nested");
+        let spec = sample_ccx_spec(
+            &["permissions.deny"],
+            &[(
+                "permissions.deny",
+                serde_json::json!(["Read(./.env)", "Read(./.env.*)"]),
+            )],
+        );
+        merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.iter().any(|v| v == "Read(./.env)"));
+        assert!(deny.iter().any(|v| v == "Read(./.env.*)"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_generic_settings_unions_array_with_operator_entries() {
+        // An operator's own permissions.deny entries must survive
+        // alongside Nexus's, not be replaced by them.
+        let dir = temp_dir("ccx-array-union");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{ "permissions": { "deny": ["Read(./secrets.json)"] } }"#,
+        )
+        .unwrap();
+
+        let spec = sample_ccx_spec(
+            &["permissions.deny"],
+            &[("permissions.deny", serde_json::json!(["Read(./.env)"]))],
+        );
+        merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert_eq!(deny.len(), 2);
+        assert!(deny.iter().any(|v| v == "Read(./secrets.json)"));
+        assert!(deny.iter().any(|v| v == "Read(./.env)"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_generic_settings_array_union_is_idempotent() {
+        let dir = temp_dir("ccx-array-idempotent");
+        let spec = sample_ccx_spec(
+            &["permissions.deny"],
+            &[("permissions.deny", serde_json::json!(["Read(./.env)"]))],
+        );
+        let first = merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        assert_eq!(first, 1);
+        let second = merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        assert_eq!(second, 0, "re-sending the same array must not duplicate it");
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["permissions"]["deny"].as_array().unwrap().len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_generic_settings_preserves_untouched_keys() {
+        let dir = temp_dir("ccx-preserve-untouched");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{ "includeCoAuthoredBy": false, "hooks": { "Stop": [] } }"#,
+        )
+        .unwrap();
+
+        let spec = sample_ccx_spec(
+            &["enabledPlugins"],
+            &[(
+                "enabledPlugins",
+                serde_json::json!({"nexus-core@gatewarden-nexus": true}),
+            )],
+        );
+        merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["includeCoAuthoredBy"], false);
+        assert!(settings["hooks"]["Stop"].is_array());
+        assert_eq!(
+            settings["enabledPlugins"]["nexus-core@gatewarden-nexus"],
+            true
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_generic_settings_missing_value_for_key_is_skipped() {
+        // managed_keys lists a path with no corresponding entry in
+        // `values`: must not panic, must not write a null.
+        let dir = temp_dir("ccx-missing-value");
+        let spec = ClaudeSettingsSpec {
+            managed_keys: vec!["statusLine".to_string()],
+            values: serde_json::Map::new(),
+        };
+        let changed = merge_claude_generic_settings(&dir, Some(&spec)).unwrap();
+        assert_eq!(changed, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── merge_claude_md_managed_block (NEXUS-APP ADR-0117 "CCX") ───────────
+
+    #[test]
+    fn test_merge_claude_md_none_block_is_noop() {
+        let dir = temp_dir("claudemd-none");
+        let changed = merge_claude_md_managed_block(&dir, None).unwrap();
+        assert!(!changed);
+        assert!(!dir.join("CLAUDE.md").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_md_creates_file_with_markers() {
+        let dir = temp_dir("claudemd-create");
+        let changed = merge_claude_md_managed_block(&dir, Some("Nexus rules here.")).unwrap();
+        assert!(changed);
+        let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+        assert!(content.contains(CLAUDE_MD_MANAGED_BEGIN));
+        assert!(content.contains(CLAUDE_MD_MANAGED_END));
+        assert!(content.contains("Nexus rules here."));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_md_inserts_at_top_preserving_existing_content() {
+        let dir = temp_dir("claudemd-insert-top");
+        fs::write(
+            dir.join("CLAUDE.md"),
+            "# My own project notes\n\nDo not touch.",
+        )
+        .unwrap();
+
+        merge_claude_md_managed_block(&dir, Some("Nexus rules here.")).unwrap();
+
+        let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+        assert!(content.contains("Nexus rules here."));
+        assert!(content.contains("# My own project notes"));
+        assert!(content.contains("Do not touch."));
+        // Managed block must come before the user's own content.
+        assert!(
+            content.find(CLAUDE_MD_MANAGED_BEGIN).unwrap()
+                < content.find("My own project notes").unwrap()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_md_replaces_only_between_existing_markers() {
+        let dir = temp_dir("claudemd-replace");
+        fs::write(
+            dir.join("CLAUDE.md"),
+            format!(
+                "Preamble.\n\n{}\nold content\n{}\n\n# User section\nUser text.",
+                CLAUDE_MD_MANAGED_BEGIN, CLAUDE_MD_MANAGED_END
+            ),
+        )
+        .unwrap();
+
+        let changed = merge_claude_md_managed_block(&dir, Some("new content")).unwrap();
+        assert!(changed);
+
+        let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+        assert!(content.contains("new content"));
+        assert!(!content.contains("old content"));
+        assert!(content.contains("Preamble."));
+        assert!(content.contains("# User section"));
+        assert!(content.contains("User text."));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_md_is_idempotent() {
+        let dir = temp_dir("claudemd-idempotent");
+        assert!(merge_claude_md_managed_block(&dir, Some("stable content")).unwrap());
+        let second = merge_claude_md_managed_block(&dir, Some("stable content")).unwrap();
+        assert!(!second, "re-sending the same block must be a no-op");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_md_coexists_with_other_managed_blocks() {
+        // Must not disturb a different tool's own managed block further
+        // down the file (e.g. a Next.js "nextjs-agent-rules" block).
+        let dir = temp_dir("claudemd-coexist");
+        fs::write(
+            dir.join("CLAUDE.md"),
+            "<!-- BEGIN:nextjs-agent-rules -->\nnextjs stuff\n<!-- END:nextjs-agent-rules -->\n",
+        )
+        .unwrap();
+
+        merge_claude_md_managed_block(&dir, Some("nexus stuff")).unwrap();
+
+        let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+        assert!(content.contains("nexus stuff"));
+        assert!(content.contains("nextjs stuff"));
+        assert!(content.contains("BEGIN:nextjs-agent-rules"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1807,6 +2280,8 @@ mod tests {
             &[],
             None,
             &[adapter],
+            None,
+            None,
             None,
         )
         .unwrap();

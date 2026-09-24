@@ -126,6 +126,73 @@ pub fn is_protected_path(target_path: &str) -> bool {
     false
 }
 
+/// Validate an `ExportedAgentFile.target_path` before it is ever joined
+/// onto a workspace root, rejecting anything that could escape the
+/// workspace (NEXUS-APP ADR-0117 hardening item, dispatch bb782869).
+///
+/// The previous check only rejected `..` (parent-dir) components. That
+/// missed a much simpler escape: `Path::join` on an *absolute* path
+/// **replaces** the base entirely rather than nesting under it, so a
+/// `target_path` of e.g. `/etc/passwd` or (on Windows) `C:\Windows\...`
+/// would silently write outside the workspace with no `..` in sight.
+///
+/// This rejects any `RootDir`/`Prefix` component in addition to the
+/// existing `ParentDir` check, then does one more pass in depth: joins
+/// the (now known-relative) path onto `workspace`, lexically normalizes
+/// the result (no filesystem access -- the target may not exist yet, so
+/// this cannot use `fs::canonicalize`), and confirms it still starts
+/// with the normalized workspace root.
+pub fn validate_agent_file_target_path(workspace: &Path, target_path: &str) -> anyhow::Result<()> {
+    let normalized = std::path::Path::new(target_path);
+    for component in normalized.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                anyhow::bail!(
+                    "refusing to write: target_path '{}' contains '..' traversal",
+                    target_path
+                );
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                anyhow::bail!(
+                    "refusing to write: target_path '{}' is an absolute path",
+                    target_path
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let joined = workspace.join(normalized);
+    let normalized_joined = lexically_normalize(&joined);
+    let normalized_workspace = lexically_normalize(workspace);
+    if !normalized_joined.starts_with(&normalized_workspace) {
+        anyhow::bail!(
+            "refusing to write: target_path '{}' escapes the workspace",
+            target_path
+        );
+    }
+
+    Ok(())
+}
+
+/// Lexically normalize a path (resolve `.`/`..` components without
+/// touching the filesystem). Used by [`validate_agent_file_target_path`]
+/// since the target of a not-yet-written file may not exist yet, ruling
+/// out `fs::canonicalize`.
+fn lexically_normalize(path: &Path) -> std::path::PathBuf {
+    let mut result = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => result.push(other.as_os_str()),
+        }
+    }
+    result
+}
+
 /// Check whether a local file was modified since the last pull.
 ///
 /// Compares the current file content hash against the hash stored in the
@@ -942,6 +1009,14 @@ pub async fn run(
                 runtime_spec_for_claude,
                 &hook_adapters_for_claude,
                 include_co_authored_by,
+                af_export_result
+                    .as_ref()
+                    .ok()
+                    .and_then(|r| r.claude_settings.as_ref()),
+                af_export_result
+                    .as_ref()
+                    .ok()
+                    .and_then(|r| r.claude_md_managed_block.as_deref()),
             )?;
         }
     } else {
@@ -1655,23 +1730,17 @@ pub fn write_agent_file(
     workspace: &Path,
     af: &nexus_core::api::ExportedAgentFile,
 ) -> anyhow::Result<()> {
+    // Path traversal / absolute-path escape protection, checked first so
+    // a malformed target_path is rejected before any exists()/join() call
+    // touches it (NEXUS-APP ADR-0117 hardening item, dispatch bb782869).
+    validate_agent_file_target_path(workspace, &af.target_path)?;
+
     // Protected file guard: never overwrite secrets/env files
     if is_protected_path(&af.target_path) {
         let target = workspace.join(&af.target_path);
         if target.exists() {
             anyhow::bail!(
                 "refusing to write: '{}' matches a protected file pattern (secrets/env files are never overwritten)",
-                af.target_path
-            );
-        }
-    }
-
-    // Path traversal protection: reject target_path with parent-dir components
-    let normalized = std::path::Path::new(&af.target_path);
-    for component in normalized.components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            anyhow::bail!(
-                "refusing to write: target_path '{}' contains '..' traversal",
                 af.target_path
             );
         }
@@ -2909,6 +2978,80 @@ mod tests {
     }
 
     // -- write_agent_file tests --
+
+    // -- validate_agent_file_target_path (NEXUS-APP ADR-0117 hardening,
+    // dispatch bb782869) --
+
+    #[test]
+    fn test_validate_target_path_accepts_plain_relative_path() {
+        let ws = Path::new("/home/user/project");
+        assert!(validate_agent_file_target_path(ws, "AGENTS.md").is_ok());
+        assert!(validate_agent_file_target_path(ws, ".claude/skills/foo/SKILL.md").is_ok());
+    }
+
+    #[test]
+    fn test_validate_target_path_rejects_parent_dir_traversal() {
+        let ws = Path::new("/home/user/project");
+        assert!(validate_agent_file_target_path(ws, "../../etc/passwd").is_err());
+        assert!(validate_agent_file_target_path(ws, ".claude/../../escape").is_err());
+    }
+
+    #[test]
+    fn test_validate_target_path_rejects_absolute_unix_path() {
+        // The bug this hardens against: Path::join replaces the base
+        // entirely for an absolute path, so this previously slipped past
+        // the '..'-only check and would have written outside the
+        // workspace with no '..' anywhere in the string.
+        let ws = Path::new("/home/user/project");
+        assert!(validate_agent_file_target_path(ws, "/etc/passwd").is_err());
+        assert!(validate_agent_file_target_path(ws, "/tmp/evil").is_err());
+    }
+
+    #[test]
+    fn test_validate_target_path_accepts_dot_slash_prefix() {
+        let ws = Path::new("/home/user/project");
+        assert!(validate_agent_file_target_path(ws, "./AGENTS.md").is_ok());
+    }
+
+    #[test]
+    fn test_lexically_normalize_resolves_dot_dot() {
+        assert_eq!(
+            lexically_normalize(Path::new("/a/b/../c")),
+            Path::new("/a/c")
+        );
+        assert_eq!(lexically_normalize(Path::new("/a/./b")), Path::new("/a/b"));
+    }
+
+    #[test]
+    fn test_write_agent_file_refuses_absolute_target_path() {
+        let tmp = std::env::temp_dir().join("nexus_test_write_af_absolute");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let af = nexus_core::api::ExportedAgentFile {
+            file_key: "evil".into(),
+            target_path: "/tmp/nexus-escape-test-should-not-exist".into(),
+            name: "evil".into(),
+            description: None,
+            category: "agent".into(),
+            version: 1,
+            body: "pwned".into(),
+            content_hash: None,
+            agent_file_id: None,
+        };
+
+        let result = write_agent_file(&tmp, &af);
+        assert!(
+            result.is_err(),
+            "expected absolute target_path to be rejected"
+        );
+        assert!(
+            !Path::new("/tmp/nexus-escape-test-should-not-exist").exists(),
+            "escape must not have written outside the workspace"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn test_write_agent_file_creates_file() {

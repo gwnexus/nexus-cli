@@ -303,6 +303,14 @@ pub async fn run(
                             runtime_spec_for_claude,
                             &hook_adapters_for_claude,
                             include_co_authored_by,
+                            af_export_result
+                                .as_ref()
+                                .ok()
+                                .and_then(|r| r.claude_settings.as_ref()),
+                            af_export_result
+                                .as_ref()
+                                .ok()
+                                .and_then(|r| r.claude_md_managed_block.as_deref()),
                         )?;
                     }
                 }
@@ -1156,6 +1164,11 @@ fn write_agent_file(
     target: &Path,
     af: &nexus_core::api::ExportedAgentFile,
 ) -> anyhow::Result<bool> {
+    // Path traversal / absolute-path escape protection, checked first
+    // (NEXUS-APP ADR-0117 hardening item, dispatch bb782869). This IS a
+    // hard error -- it indicates a malformed or malicious response.
+    super::pull::validate_agent_file_target_path(target, &af.target_path)?;
+
     // Protected file guard: never overwrite secrets/env files.
     // This is NOT an error — the workspace init succeeded, the env file is
     // intentionally left untouched. Emit a warning and skip silently.
@@ -1168,18 +1181,6 @@ fn write_agent_file(
                 af.target_path
             );
             return Ok(false);
-        }
-    }
-
-    // Path traversal protection: reject target_path with parent-dir components.
-    // This IS a hard error — it indicates a malformed or malicious response.
-    let normalized = Path::new(&af.target_path);
-    for component in normalized.components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            anyhow::bail!(
-                "refusing to write: target_path '{}' contains '..' traversal",
-                af.target_path
-            );
         }
     }
 
