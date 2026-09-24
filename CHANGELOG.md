@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.4] - 2026-09-24
+
+### Added
+- **`.claude/settings.json` now pre-approves a baseline of 14 read-only, side-effect-free Nexus MCP tools** (`session_list`, `kb_memory`, `kb_search`, `kb_get`, `dispatch_sweep`, `dispatch_inbox`, `dispatch_get`, `task_list`, `sk_list`, `sk_get`, `pd_list`, `project_list`, plus `session_create`/`session_append` on the same "expected every session, low risk" basis), reducing first-session approval-prompt friction for the calls every session-bootstrap skill makes in its opening turns. New `merge_claude_baseline_permissions()` follows the same idempotent, non-destructive merge pattern as the existing hooks and `includeCoAuthoredBy` merges: only appends missing entries into `permissions.allow`, never removes or reorders an operator's own additions, only rewrites the file when something actually changed. Deliberately excludes anything that creates, mutates, or deletes platform state (`adr_decide`, `task_create`, `dispatch_resolve`, `sk_update`, `doc_ingest`, `doc_delete`, etc.), which stay gated behind explicit per-session approval.
+- **`nexus pull` now warns when a stale toolstack projection is left on disk after an `agent_owner` flavor change.** `pull` is intentionally additive-only and never deletes an unselected projection, so switching a project's flavor (e.g. `both`/`opencode` to `claude-cli`) previously left the no-longer-selected projection's files (`.opencode/` or `.claude/`) silently orphaned. An explicit warning is now printed instead, without auto-deleting anything, consistent with this codebase's conservative stance on operator data.
+
+Both are follow-ups to a live `claude-cli` diagnostic pass against Nexus Showcase Beta, in the same vein as the `description`/`command_slug` fix shipped in v0.21.3.
+
 ## [0.21.3] - 2026-09-23
 
 ### Fixed
