@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-09-24
+
+### Changed
+- **Per-project `gh` CLI profile handling now implements the accepted ADR-0116 contract**, superseding the ADR-0115 behaviour shipped hours earlier in v0.22.0 (NEXUS-APP dispatch 0350aee7: that dispatch was resolved one minute before the ADR-0116 amendment was accepted, so v0.22.0 shipped the superseded design). The bug in v0.22.0: an empty profile directory caused `nexus run` to strip `GH_TOKEN`/`GITHUB_TOKEN` and launch with an unauthenticated `GH_CONFIG_DIR`, silently defeating `gh` for the whole session.
+- **Input source switched** from `git_config.gh` to `project.gh_effective` (`{ host, user, profile, source, origin }`). A `null`/absent `gh_effective` leaves the environment completely untouched, exactly as before.
+- **Empty profile is now seeded, not silently broken.** When the profile has no cached login, `nexus run` resolves a token per `source` (`keyring` via `gh auth token`, `env:<VAR>`, or `auto` trying keyring then `GH_TOKEN` then `GITHUB_TOKEN`), verifies it via `gh api user` against the expected user, prompts `Import GitHub login <user> from <source> into profile <profile>? [Y/n]` (auto-accepted by the global `-y`/`--yes` flag), and writes it into the isolated profile via `gh auth login --with-token` on stdin. The token is never logged, printed, or passed as a command argument at any point.
+- **Hard safety rule: if seeding is impossible, the resolved token belongs to the wrong user, or the operator declines, the environment is left *completely* untouched** (no `GH_CONFIG_DIR`, no token stripped) and a warning with the exact one-time login command is printed instead. A session must never end up less authenticated than it would have been without Nexus.
+- `nexus run` and `nexus pull` now print a login follow-up line (e.g. `GitHub: octocat@github.com via profile octocat (project)`) reflecting the resolved identity, or the next-step hint if none is authenticated yet. `nexus pull`'s version is informational only and never attempts seeding.
+- `nexus git verify`'s `gh` check now reads `gh_effective` instead of `git_config.gh` (same verification logic, `gh api user --jq .login --hostname <host>`, unchanged output shape). `nexus git verify`/`nexus git apply` also now tolerate a project with `gh_effective` but no `git_config` at all (previously required `git_config` to be present for either subcommand to do anything).
+- New `nexus_core::api::GhEffective` type. `git_config.gh`/`GhConfig` are kept for backward wire deserialization but are no longer read by any nexus-cli logic.
+
+25 new/updated unit tests across the seeding-source priority logic, verify-output classification, host-override rules, and the login-hint/status-line formatting. 545/545 tests passing, clippy/fmt clean.
+
 ## [0.22.0] - 2026-09-24
 
 ### Added

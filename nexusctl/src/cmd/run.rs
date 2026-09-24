@@ -32,9 +32,9 @@ use super::preflight::{cmd_version, print_check, CheckResult};
 
 /// Environment variables carrying a GitHub token that must be stripped from
 /// the child process when a per-project `gh` profile is active (NEXUS-APP
-/// dispatch 8776d208), so an ambient shell credential cannot silently
-/// authenticate `gh`/tools that shell out to it as the wrong account
-/// underneath the selected profile.
+/// ADR-0116), so an ambient shell credential cannot silently authenticate
+/// `gh`/tools that shell out to it as the wrong account underneath the
+/// selected profile.
 const GH_TOKEN_ENV_VARS: &[&str] = &[
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -62,6 +62,127 @@ fn gh_host_override(host: &str) -> Option<String> {
     }
 }
 
+/// Final resolved outcome of per-project `gh` handling for this
+/// invocation (NEXUS-APP ADR-0116, dispatch 0350aee7).
+enum GhOutcome {
+    /// No `gh_effective` configured for this project: the environment is
+    /// left completely untouched -- no panel entry, no warning, no status
+    /// line.
+    NotConfigured,
+    /// An isolated, authenticated profile is available (it either already
+    /// had a login, or was just seeded successfully this run): apply
+    /// `plan` at injection time.
+    Ready {
+        plan: GhEnvPlan,
+        status_line: String,
+    },
+    /// No isolated authenticated profile could be established this run
+    /// (seeding impossible, the resolved token belonged to the wrong
+    /// user, or the operator declined the import prompt): leave the
+    /// environment *completely* untouched -- a session must never end up
+    /// less authenticated than it would have been without Nexus -- and
+    /// warn with the exact one-time login command.
+    Fallback { warning: String },
+}
+
+fn gh_env_plan_for(gh: &nexus_core::api::GhEffective, profile_dir: &Path) -> GhEnvPlan {
+    GhEnvPlan {
+        config_dir: profile_dir.to_path_buf(),
+        host_override: gh_host_override(&gh.host),
+        tokens_to_remove: GH_TOKEN_ENV_VARS
+            .iter()
+            .copied()
+            .filter(|v| env::var(v).is_ok())
+            .collect(),
+    }
+}
+
+fn gh_origin_label(origin: &str) -> &'static str {
+    if origin.eq_ignore_ascii_case("user") {
+        "user default"
+    } else {
+        "project"
+    }
+}
+
+fn gh_login_hint(gh: &nexus_core::api::GhEffective, profile_dir: &Path, reason: &str) -> String {
+    format!(
+        "gh profile '{}' not logged in to {} ({reason}) -- run: GH_CONFIG_DIR={} gh auth login --hostname {}",
+        gh.profile,
+        gh.host,
+        profile_dir.display(),
+        gh.host
+    )
+}
+
+/// Attempt to seed an empty gh profile (NEXUS-APP ADR-0116 Phase B).
+///
+/// Has real side effects (a keyring lookup, an interactive Y/n prompt
+/// unless `assume_yes`, and a `gh auth login --with-token` call) and must
+/// never run during `--dry-run`. The seed token is never logged or
+/// printed at any point in this function.
+///
+/// "Seeding impossible, mismatched, or declined: strip nothing" -- every
+/// failure path here returns [`GhOutcome::Fallback`], never touching the
+/// environment.
+fn seed_gh_profile(
+    gh: &nexus_core::api::GhEffective,
+    profile_dir: &Path,
+    assume_yes: bool,
+) -> anyhow::Result<GhOutcome> {
+    let fallback = |reason: &str| GhOutcome::Fallback {
+        warning: gh_login_hint(gh, profile_dir, reason),
+    };
+
+    let Some(token) = git::resolve_gh_seed_token(&gh.source, &gh.host, gh.user.as_deref()) else {
+        return Ok(fallback("no token available to seed from"));
+    };
+
+    let Some(active) = git::verify_gh_seed_token(&token, &gh.host) else {
+        return Ok(fallback(
+            "resolved token is invalid or could not be verified",
+        ));
+    };
+
+    if let Some(expected) = &gh.user {
+        if !expected.eq_ignore_ascii_case(&active) {
+            return Ok(fallback(
+                "resolved token belongs to a different user than expected",
+            ));
+        }
+    }
+
+    if !assume_yes {
+        println!(
+            "   Import GitHub login {} from {} into profile {}? [Y/n] ",
+            style(&active).bold(),
+            gh.source,
+            gh.profile
+        );
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf)?;
+        let answer = buf.trim().to_lowercase();
+        if !(answer.is_empty() || answer == "y" || answer == "yes") {
+            return Ok(fallback("import declined"));
+        }
+    }
+
+    if !git::gh_auth_login_with_token(profile_dir, &gh.host, &token)? {
+        return Ok(fallback("'gh auth login --with-token' failed"));
+    }
+
+    Ok(GhOutcome::Ready {
+        plan: gh_env_plan_for(gh, profile_dir),
+        status_line: format!(
+            "{active}@{} via profile {} ({}, seeded from {})",
+            gh.host,
+            gh.profile,
+            gh_origin_label(&gh.origin),
+            gh.source
+        ),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -80,6 +201,7 @@ pub async fn run(
     default_tool: Option<&str>,
     countdown_secs: u64,
     account: Option<&str>,
+    assume_yes: bool,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
     let agentic_root = resolve_agentic_root(&workspace);
@@ -94,9 +216,9 @@ pub async fn run(
     let mut plugin_env = parse_env_file(&env_file_path);
 
     // ── 2. If !--no-db, refresh from af_export (fresher than file) ─────────
-    // Also fetch git_config (af_export does not carry it) so a per-project
-    // `gh` CLI profile (NEXUS-APP dispatch 8776d208) can be applied below.
-    let mut git_config: Option<nexus_core::api::GitConfig> = None;
+    // Also fetch the effective gh profile (af_export does not carry it) so
+    // per-project `gh` handling (NEXUS-APP ADR-0116) can be applied below.
+    let mut gh_effective: Option<nexus_core::api::GhEffective> = None;
     if !no_db {
         if let Some(token) = resolve_token() {
             if let Ok(client) = NexusClient::new(api_url, Some(token)) {
@@ -113,7 +235,7 @@ pub async fn run(
                         }
                     }
                     if let Ok(detail) = client.get_project(&project_id).await {
-                        git_config = detail.project.git_config;
+                        gh_effective = detail.project.gh_effective;
                     }
                 }
             }
@@ -179,39 +301,42 @@ pub async fn run(
             }
         };
 
-    // ── 4.6. Per-project gh CLI profile (NEXUS-APP dispatch 8776d208) ──────
+    // ── 4.6. Per-project gh CLI profile (NEXUS-APP ADR-0116) — Phase A ─────
     // ──────────────────────────────────────────────────────────────────────
     //
-    // Applies to all tools, not just Claude Code. The GitHub token itself
-    // never leaves the operator's machine and never touches Nexus; the
-    // project only declares which local `gh` profile (its own
-    // `GH_CONFIG_DIR`) to select. Any ambient GH_TOKEN/GITHUB_TOKEN/... in
-    // the parent shell is stripped from the child so it cannot silently
-    // authenticate `gh` as the wrong account underneath the selected
-    // profile.
-    let gh_plan = git_config
-        .as_ref()
-        .and_then(|g| g.gh.as_ref())
-        .map(|gh| -> anyhow::Result<GhEnvPlan> {
-            let dir = git::ensure_gh_profile_dir(&config::Config::dir()?, &gh.profile)?;
-            let host_override = gh_host_override(&gh.host);
-            let tokens_present: Vec<&'static str> = GH_TOKEN_ENV_VARS
-                .iter()
-                .copied()
-                .filter(|v| env::var(v).is_ok())
-                .collect();
-            Ok(GhEnvPlan {
-                config_dir: dir,
-                host_override,
-                tokens_to_remove: tokens_present,
-            })
-        })
-        .transpose()?;
+    // Side-effect-limited preview: ensure the isolated profile directory
+    // exists (idempotent, harmless, matches the same always-safe pattern
+    // as the Claude account directory above) and check whether it already
+    // has a login. No seeding is attempted here, so this is safe to run
+    // even for `--dry-run`. Applies to all tools, not just Claude Code.
+    let gh_profile_dir: Option<std::path::PathBuf> = match &gh_effective {
+        Some(gh) => Some(git::ensure_gh_profile_dir(
+            &config::Config::dir()?,
+            &gh.profile,
+        )?),
+        None => None,
+    };
+    let mut gh_outcome: GhOutcome = match (&gh_effective, &gh_profile_dir) {
+        (Some(gh), Some(dir)) if git::gh_is_authenticated(dir, &gh.host) => GhOutcome::Ready {
+            plan: gh_env_plan_for(gh, dir),
+            status_line: format!(
+                "{}@{} via profile {} ({})",
+                gh.user.as_deref().unwrap_or("?"),
+                gh.host,
+                gh.profile,
+                gh_origin_label(&gh.origin)
+            ),
+        },
+        (Some(gh), Some(dir)) => GhOutcome::Fallback {
+            warning: gh_login_hint(gh, dir, "no cached login yet"),
+        },
+        _ => GhOutcome::NotConfigured,
+    };
 
     // ── 5. Dry-run / show-env output ─────────────────────────────────────────
     if dry_run || show_env {
         print_env_table(&workspace, effective_tool, &to_inject, &skipped, args);
-        print_gh_env_plan(gh_plan.as_ref());
+        print_gh_env_plan(&gh_outcome);
         if dry_run {
             return Ok(());
         }
@@ -225,6 +350,28 @@ pub async fn run(
         let mut buf = String::new();
         std::io::stdin().read_line(&mut buf)?;
         println!();
+    }
+
+    // ── 5.6. Per-project gh CLI profile — Phase B (NEXUS-APP ADR-0116) ─────
+    // ──────────────────────────────────────────────────────────────────────
+    //
+    // Attempt to seed an empty profile now that we know this is a real
+    // launch (`--dry-run` already returned above). Has real side effects:
+    // a keyring lookup, an interactive Y/n prompt unless `--yes`, and a
+    // `gh auth login --with-token` call. The seed token is never logged.
+    if let (Some(gh), Some(dir)) = (&gh_effective, &gh_profile_dir) {
+        if matches!(gh_outcome, GhOutcome::Fallback { .. }) {
+            gh_outcome = seed_gh_profile(gh, dir, assume_yes)?;
+        }
+    }
+    match &gh_outcome {
+        GhOutcome::Ready { status_line, .. } => {
+            println!("   {} GitHub: {}", style("~").bold().cyan(), status_line);
+        }
+        GhOutcome::Fallback { warning } => {
+            println!("   {} {}", style("!").bold().yellow(), warning);
+        }
+        GhOutcome::NotConfigured => {}
     }
 
     // ── 5.5. Keep project-scoped Nexus credentials in sync with the global
@@ -275,8 +422,7 @@ pub async fn run(
             force,
             countdown_secs,
             account,
-            git_config.as_ref().and_then(|g| g.gh.as_ref()),
-            gh_plan.as_ref().map(|p| p.config_dir.as_path()),
+            &gh_outcome,
         )
         .await?;
         if !should_continue {
@@ -327,11 +473,14 @@ pub async fn run(
         }
     }
 
-    // Per-project gh CLI profile (see step 4.6): set GH_CONFIG_DIR/GH_HOST
-    // and strip any ambient token env vars so a leaked shell credential
-    // cannot silently authenticate `gh` as the wrong account underneath the
-    // selected profile. Applies to all tools, not just Claude Code.
-    if let Some(plan) = &gh_plan {
+    // Per-project gh CLI profile (see steps 4.6/5.6): set GH_CONFIG_DIR/
+    // GH_HOST and strip any ambient token env vars so a leaked shell
+    // credential cannot silently authenticate `gh` as the wrong account
+    // underneath the selected profile. Applies to all tools, not just
+    // Claude Code. On `GhOutcome::Fallback`, the environment is left
+    // *completely* untouched -- a session must never end up less
+    // authenticated than it would have been without Nexus.
+    if let GhOutcome::Ready { plan, .. } = &gh_outcome {
         env::set_var("GH_CONFIG_DIR", &plan.config_dir);
         if let Some(host) = &plan.host_override {
             env::set_var("GH_HOST", host);
@@ -592,26 +741,32 @@ fn print_env_table(
 /// `GH_HOST`, if overridden) that will be set, and the *names* of any
 /// ambient token env vars that will be removed from the child (never the
 /// values). No-op when no `gh` profile is configured for this project.
-fn print_gh_env_plan(plan: Option<&GhEnvPlan>) {
-    let Some(plan) = plan else {
-        return;
-    };
-    println!("   gh profile:");
-    println!(
-        "     {:<36} = {}",
-        style("GH_CONFIG_DIR").bold(),
-        plan.config_dir.display()
-    );
-    if let Some(host) = &plan.host_override {
-        println!("     {:<36} = {}", style("GH_HOST").bold(), host);
+fn print_gh_env_plan(outcome: &GhOutcome) {
+    match outcome {
+        GhOutcome::NotConfigured => {}
+        GhOutcome::Ready { plan, status_line } => {
+            println!("   gh profile ({status_line}):");
+            println!(
+                "     {:<36} = {}",
+                style("GH_CONFIG_DIR").bold(),
+                plan.config_dir.display()
+            );
+            if let Some(host) = &plan.host_override {
+                println!("     {:<36} = {}", style("GH_HOST").bold(), host);
+            }
+            if !plan.tokens_to_remove.is_empty() {
+                println!(
+                    "     removed from child env: {}",
+                    plan.tokens_to_remove.join(", ")
+                );
+            }
+            println!();
+        }
+        GhOutcome::Fallback { warning } => {
+            println!("   gh profile: {warning}");
+            println!();
+        }
     }
-    if !plan.tokens_to_remove.is_empty() {
-        println!(
-            "     removed from child env: {}",
-            plan.tokens_to_remove.join(", ")
-        );
-    }
-    println!();
 }
 
 // ---------------------------------------------------------------------------
@@ -897,8 +1052,7 @@ async fn run_prelaunch_checks(
     force: bool,
     countdown_secs: u64,
     account: Option<&str>,
-    gh: Option<&nexus_core::api::GhConfig>,
-    gh_profile_dir: Option<&Path>,
+    gh_outcome: &GhOutcome,
 ) -> anyhow::Result<bool> {
     println!();
     println!("{} Nexus Pre-launch Check", style(">>").bold().cyan());
@@ -956,22 +1110,18 @@ async fn run_prelaunch_checks(
         checks.push(("Account", result));
     }
 
-    // gh Auth — warn (never block) if the project's configured gh profile
-    // has no cached login for its host yet (NEXUS-APP dispatch 8776d208).
-    if let (Some(gh), Some(profile_dir)) = (gh, gh_profile_dir) {
-        let result = if git::gh_is_authenticated(profile_dir, &gh.host) {
-            CheckResult::Pass(format!("'{}' profile authenticated", gh.profile))
-        } else {
-            CheckResult::Warn(format!(
-                "'{}' profile not logged in to {} -- run: \
-                 GH_CONFIG_DIR={} gh auth login --hostname {}",
-                gh.profile,
-                gh.host,
-                profile_dir.display(),
-                gh.host
-            ))
-        };
-        checks.push(("gh Auth", result));
+    // gh Auth — reflects the final, post-seeding-attempt outcome from
+    // steps 4.6/5.6 (NEXUS-APP ADR-0116). Never a hard Fail: a session
+    // without an isolated gh identity still launches, just with the
+    // environment left untouched (see `GhOutcome::Fallback`).
+    match gh_outcome {
+        GhOutcome::Ready { status_line, .. } => {
+            checks.push(("gh Auth", CheckResult::Pass(status_line.clone())));
+        }
+        GhOutcome::Fallback { warning } => {
+            checks.push(("gh Auth", CheckResult::Warn(warning.clone())));
+        }
+        GhOutcome::NotConfigured => {}
     }
 
     // Plugin Env
@@ -1961,6 +2111,66 @@ mod tests {
                 "GITHUB_ENTERPRISE_TOKEN"
             ]
         );
+    }
+
+    fn sample_gh_effective(
+        user: Option<&str>,
+        source: &str,
+        origin: &str,
+    ) -> nexus_core::api::GhEffective {
+        nexus_core::api::GhEffective {
+            host: "github.com".to_string(),
+            user: user.map(str::to_string),
+            profile: "octocat".to_string(),
+            source: source.to_string(),
+            origin: origin.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_gh_origin_label_project() {
+        assert_eq!(gh_origin_label("project"), "project");
+    }
+
+    #[test]
+    fn test_gh_origin_label_user_default() {
+        assert_eq!(gh_origin_label("user"), "user default");
+        // Case-insensitive, matching the rest of this file's host/source
+        // string handling.
+        assert_eq!(gh_origin_label("USER"), "user default");
+    }
+
+    #[test]
+    fn test_gh_login_hint_includes_profile_host_and_command() {
+        let gh = sample_gh_effective(None, "auto", "project");
+        let dir = Path::new("/home/user/.config/nexus/gh-profiles/octocat");
+        let hint = gh_login_hint(&gh, dir, "no cached login yet");
+        assert!(hint.contains("octocat"));
+        assert!(hint.contains("github.com"));
+        assert!(hint.contains("no cached login yet"));
+        assert!(hint.contains("gh auth login --hostname github.com"));
+        assert!(hint.contains(&dir.display().to_string()));
+    }
+
+    #[test]
+    fn test_gh_env_plan_for_sets_host_override_for_enterprise_host() {
+        let mut gh = sample_gh_effective(Some("octocat"), "auto", "project");
+        gh.host = "github.internal.example.com".to_string();
+        let dir = Path::new("/home/user/.config/nexus/gh-profiles/octocat");
+        let plan = gh_env_plan_for(&gh, dir);
+        assert_eq!(plan.config_dir, dir);
+        assert_eq!(
+            plan.host_override,
+            Some("github.internal.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_gh_env_plan_for_no_host_override_for_github_com() {
+        let gh = sample_gh_effective(Some("octocat"), "auto", "project");
+        let dir = Path::new("/home/user/.config/nexus/gh-profiles/octocat");
+        let plan = gh_env_plan_for(&gh, dir);
+        assert_eq!(plan.host_override, None);
     }
 
     // -------------------------------------------------------------------

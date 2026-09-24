@@ -217,15 +217,17 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let client = nexus_core::api::NexusClient::new(&api_url, Some(token))?;
             let detail = client.get_project(&project_id).await?;
 
-            match detail.project.git_config {
-                Some(ref cfg) => match action {
-                    GitAction::Verify => git::run_verify(&workspace, cfg),
-                    GitAction::Apply => git::run_apply(&workspace, cfg),
-                },
-                None => {
-                    println!(
-                        "No git_config set for this project. Configure it in the Nexus dashboard."
-                    );
+            let git_config = detail.project.git_config.as_ref();
+            let gh_effective = detail.project.gh_effective.as_ref();
+
+            if git_config.is_none() && gh_effective.is_none() {
+                println!(
+                    "No git_config or gh profile set for this project. Configure it in the Nexus dashboard."
+                );
+            } else {
+                match action {
+                    GitAction::Verify => git::run_verify(&workspace, git_config, gh_effective),
+                    GitAction::Apply => git::run_apply(&workspace, git_config),
                 }
             }
         }
@@ -333,6 +335,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 default_tool.as_deref(),
                 countdown_secs,
                 account.as_deref(),
+                cli.yes,
             )
             .await?;
         }

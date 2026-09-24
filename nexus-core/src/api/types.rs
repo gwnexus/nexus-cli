@@ -460,6 +460,12 @@ pub struct ProjectSummary {
     pub agentic_root: Option<String>,
     /// Per-project git identity config.
     pub git_config: Option<GitConfig>,
+    /// Effective per-project `gh` CLI profile, superseding
+    /// `git_config.gh` (NEXUS-APP ADR-0116, dispatch 0350aee7). `None`
+    /// (or the field missing entirely) means: do not touch `gh` or its
+    /// environment at all.
+    #[serde(default)]
+    pub gh_effective: Option<GhEffective>,
 }
 
 /// Per-project git identity settings (auto-applied by init/pull).
@@ -508,6 +514,34 @@ pub struct GhConfig {
 
 fn default_gh_host() -> String {
     "github.com".to_string()
+}
+
+/// Effective per-project `gh` CLI profile (NEXUS-APP ADR-0116), the
+/// canonical input for `nexus run`'s gh handling and `nexus git verify`,
+/// superseding `git_config.gh` (ADR-0115, kept for backward
+/// deserialization compatibility but no longer read).
+///
+/// `source` describes where the seeding token should come from if the
+/// local profile has no login yet: `"auto"` (try the OS keyring first,
+/// then `GH_TOKEN`, then `GITHUB_TOKEN`), `"keyring"` (keyring only), or
+/// `"env:<VAR>"` (a specific named env var only). `origin` records whether
+/// this effective value came from the project's own configuration or a
+/// per-user default (`"project"` / `"user"`), for the login status line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GhEffective {
+    /// Lower-cased hostname; `github.com` unless this is a GitHub
+    /// Enterprise Server project.
+    pub host: String,
+    /// Expected GitHub login for this profile.
+    pub user: Option<String>,
+    /// Local `gh` CLI profile name.
+    pub profile: String,
+    /// Where to source a seeding token from if the profile is empty:
+    /// `"auto"` | `"keyring"` | `"env:<VAR>"`.
+    pub source: String,
+    /// Whether this came from the project's own config or a per-user
+    /// default: `"project"` | `"user"`.
+    pub origin: String,
 }
 
 /// Wrapper for project list API response.

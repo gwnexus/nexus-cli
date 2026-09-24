@@ -1444,6 +1444,45 @@ pub async fn run(
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
 
+    // Login follow-up line for the effective gh CLI profile, if one is
+    // configured (NEXUS-APP ADR-0116, dispatch 0350aee7). Informational
+    // only -- pull never seeds or writes an auth token; that is `nexus
+    // run`'s job. Applies to all tool flavors, not just Claude Code.
+    if let Ok(detail) = client.get_project(&project_id).await {
+        if let Some(gh) = detail.project.gh_effective {
+            match nexus_core::config::Config::dir()
+                .map(|d| super::git::gh_profile_dir(&d, &gh.profile))
+            {
+                Ok(dir) if super::git::gh_is_authenticated(&dir, &gh.host) => {
+                    println!(
+                        "   GitHub: {}@{} via profile {} ({})",
+                        gh.user.as_deref().unwrap_or("?"),
+                        gh.host,
+                        gh.profile,
+                        if gh.origin.eq_ignore_ascii_case("user") {
+                            "user default"
+                        } else {
+                            "project"
+                        }
+                    );
+                }
+                Ok(dir) => {
+                    println!(
+                        "   {} GitHub: profile '{}' not logged in to {} yet -- \
+                         'nexus run' will offer to import it, or run: \
+                         GH_CONFIG_DIR={} gh auth login --hostname {}",
+                        style("!").bold().yellow(),
+                        gh.profile,
+                        gh.host,
+                        dir.display(),
+                        gh.host
+                    );
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
     // Hint: use `nexus run` for env-var injection
     print_nexus_run_hint(&workspace);
 
