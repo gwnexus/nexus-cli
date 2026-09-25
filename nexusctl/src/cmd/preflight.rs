@@ -16,6 +16,8 @@ use std::process::Command as Proc;
 /// Result of a single preflight check.
 #[derive(Debug)]
 pub(crate) enum CheckResult {
+    /// Informational row (counts as passed).
+    Info(String),
     Pass(String),
     Warn(String),
     Fail(String),
@@ -33,6 +35,7 @@ impl CheckResult {
 /// Display a single check result line.
 pub(crate) fn print_check(label: &str, result: &CheckResult) {
     let (icon, msg) = match result {
+        CheckResult::Info(m) => (style("INFO").bold().blue(), m.as_str()),
         CheckResult::Pass(m) => (style("PASS").bold().green(), m.as_str()),
         CheckResult::Warn(m) => (style("WARN").bold().yellow(), m.as_str()),
         CheckResult::Fail(m) => (style("FAIL").bold().red(), m.as_str()),

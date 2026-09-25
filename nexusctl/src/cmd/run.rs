@@ -202,6 +202,7 @@ pub async fn run(
     countdown_secs: u64,
     account: Option<&str>,
     assume_yes: bool,
+    workspace_flag: Option<(&str, WorkspaceSource)>,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
     let agentic_root = resolve_agentic_root(&workspace);
@@ -273,16 +274,35 @@ pub async fn run(
         }
     }
 
+    // Workspace: flag, then the local `[run] workspace`, then the project
+    // default (NEXUS-APP dispatch be6be18e).
+    let local_workspace = config::load_run_workspace(Some(&workspace));
+    let workspace_choice = match workspace_flag {
+        Some((name, source)) => {
+            validate_workspace(name, source.label())?;
+            Some((name, source))
+        }
+        None => match local_workspace.as_deref() {
+            Some(name) => {
+                validate_workspace(name, WorkspaceSource::LocalConfig.label())?;
+                Some((name, WorkspaceSource::LocalConfig))
+            }
+            None => None,
+        },
+    };
     let launch = resolve_launch(
         tool,
         default_tool,
         agent_owner.as_deref(),
         run_target.as_ref(),
+        workspace_choice,
         &workspace,
         on_path("zellij"),
     );
-    if let Some(ref hint) = launch.hint {
-        println!("   {} {}", style("i").bold().blue(), hint);
+    let workspace_row = row_check(&launch.row);
+    if skip_checks && workspace_row.is_warn() {
+        // The row is part of the pre-launch check; keep the warning visible.
+        print_check("Workspace", &workspace_row);
     }
     let effective_tool = launch.tool.as_str();
     let args: &[String] = &[launch.leading_args.as_slice(), args].concat();
@@ -438,6 +458,7 @@ pub async fn run(
             countdown_secs,
             account,
             &gh_outcome,
+            workspace_row,
         )
         .await?;
         if !should_continue {
@@ -588,6 +609,7 @@ pub async fn run(
                     token_stats.as_ref(),
                     activity_stats.as_ref(),
                     agent_owner.as_deref(),
+                    &launch.summary,
                 );
             }
             None => {
@@ -809,72 +831,169 @@ fn resolve_effective_tool(
     config::tool_for_agent_owner(agent_owner).to_string()
 }
 
+/// Terminal workspaces `nexus run` has a launcher for (`--workspace`,
+/// `[run] workspace`, `run_target.workspace`).
+pub(crate) const SUPPORTED_WORKSPACES: &[&str] = &["none", "zellij"];
+
+/// Where the workspace choice came from (shown in the preflight row and
+/// the session summary, NEXUS-APP dispatch be6be18e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceSource {
+    /// `--plain` (shorthand for `--workspace none`).
+    Plain,
+    /// `--workspace <name>`.
+    Flag,
+    /// `[run] workspace` in `.nexus/config.toml`.
+    LocalConfig,
+    /// The backend's `run_target.workspace` (team default).
+    Project,
+}
+
+impl WorkspaceSource {
+    fn label(self) -> &'static str {
+        match self {
+            WorkspaceSource::Plain => "--plain",
+            WorkspaceSource::Flag => "--workspace",
+            WorkspaceSource::LocalConfig => "local config: run.workspace",
+            WorkspaceSource::Project => "project default",
+        }
+    }
+}
+
+/// The preflight "Workspace" row as a check result.
+fn row_check(row: &(RowLevel, String)) -> CheckResult {
+    match row.0 {
+        RowLevel::Info => CheckResult::Info(row.1.clone()),
+        RowLevel::Pass => CheckResult::Pass(row.1.clone()),
+        RowLevel::Warn => CheckResult::Warn(row.1.clone()),
+    }
+}
+
+/// Validate a workspace name against [`SUPPORTED_WORKSPACES`].
+pub(crate) fn validate_workspace(name: &str, source: &str) -> anyhow::Result<()> {
+    if SUPPORTED_WORKSPACES.contains(&name) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "unsupported workspace '{}' ({}); supported: {}",
+        name,
+        source,
+        SUPPORTED_WORKSPACES.join(", ")
+    )
+}
+
+/// Severity of the preflight "Workspace" row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowLevel {
+    Info,
+    Pass,
+    Warn,
+}
+
 /// What `nexus run` starts: the binary, arguments placed before the
-/// operator's own `-- <args>`, and an optional one-line hint.
+/// operator's own `-- <args>`, the preflight "Workspace" row, and the
+/// session-summary line.
 #[derive(Debug, PartialEq, Eq)]
 struct Launch {
     tool: String,
     leading_args: Vec<String>,
-    hint: Option<String>,
+    row: (RowLevel, String),
+    summary: String,
 }
 
-/// Resolve the start (NEXUS-APP dispatch 442f0e97), highest priority first:
-/// 1. `--tool <bin>`: explicit override.
-/// 2. the backend's `run_target`: zellij with the CCX layout for
-///    `workspace: "zellij"` (plain `claude` plus a hint when zellij or the
-///    layout is missing), otherwise `run_target.tool`.
-/// 3. without `run_target` (older backend): [`resolve_effective_tool`].
+fn tool_label(tool: &str) -> String {
+    match tool {
+        "claude" => "Claude Code".into(),
+        "opencode" => "OpenCode".into(),
+        other => other.into(),
+    }
+}
+
+/// Resolve the start (NEXUS-APP dispatches 442f0e97, be6be18e).
+///
+/// Tool: `--tool`, else `run_target.tool`, else [`resolve_effective_tool`]
+/// (older backends).
+///
+/// Workspace, highest priority first: `--plain` / `--workspace`, the local
+/// `[run] workspace`, then `run_target.workspace` (the project default,
+/// not applied when `--tool` overrides the tool). `zellij` starts the tool
+/// through `zellij --layout <run_target.layout>`; if zellij or the layout is
+/// missing the tool starts directly and the row is a WARN.
 fn resolve_launch(
     cli_tool: Option<&str>,
     configured_default: Option<&str>,
     agent_owner: Option<&str>,
     run_target: Option<&nexus_core::api::RunTarget>,
+    workspace_choice: Option<(&str, WorkspaceSource)>,
     workspace: &Path,
     zellij_available: bool,
 ) -> Launch {
-    let plain = |tool: String| Launch {
-        tool,
-        leading_args: Vec::new(),
-        hint: None,
+    let cli_tool = cli_tool.filter(|t| !t.is_empty());
+    let tool = match (cli_tool, run_target) {
+        (Some(t), _) => t.to_string(),
+        (None, Some(target)) => target.tool.clone(),
+        (None, None) => resolve_effective_tool(None, configured_default, agent_owner),
     };
-    if let Some(t) = cli_tool.filter(|t| !t.is_empty()) {
-        return plain(t.to_string());
-    }
-    let Some(target) = run_target else {
-        return plain(resolve_effective_tool(
-            None,
-            configured_default,
-            agent_owner,
-        ));
-    };
-    if target.workspace.as_deref() != Some("zellij") {
-        return plain(target.tool.clone());
-    }
-    let layout = workspace.join(
-        target
-            .layout
-            .as_deref()
-            .unwrap_or(".nexus/claude/nexus-claude.kdl"),
-    );
-    let hint = if !zellij_available {
-        "zellij not found; starting Claude Code without the workspace. Install it via devbox."
-            .to_string()
-    } else if !layout.is_file() {
-        format!(
-            "workspace layout {} not found (run nexus pull); starting Claude Code without the workspace.",
-            layout.display()
-        )
+    let (name, source) = workspace_choice.unwrap_or_else(|| {
+        let project = run_target
+            .filter(|_| cli_tool.is_none())
+            .and_then(|t| t.workspace.as_deref())
+            .unwrap_or("none");
+        (project, WorkspaceSource::Project)
+    });
+    let label = tool_label(&tool);
+    let src = source.label();
+    let override_level = if source == WorkspaceSource::Project {
+        RowLevel::Pass
     } else {
-        return Launch {
-            tool: "zellij".to_string(),
-            leading_args: vec!["--layout".to_string(), layout.display().to_string()],
-            hint: None,
-        };
+        RowLevel::Info
     };
-    Launch {
-        tool: "claude".to_string(),
+    let direct = |row: (RowLevel, String), summary: String| Launch {
+        tool: tool.clone(),
         leading_args: Vec::new(),
-        hint: Some(hint),
+        row,
+        summary,
+    };
+
+    if name != "zellij" {
+        return direct(
+            (
+                override_level,
+                format!("{label}, plain (no zellij) [{src}]"),
+            ),
+            format!("plain ({src})"),
+        );
+    }
+    let layout_rel = run_target
+        .and_then(|t| t.layout.as_deref())
+        .unwrap_or(".nexus/claude/nexus-claude.kdl");
+    let layout = workspace.join(layout_rel);
+    if !zellij_available {
+        return direct(
+            (
+                RowLevel::Warn,
+                format!("{label}, plain: zellij not found (install via devbox) [{src}]"),
+            ),
+            format!("plain, zellij not found ({src})"),
+        );
+    }
+    if !layout.is_file() {
+        return direct(
+            (
+                RowLevel::Warn,
+                format!("{label}, plain: layout {layout_rel} not found (run nexus pull) [{src}]"),
+            ),
+            format!("plain, layout missing ({src})"),
+        );
+    }
+    Launch {
+        tool: "zellij".to_string(),
+        leading_args: vec!["--layout".to_string(), layout.display().to_string()],
+        row: (
+            RowLevel::Pass,
+            format!("{label} in zellij ({layout_rel}) [{src}]"),
+        ),
+        summary: format!("zellij ({src})"),
     }
 }
 
@@ -1142,6 +1261,7 @@ async fn run_prelaunch_checks(
     countdown_secs: u64,
     account: Option<&str>,
     gh_outcome: &GhOutcome,
+    workspace_row: CheckResult,
 ) -> anyhow::Result<bool> {
     println!();
     println!("{} Nexus Pre-launch Check", style(">>").bold().cyan());
@@ -1174,7 +1294,8 @@ async fn run_prelaunch_checks(
     } else {
         CheckResult::Fail("No .nexus/ directory — run 'nexus init'".into())
     };
-    checks.push(("Workspace", ws_check));
+    checks.push(("Project", ws_check));
+    checks.push(("Workspace", workspace_row));
 
     // Auth
     let resolved_token = resolve_token();
@@ -1543,6 +1664,7 @@ fn print_session_summary(
     token_stats: Option<&TokenStats>,
     activity_stats: Option<&ActivityStats>,
     agent_owner: Option<&str>,
+    workspace_summary: &str,
 ) {
     let hrs = elapsed.as_secs() / 3600;
     let mins = (elapsed.as_secs() % 3600) / 60;
@@ -1567,6 +1689,7 @@ fn print_session_summary(
         style("─────────────────────────────────────────────").dim()
     );
     println!("  Duration:     {}", style(&duration_str).bold());
+    println!("  Workspace:    {}", workspace_summary);
     println!(
         "  Exit code:    {}",
         if exit_code == 0 {
@@ -2648,9 +2771,13 @@ mod tests {
                 exec,
                 skip_checks,
                 force,
+                plain,
+                workspace,
                 account,
                 args,
             } => {
+                assert!(!plain);
+                assert!(workspace.is_none());
                 assert!(tool.is_none());
                 assert!(!dry_run);
                 assert!(!show_env);
@@ -2663,6 +2790,21 @@ mod tests {
             }
             _ => panic!("expected Run"),
         }
+    }
+
+    #[test]
+    fn test_parse_cli_run_plain_and_workspace() {
+        use crate::{Cli, Command};
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["nexus", "run", "--plain", "--tool", "claude"]).unwrap();
+        assert!(matches!(cli.command, Command::Run { plain: true, .. }));
+        let cli = Cli::try_parse_from(["nexus", "run", "--workspace", "zellij"]).unwrap();
+        match cli.command {
+            Command::Run { workspace, .. } => assert_eq!(workspace.as_deref(), Some("zellij")),
+            _ => panic!("expected Run"),
+        }
+        // --plain and --workspace are mutually exclusive.
+        assert!(Cli::try_parse_from(["nexus", "run", "--plain", "--workspace", "zellij"]).is_err());
     }
 
     #[test]
@@ -2894,7 +3036,7 @@ mod tests {
     // agent_owner-aware launch behaviour (NEXUS-APP dispatch dfd4e655)
     // -------------------------------------------------------------------
 
-    // ── resolve_launch (NEXUS-APP dispatch 442f0e97) ───────────────────────
+    // ── resolve_launch (NEXUS-APP dispatches 442f0e97, be6be18e) ───────────
 
     fn target(
         tool: &str,
@@ -2908,133 +3050,192 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_launch_run_target_plain_tools() {
-        let ws = Path::new("/nonexistent");
-        let l = resolve_launch(
-            None,
-            None,
-            Some("claude-cli"),
-            Some(&target("opencode", Some("none"), None)),
-            ws,
-            true,
-        );
-        assert_eq!(
-            (l.tool.as_str(), l.leading_args.len(), l.hint),
-            ("opencode", 0, None)
-        );
-        let l = resolve_launch(
-            None,
-            None,
-            Some("opencode"),
-            Some(&target("claude", Some("none"), None)),
-            ws,
-            true,
-        );
-        assert_eq!(l.tool, "claude");
-        assert!(l.hint.is_none());
-    }
+    const KDL: &str = ".nexus/claude/nexus-claude.kdl";
 
-    #[test]
-    fn test_launch_run_target_beats_configured_default() {
-        let l = resolve_launch(
-            None,
-            Some("opencode"),
-            None,
-            Some(&target("claude", None, None)),
-            Path::new("/x"),
-            false,
-        );
-        assert_eq!(l.tool, "claude");
-    }
-
-    #[test]
-    fn test_launch_zellij_workspace_with_layout() {
-        let dir = std::env::temp_dir().join(format!("nexus-launch-{}", std::process::id()));
+    /// A workspace dir with the CCX layout present.
+    fn with_layout(suffix: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("nexus-launch-{}-{suffix}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(".nexus/claude")).unwrap();
-        fs::write(dir.join(".nexus/claude/nexus-claude.kdl"), "layout {}").unwrap();
-        let t = target(
-            "claude",
-            Some("zellij"),
-            Some(".nexus/claude/nexus-claude.kdl"),
-        );
+        fs::write(dir.join(KDL), "layout {}").unwrap();
+        dir
+    }
 
-        let l = resolve_launch(None, None, Some("claude-cli"), Some(&t), &dir, true);
+    fn launch(
+        choice: Option<(&str, WorkspaceSource)>,
+        t: Option<&nexus_core::api::RunTarget>,
+        ws: &Path,
+        zellij: bool,
+    ) -> Launch {
+        resolve_launch(None, None, Some("claude-cli"), t, choice, ws, zellij)
+    }
+
+    #[test]
+    fn test_launch_project_default_zellij() {
+        let dir = with_layout("default");
+        let t = target("claude", Some("zellij"), Some(KDL));
+        let l = launch(None, Some(&t), &dir, true);
         assert_eq!(l.tool, "zellij");
         assert_eq!(
             l.leading_args,
-            vec![
-                "--layout".to_string(),
-                dir.join(".nexus/claude/nexus-claude.kdl")
-                    .display()
-                    .to_string()
-            ]
+            vec!["--layout".to_string(), dir.join(KDL).display().to_string()]
         );
-        assert!(l.hint.is_none());
-
-        // zellij missing: plain claude plus a hint.
-        let l = resolve_launch(None, None, Some("claude-cli"), Some(&t), &dir, false);
-        assert_eq!(l.tool, "claude");
-        assert!(l.leading_args.is_empty());
-        assert!(l.hint.unwrap().contains("zellij not found"));
+        assert_eq!(
+            l.row,
+            (
+                RowLevel::Pass,
+                format!("Claude Code in zellij ({KDL}) [project default]")
+            )
+        );
+        assert_eq!(l.summary, "zellij (project default)");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn test_launch_zellij_workspace_layout_missing() {
-        let t = target(
-            "claude",
-            Some("zellij"),
-            Some(".nexus/claude/nexus-claude.kdl"),
+    fn test_launch_plain_flag_equals_workspace_none() {
+        let dir = with_layout("plain");
+        let t = target("claude", Some("zellij"), Some(KDL));
+        let plain = launch(Some(("none", WorkspaceSource::Plain)), Some(&t), &dir, true);
+        let none = launch(Some(("none", WorkspaceSource::Flag)), Some(&t), &dir, true);
+        assert_eq!(plain.tool, "claude");
+        assert!(plain.leading_args.is_empty());
+        assert_eq!(
+            plain.row,
+            (
+                RowLevel::Info,
+                "Claude Code, plain (no zellij) [--plain]".to_string()
+            )
         );
-        let l = resolve_launch(
-            None,
-            None,
-            Some("claude-cli"),
+        assert_eq!(plain.summary, "plain (--plain)");
+        assert_eq!(
+            (none.tool, none.leading_args),
+            (plain.tool, plain.leading_args)
+        );
+        assert_eq!(none.row.1, "Claude Code, plain (no zellij) [--workspace]");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_launch_local_config_row() {
+        let dir = with_layout("local");
+        let t = target("claude", Some("zellij"), Some(KDL));
+        let l = launch(
+            Some(("none", WorkspaceSource::LocalConfig)),
             Some(&t),
-            Path::new("/nonexistent"),
+            &dir,
             true,
         );
         assert_eq!(l.tool, "claude");
-        assert!(l.hint.unwrap().contains("run nexus pull"));
+        assert_eq!(
+            l.row,
+            (
+                RowLevel::Info,
+                "Claude Code, plain (no zellij) [local config: run.workspace]".to_string()
+            )
+        );
+        // Local preference for zellij on a project that defaults to none.
+        let t = target("claude", Some("none"), Some(KDL));
+        let l = launch(
+            Some(("zellij", WorkspaceSource::LocalConfig)),
+            Some(&t),
+            &dir,
+            true,
+        );
+        assert_eq!(l.tool, "zellij");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn test_launch_without_run_target_falls_back_to_agent_owner() {
-        let ws = Path::new("/x");
+    fn test_launch_zellij_missing_is_warn_row() {
+        let dir = with_layout("nozellij");
+        let t = target("claude", Some("zellij"), Some(KDL));
+        let l = launch(None, Some(&t), &dir, false);
+        assert_eq!(l.tool, "claude");
         assert_eq!(
-            resolve_launch(None, None, Some("claude-cli"), None, ws, true).tool,
-            "claude"
+            l.row,
+            (
+                RowLevel::Warn,
+                "Claude Code, plain: zellij not found (install via devbox) [project default]"
+                    .to_string()
+            )
         );
-        assert_eq!(
-            resolve_launch(None, None, Some("opencode"), None, ws, true).tool,
-            "opencode"
-        );
-        assert_eq!(
-            resolve_launch(None, Some("zed"), Some("claude-cli"), None, ws, true).tool,
-            "zed"
-        );
-        // Retired `both` counts as OpenCode.
-        assert_eq!(
-            resolve_launch(None, None, Some("both"), None, ws, true).tool,
-            "opencode"
-        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn test_launch_cli_tool_overrides_run_target() {
-        let t = target("claude", Some("zellij"), None);
-        let l = resolve_launch(
-            Some("opencode"),
-            None,
-            Some("claude-cli"),
+    fn test_launch_layout_missing_is_warn_row() {
+        let t = target("claude", Some("zellij"), Some(KDL));
+        let l = launch(None, Some(&t), Path::new("/nonexistent"), true);
+        assert_eq!(l.tool, "claude");
+        assert_eq!(l.row.0, RowLevel::Warn);
+        assert!(l.row.1.contains("run nexus pull"), "{}", l.row.1);
+    }
+
+    #[test]
+    fn test_launch_plain_with_opencode_target_without_workspace() {
+        let t = target("opencode", None, None);
+        let l = launch(
+            Some(("none", WorkspaceSource::Plain)),
             Some(&t),
             Path::new("/x"),
             true,
         );
         assert_eq!(l.tool, "opencode");
-        assert!(l.leading_args.is_empty() && l.hint.is_none());
+        assert_eq!(l.row.1, "OpenCode, plain (no zellij) [--plain]");
+    }
+
+    #[test]
+    fn test_launch_without_run_target_falls_back_to_agent_owner() {
+        let ws = Path::new("/x");
+        let r = |default: Option<&str>, owner: &str| {
+            resolve_launch(None, default, Some(owner), None, None, ws, true).tool
+        };
+        assert_eq!(r(None, "claude-cli"), "claude");
+        assert_eq!(r(None, "opencode"), "opencode");
+        assert_eq!(r(Some("zed"), "claude-cli"), "zed");
+        // Retired `both` counts as OpenCode.
+        assert_eq!(r(None, "both"), "opencode");
+    }
+
+    #[test]
+    fn test_launch_cli_tool_overrides_run_target_and_combines_with_workspace() {
+        let dir = with_layout("tool");
+        let t = target("claude", Some("zellij"), Some(KDL));
+        // --tool alone: the project's zellij default does not apply.
+        let l = resolve_launch(
+            Some("opencode"),
+            None,
+            Some("claude-cli"),
+            Some(&t),
+            None,
+            &dir,
+            true,
+        );
+        assert_eq!(l.tool, "opencode");
+        assert!(l.leading_args.is_empty());
+        // --tool claude --workspace zellij: explicit combination.
+        let l = resolve_launch(
+            Some("claude"),
+            None,
+            Some("claude-cli"),
+            Some(&t),
+            Some(("zellij", WorkspaceSource::Flag)),
+            &dir,
+            true,
+        );
+        assert_eq!(l.tool, "zellij");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_validate_workspace() {
+        assert!(validate_workspace("none", "--workspace").is_ok());
+        assert!(validate_workspace("zellij", "--workspace").is_ok());
+        let err = validate_workspace("tmux", "--workspace")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("supported: none, zellij"), "{err}");
     }
 
     #[test]

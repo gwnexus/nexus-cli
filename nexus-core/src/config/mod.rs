@@ -509,6 +509,30 @@ pub struct ProjectConfig {
     /// `nexus config set --local`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<LocalConfigOverrides>,
+
+    /// Personal `nexus run` preferences (`[run] workspace = "none"|"zellij"`,
+    /// NEXUS-APP dispatch be6be18e). Never written by `nexus pull`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<ProjectRunConfig>,
+}
+
+/// `[run]` section of the project-local `.nexus/config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectRunConfig {
+    /// Local default terminal workspace for `nexus run`, overriding the
+    /// project's `run_target.workspace` (the team default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+}
+
+/// The local `[run] workspace` preference, if set.
+pub fn load_run_workspace(from: Option<&std::path::Path>) -> Option<String> {
+    load_project_config(from)
+        .ok()
+        .flatten()
+        .and_then(|pc| pc.run)
+        .and_then(|r| r.workspace)
+        .filter(|w| !w.is_empty())
 }
 
 /// Returns the path to the project-local `.nexus/config.toml`,

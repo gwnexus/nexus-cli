@@ -315,6 +315,7 @@ fn test_project_config_toml_roundtrip_with_local_overrides() {
             default_output: Some(OutputPreference::Json),
             no_color: Some(true),
         }),
+        run: None,
     };
 
     let serialized = toml::to_string_pretty(&project_config).unwrap();
@@ -372,6 +373,7 @@ fn test_load_effective_prefers_local_api_url_over_global() {
             default_output: None,
             no_color: None,
         }),
+        run: None,
     };
     save_project_config(Some(&dir), &project_config).unwrap();
 
@@ -403,6 +405,7 @@ fn test_load_effective_partial_override_only_affects_set_keys() {
             default_output: Some(OutputPreference::Json),
             no_color: None,
         }),
+        run: None,
     };
     save_project_config(Some(&dir), &project_config).unwrap();
 

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.3] - 2026-09-25
+
+### Added
+- **`nexus run --plain` / `--workspace <none|zellij>`** and a local preference `[run] workspace` in `.nexus/config.toml` (NEXUS-APP dispatch be6be18e). Precedence: flag, then the local preference, then the project's `run_target.workspace`. `--plain` equals `--workspace none` and starts the tool directly; everything else `nexus run` does (preflight, env injection, gh profile, `--account`, headroom env, session summary) stays active. Unsupported values fail with the list of supported ones. Both flags work for Claude Code and OpenCode and combine with `--tool` (with `--tool` alone the project's workspace default does not apply). `nexus pull` never touches `[run] workspace`.
+- The pre-launch check has a `Workspace` row naming the workspace and its source (`INFO` for a flag or local override, `PASS` for a working project default, `WARN` when zellij or the layout is missing; it replaces the former separate hint line). The former `Workspace` row (linked project) is now labelled `Project`. `nexus status` shows a local override in the Environment line, and the session summary prints the workspace used.
+
+9 new tests (precedence and rows per source, `--plain` equals `--workspace none`, unsupported value, zellij/layout missing, OpenCode target without workspace, `--tool` combinations, CLI parsing, `nexus pull` preserving `[run] workspace`). 672/672 tests passing, clippy/fmt clean.
+
 ## [0.28.2] - 2026-09-25
 
 ### Fixed

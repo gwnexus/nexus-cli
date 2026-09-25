@@ -441,6 +441,8 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             exec,
             skip_checks,
             force,
+            plain,
+            ref workspace,
             ref account,
             ref args,
         } => {
@@ -462,6 +464,13 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 countdown_secs,
                 account.as_deref(),
                 cli.yes,
+                if plain {
+                    Some(("none", run::WorkspaceSource::Plain))
+                } else {
+                    workspace
+                        .as_deref()
+                        .map(|w| (w, run::WorkspaceSource::Flag))
+                },
             )
             .await?;
         }

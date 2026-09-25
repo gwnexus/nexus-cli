@@ -257,8 +257,30 @@ impl WorkspaceState {
         })
     }
 
-    /// Human label of what `nexus run` starts.
+    /// Human label of what `nexus run` starts, including a local
+    /// `[run] workspace` override (NEXUS-APP dispatch be6be18e).
     pub fn environment_label(&self) -> String {
+        let project = self.project_environment_label();
+        let project_ws = self
+            .export
+            .run_target
+            .as_ref()
+            .and_then(|t| t.workspace.as_deref())
+            .unwrap_or("none");
+        match config::load_run_workspace(Some(&self.workspace)) {
+            Some(local) if local != project_ws => format!(
+                "{project} (local override: {})",
+                if local == "none" {
+                    "plain"
+                } else {
+                    local.as_str()
+                }
+            ),
+            _ => project,
+        }
+    }
+
+    fn project_environment_label(&self) -> String {
         match &self.export.run_target {
             Some(t) if t.tool == "claude" && t.workspace.as_deref() == Some("zellij") => {
                 "Claude Code (workspace zellij)".into()

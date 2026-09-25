@@ -345,6 +345,16 @@ pub enum Command {
         #[arg(short, long)]
         force: bool,
 
+        /// Start without the terminal workspace (multiplexer): shorthand for
+        /// `--workspace none`. Everything else nexus run does stays active.
+        #[arg(long, conflicts_with = "workspace")]
+        plain: bool,
+
+        /// Terminal workspace for this start (`none` or `zellij`), overriding
+        /// the local `[run] workspace` and the project default.
+        #[arg(long, value_name = "NAME")]
+        workspace: Option<String>,
+
         /// Named Claude Code account (sets CLAUDE_CONFIG_DIR to an isolated
         /// directory under ~/.config/nexus/claude-accounts/<name>/, giving
         /// this invocation its own Keychain login). Only applies to

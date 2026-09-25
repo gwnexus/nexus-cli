@@ -326,6 +326,24 @@ missing, Claude Code starts directly with a hint). `--tool <bin>` overrides
 this. Backends without `run_target` fall back to `run.default_tool` and the
 project's `agent_owner`.
 
+The terminal workspace (multiplexer) can be chosen per start or locally,
+without affecting the Claude Code extensions (HUD, rules, hooks, plugins):
+
+```bash
+nexus run --plain                 # start the tool directly (= --workspace none)
+nexus run --workspace zellij      # force the zellij workspace for this start
+```
+
+```toml
+# .nexus/config.toml: personal default, never overwritten by nexus pull
+[run]
+workspace = "none"   # or "zellij"
+```
+
+Precedence: flag, then `[run] workspace`, then the project default
+(`run_target.workspace`). The pre-launch check shows the choice and its
+source in a `Workspace` row; the session summary repeats it.
+
 `nexus run` embeds the same checks and adds a **launch countdown** after
 they complete. The countdown gives you a moment to review the results before
 the tool starts. Press `Ctrl+C` at any time to abort.

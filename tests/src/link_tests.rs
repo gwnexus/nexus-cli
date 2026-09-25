@@ -40,6 +40,7 @@ fn test_save_and_load_project_config() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
 
     // Save
@@ -82,6 +83,7 @@ fn test_save_project_config_creates_nexus_dir() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
 
     save_project_config(Some(&dir), &config).unwrap();
@@ -127,6 +129,7 @@ fn test_remove_project_section() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -158,6 +161,7 @@ fn test_remove_project_section_returns_false_when_no_project() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -207,6 +211,7 @@ fn test_resolve_project_id_from_config() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -235,6 +240,7 @@ fn test_resolve_project_id_with_flag_override() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -285,6 +291,7 @@ fn test_resolve_project_id_skips_empty_cli_flag() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -313,6 +320,7 @@ fn test_resolve_project_id_skips_empty_config_id() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -344,6 +352,7 @@ fn test_project_config_toml_content() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
 
@@ -380,6 +389,7 @@ fn test_save_overwrites_existing_config() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config1).unwrap();
 
@@ -396,6 +406,7 @@ fn test_save_overwrites_existing_config() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config2).unwrap();
 
@@ -432,6 +443,7 @@ fn test_agent_owner_roundtrip() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
     assert_eq!(load_agent_owner(Some(&dir)), None);
@@ -467,6 +479,7 @@ fn test_run_target_roundtrip() {
         mcp_extra: None,
         plugins: None,
         config: None,
+        run: None,
     };
     save_project_config(Some(&dir), &config).unwrap();
     assert_eq!(load_run_target(Some(&dir)), None);
@@ -487,6 +500,34 @@ fn test_run_target_roundtrip() {
     // An older backend without run_target clears the cache.
     assert!(update_run_target(Some(&dir), None).unwrap());
     assert_eq!(load_run_target(Some(&dir)), None);
+}
+
+#[test]
+fn test_pull_cache_updates_preserve_local_run_workspace() {
+    // `nexus pull` rewrites agent_owner / run_target in config.toml; the
+    // personal `[run] workspace` preference must survive (dispatch be6be18e).
+    use nexus_core::api::RunTarget;
+    use nexus_core::config::{load_run_workspace, update_agent_owner, update_run_target};
+    let dir = temp_dir("run-workspace-preserved");
+    fs::create_dir_all(dir.join(".nexus")).unwrap();
+    fs::write(
+        dir.join(".nexus").join("config.toml"),
+        "[project]\nid = \"fdc7a78c-d0b9-46fd-8206-9fc57301de2d\"\nname = \"P\"\n\n[run]\nworkspace = \"none\"\n",
+    )
+    .unwrap();
+    assert_eq!(load_run_workspace(Some(&dir)).as_deref(), Some("none"));
+
+    update_agent_owner(Some(&dir), Some("claude-cli")).unwrap();
+    update_run_target(
+        Some(&dir),
+        Some(&RunTarget {
+            tool: "claude".into(),
+            workspace: Some("zellij".into()),
+            layout: None,
+        }),
+    )
+    .unwrap();
+    assert_eq!(load_run_workspace(Some(&dir)).as_deref(), Some("none"));
 }
 
 #[test]
