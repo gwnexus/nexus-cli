@@ -2867,6 +2867,30 @@ pub(crate) fn unique_agent_files(
     (kept, dropped)
 }
 
+/// Record `content` as last written by pull for `rel` in the pull manifest.
+fn record_generated(
+    workspace: &Path,
+    agentic_root: &str,
+    rel: &str,
+    content: &str,
+) -> anyhow::Result<()> {
+    let mut recorded = load_pull_manifest(workspace, agentic_root);
+    let hash = sha256_hex(content);
+    if recorded.get(rel) == Some(&hash) {
+        return Ok(());
+    }
+    recorded.insert(rel.to_string(), hash);
+    let manifest_path = pull_manifest_path(workspace, agentic_root);
+    if let Some(parent) = manifest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&recorded)? + "\n",
+    )?;
+    Ok(())
+}
+
 /// Whether an agent file belongs to the OpenCode projection.
 fn is_opencode_path(target_path: &str) -> bool {
     target_path == "opencode.json" || target_path.starts_with(".opencode/")
@@ -2891,11 +2915,14 @@ pub fn write_directives(
     let content = render_directives_markdown(directives);
 
     let path = dir.join("directives.md");
-    if content_matches(&path, &content) {
-        return Ok(());
+    let rel = format!("{}/directives.md", agentic_root);
+    if !content_matches(&path, &content) {
+        fs::write(&path, &content)?;
+        print_synced(&rel);
     }
-    fs::write(&path, content)?;
-    print_synced(&format!("{}/directives.md", agentic_root));
+    // Recorded like the other generated files, so `nexus status` can tell
+    // a local edit (DRIFTED) from a new backend version (UPDATE).
+    record_generated(target, agentic_root, &rel, &content)?;
 
     Ok(())
 }
@@ -3266,6 +3293,36 @@ mod tests {
                 ]
             )]
         );
+    }
+
+    #[test]
+    fn test_write_directives_records_hash_for_status() {
+        let dir = temp_dir("directives-record");
+        let directives = vec![ExportedDirective {
+            id: "1".into(),
+            title: "Use HTTPS".into(),
+            body: Some("Always.".into()),
+            category: "security".into(),
+            priority: "normal".into(),
+        }];
+        write_directives(&dir, &directives, ".nexus").unwrap();
+        let content = render_directives_markdown(&directives);
+        assert_eq!(
+            load_pull_manifest(&dir, ".nexus").get(".nexus/directives.md"),
+            Some(&sha256_hex(&content))
+        );
+        // A local edit is then distinguishable from a backend change.
+        assert_eq!(
+            classify_generated(
+                Some(b"edited"),
+                &content,
+                load_pull_manifest(&dir, ".nexus")
+                    .get(".nexus/directives.md")
+                    .map(String::as_str)
+            ),
+            GeneratedState::LocallyModified
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

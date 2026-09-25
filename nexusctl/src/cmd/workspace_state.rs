@@ -134,10 +134,10 @@ pub fn projection_setting(path: &str, kind: &Kind) -> Option<&'static str> {
             _ => None,
         };
     }
+    // No hint for `.claude/rules/`: several rules ship with every profile,
+    // so `claude.profile` would not remove the drift (dispatch b5f7bfb0).
     if path.starts_with(".claude/statusline/") {
         Some("claude.hud")
-    } else if path.starts_with(".claude/rules/") {
-        Some("claude.profile")
     } else if path.ends_with("nexus-claude.kdl") {
         Some("claude.workspace")
     } else {
@@ -147,8 +147,9 @@ pub fn projection_setting(path: &str, kind: &Kind) -> Option<&'static str> {
 
 /// Whether an agent file is generated (projection) rather than authored
 /// content. Mirrors the keys the backend refuses in `af_sync` push:
-/// synthetic files, CCX, actor profiles, `env-nexus-local`, RTK filters and
-/// the headroom plugin.
+/// synthetic files, CCX, actor profiles, `env-nexus-local`, RTK filters, the
+/// headroom plugin, and `AGENTS.md` / `CLAUDE.md`, which the backend
+/// regenerates on every export (a pushed edit would be lost).
 pub fn is_projection_agent_file(
     file_key: &str,
     target_path: &str,
@@ -164,7 +165,12 @@ pub fn is_projection_agent_file(
             return true;
         }
     }
-    file_key.starts_with("ccx-")
+    let file_name = target_path.rsplit('/').next().unwrap_or(target_path);
+    file_name.eq_ignore_ascii_case("AGENTS.md")
+        || file_name.eq_ignore_ascii_case("CLAUDE.md")
+        || file_key.eq_ignore_ascii_case("agents.md")
+        || file_key.eq_ignore_ascii_case("claude.md")
+        || file_key.starts_with("ccx-")
         || file_key.starts_with("actor-profile-")
         || file_key.starts_with("rtk-filters")
         || file_key == "actors-json"
@@ -450,36 +456,45 @@ pub async fn load(
         }
     }
 
-    // Skills and OpenCode commands rendered by pull.
+    // Skills, OpenCode commands and directives.md rendered by pull.
+    let mut generated: Vec<(String, String)> = Vec::new();
     if let Ok(skills) = client.export_skills(project_id).await {
-        let recorded = super::pull::load_pull_manifest(workspace, &agentic_root);
         for skill in &skills.skills {
-            let mut files = super::pull::render_skill_files(skill, &agentic_root);
+            generated.extend(super::pull::render_skill_files(skill, &agentic_root));
             if !is_claude {
-                files.extend(super::pull::render_command_file(skill, &agentic_root));
-            }
-            for (path, content) in files {
-                let local = read(&path);
-                let state = match super::pull::classify_generated(
-                    local.as_deref(),
-                    &content,
-                    recorded.get(&path).map(String::as_str),
-                ) {
-                    super::pull::GeneratedState::Unchanged => continue,
-                    super::pull::GeneratedState::Write if local.is_none() => State::Create,
-                    super::pull::GeneratedState::Write => State::Update,
-                    super::pull::GeneratedState::LocallyModified => State::Drifted,
-                };
-                entries.push(Entry {
-                    path,
-                    class: FileClass::Projection,
-                    state,
-                    kind: Kind::Generated,
-                    local: local.map(|l| String::from_utf8_lossy(&l).into_owned()),
-                    desired: Some(content),
-                });
+                generated.extend(super::pull::render_command_file(skill, &agentic_root));
             }
         }
+    }
+    if let Ok(dir_export) = client.export_directives(project_id).await {
+        if !dir_export.directives.is_empty() {
+            generated.push((
+                format!("{agentic_root}/directives.md"),
+                super::pull::render_directives_markdown(&dir_export.directives),
+            ));
+        }
+    }
+    let recorded = super::pull::load_pull_manifest(workspace, &agentic_root);
+    for (path, content) in generated {
+        let local = read(&path);
+        let state = match super::pull::classify_generated(
+            local.as_deref(),
+            &content,
+            recorded.get(&path).map(String::as_str),
+        ) {
+            super::pull::GeneratedState::Unchanged => continue,
+            super::pull::GeneratedState::Write if local.is_none() => State::Create,
+            super::pull::GeneratedState::Write => State::Update,
+            super::pull::GeneratedState::LocallyModified => State::Drifted,
+        };
+        entries.push(Entry {
+            path,
+            class: FileClass::Projection,
+            state,
+            kind: Kind::Generated,
+            local: local.map(|l| String::from_utf8_lossy(&l).into_owned()),
+            desired: Some(content),
+        });
     }
 
     // Stale projection of the non-selected runtime (never deleted).
@@ -702,9 +717,25 @@ mod tests {
             ".opencode/plugins/nexus-headroom-intercept.ts",
             None
         ));
-        assert!(!is_projection_agent_file(
+        // Regenerated by the backend on every export (dispatch b5f7bfb0).
+        assert!(is_projection_agent_file(
             "AGENTS.md",
             ".nexus/AGENTS.md",
+            None
+        ));
+        assert!(is_projection_agent_file(
+            "claude.md",
+            ".nexus/CLAUDE.md",
+            None
+        ));
+        assert!(!is_projection_agent_file(
+            "cursorrules",
+            ".cursorrules",
+            None
+        ));
+        assert!(!is_projection_agent_file(
+            "copilot-instructions",
+            ".github/copilot-instructions.md",
             None
         ));
         let synthetic = ExportedAgentFile {
@@ -754,9 +785,17 @@ mod tests {
             State::Drifted,
             Kind::Ccx,
         );
+        // Rules ship with every profile: no claude.profile hint.
+        assert_eq!(e.next_action(), "nexus reset .claude/rules/10.md");
+        let e = entry(
+            ".claude/statusline/nexus-hud.mjs",
+            FileClass::Projection,
+            State::Drifted,
+            Kind::Ccx,
+        );
         assert_eq!(
             e.next_action(),
-            "nexus reset .claude/rules/10.md, or change it with nexus env set claude.profile <value>"
+            "nexus reset .claude/statusline/nexus-hud.mjs, or change it with nexus env set claude.hud <value>"
         );
         let e = entry(
             ".claude/settings.json#statusLine",

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.1] - 2026-09-25
+
+Staging acceptance findings for v0.28.0 (NEXUS-APP dispatch b5f7bfb0).
+
+### Fixed
+- `AGENTS.md` and `CLAUDE.md` agent files are classified as **projection** (the backend regenerates them on every export and `af_sync` push rejects them): a local edit is DRIFTED with a `nexus reset` hint, `nexus push` refuses them, and `nexus stash` no longer stashes them.
+- `<agentic_root>/directives.md` is now visible to `nexus status` / `nexus diff` / `nexus reset` as a projection generated from the project directives. `nexus pull` records its hash, so a local edit (DRIFTED) is distinguishable from a new backend version (UPDATE).
+- `nexus diff` for content now uses the backend version as the base (`--- backend` / `+++ local`), so local additions show as `+`. Projection diffs are unchanged (local base, `+` = what the next pull writes).
+- Drifted `.claude/rules/*` files no longer suggest `nexus env set claude.profile` (several rules ship with every profile); the hint is `nexus reset`. The push refusal only mentions the dashboard for skills.
+
+Confirmed (no change needed): the UPDATE check ignores `generated_at`, so a timestamp-only re-export is not reported.
+
+3 new tests, 3 updated to the new classification. 663/663 tests passing, clippy/fmt clean.
+
 ## [0.28.0] - 2026-09-25
 
 One command per function group (NEXUS-APP dispatch b5f7bfb0, revised specification).

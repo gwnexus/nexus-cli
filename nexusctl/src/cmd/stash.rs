@@ -419,21 +419,24 @@ mod tests {
         let ws = dir.path();
         fs::create_dir_all(ws.join(".nexus")).unwrap();
         fs::create_dir_all(ws.join(".rtk")).unwrap();
+        fs::write(ws.join(".cursorrules"), "edited").unwrap();
         fs::write(ws.join(".nexus/AGENTS.md"), "edited").unwrap();
-        fs::write(ws.join(".nexus/CLAUDE.md"), "unchanged").unwrap();
+        fs::write(ws.join(".github-unchanged.md"), "unchanged").unwrap();
         fs::write(ws.join(".rtk/filters.toml"), "edited").unwrap();
         let manifest = serde_json::json!({
+            "cursorrules": {"target_path": ".cursorrules", "hash": sha256_hex("original")},
             "AGENTS.md": {"target_path": ".nexus/AGENTS.md", "hash": sha256_hex("original")},
-            "CLAUDE.md": {"target_path": ".nexus/CLAUDE.md", "hash": sha256_hex("unchanged")},
+            "unchanged": {"target_path": ".github-unchanged.md", "hash": sha256_hex("unchanged")},
             "rtk-filters-default": {"target_path": ".rtk/filters.toml", "hash": sha256_hex("original")}
         });
         fs::write(ws.join(SYNC_MANIFEST), manifest.to_string()).unwrap();
 
+        // AGENTS.md and RTK filters are projections: never stashed.
         let modified: Vec<PathBuf> = detect_modified_files(ws)
             .into_iter()
             .map(|(p, _)| p)
             .collect();
-        assert_eq!(modified, vec![ws.join(".nexus/AGENTS.md")]);
+        assert_eq!(modified, vec![ws.join(".cursorrules")]);
     }
 
     #[test]
