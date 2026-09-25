@@ -1623,13 +1623,18 @@ fn print_session_summary(
     if headroom_active || headroom.is_some() {
         println!();
         print!("  {}:     ", style("Headroom").bold());
+        let mode = headroom
+            .as_ref()
+            .and_then(|h| h.mode.clone())
+            .or_else(|| headroom_gate_mode(workspace, env::var("HEADROOM_MODE").ok()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let mode_style = if mode == "transform" {
+            style(&mode).green()
+        } else {
+            style(&mode).yellow()
+        };
         match headroom {
             Some(ref h) => {
-                let mode_style = if h.mode == "transform" {
-                    style(&h.mode).green()
-                } else {
-                    style(&h.mode).yellow()
-                };
                 println!("{} mode", mode_style);
                 if h.compressions > 0 || h.locally_applied > 0 {
                     println!(
@@ -1653,9 +1658,12 @@ fn print_session_summary(
                 }
             }
             None => {
+                // No summary from this session (the adapter writes none
+                // without activity); never show an older session's numbers.
                 println!(
-                    "{}",
-                    style("no session stats (short session or no MCP activity)").dim()
+                    "{} mode, {}",
+                    mode_style,
+                    style("no activity this session").dim()
                 );
             }
         }
@@ -1974,7 +1982,8 @@ fn format_number(n: u64) -> String {
 
 /// Parsed headroom session summary from `.nexus/headroom-intercept.jsonl`.
 pub(crate) struct HeadroomSummary {
-    pub(crate) mode: String,
+    /// `None` for adapters before v0.5.17, which did not log the mode.
+    pub(crate) mode: Option<String>,
     pub(crate) compressions: u64,
     pub(crate) locally_applied: u64,
     pub(crate) observations: u64,
@@ -1985,16 +1994,16 @@ pub(crate) struct HeadroomSummary {
 }
 
 /// Read the last `session_summary` event from `.nexus/headroom-intercept.jsonl`
-/// that was written after `run_start_epoch` (Unix seconds). Falls back to the
-/// very last `session_summary` in the file if timestamp filtering fails.
+/// written at or after `run_start_epoch` (Unix seconds). Older summaries
+/// belong to other sessions and are never used (NEXUS-APP dispatch
+/// 3334d664): the adapter writes none for a session without activity.
+/// Pass `0` for "the most recent summary".
 pub(crate) fn read_headroom_stats(
     workspace: &Path,
     run_start_epoch: u64,
 ) -> Option<HeadroomSummary> {
     let jsonl_path = workspace.join(".nexus").join("headroom-intercept.jsonl");
     let content = fs::read_to_string(&jsonl_path).ok()?;
-
-    let mut best: Option<(u64, HeadroomSummary)> = None;
 
     for line in content.lines().rev() {
         let line = line.trim();
@@ -2030,11 +2039,7 @@ pub(crate) fn read_headroom_stats(
             .unwrap_or(0);
 
         let summary = HeadroomSummary {
-            mode: val
-                .get("mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
+            mode: val.get("mode").and_then(|v| v.as_str()).map(str::to_string),
             compressions: val
                 .get("compressions")
                 .and_then(|v| v.as_u64())
@@ -2062,18 +2067,30 @@ pub(crate) fn read_headroom_stats(
                 .unwrap_or(0),
         };
 
-        // Prefer entries from after run start
         if ts_secs >= run_start_epoch {
             return Some(summary);
         }
-
-        // Keep the most recent as fallback
-        if best.is_none() || ts_secs > best.as_ref().unwrap().0 {
-            best = Some((ts_secs, summary));
-        }
     }
 
-    best.map(|(_, s)| s)
+    None
+}
+
+/// The headroom mode the gate settled on for this workspace:
+/// `.nexus/headroom-gate-state.json` (`mode`, then `requestedMode`), else
+/// `HEADROOM_MODE` (`env_mode`). `None` if neither is known.
+pub(crate) fn headroom_gate_mode(workspace: &Path, env_mode: Option<String>) -> Option<String> {
+    fs::read_to_string(workspace.join(".nexus").join("headroom-gate-state.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            ["mode", "requestedMode"].iter().find_map(|k| {
+                v.get(*k)
+                    .and_then(|m| m.as_str())
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_string)
+            })
+        })
+        .or(env_mode.filter(|m| !m.is_empty()))
 }
 
 /// Parse an ISO 8601 UTC timestamp to Unix seconds.
@@ -2755,7 +2772,7 @@ mod tests {
         let stats = read_headroom_stats(&dir, 0);
         assert!(stats.is_some());
         let s = stats.unwrap();
-        assert_eq!(s.mode, "transform");
+        assert_eq!(s.mode.as_deref(), Some("transform"));
         assert_eq!(s.compressions, 4);
         assert_eq!(s.locally_applied, 2);
         assert_eq!(s.observations, 3);
@@ -2763,6 +2780,75 @@ mod tests {
         assert_eq!(s.passthroughs, 12);
         assert_eq!(s.potential_saved_tokens, 10690);
         assert_eq!(s.cache_integrity_failures, 0);
+    }
+
+    // ── stale summaries (NEXUS-APP dispatch 3334d664) ──────────────────────
+
+    fn write_headroom(dir: &Path, jsonl: &str, gate: Option<&str>) {
+        let nexus_dir = dir.join(".nexus");
+        fs::create_dir_all(&nexus_dir).unwrap();
+        fs::write(nexus_dir.join("headroom-intercept.jsonl"), jsonl).unwrap();
+        if let Some(g) = gate {
+            fs::write(nexus_dir.join("headroom-gate-state.json"), g).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_read_headroom_stats_ignores_summary_before_run_start() {
+        // Yesterday's summary (older adapter, no `mode`); this run had no
+        // activity, so the adapter wrote nothing.
+        let dir = tmp_dir("headroom_stale");
+        write_headroom(
+            &dir,
+            r#"{"event":"session_summary","observations":0,"skips":0,"passthroughs":2,"ts":"2026-09-24T10:43:00.000Z"}
+"#,
+            Some(r#"{"mode":"transform","requestedMode":"transform"}"#),
+        );
+        let run_start = iso8601_to_unix_secs("2026-09-25T04:00:00Z").unwrap();
+        assert!(read_headroom_stats(&dir, run_start).is_none());
+        // The summary line then uses the gate mode.
+        assert_eq!(headroom_gate_mode(&dir, None).as_deref(), Some("transform"));
+    }
+
+    #[test]
+    fn test_read_headroom_stats_summary_after_run_start_is_used() {
+        let dir = tmp_dir("headroom_current");
+        write_headroom(
+            &dir,
+            r#"{"event":"session_summary","mode":"observe","compressions":0,"passthroughs":2,"ts":"2026-09-24T10:43:00.000Z"}
+{"event":"session_summary","mode":"transform","compressions":3,"ts":"2026-09-25T04:10:00.000Z"}
+"#,
+            None,
+        );
+        let run_start = iso8601_to_unix_secs("2026-09-25T04:00:00Z").unwrap();
+        let s = read_headroom_stats(&dir, run_start).unwrap();
+        assert_eq!(s.compressions, 3);
+        assert_eq!(s.mode.as_deref(), Some("transform"));
+    }
+
+    #[test]
+    fn test_summary_without_mode_falls_back_to_gate_state() {
+        let dir = tmp_dir("headroom_nomode");
+        write_headroom(
+            &dir,
+            r#"{"event":"session_summary","compressions":1,"ts":"2026-09-25T04:10:00.000Z"}
+"#,
+            Some(r#"{"requestedMode":"observe"}"#),
+        );
+        let s = read_headroom_stats(&dir, 0).unwrap();
+        assert!(s.mode.is_none());
+        assert_eq!(headroom_gate_mode(&dir, None).as_deref(), Some("observe"));
+    }
+
+    #[test]
+    fn test_headroom_gate_mode_env_fallback_and_unknown() {
+        let dir = tmp_dir("headroom_gate_env");
+        assert_eq!(
+            headroom_gate_mode(&dir, Some("transform".into())).as_deref(),
+            Some("transform")
+        );
+        assert_eq!(headroom_gate_mode(&dir, None), None);
+        assert_eq!(headroom_gate_mode(&dir, Some(String::new())), None);
     }
 
     #[test]
@@ -2800,7 +2886,7 @@ mod tests {
         let stats = read_headroom_stats(&dir, 1752076800);
         assert!(stats.is_some());
         let s = stats.unwrap();
-        assert_eq!(s.mode, "transform");
+        assert_eq!(s.mode.as_deref(), Some("transform"));
         assert_eq!(s.compressions, 7);
     }
 

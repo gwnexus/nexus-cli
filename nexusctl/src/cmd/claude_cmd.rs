@@ -50,7 +50,9 @@ pub fn runtime_details(
         if let Some(ref h) = headroom {
             println!(
                 "  Headroom: last session mode {}, {} compression(s), ~{} tokens saved",
-                h.mode, h.compressions, h.potential_saved_tokens
+                h.mode.as_deref().unwrap_or("unknown"),
+                h.compressions,
+                h.potential_saved_tokens
             );
         }
         println!();

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.2] - 2026-09-25
+
+### Fixed
+- **`nexus run` session summary no longer shows another session's headroom numbers** (NEXUS-APP dispatch 3334d664). The headroom-intercept adapter writes `session_summary` only for sessions with activity; for a session without one the CLI used to fall back to the most recent older summary (e.g. yesterday's, from an adapter that did not log `mode`, hence "unknown mode"). Only summaries written at or after the run start are used now. Without one, the summary prints `Headroom: <mode> mode, no activity this session`, with the mode taken from `.nexus/headroom-gate-state.json` (`mode`, then `requestedMode`), falling back to `HEADROOM_MODE`; "unknown" only when neither exists. A summary without `mode` also uses this fallback.
+
+4 new tests (stale summary ignored, current summary used, missing mode falls back to gate state, env fallback / unknown). 667/667 tests passing, clippy/fmt clean.
+
 ## [0.28.1] - 2026-09-25
 
 Staging acceptance findings for v0.28.0 (NEXUS-APP dispatch b5f7bfb0).
