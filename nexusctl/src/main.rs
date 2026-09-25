@@ -125,8 +125,39 @@ pub enum Command {
         global: bool,
     },
 
-    /// Show current authentication and project status.
+    /// Show auth/project, the agent environment, git identity, and every
+    /// non-clean workspace file with its class (content/projection), state
+    /// and next action. Supports --output json. Exits 1 when changes are
+    /// pending.
     Status,
+
+    /// Show unified diffs for non-clean files: content vs. the backend,
+    /// projection vs. what the next pull writes (incl. managed settings keys
+    /// and the CLAUDE.md block). Read-only. Exits 1 when differences exist.
+    Diff {
+        /// Limit to a file or directory.
+        path: Option<String>,
+    },
+
+    /// Discard local changes: content returns to the backend version,
+    /// projection files to what the next pull writes. Without a path, all
+    /// pending changes are reset after one confirmation (-y skips it).
+    Reset {
+        /// File or directory to reset.
+        path: Option<String>,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Inspect and change the project's backend settings (executioner,
+    /// execution mode, Claude Code experience, git identity). Never writes
+    /// local files except through `set --pull`.
+    Env {
+        #[command(subcommand)]
+        action: Option<EnvAction>,
+    },
 
     /// Pull skills and configuration from the Nexus platform into this workspace.
     Pull {
@@ -159,7 +190,8 @@ pub enum Command {
         skip_actor_assets: bool,
     },
 
-    /// Claude Code Experience (CCX) bundle: status, diff, and launch.
+    /// Deprecated: use `nexus status`, `nexus diff`, `nexus run`.
+    #[command(hide = true)]
     Claude {
         #[command(subcommand)]
         action: ClaudeAction,
@@ -210,7 +242,8 @@ pub enum Command {
         dry_run: bool,
     },
 
-    /// Sync agent files between the local workspace and the Nexus platform.
+    /// Deprecated: use `nexus status`, `nexus push`, `nexus reset`.
+    #[command(hide = true)]
     Sync {
         #[command(subcommand)]
         action: SyncAction,
@@ -228,12 +261,16 @@ pub enum Command {
         action: ActorsAction,
     },
 
-    /// Push local workspace changes to the linked Nexus project.
+    /// Push local content changes to the linked Nexus project.
     ///
-    /// Detects modified workspace files (devbox.json, scripts/devbox/),
-    /// compares with the server-side version, and creates a new workspace
-    /// fork with the local changes.
+    /// Content only: modified agent files are synced back; devbox changes
+    /// (devbox.json, scripts/devbox/) become a new workspace fork.
+    /// Projection files (generated from settings) are refused with the
+    /// setting to change instead.
     Push {
+        /// Limit to a file or directory (default: all modified content).
+        path: Option<String>,
+
         /// Override the linked project ID.
         #[arg(long)]
         project_id: Option<String>,
@@ -246,8 +283,8 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Only push workspace files (devbox.json, scripts). This is the default for now.
-        #[arg(long)]
+        /// Deprecated, has no effect (kept for compatibility).
+        #[arg(long, hide = true)]
         workspace: bool,
 
         /// Publish the current local workspace as a new fork without a prior pull.
@@ -260,7 +297,8 @@ pub enum Command {
         adopt_local: bool,
     },
 
-    /// Temporarily save modified workspace files and restore them later.
+    /// Temporarily save modified content files (devbox workspace and agent
+    /// files) and restore them later. Projection files are never stashed.
     ///
     /// Running `nexus stash` without a subcommand defaults to `nexus stash save`.
     Stash {
@@ -268,15 +306,18 @@ pub enum Command {
         action: Option<StashAction>,
     },
 
-    /// Launch a tool (default: opencode) with platform-managed env vars injected.
+    /// Start the project's agent environment: whatever the backend selects
+    /// (OpenCode, Claude Code, or the Claude Code zellij workspace), with
+    /// platform-managed env vars injected.
     ///
     /// Resolves env vars from .nexus/env (plugin defaults) and .env.nexus.local
     /// (secrets), runs a pre-launch check, then spawns the tool. After the tool
     /// exits, prints a session summary with duration and git activity.
     /// Shell vars already set are never overwritten.
     Run {
-        /// Tool binary to launch. Defaults to config run.default_tool, else
-        /// the linked project's agent_owner (claude-cli -> claude), else opencode.
+        /// Tool binary to launch instead of the backend's run target. Without a
+        /// run target (older backends): config run.default_tool, else the
+        /// project's agent_owner (claude-cli -> claude), else opencode.
         #[arg(short, long)]
         tool: Option<String>,
 
@@ -307,7 +348,7 @@ pub enum Command {
         /// Named Claude Code account (sets CLAUDE_CONFIG_DIR to an isolated
         /// directory under ~/.config/nexus/claude-accounts/<name>/, giving
         /// this invocation its own Keychain login). Only applies to
-        /// claude-cli/both projects. Explicit only: no automatic switching,
+        /// claude-cli projects. Explicit only: no automatic switching,
         /// no rotation. Omit for the existing default (~/.claude).
         #[arg(long)]
         account: Option<String>,
@@ -318,7 +359,38 @@ pub enum Command {
     },
 }
 
-/// Claude Code Experience (CCX) subcommands (NEXUS-APP ADR-0117).
+/// Backend settings subcommands (NEXUS-APP dispatch b5f7bfb0). Keys and
+/// values come from the backend schema (`nexus env keys`).
+#[derive(Debug, Subcommand)]
+pub enum EnvAction {
+    /// Print all settings, or one key's value. Supports --output json.
+    Get {
+        /// Setting key, e.g. claude.hud.
+        key: Option<String>,
+    },
+
+    /// List the settable keys with their types and allowed values.
+    Keys,
+
+    /// Change a setting in the backend (requires project admin rights).
+    Set {
+        /// Setting key, e.g. claude.hud.
+        key: String,
+
+        /// New value (`true`/`false` for booleans, `unset` clears nullable keys).
+        value: String,
+
+        /// Preview the change without applying it.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Run `nexus pull` afterwards to apply the change locally.
+        #[arg(long)]
+        pull: bool,
+    },
+}
+
+/// Deprecated `nexus claude` subcommands (NEXUS-APP ADR-0117).
 #[derive(Debug, Subcommand)]
 pub enum ClaudeAction {
     /// Show the CCX bundle state (per-file state, managed settings, Claude
@@ -1359,6 +1431,74 @@ mod tests {
             }
             _ => panic!("expected Pull command"),
         }
+    }
+
+    #[test]
+    fn test_parse_state_commands() {
+        let cli = Cli::try_parse_from(["nexus", "diff", ".claude/rules"]).unwrap();
+        match cli.command {
+            Command::Diff { path } => assert_eq!(path.as_deref(), Some(".claude/rules")),
+            _ => panic!("expected Diff"),
+        }
+        let cli = Cli::try_parse_from(["nexus", "reset"]).unwrap();
+        assert!(matches!(cli.command, Command::Reset { path: None, .. }));
+        let cli = Cli::try_parse_from(["nexus", "push", ".nexus/AGENTS.md", "--dry-run"]).unwrap();
+        match cli.command {
+            Command::Push { path, dry_run, .. } => {
+                assert_eq!(path.as_deref(), Some(".nexus/AGENTS.md"));
+                assert!(dry_run);
+            }
+            _ => panic!("expected Push"),
+        }
+        // Bare `nexus push` keeps working.
+        let cli = Cli::try_parse_from(["nexus", "push"]).unwrap();
+        assert!(matches!(cli.command, Command::Push { path: None, .. }));
+    }
+
+    #[test]
+    fn test_parse_env_commands() {
+        let cli = Cli::try_parse_from(["nexus", "env"]).unwrap();
+        assert!(matches!(cli.command, Command::Env { action: None }));
+        let cli = Cli::try_parse_from(["nexus", "env", "get", "claude.hud"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Env {
+                action: Some(EnvAction::Get { key: Some(_) })
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "env", "keys"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Env {
+                action: Some(EnvAction::Keys)
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "env", "set", "claude.hud", "minimal", "--pull"])
+            .unwrap();
+        match cli.command {
+            Command::Env {
+                action:
+                    Some(EnvAction::Set {
+                        key,
+                        value,
+                        pull,
+                        dry_run,
+                    }),
+            } => {
+                assert_eq!(
+                    (key.as_str(), value.as_str(), pull, dry_run),
+                    ("claude.hud", "minimal", true, false)
+                );
+            }
+            _ => panic!("expected env set"),
+        }
+    }
+
+    #[test]
+    fn test_deprecated_aliases_still_parse() {
+        assert!(Cli::try_parse_from(["nexus", "sync", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["nexus", "sync", "push", "AGENTS.md"]).is_ok());
+        assert!(Cli::try_parse_from(["nexus", "claude", "diff"]).is_ok());
     }
 
     #[test]

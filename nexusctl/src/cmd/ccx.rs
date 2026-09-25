@@ -230,6 +230,23 @@ pub fn record_ccx_in_lock(
     save_lock(workspace, agentic_root, &lock)
 }
 
+/// Set (or with `None` remove) a single file entry in the CCX lock, e.g.
+/// after `nexus reset <path>` restored one file.
+pub fn set_lock_file_entry(
+    workspace: &Path,
+    agentic_root: &str,
+    target_path: &str,
+    entry: Option<CcxLockFileEntry>,
+) -> anyhow::Result<()> {
+    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+    match entry {
+        Some(e) => lock.files.insert(target_path.to_string(), e),
+        None => lock.files.remove(target_path),
+    };
+    lock.applied_at = chrono_like_now();
+    save_lock(workspace, agentic_root, &lock)
+}
+
 /// Record the sha256 of the `CLAUDE.md` managed block text last written
 /// (or confirmed unchanged) by the CLI.
 pub fn record_claude_md_block_in_lock(
@@ -578,21 +595,6 @@ pub fn outcome_label(outcome: &FileOutcome) -> (&'static str, &'static str) {
     }
 }
 
-/// Status label for a planned (not yet applied) state, as used by
-/// `nexus claude status`.
-pub fn state_label(state: FileState) -> &'static str {
-    match state {
-        FileState::Create => "CREATE",
-        FileState::Clean => "CLEAN",
-        FileState::Updated => "UPDATE",
-        FileState::Drifted => "DRIFTED",
-        FileState::Conflict => "CONFLICT",
-        FileState::Unmanaged => "UNMANAGED",
-        FileState::Adopt => "ADOPT",
-        FileState::Orphaned => "ORPHANED",
-    }
-}
-
 /// One entry per managed settings key (current and previously managed),
 /// describing how `before` changed into `after`: `statusLine set`,
 /// `attribution removed`, `permissions.deny +1/-0`, `model unchanged`.
@@ -726,7 +728,11 @@ pub(crate) fn json_get_path<'a>(
     Some(current)
 }
 
-fn json_set_path(value: &mut serde_json::Value, path: &str, new_value: serde_json::Value) {
+pub(crate) fn json_set_path(
+    value: &mut serde_json::Value,
+    path: &str,
+    new_value: serde_json::Value,
+) {
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = value;
     for (i, part) in parts.iter().enumerate() {
@@ -748,7 +754,7 @@ fn json_set_path(value: &mut serde_json::Value, path: &str, new_value: serde_jso
 /// Intermediate objects that become empty as a result are left in place
 /// (not pruned) -- an empty `{}` is harmless and pruning risks removing
 /// an object the operator or another tool put there for its own reasons.
-fn json_remove_path(value: &mut serde_json::Value, path: &str) {
+pub(crate) fn json_remove_path(value: &mut serde_json::Value, path: &str) {
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = value;
     for part in &parts[..parts.len() - 1] {

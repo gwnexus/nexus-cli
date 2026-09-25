@@ -1,13 +1,14 @@
 //! Command dispatcher and implementations.
 
 mod actors;
-mod auth;
+pub(crate) mod auth;
 pub(crate) mod ccx;
 mod claude_cmd;
 pub(crate) mod claude_render;
 mod config_cmd;
 mod deinit;
 pub(crate) mod display;
+mod env_cmd;
 pub(crate) mod git;
 pub(crate) mod import;
 mod init;
@@ -21,12 +22,14 @@ pub(crate) mod run;
 pub(crate) mod shadow;
 mod skills_cmd;
 pub(crate) mod stash;
+mod state_cmd;
 pub(crate) mod sync;
 mod upgrade;
+pub(crate) mod workspace_state;
 
 use crate::{
-    ActorAvatarAction, ActorsAction, ClaudeAction, Cli, Command, ConfigAction, GitAction,
-    ProjectAction, ShadowAction, SkillsAction, StashAction, SyncAction, WorkspaceAction,
+    ActorAvatarAction, ActorsAction, ClaudeAction, Cli, Command, ConfigAction, EnvAction,
+    GitAction, ProjectAction, ShadowAction, SkillsAction, StashAction, SyncAction, WorkspaceAction,
     WorkspaceShadowAction,
 };
 
@@ -118,7 +121,58 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 nexus_core::config::Config::load_effective_with_provenance(Some(&workspace))?;
             let api_url = cli.resolve_api_url(&effective.config);
             let api_url_source = cli.resolve_api_url_source(&effective);
-            auth::status(&api_url, api_url_source).await?;
+            let json = matches!(
+                cli.resolve_output(&effective.config),
+                nexus_core::OutputPreference::Json
+            );
+            exit_with(state_cmd::status(&api_url, api_url_source, json).await?);
+        }
+        Command::Diff { ref path } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            exit_with(state_cmd::diff(&api_url, path.as_deref()).await?);
+        }
+        Command::Reset {
+            ref path,
+            ref project_id,
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            state_cmd::reset(&api_url, project_id.as_deref(), path.as_deref(), cli.yes).await?;
+        }
+        Command::Env { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            let json = matches!(
+                cli.resolve_output(&config),
+                nexus_core::OutputPreference::Json
+            );
+            match action.as_ref().unwrap_or(&EnvAction::Get { key: None }) {
+                EnvAction::Get { key } => env_cmd::get(&api_url, key.as_deref(), json).await?,
+                EnvAction::Keys => env_cmd::keys(&api_url, json).await?,
+                EnvAction::Set {
+                    key,
+                    value,
+                    dry_run,
+                    pull,
+                } => {
+                    let changed = env_cmd::set(&api_url, key, value, *dry_run, cli.yes).await?;
+                    if changed && *pull {
+                        pull::run(
+                            &api_url,
+                            None,
+                            false,
+                            config.mcp_source,
+                            &[],
+                            false,
+                            ccx::ForceMode::None,
+                        )
+                        .await?;
+                    } else if changed {
+                        println!("   Run 'nexus pull' to apply it to this workspace.");
+                    }
+                }
+            }
         }
         Command::Pull {
             ref project_id,
@@ -149,15 +203,17 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             let code = match action {
-                ClaudeAction::Status { ref project_id } => {
+                ClaudeAction::Status { .. } => {
+                    deprecated("nexus claude status", "nexus status");
                     let json = matches!(
                         cli.resolve_output(&config),
                         nexus_core::OutputPreference::Json
                     );
-                    claude_cmd::status(&api_url, project_id.as_deref(), json).await?
+                    state_cmd::status(&api_url, "config", json).await?
                 }
-                ClaudeAction::Diff { ref project_id } => {
-                    claude_cmd::diff(&api_url, project_id.as_deref()).await?
+                ClaudeAction::Diff { .. } => {
+                    deprecated("nexus claude diff", "nexus diff");
+                    state_cmd::diff(&api_url, None).await?
                 }
                 ClaudeAction::Launch {
                     skip_checks,
@@ -177,9 +233,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     0
                 }
             };
-            if code != 0 {
-                std::process::exit(code);
-            }
+            exit_with(code);
         }
         Command::Skills { ref action } => match action {
             SkillsAction::List { ref status, limit } => {
@@ -230,21 +284,48 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Sync { ref action } => {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
+            // Deprecated aliases (NEXUS-APP dispatch b5f7bfb0): file keys map
+            // to their paths via the sync manifest.
+            let path_of = |file_key: &str| -> anyhow::Result<String> {
+                let manifest = sync::load_manifest_pub(&std::env::current_dir()?);
+                manifest[file_key]["target_path"]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "File '{}' not found in sync manifest. Run 'nexus pull' first.",
+                            file_key
+                        )
+                    })
+            };
             match action {
-                SyncAction::Status { ref project_id } => {
-                    sync::status(&api_url, project_id.as_deref()).await?;
+                SyncAction::Status { .. } => {
+                    deprecated("nexus sync status", "nexus status");
+                    exit_with(state_cmd::status(&api_url, "config", false).await?);
                 }
                 SyncAction::Push {
                     ref file_key,
                     ref project_id,
                 } => {
-                    sync::push(&api_url, project_id.as_deref(), file_key).await?;
+                    let path = path_of(file_key)?;
+                    deprecated("nexus sync push", &format!("nexus push {path}"));
+                    state_cmd::push(
+                        &api_url,
+                        project_id.as_deref(),
+                        Some(&path),
+                        None,
+                        false,
+                        false,
+                    )
+                    .await?;
                 }
                 SyncAction::Reset {
                     ref file_key,
                     ref project_id,
                 } => {
-                    sync::reset(&api_url, project_id.as_deref(), file_key).await?;
+                    let path = path_of(file_key)?;
+                    deprecated("nexus sync reset", &format!("nexus reset {path}"));
+                    state_cmd::reset(&api_url, project_id.as_deref(), Some(&path), cli.yes).await?;
                 }
             }
         }
@@ -325,6 +406,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Push {
+            ref path,
             ref project_id,
             ref name,
             dry_run,
@@ -333,9 +415,10 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         } => {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
-            push::run(
+            state_cmd::push(
                 &api_url,
                 project_id.as_deref(),
+                path.as_deref(),
                 name.as_deref(),
                 dry_run,
                 adopt_local,
@@ -384,6 +467,22 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Exit with `code` when it is non-zero (status/diff "pending" signal).
+fn exit_with(code: i32) {
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+/// Deprecation notice for the one-release aliases (NEXUS-APP dispatch
+/// b5f7bfb0).
+fn deprecated(old: &str, new: &str) {
+    eprintln!(
+        "{} `{old}` is deprecated and will be removed; use `{new}`.",
+        console::style("!").bold().yellow()
+    );
 }
 
 /// Whether `nexus run` should skip pre-launch checks (the "Nexus Pre-launch

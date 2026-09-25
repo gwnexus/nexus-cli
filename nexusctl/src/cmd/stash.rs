@@ -64,6 +64,32 @@ fn detect_modified_files(workspace: &Path) -> Vec<(PathBuf, String)> {
         }
     }
 
+    // Agent files (content only; projection files are never stashed,
+    // NEXUS-APP dispatch b5f7bfb0): tracked in the sync manifest and edited
+    // since the last pull.
+    if let Some(entries) = manifest.as_object() {
+        for (file_key, info) in entries {
+            let Some(target) = info.get("target_path").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            let is_workspace_file = WORKSPACE_PATHS
+                .iter()
+                .any(|w| target == *w || target.starts_with(&format!("{w}/")));
+            if is_workspace_file
+                || super::workspace_state::is_projection_agent_file(file_key, target, None)
+                || super::pull::validate_agent_file_target_path(workspace, target).is_err()
+            {
+                continue;
+            }
+            let expected = info.get("hash").and_then(|h| h.as_str()).unwrap_or("");
+            if let Ok(content) = fs::read_to_string(workspace.join(target)) {
+                if !nexus_core::hash::hash_matches(expected, &content) {
+                    modified.push((workspace.join(target), content));
+                }
+            }
+        }
+    }
+
     modified
 }
 
@@ -110,7 +136,7 @@ pub fn save(workspace: &Path) -> anyhow::Result<()> {
 
     if modified.is_empty() {
         println!(
-            "   {} No modified workspace files to stash.",
+            "   {} No modified content files to stash.",
             style("✓").green()
         );
         return Ok(());
@@ -385,6 +411,29 @@ mod tests {
             .filter(|e| e.path().is_dir())
             .collect();
         assert_eq!(stashes.len(), 0);
+    }
+
+    #[test]
+    fn test_detect_modified_includes_agent_content_not_projection() {
+        let dir = TempDir::new().unwrap();
+        let ws = dir.path();
+        fs::create_dir_all(ws.join(".nexus")).unwrap();
+        fs::create_dir_all(ws.join(".rtk")).unwrap();
+        fs::write(ws.join(".nexus/AGENTS.md"), "edited").unwrap();
+        fs::write(ws.join(".nexus/CLAUDE.md"), "unchanged").unwrap();
+        fs::write(ws.join(".rtk/filters.toml"), "edited").unwrap();
+        let manifest = serde_json::json!({
+            "AGENTS.md": {"target_path": ".nexus/AGENTS.md", "hash": sha256_hex("original")},
+            "CLAUDE.md": {"target_path": ".nexus/CLAUDE.md", "hash": sha256_hex("unchanged")},
+            "rtk-filters-default": {"target_path": ".rtk/filters.toml", "hash": sha256_hex("original")}
+        });
+        fs::write(ws.join(SYNC_MANIFEST), manifest.to_string()).unwrap();
+
+        let modified: Vec<PathBuf> = detect_modified_files(ws)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(modified, vec![ws.join(".nexus/AGENTS.md")]);
     }
 
     #[test]

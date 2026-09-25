@@ -230,7 +230,7 @@ fn is_locally_modified(workspace: &Path, target_path: &str, manifest: &serde_jso
     };
 
     match fs::read_to_string(&file_path) {
-        Ok(content) => sha256_hex(&content) != expected_hash,
+        Ok(content) => !nexus_core::hash::hash_matches(&expected_hash, &content),
         Err(_) => false,
     }
 }
@@ -680,7 +680,16 @@ pub async fn run(
                 );
             } else {
                 let mut af_written = 0;
-                for af in &af_export.agent_files {
+                let (agent_files, duplicates) = unique_agent_files(&af_export.agent_files);
+                for (path, dropped) in &duplicates {
+                    println!(
+                        "   {} backend sent several agent files for {}; using the first, ignoring {}",
+                        style("!").bold().yellow(),
+                        path,
+                        dropped.join(", ")
+                    );
+                }
+                for af in agent_files {
                     // CCX files are reconciled against the CCX lock below
                     // (NEXUS-APP ADR-0117, dispatch 99f335e8).
                     if af_export.ccx.is_some() && af.category == super::ccx::CCX_CATEGORY {
@@ -702,14 +711,14 @@ pub async fn run(
                     // Already identical (ignoring the export timestamp):
                     // nothing to write or report.
                     if agent_file_matches(&target_path, &af.body) {
-                        if let Some(ref hash) = af.content_hash {
-                            let _ = super::sync::update_manifest_after_pull(
-                                &workspace,
-                                &af.file_key,
-                                &af.target_path,
-                                hash,
-                            );
-                        }
+                        // Normalized hash: also true for the local file,
+                        // whose generated_at may differ from this export's.
+                        let _ = super::sync::update_manifest_after_pull(
+                            &workspace,
+                            &af.file_key,
+                            &af.target_path,
+                            &nexus_core::hash::sha256_hex_normalized(&af.body),
+                        );
                         af_written_paths.insert(af.target_path.clone());
                         continue;
                     }
@@ -747,15 +756,14 @@ pub async fn run(
                     write_agent_file(&workspace, af)?;
                     af_written_paths.insert(af.target_path.clone());
 
-                    // Update sync manifest with content hash from server
-                    if let Some(ref hash) = af.content_hash {
-                        let _ = super::sync::update_manifest_after_pull(
-                            &workspace,
-                            &af.file_key,
-                            &af.target_path,
-                            hash,
-                        );
-                    }
+                    // Record the (generated_at-normalized) hash of what was
+                    // written, for local-modification detection.
+                    let _ = super::sync::update_manifest_after_pull(
+                        &workspace,
+                        &af.file_key,
+                        &af.target_path,
+                        &nexus_core::hash::sha256_hex_normalized(&af.body),
+                    );
 
                     af_written += 1;
                 }
@@ -1791,13 +1799,11 @@ fn content_matches(path: &Path, body: &str) -> bool {
 /// `generated_at:` frontmatter line, which the backend re-stamps on every
 /// export even when nothing else changed.
 fn agent_file_matches(path: &Path, body: &str) -> bool {
-    let strip = |c: &str| {
-        c.lines()
-            .filter(|l| !l.starts_with("generated_at:"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    fs::read_to_string(path).is_ok_and(|c| c == body || strip(&c) == strip(body))
+    fs::read_to_string(path).is_ok_and(|c| {
+        c == body
+            || nexus_core::hash::sha256_hex_normalized(&c)
+                == nexus_core::hash::sha256_hex_normalized(body)
+    })
 }
 
 /// Whether pull may treat an existing file as its own: it carries the
@@ -2710,7 +2716,7 @@ fn pull_manifest_path(workspace: &Path, agentic_root: &str) -> std::path::PathBu
         .join("pull-manifest.json")
 }
 
-fn load_pull_manifest(
+pub(crate) fn load_pull_manifest(
     workspace: &Path,
     agentic_root: &str,
 ) -> std::collections::BTreeMap<String, String> {
@@ -2835,6 +2841,30 @@ fn sync_generated_files_with(
         serde_json::to_string_pretty(&recorded)? + "\n",
     )?;
     Ok((written, skipped))
+}
+
+/// The agent files to materialize, one per `target_path` (the first one
+/// wins), plus the file keys dropped per duplicated path. Several files
+/// for one path would otherwise overwrite each other on every pull.
+pub(crate) fn unique_agent_files(
+    files: &[nexus_core::api::ExportedAgentFile],
+) -> (
+    Vec<&nexus_core::api::ExportedAgentFile>,
+    Vec<(String, Vec<String>)>,
+) {
+    let mut kept: Vec<&nexus_core::api::ExportedAgentFile> = Vec::new();
+    let mut dropped: Vec<(String, Vec<String>)> = Vec::new();
+    for af in files {
+        if kept.iter().any(|k| k.target_path == af.target_path) {
+            match dropped.iter_mut().find(|(p, _)| *p == af.target_path) {
+                Some((_, keys)) => keys.push(af.file_key.clone()),
+                None => dropped.push((af.target_path.clone(), vec![af.file_key.clone()])),
+            }
+        } else {
+            kept.push(af);
+        }
+    }
+    (kept, dropped)
 }
 
 /// Whether an agent file belongs to the OpenCode projection.
@@ -3200,6 +3230,42 @@ mod tests {
         let (path, content) = render_command_file(&skill, ".nexus").unwrap();
         assert_eq!(path, ".opencode/commands/a.md");
         assert!(content.contains("`.nexus/skills/nx-a/SKILL.md`"));
+    }
+
+    #[test]
+    fn test_unique_agent_files_keeps_first_per_path() {
+        let af = |key: &str, path: &str| nexus_core::api::ExportedAgentFile {
+            file_key: key.into(),
+            target_path: path.into(),
+            name: key.into(),
+            description: None,
+            category: "general".into(),
+            version: 1,
+            body: key.into(),
+            content_hash: None,
+            agent_file_id: None,
+        };
+        let files = vec![
+            af("rtk-filters-default", ".rtk/filters.toml"),
+            af("AGENTS.md", ".nexus/AGENTS.md"),
+            af("rtk-filters-rust", ".rtk/filters.toml"),
+            af("rtk-filters-docker", ".rtk/filters.toml"),
+        ];
+        let (kept, dropped) = unique_agent_files(&files);
+        assert_eq!(
+            kept.iter().map(|a| a.file_key.as_str()).collect::<Vec<_>>(),
+            vec!["rtk-filters-default", "AGENTS.md"]
+        );
+        assert_eq!(
+            dropped,
+            vec![(
+                ".rtk/filters.toml".to_string(),
+                vec![
+                    "rtk-filters-rust".to_string(),
+                    "rtk-filters-docker".to_string()
+                ]
+            )]
+        );
     }
 
     #[test]

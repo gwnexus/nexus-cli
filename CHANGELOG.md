@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-09-25
+
+One command per function group (NEXUS-APP dispatch b5f7bfb0, revised specification).
+
+### Added
+- **Shared workspace classification** (`workspace_state`): every managed file is *content* (assigned agent files, `devbox.json`, `scripts/devbox/**`) or *projection* (CCX files, generated agent files such as `ccx-*`, `actor-profile-*`, `actors-json`, `env-nexus-local`, `rtk-filters*` and the headroom plugin, skills and OpenCode commands rendered by pull, the `CLAUDE.md` managed block, managed `.claude/settings.json` keys), with the same rules `nexus pull` applies. Unmanaged files are never listed; the non-selected runtime's projection is reported as STALE and never deleted.
+- **`nexus status`** now also shows the agent environment (what `nexus run` starts), the Claude Code runtime (version vs. `ccx.compatibility.claudeCode`, plugins, last headroom summary), git identity (as `nexus git verify`), and every non-clean file with class, state and next action (`nexus push`, `nexus reset <path>`, `nexus env set ...`, `nexus pull`). `--output json`; exit 0 clean, 1 pending.
+- **`nexus diff [path]`**: unified diffs for content (local vs backend) and projection (local vs what the next pull writes), key-level for managed settings and the `CLAUDE.md` block. Read-only; exit 1 when differences exist.
+- **`nexus push [path]`**: content only. Modified agent files go through the agent-file sync; devbox changes become a workspace fork as before (`--name`, `--dry-run`, `--adopt-local` unchanged). Projection files are refused with the setting to change instead (e.g. `.claude/statusline/*` -> `nexus env set claude.hud`), so generated file keys never reach `af_sync` push.
+- **`nexus reset [path]`**: content returns to the backend version, projection files to what the next pull writes (CCX lock, pull manifest, `CLAUDE.md` block hash and single settings keys updated accordingly). Without a path, all pending changes after one confirmation (`-y` skips it).
+- **`nexus env get [key]` / `nexus env keys` / `nexus env set <key> <value> [--dry-run] [--pull]`** against `GET`/`PATCH /api/mcp/projects/{id}/settings`. Keys, types and allowed values come from the backend `schema`; bool values accept `true`/`false` (also `on`/`off`), nullable keys `unset`/`null`. `set` sends `expected_revision`, prints `changes` (empty = no-op), prints 400 `details` per field, reports 403 verbatim, and on 409 re-reads, shows what changed and retries once on confirmation. `claude.*` keys on an OpenCode project print a note. `--pull` runs `nexus pull` afterwards. Backends without the endpoint get a clear hint instead of a bare 404.
+- **`nexus stash`** now also stashes modified agent content files (projection files never).
+
+### Changed
+- `nexus sync status|push|reset` and `nexus claude status|diff` are hidden, deprecated aliases for one release: they print the new command and delegate (`sync push/reset <file_key>` map to `nexus push/reset <path>`).
+- Agent-file hashes are compared without the `generated_at:` line the backend re-stamps on every export (raw hashes recorded by older CLIs still match), so a local edit is reported as MODIFIED instead of CONFLICT, and pull records a hash that stays valid for the file on disk.
+- When the backend sends several agent files for one `target_path`, pull (and status) use the first one and print a warning naming the ignored file keys, instead of letting them overwrite each other on every pull.
+
+### Removed
+- The old `nexus sync status` / `sync reset` implementations (replaced by `nexus status` / `nexus reset`).
+
+28 new tests (classification per class incl. the timestamp case, projection detection, next actions, path matching, push refusal, reset per kind incl. CCX lock and single settings key, stash of agent files, duplicate agent files, env value parsing and schema handling, CLI parsing incl. deprecated aliases, and the settings endpoint against a local HTTP stub: GET, PATCH 200 with the exact request body, 400 details, 403, 409 revision). 661/661 tests passing, clippy/fmt clean.
+
 ## [0.27.0] - 2026-09-25
 
 v0.26.0 acceptance findings (NEXUS-APP dispatch 4820e584) and a single start command (dispatch 442f0e97).

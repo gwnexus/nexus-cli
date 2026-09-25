@@ -395,6 +395,70 @@ pub struct AgentFileExportResponse {
     pub run_target: Option<RunTarget>,
 }
 
+/// `GET /api/mcp/projects/{id}/settings` (and the 200 body of `PATCH`):
+/// backend project settings for `nexus env` (NEXUS-APP dispatch b5f7bfb0).
+/// Keys, types and allowed values come from `schema`; the CLI hardcodes none.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSettingsResponse {
+    #[serde(default)]
+    pub project_id: String,
+    pub revision: String,
+    pub settings: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub run_target: Option<RunTarget>,
+    #[serde(default)]
+    pub claude_experience_explicit: bool,
+    #[serde(default)]
+    pub can_write: bool,
+    #[serde(default)]
+    pub schema: Vec<SettingSchema>,
+    /// PATCH only: applied (or previewed) changes; empty means no-op.
+    #[serde(default)]
+    pub changes: Vec<SettingChange>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// One entry of the settings `schema`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingSchema {
+    pub key: String,
+    /// `"enum"`, `"bool"` or `"string"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub values: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub nullable: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingChange {
+    pub key: String,
+    #[serde(default)]
+    pub from: serde_json::Value,
+    #[serde(default)]
+    pub to: serde_json::Value,
+}
+
+/// Outcome of `PATCH /api/mcp/projects/{id}/settings`, per the backend
+/// contract: 200, 400 with field details, 403, 409 with the new revision.
+#[derive(Debug, Clone)]
+pub enum SettingsPatchOutcome {
+    Applied(Box<ProjectSettingsResponse>),
+    Invalid {
+        error: String,
+        details: Vec<(String, String)>,
+    },
+    Forbidden(String),
+    Conflict {
+        error: String,
+        revision: Option<String>,
+    },
+}
+
 /// `af_export.run_target`: `{ tool: "opencode"|"claude", workspace:
 /// "none"|"zellij", layout? }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

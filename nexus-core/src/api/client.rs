@@ -14,10 +14,10 @@ use crate::api::types::{
     ActorImportResponse, ActorListResponse, AgentFileExportResponse, ApiError, AuthStatus,
     AuthStatusResponse, DirectiveExportResponse, FileStatusResponse, IdentityResponse,
     InferenceTokenInfo, InferenceTokenIssueRequest, InferenceTokenResponse, McpPreflightResponse,
-    ProjectDetailResponse, ProjectListResponse, SkillExportResponse, SkillListResponse,
-    SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse, TaskListResponse,
-    WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
-    WorkspacePushResponse,
+    ProjectDetailResponse, ProjectListResponse, ProjectSettingsResponse, SettingsPatchOutcome,
+    SkillExportResponse, SkillListResponse, SyncCheckResponse, SyncFileHash, SyncResponse,
+    SyncStatusResponse, TaskListResponse, WorkspaceExportResponse, WorkspaceForkExportResponse,
+    WorkspaceForksResponse, WorkspacePushResponse,
 };
 use crate::Error;
 
@@ -455,6 +455,82 @@ impl NexusClient {
             "render_mode": "structured"
         });
         self.post("/api/mcp/kb", &body).await
+    }
+
+    /// Read the project's backend settings (`nexus env get`).
+    pub async fn get_project_settings(
+        &self,
+        project_id: &str,
+    ) -> Result<ProjectSettingsResponse, Error> {
+        self.get(&format!("/api/mcp/projects/{}/settings", project_id))
+            .await
+    }
+
+    /// Change backend settings (`nexus env set`). `set` maps keys to JSON
+    /// values (`null` unsets a nullable key). 400/403/409 are returned as
+    /// [`SettingsPatchOutcome`] variants rather than errors, since the CLI
+    /// acts on each of them.
+    pub async fn patch_project_settings(
+        &self,
+        project_id: &str,
+        set: &serde_json::Map<String, serde_json::Value>,
+        dry_run: bool,
+        expected_revision: Option<&str>,
+    ) -> Result<SettingsPatchOutcome, Error> {
+        let url = format!("{}/api/mcp/projects/{}/settings", self.base_url, project_id);
+        debug!("PATCH {}", url);
+        let mut body = json!({ "set": set, "dry_run": dry_run });
+        if let Some(rev) = expected_revision {
+            body["expected_revision"] = serde_json::Value::String(rev.to_string());
+        }
+        let mut req = self.client.patch(&url).json(&body);
+        if let Some(ref token) = self.token {
+            req = req.bearer_auth(token);
+        }
+        if let Some(ref mid) = self.machine_id {
+            req = req.header("X-Nexus-Machine-Id", mid);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(SettingsPatchOutcome::Applied(Box::new(resp.json().await?)));
+        }
+        let value: serde_json::Value = resp.json().await.unwrap_or_default();
+        let error = value
+            .get("error")
+            .and_then(|e| e.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("HTTP {}", status));
+        match status {
+            StatusCode::BAD_REQUEST => Ok(SettingsPatchOutcome::Invalid {
+                error,
+                details: value
+                    .get("details")
+                    .and_then(|d| d.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|d| {
+                                let field = d.get("field").and_then(|f| f.as_str()).unwrap_or("");
+                                let msg = d.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                                (field.to_string(), msg.to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }),
+            StatusCode::FORBIDDEN => Ok(SettingsPatchOutcome::Forbidden(error)),
+            StatusCode::CONFLICT => Ok(SettingsPatchOutcome::Conflict {
+                error,
+                revision: value
+                    .get("revision")
+                    .and_then(|r| r.as_str())
+                    .map(str::to_string),
+            }),
+            StatusCode::UNAUTHORIZED => Err(Error::Unauthorized(error)),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(error)),
+            _ => Err(Error::Api(error)),
+        }
     }
 
     /// Send a GET request and deserialize the JSON response.

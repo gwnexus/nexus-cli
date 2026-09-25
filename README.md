@@ -51,7 +51,8 @@ nexus pull               # Sync skills and agent files from the platform
 nexus init [path]                       Initialize a Nexus project workspace
 nexus login                             Authenticate with the Nexus platform
 nexus logout                            Remove stored credentials
-nexus status                            Show auth, project, and workspace status
+nexus status                            Auth, project, environment, and every non-clean file with its next action
+nexus diff [path]                       Unified diffs for non-clean files (content and projection)
 nexus link [--project-id <id>]          Bind a project to the current workspace
 nexus unlink                            Remove project binding from the workspace
 nexus project link [--runtime-id <n>]   Issue a project inference token (nxs_proj_*) for gateway auth
@@ -59,10 +60,15 @@ nexus project rotate [--finalize]       Rotate the project inference token (zero
 nexus project unlink                    Revoke the project inference token and clear local state
 nexus project status                    List issued project inference tokens
 nexus pull [--project-id <id>]          Pull skills and config from the Nexus platform
-nexus push [--name "..."] [--dry-run]   Push workspace changes as a new fork
-nexus stash save                        Save modified workspace files to a stash
+nexus push [path] [--name "..."]        Push content changes (agent files; devbox changes as a new fork)
+nexus reset [path]                      Discard local changes (content: backend version; projection: desired)
+nexus stash save                        Save modified content files to a stash
 nexus stash pop                         Restore the most recent stash
 nexus stash list                        List all available stashes
+nexus env [get [key]]                   Show the project's backend settings
+nexus env keys                          List settable keys, types and allowed values
+nexus env set <key> <value> [--pull]    Change a backend setting (admin), optionally pull afterwards
+nexus run [-- <args>]                   Start the agent environment the backend selects
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
 nexus deinit [--force]                  Remove all AI scaffold files from the workspace
@@ -130,14 +136,34 @@ CI, set `NEXUS_PROJECT_TOKEN` directly in the environment; it always takes
 precedence over the local store. The PAT remains the long-lived bootstrap
 credential; project tokens are shorter-lived and rotate independently.
 
-### Workspace Sync (Push / Stash)
+### Workspace Files: Status, Diff, Push, Reset, Stash
 
-`nexus push` detects local changes to workspace files (`devbox.json`,
-`scripts/devbox/`) and uploads them as a new workspace fork to the linked
-Nexus project.
+One command per activity; each classifies every file itself:
+
+- **content**: authored files that may go back to the backend: assigned
+  agent files (e.g. `.nexus/AGENTS.md`) and the devbox workspace
+  (`devbox.json`, `scripts/devbox/**`). States: MODIFIED, NEW, DELETED,
+  UPDATE (backend changed), CONFLICT.
+- **projection**: generated from backend settings; a local edit is drift:
+  Claude Code Experience files, generated agent files, skills and OpenCode
+  commands, the `CLAUDE.md` managed block and managed `.claude/settings.json`
+  keys. States: DRIFTED, CONFLICT, UPDATE, CREATE, ORPHANED, UNMANAGED.
+- Files of the runtime the project does not use are reported as STALE
+  (never deleted); unmanaged files are never touched.
 
 ```bash
-nexus push                          # detect changes + push
+nexus status                        # overview with the next action per file (exit 1 if pending)
+nexus diff .claude/rules            # diffs for a file or directory
+nexus push .nexus/AGENTS.md         # push one content file
+nexus push                          # push all modified content
+nexus reset .claude/rules/10.md     # restore one file (content: backend, projection: desired)
+nexus env set claude.hud minimal --pull   # change the setting a projection comes from
+```
+
+`nexus push` refuses projection files and names the setting to change
+instead. Devbox changes become a new workspace fork:
+
+```bash
 nexus push --name "v3.1 ansible"    # push with custom fork name
 nexus push --dry-run                # show what would be pushed
 ```
@@ -163,10 +189,12 @@ alongside the project ID, so a wrong `NEXUS_API_URL` / `--api-url` (project
 not on this environment) is diagnosable in one step, including under
 `--dry-run`.
 
-`nexus stash` provides temporary local backup before a `nexus pull --force`:
+`nexus stash` provides temporary local backup of modified content files
+(devbox workspace and agent files; projection files are never stashed)
+before a `nexus pull --force`:
 
 ```bash
-nexus stash save    # save modified workspace files to .nexus/stash/
+nexus stash save    # save modified content files to .nexus/stash/
 nexus stash pop     # restore the most recent stash
 nexus stash list    # show all available stashes
 ```
@@ -237,8 +265,12 @@ on this environment), `nexus pull` renders it before writing `opencode.json`:
 
 ### Status
 
-`nexus status` shows auth, workspace, and project state, with real
-server-side validation (not just a local echo):
+`nexus status` shows auth, workspace, and project state (with real
+server-side validation, not just a local echo), then the agent environment
+(what `nexus run` starts), the Claude Code runtime (version vs. the CCX
+compatibility range, plugins, last headroom summary), git identity, and the
+workspace file list described above. `--output json` is supported; the exit
+code is 1 when changes are pending.
 
 ```bash
 nexus status
@@ -440,10 +472,10 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 > Modified files are **skipped** with a warning. Use `nexus stash` to save
 > changes before pulling, or `nexus pull --force` to overwrite.
 >
-> **Pushing workspace changes back to the platform:**
-> Use `nexus push` to upload modified workspace files (devbox.json, scripts/)
-> as a new workspace fork. Agent file push (skills, AGENTS.md) is planned
-> for a future release.
+> **Pushing changes back to the platform:**
+> `nexus push` uploads modified content: agent files (e.g. AGENTS.md) and
+> workspace files (devbox.json, scripts/, as a new workspace fork). Generated
+> files are changed through their setting (`nexus env set`) instead.
 
 - Run `nexus pull` periodically (or after skill/agent file changes in the dashboard) to keep your workspace in sync.
 - Start the agent environment with `nexus run`, then use `/nexus-init` inside OpenCode or Claude Code to bootstrap the agent.
