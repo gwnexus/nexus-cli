@@ -389,6 +389,22 @@ pub struct AgentFileExportResponse {
     /// being written unconditionally.
     #[serde(default)]
     pub ccx: Option<CcxBundleInfo>,
+    /// What `nexus run` starts for this project (NEXUS-APP dispatch
+    /// 442f0e97). `None` on older backends; then `agent_owner` decides.
+    #[serde(default)]
+    pub run_target: Option<RunTarget>,
+}
+
+/// `af_export.run_target`: `{ tool: "opencode"|"claude", workspace:
+/// "none"|"zellij", layout? }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunTarget {
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Workspace-relative layout file, for `workspace: "zellij"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
 }
 
 /// `af_export.ccx`: identifies the CCX bundle revision being delivered.

@@ -385,8 +385,8 @@ pub struct ProjectInfo {
     #[serde(default)]
     pub slug: String,
 
-    /// Tool flavor owned by this project: `"opencode"`, `"claude-cli"`, or
-    /// `"both"`. Mirrors the backend's `agent_owner` and is refreshed by
+    /// Tool flavor owned by this project: `"opencode"` or `"claude-cli"`
+    /// (a legacy `"both"` is treated as OpenCode). Mirrors the backend's `agent_owner` and is refreshed by
     /// `nexus link`, `nexus init`, and `nexus pull`.
     ///
     /// Cached locally so launch-time commands (`nexus run`, `nexus preflight`)
@@ -396,6 +396,11 @@ pub struct ProjectInfo {
     /// to OpenCode behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_owner: Option<String>,
+
+    /// Cached `af_export.run_target` (what `nexus run` starts), refreshed by
+    /// `nexus pull`, so `nexus run --no-db` resolves the same start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_target: Option<crate::api::RunTarget>,
 }
 
 /// Extra MCP server definition for `[mcp_extra.<name>]` in config.toml.
@@ -598,6 +603,36 @@ pub fn update_agent_owner(
     Ok(true)
 }
 
+/// Cache the backend's `run_target` in `.nexus/config.toml` (`None` clears
+/// it, e.g. after a backend without the field answered). No-op when nothing
+/// is linked or the cached value already matches. Returns `true` when the
+/// file was rewritten.
+pub fn update_run_target(
+    from: Option<&std::path::Path>,
+    run_target: Option<&crate::api::RunTarget>,
+) -> Result<bool, Error> {
+    let Some(mut pc) = load_project_config(from)? else {
+        return Ok(false);
+    };
+    let Some(project) = pc.project.as_mut() else {
+        return Ok(false);
+    };
+    if project.run_target.as_ref() == run_target {
+        return Ok(false);
+    }
+    project.run_target = run_target.cloned();
+    save_project_config(from, &pc)?;
+    Ok(true)
+}
+
+/// Load the cached `run_target` for the linked project, if known.
+pub fn load_run_target(from: Option<&std::path::Path>) -> Option<crate::api::RunTarget> {
+    load_linked_project(from)
+        .ok()
+        .flatten()
+        .and_then(|p| p.run_target)
+}
+
 /// Load the cached `agent_owner` tool flavor for the linked project, if known.
 ///
 /// Reads `[project].agent_owner` from `.nexus/config.toml`. Returns `None`
@@ -612,10 +647,18 @@ pub fn load_agent_owner(from: Option<&std::path::Path>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Whether a project's `agent_owner` selects Claude Code. `agent_owner` is
+/// exactly `opencode` (default) or `claude-cli` (NEXUS-APP dispatch
+/// 442f0e97); absent, unknown, and the retired `both` value all count as
+/// OpenCode, so exactly one runtime projection is ever rendered.
+pub fn is_claude_owner(agent_owner: Option<&str>) -> bool {
+    agent_owner == Some("claude-cli")
+}
+
 /// Map an `agent_owner` tool flavor to the binary `nexus run` should launch.
 ///
-/// `"both"` and unknown values resolve to OpenCode, which stays the platform
-/// default when a project has not committed to a single runtime.
+/// Unknown values (including the retired `both`) resolve to OpenCode, which
+/// stays the platform default.
 pub fn tool_for_agent_owner(agent_owner: Option<&str>) -> &'static str {
     match agent_owner {
         Some("claude-cli") => "claude",

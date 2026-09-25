@@ -63,7 +63,6 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
             let flavor = match p.agent_owner.as_deref() {
                 Some("opencode") => " [opencode]",
                 Some("claude-cli") => " [claude-cli]",
-                Some("both") => " [opencode + claude-cli]",
                 _ => "",
             };
             println!(
@@ -90,6 +89,7 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
             .agent_owner
             .clone()
             .filter(|v| !v.is_empty()),
+        run_target: None,
     };
 
     // Load existing config or create new

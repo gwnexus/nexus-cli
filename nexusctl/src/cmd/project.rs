@@ -413,6 +413,7 @@ fn ensure_workspace_linked(id: &str, name: &str, slug: &str) -> anyhow::Result<(
         name: name.to_string(),
         slug: slug.to_string(),
         agent_owner: None,
+        run_target: None,
     });
     config::save_project_config(None, &project_config)?;
     Ok(())

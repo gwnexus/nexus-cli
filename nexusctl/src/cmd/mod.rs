@@ -168,6 +168,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         &api_url,
                         *skip_checks,
                         *force,
+                        config.run.default_tool.as_deref(),
                         config.run.launch_countdown_secs,
                         account.as_deref(),
                         cli.yes,

@@ -135,6 +135,10 @@ jobs:
         run: |
           mkdir -p release-assets
           find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) -exec cp {} release-assets/ \;
+          # Installer script plus checksum, so `nexus upgrade` can verify the
+          # whole chain against this release (NEXUS-APP dispatch 4820e584).
+          cp install.sh release-assets/
+          (cd release-assets && sha256sum install.sh > install.sh.sha256)
           echo "Release assets:"
           ls -la release-assets/
 
@@ -172,7 +176,7 @@ jobs:
           \`\`\`
 
           ### Checksums
-          SHA256 checksums are provided as \`.sha256\` files for each asset.
+          SHA256 checksums are provided as \`.sha256\` files for each asset, including \`install.sh\`.
           EOF
 
       - name: Create GitHub Release

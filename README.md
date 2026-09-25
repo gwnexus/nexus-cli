@@ -287,6 +287,13 @@ nexus status
 | Workspace | `.nexus/` workspace marker present |
 | MCP | Agent MCP configurations reference nexus-mcp |
 
+`nexus run` is the single start command. It starts whatever the backend
+selects for the project (`run_target`): OpenCode, Claude Code, or the Claude
+Code workspace (zellij with the CCX layout; if zellij or the layout is
+missing, Claude Code starts directly with a hint). `--tool <bin>` overrides
+this. Backends without `run_target` fall back to `run.default_tool` and the
+project's `agent_owner`.
+
 `nexus run` embeds the same checks and adds a **launch countdown** after
 they complete. The countdown gives you a moment to review the results before
 the tool starts. Press `Ctrl+C` at any time to abort.
@@ -302,7 +309,7 @@ Global config is stored in `~/.config/nexus/config.toml`.
 | `no_color` | `false` | Disable colored output |
 | `mcp_source` | `npm` | MCP server source: `npm` or `local` |
 | `check_updates` | `true` | Check for CLI updates on startup |
-| `run.default_tool` | `opencode` | Tool binary launched by `nexus run` |
+| `run.default_tool` | `opencode` | Tool binary launched by `nexus run` when the backend supplies no `run_target` |
 | `run.launch_countdown_secs` | `5` | Seconds to count down after pre-launch checks before starting the tool. Set to `0` to skip the countdown and launch immediately. |
 
 The API URL can also be set via the `NEXUS_API_URL` environment variable.
@@ -439,8 +446,8 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 > for a future release.
 
 - Run `nexus pull` periodically (or after skill/agent file changes in the dashboard) to keep your workspace in sync.
-- Use `/nexus-init` inside OpenCode or Claude CLI to bootstrap the agent after initialization.
-- Each project is optimized for a specific tool flavor (OpenCode, Claude CLI, or both). Run `nexus link` to see which flavor is configured.
+- Start the agent environment with `nexus run`, then use `/nexus-init` inside OpenCode or Claude Code to bootstrap the agent.
+- Each project uses exactly one runtime (`agent_owner`: OpenCode or Claude Code); `nexus pull` only writes that runtime's files. Run `nexus link` to see which runtime is configured.
 
 ## Cost Control Tools
 

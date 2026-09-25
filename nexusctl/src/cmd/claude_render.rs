@@ -78,7 +78,8 @@ pub(crate) fn strip_frontmatter(body: &str) -> &str {
 /// `.claude/skills/<canonical-id>/SKILL.md` (+ any resource files).
 /// The directory name becomes the `/<canonical-id>` slash-command in
 /// Claude Code (project skill directory names are command names).
-pub fn write_claude_skill(target: &Path, skill: &ExportedSkill) -> anyhow::Result<()> {
+/// Returns `true` if any file was written (unchanged files are left alone).
+pub fn write_claude_skill(target: &Path, skill: &ExportedSkill) -> anyhow::Result<bool> {
     let canonical_id = canonical_claude_skill_id(&skill.skill_id);
     let skill_dir = target.join(".claude").join("skills").join(&canonical_id);
     fs::create_dir_all(&skill_dir)?;
@@ -109,7 +110,7 @@ source: nexus-platform
         body = body,
     );
 
-    fs::write(skill_dir.join("SKILL.md"), content)?;
+    let mut written = write_if_changed(&skill_dir.join("SKILL.md"), &content)?;
 
     for res in &skill.resources {
         // Sanitize filename: prevent directory traversal.
@@ -117,10 +118,20 @@ source: nexus-platform
         if filename.is_empty() || filename == "SKILL.md" {
             continue;
         }
-        fs::write(skill_dir.join(&filename), &res.body)?;
+        written |= write_if_changed(&skill_dir.join(&filename), &res.body)?;
     }
 
-    Ok(())
+    Ok(written)
+}
+
+/// Write `content` to `path` unless it already has exactly that content.
+/// Returns `true` if the file was written.
+fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<bool> {
+    if fs::read(path).is_ok_and(|c| c == content.as_bytes()) {
+        return Ok(false);
+    }
+    fs::write(path, content)?;
+    Ok(true)
 }
 
 /// Quote and escape a string for safe use as a YAML flow scalar in the
@@ -998,8 +1009,9 @@ pub fn render_claude_projection(
 ) -> anyhow::Result<ClaudeProjectionReport> {
     let mut skills_written = 0;
     for skill in skills {
-        write_claude_skill(target, skill)?;
-        skills_written += 1;
+        if write_claude_skill(target, skill)? {
+            skills_written += 1;
+        }
     }
     if skills_written > 0 {
         println!(

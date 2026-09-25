@@ -34,6 +34,7 @@ fn test_save_and_load_project_config() {
             name: "My Nexus Project".to_string(),
             slug: "my-nexus-project".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -75,6 +76,7 @@ fn test_save_project_config_creates_nexus_dir() {
             name: "Test".to_string(),
             slug: "test".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -119,6 +121,7 @@ fn test_remove_project_section() {
             name: "Removal Target".to_string(),
             slug: "removal-target".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -198,6 +201,7 @@ fn test_resolve_project_id_from_config() {
             name: "Test Project".to_string(),
             slug: "test-project".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -225,6 +229,7 @@ fn test_resolve_project_id_with_flag_override() {
             name: "Config Project".to_string(),
             slug: "config-proj".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -274,6 +279,7 @@ fn test_resolve_project_id_skips_empty_cli_flag() {
             name: "Real".to_string(),
             slug: "real".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -301,6 +307,7 @@ fn test_resolve_project_id_skips_empty_config_id() {
             name: "Empty".to_string(),
             slug: "empty".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -331,6 +338,7 @@ fn test_project_config_toml_content() {
             name: "Content Check".to_string(),
             slug: "content-check".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -366,6 +374,7 @@ fn test_save_overwrites_existing_config() {
             name: "First".to_string(),
             slug: "first".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -381,6 +390,7 @@ fn test_save_overwrites_existing_config() {
             name: "Second".to_string(),
             slug: "second".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -416,6 +426,7 @@ fn test_agent_owner_roundtrip() {
             name: "Claude Project".to_string(),
             slug: "claude-project".to_string(),
             agent_owner: None,
+            run_target: None,
         }),
         mcp: None,
         mcp_extra: None,
@@ -437,6 +448,45 @@ fn test_agent_owner_roundtrip() {
     // A flavor change is picked up.
     assert!(update_agent_owner(Some(&dir), Some("opencode")).unwrap());
     assert_eq!(load_agent_owner(Some(&dir)).as_deref(), Some("opencode"));
+}
+
+#[test]
+fn test_run_target_roundtrip() {
+    use nexus_core::api::RunTarget;
+    use nexus_core::config::{load_run_target, update_run_target};
+    let dir = temp_dir("run-target-roundtrip");
+    let config = ProjectConfig {
+        project: Some(ProjectInfo {
+            id: "fdc7a78c-d0b9-46fd-8206-9fc57301de2d".to_string(),
+            name: "Claude Project".to_string(),
+            slug: "claude-project".to_string(),
+            agent_owner: Some("claude-cli".to_string()),
+            run_target: None,
+        }),
+        mcp: None,
+        mcp_extra: None,
+        plugins: None,
+        config: None,
+    };
+    save_project_config(Some(&dir), &config).unwrap();
+    assert_eq!(load_run_target(Some(&dir)), None);
+
+    let target = RunTarget {
+        tool: "claude".to_string(),
+        workspace: Some("zellij".to_string()),
+        layout: Some(".nexus/claude/nexus-claude.kdl".to_string()),
+    };
+    assert!(update_run_target(Some(&dir), Some(&target)).unwrap());
+    assert_eq!(load_run_target(Some(&dir)), Some(target.clone()));
+    assert!(!update_run_target(Some(&dir), Some(&target)).unwrap());
+    // agent_owner survives the rewrite.
+    assert_eq!(
+        nexus_core::config::load_agent_owner(Some(&dir)).as_deref(),
+        Some("claude-cli")
+    );
+    // An older backend without run_target clears the cache.
+    assert!(update_run_target(Some(&dir), None).unwrap());
+    assert_eq!(load_run_target(Some(&dir)), None);
 }
 
 #[test]

@@ -210,6 +210,9 @@ pub async fn run(
     // Cached in .nexus/config.toml by link/init/pull, refreshed below from
     // af_export when we talk to the backend anyway.
     let mut agent_owner = config::load_agent_owner(Some(&workspace));
+    // What to start (NEXUS-APP dispatch 442f0e97): cached by `nexus pull`,
+    // refreshed below from af_export.
+    let mut run_target = config::load_run_target(Some(&workspace));
 
     // ── 1. Load .nexus/env (plugin defaults from last pull) ────────────────
     let env_file_path = workspace.join(&agentic_root).join("env");
@@ -230,6 +233,7 @@ pub async fn run(
                         if let Some(owner) = af_export.agent_owner.filter(|v| !v.is_empty()) {
                             agent_owner = Some(owner);
                         }
+                        run_target = af_export.run_target;
                         for (k, v) in af_export.plugin_env {
                             plugin_env.insert(k, v);
                         }
@@ -269,8 +273,19 @@ pub async fn run(
         }
     }
 
-    let effective_tool = resolve_effective_tool(tool, default_tool, agent_owner.as_deref());
-    let effective_tool = effective_tool.as_str();
+    let launch = resolve_launch(
+        tool,
+        default_tool,
+        agent_owner.as_deref(),
+        run_target.as_ref(),
+        &workspace,
+        on_path("zellij"),
+    );
+    if let Some(ref hint) = launch.hint {
+        println!("   {} {}", style("i").bold().blue(), hint);
+    }
+    let effective_tool = launch.tool.as_str();
+    let args: &[String] = &[launch.leading_args.as_slice(), args].concat();
 
     // ── 4.5. Named Claude account (`--account`, NEXUS-APP dispatch ad6e0176)
     // ──────────────────────────────────────────────────────────────────────
@@ -794,17 +809,91 @@ fn resolve_effective_tool(
     config::tool_for_agent_owner(agent_owner).to_string()
 }
 
-/// Does this project's flavor include Claude Code?
-fn wants_claude(agent_owner: Option<&str>) -> bool {
-    matches!(agent_owner, Some("claude-cli") | Some("both"))
+/// What `nexus run` starts: the binary, arguments placed before the
+/// operator's own `-- <args>`, and an optional one-line hint.
+#[derive(Debug, PartialEq, Eq)]
+struct Launch {
+    tool: String,
+    leading_args: Vec<String>,
+    hint: Option<String>,
 }
 
-/// Does this project's flavor include OpenCode?
-///
-/// Unknown/absent flavors count as OpenCode, preserving pre-dfd4e655 behaviour
-/// for workspaces linked before `agent_owner` was cached locally.
+/// Resolve the start (NEXUS-APP dispatch 442f0e97), highest priority first:
+/// 1. `--tool <bin>`: explicit override.
+/// 2. the backend's `run_target`: zellij with the CCX layout for
+///    `workspace: "zellij"` (plain `claude` plus a hint when zellij or the
+///    layout is missing), otherwise `run_target.tool`.
+/// 3. without `run_target` (older backend): [`resolve_effective_tool`].
+fn resolve_launch(
+    cli_tool: Option<&str>,
+    configured_default: Option<&str>,
+    agent_owner: Option<&str>,
+    run_target: Option<&nexus_core::api::RunTarget>,
+    workspace: &Path,
+    zellij_available: bool,
+) -> Launch {
+    let plain = |tool: String| Launch {
+        tool,
+        leading_args: Vec::new(),
+        hint: None,
+    };
+    if let Some(t) = cli_tool.filter(|t| !t.is_empty()) {
+        return plain(t.to_string());
+    }
+    let Some(target) = run_target else {
+        return plain(resolve_effective_tool(
+            None,
+            configured_default,
+            agent_owner,
+        ));
+    };
+    if target.workspace.as_deref() != Some("zellij") {
+        return plain(target.tool.clone());
+    }
+    let layout = workspace.join(
+        target
+            .layout
+            .as_deref()
+            .unwrap_or(".nexus/claude/nexus-claude.kdl"),
+    );
+    let hint = if !zellij_available {
+        "zellij not found; starting Claude Code without the workspace. Install it via devbox."
+            .to_string()
+    } else if !layout.is_file() {
+        format!(
+            "workspace layout {} not found (run nexus pull); starting Claude Code without the workspace.",
+            layout.display()
+        )
+    } else {
+        return Launch {
+            tool: "zellij".to_string(),
+            leading_args: vec!["--layout".to_string(), layout.display().to_string()],
+            hint: None,
+        };
+    };
+    Launch {
+        tool: "claude".to_string(),
+        leading_args: Vec::new(),
+        hint: Some(hint),
+    }
+}
+
+/// Whether `binary` is an executable file on `PATH`.
+pub(crate) fn on_path(binary: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(binary).is_file()))
+        .unwrap_or(false)
+}
+
+/// Does this project run Claude Code? See [`config::is_claude_owner`].
+fn wants_claude(agent_owner: Option<&str>) -> bool {
+    config::is_claude_owner(agent_owner)
+}
+
+/// Does this project run OpenCode? Unknown/absent flavors (and the retired
+/// `both`) count as OpenCode (NEXUS-APP dispatch 442f0e97).
 fn wants_opencode(agent_owner: Option<&str>) -> bool {
-    !matches!(agent_owner, Some("claude-cli"))
+    !wants_claude(agent_owner)
 }
 
 // ---------------------------------------------------------------------------
@@ -931,7 +1020,7 @@ fn account_check(agent_owner: Option<&str>, account: Option<&str>) -> Option<Che
 /// Before dispatch dfd4e655 this unconditionally inspected `opencode.json` and
 /// told `claude-cli` projects to "run 'nexus init'" for a file they are never
 /// supposed to have. The authoritative artifact is `opencode.json` for
-/// OpenCode and the root `.mcp.json` for Claude Code (`both` needs each).
+/// OpenCode and the root `.mcp.json` for Claude Code.
 fn mcp_config_check(workspace: &Path, agent_owner: Option<&str>) -> CheckResult {
     let mut expected: Vec<&str> = Vec::new();
     if wants_opencode(agent_owner) {
@@ -2719,6 +2808,149 @@ mod tests {
     // agent_owner-aware launch behaviour (NEXUS-APP dispatch dfd4e655)
     // -------------------------------------------------------------------
 
+    // ── resolve_launch (NEXUS-APP dispatch 442f0e97) ───────────────────────
+
+    fn target(
+        tool: &str,
+        workspace: Option<&str>,
+        layout: Option<&str>,
+    ) -> nexus_core::api::RunTarget {
+        nexus_core::api::RunTarget {
+            tool: tool.to_string(),
+            workspace: workspace.map(str::to_string),
+            layout: layout.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_launch_run_target_plain_tools() {
+        let ws = Path::new("/nonexistent");
+        let l = resolve_launch(
+            None,
+            None,
+            Some("claude-cli"),
+            Some(&target("opencode", Some("none"), None)),
+            ws,
+            true,
+        );
+        assert_eq!(
+            (l.tool.as_str(), l.leading_args.len(), l.hint),
+            ("opencode", 0, None)
+        );
+        let l = resolve_launch(
+            None,
+            None,
+            Some("opencode"),
+            Some(&target("claude", Some("none"), None)),
+            ws,
+            true,
+        );
+        assert_eq!(l.tool, "claude");
+        assert!(l.hint.is_none());
+    }
+
+    #[test]
+    fn test_launch_run_target_beats_configured_default() {
+        let l = resolve_launch(
+            None,
+            Some("opencode"),
+            None,
+            Some(&target("claude", None, None)),
+            Path::new("/x"),
+            false,
+        );
+        assert_eq!(l.tool, "claude");
+    }
+
+    #[test]
+    fn test_launch_zellij_workspace_with_layout() {
+        let dir = std::env::temp_dir().join(format!("nexus-launch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".nexus/claude")).unwrap();
+        fs::write(dir.join(".nexus/claude/nexus-claude.kdl"), "layout {}").unwrap();
+        let t = target(
+            "claude",
+            Some("zellij"),
+            Some(".nexus/claude/nexus-claude.kdl"),
+        );
+
+        let l = resolve_launch(None, None, Some("claude-cli"), Some(&t), &dir, true);
+        assert_eq!(l.tool, "zellij");
+        assert_eq!(
+            l.leading_args,
+            vec![
+                "--layout".to_string(),
+                dir.join(".nexus/claude/nexus-claude.kdl")
+                    .display()
+                    .to_string()
+            ]
+        );
+        assert!(l.hint.is_none());
+
+        // zellij missing: plain claude plus a hint.
+        let l = resolve_launch(None, None, Some("claude-cli"), Some(&t), &dir, false);
+        assert_eq!(l.tool, "claude");
+        assert!(l.leading_args.is_empty());
+        assert!(l.hint.unwrap().contains("zellij not found"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_launch_zellij_workspace_layout_missing() {
+        let t = target(
+            "claude",
+            Some("zellij"),
+            Some(".nexus/claude/nexus-claude.kdl"),
+        );
+        let l = resolve_launch(
+            None,
+            None,
+            Some("claude-cli"),
+            Some(&t),
+            Path::new("/nonexistent"),
+            true,
+        );
+        assert_eq!(l.tool, "claude");
+        assert!(l.hint.unwrap().contains("run nexus pull"));
+    }
+
+    #[test]
+    fn test_launch_without_run_target_falls_back_to_agent_owner() {
+        let ws = Path::new("/x");
+        assert_eq!(
+            resolve_launch(None, None, Some("claude-cli"), None, ws, true).tool,
+            "claude"
+        );
+        assert_eq!(
+            resolve_launch(None, None, Some("opencode"), None, ws, true).tool,
+            "opencode"
+        );
+        assert_eq!(
+            resolve_launch(None, Some("zed"), Some("claude-cli"), None, ws, true).tool,
+            "zed"
+        );
+        // Retired `both` counts as OpenCode.
+        assert_eq!(
+            resolve_launch(None, None, Some("both"), None, ws, true).tool,
+            "opencode"
+        );
+    }
+
+    #[test]
+    fn test_launch_cli_tool_overrides_run_target() {
+        let t = target("claude", Some("zellij"), None);
+        let l = resolve_launch(
+            Some("opencode"),
+            None,
+            Some("claude-cli"),
+            Some(&t),
+            Path::new("/x"),
+            true,
+        );
+        assert_eq!(l.tool, "opencode");
+        assert!(l.leading_args.is_empty() && l.hint.is_none());
+    }
+
     #[test]
     fn test_effective_tool_cli_flag_always_wins() {
         assert_eq!(
@@ -2799,14 +3031,10 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_config_check_both_flavor_requires_each_artifact() {
+    fn test_mcp_config_check_legacy_both_flavor_needs_only_opencode_json() {
+        // The retired "both" flavor counts as OpenCode (NEXUS-APP 442f0e97).
         let dir = tmp_dir("mcp_check_both");
         fs::write(dir.join("opencode.json"), r#"{"mcp":{"nexus":{}}}"#).unwrap();
-        match mcp_config_check(&dir, Some("both")) {
-            CheckResult::Warn(msg) => assert!(msg.contains(".mcp.json"), "unexpected: {msg}"),
-            other => panic!("expected Warn, got {other:?}"),
-        }
-        fs::write(dir.join(".mcp.json"), r#"{"mcpServers":{"nexus":{}}}"#).unwrap();
         assert!(matches!(
             mcp_config_check(&dir, Some("both")),
             CheckResult::Pass(_)
@@ -2883,8 +3111,8 @@ mod tests {
             Some(CheckResult::Pass(msg)) => assert!(msg.contains("work"), "got {msg}"),
             other => panic!("expected Some(Pass), got {other:?}"),
         }
-        // "both" flavor also gets the check.
-        assert!(account_check(Some("both"), Some("work")).is_some());
+        // The retired "both" flavor counts as OpenCode: no Claude account.
+        assert!(account_check(Some("both"), Some("work")).is_none());
     }
 
     #[test]
@@ -3044,10 +3272,11 @@ mod tests {
     }
 
     #[test]
-    fn test_billing_auth_check_both_flavor_also_hard_fails() {
+    fn test_billing_auth_check_legacy_both_flavor_is_opencode() {
+        // The retired "both" flavor counts as OpenCode (NEXUS-APP 442f0e97).
         assert!(matches!(
             billing_auth_check_with(Some("both"), true, false),
-            CheckResult::Fail(_)
+            CheckResult::Pass(_)
         ));
     }
 
@@ -3096,7 +3325,8 @@ mod tests {
         fs::write(hooks.join("nexus-headroom-intercept.mjs"), "// adapter").unwrap();
 
         assert!(headroom_adapter_installed(&dir, Some("claude-cli")));
-        assert!(headroom_adapter_installed(&dir, Some("both")));
+        // The retired "both" flavor counts as OpenCode (NEXUS-APP 442f0e97).
+        assert!(!headroom_adapter_installed(&dir, Some("both")));
         // An opencode-only project must not be credited with a Claude adapter.
         assert!(!headroom_adapter_installed(&dir, Some("opencode")));
     }

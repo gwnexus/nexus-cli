@@ -7,7 +7,7 @@
 //! copy, the `CLAUDE.md` block rule), so they never disagree with a pull.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use console::style;
 use nexus_core::api::{AgentFileExportResponse, NexusClient};
@@ -568,67 +568,39 @@ fn unified_diff(old: &str, new: &str, old_label: &str, new_label: &str) -> Strin
 // nexus claude launch
 // ---------------------------------------------------------------------------
 
-/// `nexus claude launch`: start the CCX zellij layout through the regular
-/// `nexus run` path (all pre-launch checks and env injection), or fall
-/// back to `nexus run --tool claude` with a hint.
-#[allow(clippy::too_many_arguments)]
+/// `nexus claude launch`: deprecated alias (NEXUS-APP dispatch 442f0e97).
+/// `nexus run` is the only start command; it follows the backend's
+/// `run_target` (including the CCX zellij workspace).
 pub async fn launch(
     api_url: &str,
     skip_checks: bool,
     force: bool,
+    default_tool: Option<&str>,
     countdown_secs: u64,
     account: Option<&str>,
     assume_yes: bool,
 ) -> anyhow::Result<()> {
-    let workspace = std::env::current_dir()?;
-    let layout = layout_path(&workspace);
-    let (tool, args) = if layout.is_file() && on_path("zellij") {
-        (
-            "zellij",
-            vec!["--layout".to_string(), layout.display().to_string()],
-        )
-    } else {
-        let reason = if layout.is_file() {
-            "zellij is not on PATH"
-        } else {
-            "no CCX zellij layout in this workspace (run nexus pull)"
-        };
-        println!(
-            "   {} {}; launching Claude Code directly.",
-            style("i").bold().blue(),
-            reason
-        );
-        ("claude", Vec::new())
-    };
+    println!(
+        "   {} `nexus claude launch` is deprecated and will be removed; use {}.",
+        style("!").bold().yellow(),
+        style("nexus run").bold()
+    );
     super::run::run(
         api_url,
-        Some(tool),
+        None,
         false,
         false,
         false,
         false,
         skip_checks,
         force,
-        &args,
-        None,
+        &[],
+        default_tool,
         countdown_secs,
         account,
         assume_yes,
     )
     .await
-}
-
-fn layout_path(workspace: &Path) -> PathBuf {
-    workspace
-        .join(super::run::resolve_agentic_root(workspace))
-        .join("claude")
-        .join("nexus-claude.kdl")
-}
-
-fn on_path(binary: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(binary).is_file()))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -721,13 +693,5 @@ mod tests {
         let out = unified_diff("a\n", "b\n", "x (local)", "x (nexus)");
         assert!(out.contains("-a"));
         assert!(out.contains("+b"));
-    }
-
-    #[test]
-    fn test_layout_path_under_agentic_root() {
-        assert_eq!(
-            layout_path(Path::new("/w")),
-            Path::new("/w/.nexus/claude/nexus-claude.kdl")
-        );
     }
 }

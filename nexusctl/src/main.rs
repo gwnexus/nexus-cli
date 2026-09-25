@@ -339,8 +339,9 @@ pub enum ClaudeAction {
         project_id: Option<String>,
     },
 
-    /// Launch Claude Code in the CCX zellij layout via `nexus run` (falls
-    /// back to `nexus run --tool claude` when no layout or zellij exists).
+    /// Deprecated: use `nexus run` (it starts the backend's run target,
+    /// including the CCX zellij workspace).
+    #[command(hide = true)]
     Launch {
         /// Skip pre-launch checks.
         #[arg(long)]

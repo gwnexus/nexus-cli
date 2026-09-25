@@ -238,7 +238,11 @@ pub async fn run(
                 .unwrap_or_else(|| ".nexus".to_string());
 
             // Detect existing .claude/ files and hint at import (v0.7.0)
-            detect_importable_files(&target);
+            detect_importable_files(
+                &target,
+                config::is_claude_owner(tool_flavor.as_deref()),
+                &super::sync::load_manifest_pub(&target),
+            );
 
             // Create the agentic root directory (.claude/ or .nexus/ etc.)
             create_claude_dir(&target, project_name, &agentic_root)?;
@@ -259,17 +263,24 @@ pub async fn run(
                         export.count
                     );
 
-                    // Materialize skills
+                    // Materialize skills (same renderer and hash record as
+                    // `nexus pull`, so the next pull sees them as unchanged).
+                    // OpenCode commands only for OpenCode projects.
+                    let mut generated: Vec<(String, String)> = Vec::new();
                     for skill in &export.skills {
-                        write_skill(&target, skill, &agentic_root)?;
-                        write_command(&target, skill, &agentic_root)?;
+                        generated.extend(super::pull::render_skill_files(skill, &agentic_root));
+                        if !config::is_claude_owner(tool_flavor.as_deref()) {
+                            generated
+                                .extend(super::pull::render_command_file(skill, &agentic_root));
+                        }
                     }
+                    super::pull::sync_generated_files(&target, &agentic_root, &generated, true)?;
 
                     // Render the native Claude Code projection (Track B1,
                     // ADR-C04/C06): CLAUDE.md, .claude/settings.json,
                     // .claude/skills/, .claude/agents/. Additive only;
                     // skipped for the opencode-only flavor.
-                    if !matches!(tool_flavor.as_deref(), Some("opencode")) {
+                    if config::is_claude_owner(tool_flavor.as_deref()) {
                         let actors_for_claude = af_export_result
                             .as_ref()
                             .ok()
@@ -411,6 +422,13 @@ pub async fn run(
                 Ok(ref af_export) => {
                     if !af_export.agent_files.is_empty() {
                         for af in &af_export.agent_files {
+                            // Only the selected runtime's projection.
+                            if config::is_claude_owner(tool_flavor.as_deref())
+                                && (af.target_path == "opencode.json"
+                                    || af.target_path.starts_with(".opencode/"))
+                            {
+                                continue;
+                            }
                             let written = write_agent_file(&target, af)?;
                             if !written {
                                 continue;
@@ -433,7 +451,7 @@ pub async fn run(
                         );
                     }
                 }
-                Err(e) => {
+                Err(ref e) => {
                     println!(
                         "   {} Agent file export not available ({}), using local templates",
                         style("!").bold().yellow(),
@@ -565,12 +583,8 @@ pub async fn run(
 
             // Show tool flavor and next steps
             {
-                let flavor = tool_flavor.as_deref().unwrap_or("opencode");
-                let flavor_label = match flavor {
-                    "both" => "OpenCode + Claude CLI",
-                    "claude-cli" => "Claude CLI",
-                    _ => "OpenCode",
-                };
+                let is_claude = config::is_claude_owner(tool_flavor.as_deref());
+                let flavor_label = if is_claude { "Claude Code" } else { "OpenCode" };
                 println!();
                 println!(
                     "{} Nexus workspace initialized successfully.",
@@ -600,17 +614,11 @@ pub async fn run(
                 );
                 println!();
                 println!("Next steps:");
-                match flavor {
-                    "claude-cli" => {
-                        println!("  1. Start Claude CLI in this directory");
-                    }
-                    "opencode" => {
-                        println!("  1. Start OpenCode in this directory");
-                    }
-                    _ => {
-                        println!("  1. Start OpenCode or Claude CLI in this directory");
-                    }
-                }
+                println!(
+                    "  1. Run {} to start {}",
+                    style("nexus run").bold(),
+                    flavor_label
+                );
                 println!(
                     "  2. Run {} to bootstrap the agent",
                     style("/nexus-init").bold()
@@ -637,14 +645,23 @@ pub async fn run(
                 println!("     by the Nexus platform and cannot be pushed back yet.");
 
                 // Hint: use `nexus run` for env-var injection
-                crate::cmd::pull::print_nexus_run_hint(&target);
+                crate::cmd::pull::print_nexus_run_hint(
+                    &target,
+                    crate::cmd::pull::run_start_label(
+                        af_export_result
+                            .as_ref()
+                            .ok()
+                            .and_then(|r| r.run_target.as_ref()),
+                        config::is_claude_owner(tool_flavor.as_deref()),
+                    ),
+                );
 
                 server_aware = true;
             }
         } else {
             // No token — fall back to default .nexus/ scaffold
             let default_agentic_root = ".nexus";
-            detect_importable_files(&target);
+            detect_importable_files(&target, false, &serde_json::json!({}));
             create_claude_dir(&target, project_name, default_agentic_root)?;
             create_agents_md(&target, project_name, force, default_agentic_root)?;
             append_gitignore(&target)?;
@@ -661,7 +678,7 @@ pub async fn run(
         // No project linked — create default .nexus/ scaffold so the
         // workspace is immediately usable with coding agents.
         let default_agentic_root = ".nexus";
-        detect_importable_files(&target);
+        detect_importable_files(&target, false, &serde_json::json!({}));
         create_claude_dir(&target, project_name, default_agentic_root)?;
         create_agents_md(&target, project_name, force, default_agentic_root)?;
         append_gitignore(&target)?;
@@ -712,6 +729,7 @@ fn create_nexus_dir(
                         name: project_name.to_string(),
                         slug: String::new(),
                         agent_owner: cached_owner,
+                        run_target: None,
                     });
                     config::save_project_config(Some(target), &existing)?;
                 }
@@ -1017,91 +1035,6 @@ fn migrate_gitignore_entries(target: &Path) {
 // Phase 2 helpers: Server-aware init
 // ---------------------------------------------------------------------------
 
-/// Write a skill definition to `.claude/skills/<skill_id>/SKILL.md`.
-fn write_skill(
-    target: &Path,
-    skill: &nexus_core::api::ExportedSkill,
-    agentic_root: &str,
-) -> anyhow::Result<()> {
-    let skill_dir = target
-        .join(agentic_root)
-        .join("skills")
-        .join(&skill.skill_id);
-    fs::create_dir_all(&skill_dir)?;
-
-    let body = skill
-        .body
-        .as_deref()
-        .unwrap_or("<!-- No skill body defined -->");
-    let body = claude_render::strip_frontmatter(body);
-
-    let content = format!(
-        r#"---
-skill_id: {skill_id}
-name: {name}
-description: {description}
-version: {version}
-command_slug: {command_slug}
-source: nexus-platform
----
-
-{body}
-"#,
-        skill_id = skill.skill_id,
-        name = skill.name,
-        description = claude_render::yaml_escape(skill.description.as_deref().unwrap_or("")),
-        version = skill.version,
-        command_slug = skill.command_slug.as_deref().unwrap_or("none"),
-        body = body,
-    );
-
-    let path = skill_dir.join("SKILL.md");
-    fs::write(&path, content)?;
-    print_created(&format!(
-        "{}/skills/{}/SKILL.md",
-        agentic_root, skill.skill_id
-    ));
-
-    Ok(())
-}
-
-/// Write an OpenCode command for a skill to `.opencode/commands/<slug>.md`.
-fn write_command(
-    target: &Path,
-    skill: &nexus_core::api::ExportedSkill,
-    agentic_root: &str,
-) -> anyhow::Result<()> {
-    let slug = match skill.command_slug.as_deref() {
-        Some(s) if !s.is_empty() => s,
-        _ => return Ok(()), // No command slug, skip
-    };
-
-    let commands_dir = target.join(".opencode").join("commands");
-    fs::create_dir_all(&commands_dir)?;
-
-    let content = format!(
-        r#"---
-description: "{name}"
-skill_id: "{skill_id}"
-version: {version}
-source: nexus-platform
----
-
-Load the skill file at `{agentic_root}/skills/{skill_id}/SKILL.md` and follow its instructions.
-"#,
-        name = skill.name,
-        skill_id = skill.skill_id,
-        version = skill.version,
-        agentic_root = agentic_root,
-    );
-
-    let path = commands_dir.join(format!("{}.md", slug));
-    fs::write(&path, content)?;
-    print_created(&format!(".opencode/commands/{}.md", slug));
-
-    Ok(())
-}
-
 /// Write all directives to `.claude/directives.md` as a single Markdown file.
 ///
 /// Directives are grouped by category, with priority indicated inline.
@@ -1237,8 +1170,8 @@ fn write_mcp_configs(
         McpSource::Local => "local (tools/nexus-mcp/dist/server.js)",
     };
 
-    let skip_opencode = matches!(tool_flavor, Some("claude-cli"));
-    let skip_claude = matches!(tool_flavor, Some("opencode"));
+    let skip_opencode = config::is_claude_owner(tool_flavor);
+    let skip_claude = !skip_opencode;
 
     // --- OpenCode config (opencode.json) ---
     if !skip_opencode {
@@ -1817,6 +1750,28 @@ fn print_done(server_aware: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test shims for the former init writers, now backed by the shared
+    /// pull renderer (same output format).
+    fn write_skill(
+        dir: &Path,
+        skill: &nexus_core::api::ExportedSkill,
+        root: &str,
+    ) -> anyhow::Result<()> {
+        let files = super::super::pull::render_skill_files(skill, root);
+        super::super::pull::sync_generated_files(dir, root, &files, true).map(|_| ())
+    }
+
+    fn write_command(
+        dir: &Path,
+        skill: &nexus_core::api::ExportedSkill,
+        root: &str,
+    ) -> anyhow::Result<()> {
+        let files: Vec<_> = super::super::pull::render_command_file(skill, root)
+            .into_iter()
+            .collect();
+        super::super::pull::sync_generated_files(dir, root, &files, true).map(|_| ())
+    }
     use std::fs;
 
     /// Helper to create a unique temp directory for testing init.
@@ -2305,6 +2260,20 @@ mod tests {
         // it is not a Nexus credential and should be resolved from the shell at runtime
         assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
 
+        // One runtime per call (NEXUS-APP dispatch 442f0e97): render the
+        // Claude Code projection separately for its .mcp.json.
+        write_mcp_configs(
+            &dir,
+            "test-proj",
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_test-token-1234567890",
+            "test-project-id",
+            McpSource::Npm,
+            Some("claude-cli"),
+            ".claude",
+        )
+        .unwrap();
+
         // .mcp.json MUST be created at project root (Claude Code project scope)
         let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(cm.contains("\"mcpServers\""));
@@ -2343,6 +2312,20 @@ mod tests {
         assert!(oc.contains("tools/nexus-mcp/dist/server.js"));
         assert!(!oc.contains("npx"));
         assert!(!oc.contains("@gwdn/nexus-mcp"));
+
+        // One runtime per call (NEXUS-APP dispatch 442f0e97): render the
+        // Claude Code projection separately for its .mcp.json.
+        write_mcp_configs(
+            &dir,
+            "test-proj",
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_local-test-token",
+            "test-project-id",
+            McpSource::Local,
+            Some("claude-cli"),
+            ".claude",
+        )
+        .unwrap();
 
         // .mcp.json must also exist at project root with local path
         let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();

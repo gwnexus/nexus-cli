@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-09-25
+
+v0.26.0 acceptance findings (NEXUS-APP dispatch 4820e584) and a single start command (dispatch 442f0e97).
+
+### Changed
+- **`nexus run` follows the backend's `run_target`** (new `af_export.run_target: { tool, workspace, layout? }`, cached in `.nexus/config.toml` by `nexus pull` so `--no-db` resolves the same start). `workspace: "zellij"` starts zellij with the CCX layout through the full `nexus run` path (pre-launch checks, env injection, gh profile, `--account`, session summary); if zellij or the layout is missing, Claude Code starts directly with a one-line hint. Otherwise `run_target.tool` starts. `--tool` stays an explicit override; backends without `run_target` keep the previous `run.default_tool` / `agent_owner` resolution.
+- **One runtime per project.** `agent_owner` is `opencode` or `claude-cli`; absent, unknown and the retired `both` value count as OpenCode (`config::is_claude_owner`). `nexus pull` / `nexus init` render exactly one projection: no `.opencode/commands`, `.opencode/plugins`, `opencode.json` or `.opencode/**` agent files for claude-cli projects, and no Claude Code projection (`.mcp.json`, `.claude/**`, `CLAUDE.md`) for OpenCode projects. The stale-projection warning stays (nothing is deleted).
+- **`nexus claude launch` is deprecated**: hidden alias that prints "use nexus run" and delegates to it. README documents `nexus run` as the only start command.
+- **Plain `nexus pull` no longer prompts for unchanged files.** Skills, skill resources and OpenCode commands are rendered and compared with disk: identical files are skipped silently, files unmodified since the last pull (hash in `<agentic_root>/generated/pull-manifest.json`) are updated without a prompt, and only locally edited files are listed and confirmed with one prompt. Declining keeps just those files; the rest of the pull (including CCX reconciliation) always continues. `nexus init` uses the same renderer and hash record.
+- Agent files, `directives.md`, `devbox.json`, workspace scripts, `opencode.json`, `.mcp.json`, `model-routes.json`, `<agentic_root>/env` and `.claude/skills/` are no longer rewritten or reported when their content is unchanged (agent-file comparison ignores the `generated_at:` line the backend re-stamps on every export). Files Nexus wrote that cannot carry the `source: nexus-platform` marker (YAML/TOML/JSON) are recognised as managed via the sync manifest instead of being reported as user-managed.
+- **`nexus upgrade` verifies the whole chain.** Releases now publish `install.sh` and `install.sh.sha256`; `nexus upgrade` fetches both from the latest GitHub release, verifies the SHA-256 in-process, and aborts on a missing or mismatching checksum. Only releases without the asset fall back to `nexus.gatewarden.eu` (verified when a checksum is published there).
+
+### Fixed
+- The "Existing .claude/ files detected ... nexus import" hint no longer lists Nexus-generated files (marker, nexus-managed block, sync manifest, or a claude-cli project's `.claude/settings.json`).
+- No more `!! .env.nexus.local is a protected file, refusing to overwrite` on every pull: existing protected scaffolds are skipped silently (write-if-missing).
+- The final tip names what `nexus run` starts (OpenCode, Claude Code, or the Claude Code workspace) instead of always "OpenCode".
+- Doubled dot in pull output paths (`..nexus/env`, `..nexus/generated/model-routes.json`) and in the `.nexus/env` header.
+
+14 new tests (run_target resolution for all shapes incl. zellij/layout missing, `--tool` override, fallback and legacy `both`; generated-file classification, pull twice without prompt or writes, locally edited file prompts only for itself, force; import-hint filtering; run tip labels; agent-file timestamp comparison; install-script checksum; run_target cache); MCP/run tests updated to the one-runtime rule. 633/633 tests passing, clippy/fmt clean.
+
 ## [0.26.0] - 2026-09-24
 
 Completes the CCX (Claude Code Experience) CLI scope of NEXUS-APP ADR-0117 (dispatch 99f335e8).
