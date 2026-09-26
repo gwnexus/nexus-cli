@@ -141,7 +141,7 @@ pub async fn run(
     }
 
     create_nexus_dir(&target, project_name, resolved_pid.as_deref())?;
-    create_opencode_dir(&target)?;
+    // .opencode/ is created once the runtime is known (OpenCode only).
 
     // Ensure a persistent machine identity exists
     match nexus_core::machine::MachineIdentity::load_or_create() {
@@ -202,6 +202,7 @@ pub async fn run(
                     // Fall back to default .nexus/ scaffold since we cannot
                     // determine the server-configured agentic_root.
                     let default_agentic_root = ".nexus";
+                    create_opencode_dir(&target)?;
                     create_claude_dir(&target, project_name, default_agentic_root)?;
                     create_agents_md(&target, project_name, force, default_agentic_root)?;
                     append_gitignore(&target)?;
@@ -225,6 +226,8 @@ pub async fn run(
             // (`nexus run`, `nexus preflight`) can pick the right artifacts and
             // binary offline (NEXUS-APP dispatch dfd4e655).
             let _ = config::update_agent_owner(Some(&target), tool_flavor.as_deref());
+            let is_claude = config::is_claude_owner(tool_flavor.as_deref());
+            create_runtime_dir(&target, is_claude)?;
             let agentic_root = project_detail
                 .as_ref()
                 .and_then(|d| d.project.agentic_root.clone())
@@ -368,11 +371,12 @@ pub async fn run(
             }
 
             // Apply extra MCP servers and plugins from .nexus/config.toml
+            // (plugins are OpenCode plugins: OpenCode projects only).
             if let Ok(Some(proj_config)) = config::load_project_config(Some(&target)) {
                 if let Some(ref extras) = proj_config.mcp_extra {
                     merge_extra_mcp_servers(&target, extras, &agentic_root)?;
                 }
-                if let Some(ref plugins) = proj_config.plugins {
+                if let (false, Some(ref plugins)) = (is_claude, &proj_config.plugins) {
                     install_plugins(&target, plugins).await?;
                 }
             }
@@ -380,7 +384,8 @@ pub async fn run(
             // Install platform-selected plugins from af_export plugins list.
             // Uses the built-in plugin registry to resolve download URLs for
             // known Nexus plugins (nexus-compaction-plus, nexus-cost-control).
-            if let Ok(ref af_export) = af_export_result {
+            // OpenCode projects only, like `nexus pull`.
+            if let (false, Ok(ref af_export)) = (is_claude, &af_export_result) {
                 if !af_export.plugins.is_empty() {
                     let platform_plugins = resolve_platform_plugins(&af_export.plugins);
                     if !platform_plugins.is_empty() {
@@ -423,10 +428,7 @@ pub async fn run(
                     if !af_export.agent_files.is_empty() {
                         for af in &af_export.agent_files {
                             // Only the selected runtime's projection.
-                            if config::is_claude_owner(tool_flavor.as_deref())
-                                && (af.target_path == "opencode.json"
-                                    || af.target_path.starts_with(".opencode/"))
-                            {
+                            if super::pull::is_other_runtime_path(&af.target_path, is_claude) {
                                 continue;
                             }
                             let written = write_agent_file(&target, af)?;
@@ -625,8 +627,8 @@ pub async fn run(
                 );
                 println!(
                     "  3. Skills are in {}, commands/configs in {}",
-                    style(".nexus/skills/").bold(),
-                    style(".opencode/").bold()
+                    style(format!("{agentic_root}/skills/")).bold(),
+                    style(if is_claude { ".claude/" } else { ".opencode/" }).bold()
                 );
                 println!(
                     "  4. Run {} periodically to sync from the platform",
@@ -661,6 +663,7 @@ pub async fn run(
         } else {
             // No token — fall back to default .nexus/ scaffold
             let default_agentic_root = ".nexus";
+            create_opencode_dir(&target)?;
             detect_importable_files(&target, false, &serde_json::json!({}));
             create_claude_dir(&target, project_name, default_agentic_root)?;
             create_agents_md(&target, project_name, force, default_agentic_root)?;
@@ -676,8 +679,10 @@ pub async fn run(
         }
     } else {
         // No project linked — create default .nexus/ scaffold so the
-        // workspace is immediately usable with coding agents.
+        // workspace is immediately usable with coding agents (OpenCode is
+        // the default runtime).
         let default_agentic_root = ".nexus";
+        create_opencode_dir(&target)?;
         detect_importable_files(&target, false, &serde_json::json!({}));
         create_claude_dir(&target, project_name, default_agentic_root)?;
         create_agents_md(&target, project_name, force, default_agentic_root)?;
@@ -841,6 +846,16 @@ NEVER:
     print_created(&format!("{}/skills/", agentic_root));
 
     Ok(())
+}
+
+/// Create the selected runtime's scaffold directory: `.opencode/commands/`
+/// for OpenCode; nothing for Claude Code (its projection is rendered by
+/// the Claude Code renderer).
+fn create_runtime_dir(target: &Path, is_claude: bool) -> anyhow::Result<()> {
+    if is_claude {
+        return Ok(());
+    }
+    create_opencode_dir(target)
 }
 
 /// Create .opencode/ directory with commands subfolder.
@@ -2783,6 +2798,16 @@ url = "https://example.com/plugin.ts"
         let result = resolve_platform_plugins(&slugs);
         assert_eq!(result.len(), 1, "only known slugs should resolve");
         assert!(result.contains_key("nexus-compaction-plus"));
+    }
+
+    #[test]
+    fn test_create_runtime_dir_opencode_only() {
+        let dir = temp_project_dir("runtime-dir");
+        create_runtime_dir(&dir, true).unwrap();
+        assert!(!dir.join(".opencode").exists());
+        create_runtime_dir(&dir, false).unwrap();
+        assert!(dir.join(".opencode/commands").is_dir());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
