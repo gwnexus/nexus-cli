@@ -548,9 +548,12 @@ pub async fn run(
     // Resolve the runtime before writing anything, so only the selected
     // runtime's projection is rendered (NEXUS-APP dispatches 4820e584,
     // 442f0e97).
-    // `flavor_known`: the backend actually answered (an absent owner then
-    // legitimately means OpenCode); an unreachable backend must never
-    // trigger the removal of the Claude Code projection below.
+    // The owner cached by the previous pull, before it is overwritten below.
+    let previous_owner = config::load_agent_owner(Some(&workspace));
+    // `flavor_known`: the backend reported the owner. An absent owner means
+    // OpenCode only when the previous pull did not record Claude Code: an
+    // unreachable backend, or one that omits the field, must never trigger
+    // the removal of the Claude Code projection below.
     let (tool_flavor, flavor_known) = match af_export_result
         .as_ref()
         .ok()
@@ -560,14 +563,16 @@ pub async fn run(
         None => {
             // Fallback: fetch from project details API
             match client.get_project(&project_id).await {
-                Ok(d) => (d.project.agent_owner, true),
+                Ok(d) => {
+                    let known = d.project.agent_owner.is_some()
+                        || !config::is_claude_owner(previous_owner.as_deref());
+                    (d.project.agent_owner, known)
+                }
                 Err(_) => (None, false),
             }
         }
     };
     let is_claude = config::is_claude_owner(tool_flavor.as_deref());
-    // The owner cached by the previous pull, before it is overwritten below.
-    let previous_owner = config::load_agent_owner(Some(&workspace));
 
     // Load sync manifest for local-modification detection
     let manifest = super::sync::load_manifest_pub(&workspace);
@@ -707,7 +712,7 @@ pub async fn run(
                     let target_path = workspace.join(&af.target_path);
 
                     // Only the selected runtime's projection is written.
-                    if is_other_runtime_path(&af.target_path, is_claude) {
+                    if is_other_runtime_path(&af.target_path, is_claude, &agentic_root) {
                         continue;
                     }
 
@@ -1148,6 +1153,9 @@ pub async fn run(
                             Ok(resp) if resp.status().is_success() => {
                                 let body = resp.text().await.unwrap_or_default();
                                 std::fs::write(&dest, &body)?;
+                                // Recorded, so a later switch to Claude Code
+                                // can tell an unedited plugin from an edited one.
+                                record_generated(&workspace, &agentic_root, &plugin_target, &body)?;
                                 println!(
                                     "   {} .opencode/plugins/{} ({})",
                                     style("+").bold().green(),
@@ -1785,6 +1793,15 @@ pub(crate) fn decide_workspace_write(
     if !pull_managed && !force {
         return WorkspaceAction::Skip(WorkspaceSkip::UserManaged);
     }
+    // Unchanged since Nexus last delivered it: the fork moved on, so this
+    // is a plain update even when that version is committed. The guard
+    // below only protects committed content Nexus never delivered.
+    if recorded.is_some_and(|r| nexus_core::hash::hash_matches_text(r, local)) {
+        return WorkspaceAction::Write {
+            overwrote_modified: false,
+            reverted_commit: false,
+        };
+    }
     let committed = head().is_some_and(|h| {
         nexus_core::hash::text_equivalent(local, &h)
             && !nexus_core::hash::text_equivalent(&h, incoming)
@@ -1884,8 +1901,10 @@ pub(crate) fn sync_workspace_file(
         WorkspaceAction::Skip(WorkspaceSkip::CommittedDiffers) => {
             println!(
                 "   {} skipped: {} (committed locally and differs from the Nexus workspace fork; \
-                 run `nexus push` to update the fork, or `nexus pull --force` to take the fork version)",
+                 compare with `nexus diff {}`, then `nexus push` to publish the committed version \
+                 or `nexus pull --force` to take the fork version)",
                 style("!").bold().yellow(),
+                rel,
                 rel
             );
             report.skipped_committed.push(rel.to_string());
@@ -1955,7 +1974,8 @@ fn print_committed_workspace_summary(report: &WorkspaceSyncReport) {
             println!("      {}", style(path).yellow());
         }
         println!(
-            "   Run {} to update the fork, or {} to take the fork version.",
+            "   Compare with {}, then run {} to publish the committed version, or {} to take the fork version.",
+            style("nexus diff <file>").bold(),
             style("nexus push").bold(),
             style("nexus pull --force").bold()
         );
@@ -3108,10 +3128,18 @@ fn is_opencode_path(target_path: &str) -> bool {
 
 /// Whether an agent file belongs to the projection of the runtime the
 /// project does not use (`.opencode/`/`opencode.json` for Claude Code,
-/// `.claude/` for OpenCode). Same rule as `nexus status`.
-pub(crate) fn is_other_runtime_path(target_path: &str, is_claude: bool) -> bool {
+/// `.claude/` for OpenCode). Same rule as `nexus status`. With the legacy
+/// agentic root `.claude` the agent files and canonical skills live under
+/// `.claude/` for both runtimes, so only `.claude/agents/` is Claude-only.
+pub(crate) fn is_other_runtime_path(
+    target_path: &str,
+    is_claude: bool,
+    agentic_root: &str,
+) -> bool {
     if is_claude {
         is_opencode_path(target_path)
+    } else if agentic_root.trim_end_matches('/') == ".claude" {
+        target_path.starts_with(".claude/agents/")
     } else {
         target_path.starts_with(".claude/")
     }
@@ -3138,7 +3166,9 @@ pub(crate) fn cleanup_context(
     };
     for af in &af_export.agent_files {
         let ccx_file = af.category == super::ccx::CCX_CATEGORY;
-        if is_other_runtime_path(&af.target_path, is_claude) || (ccx_file && !is_claude) {
+        if is_other_runtime_path(&af.target_path, is_claude, agentic_root)
+            || (ccx_file && !is_claude)
+        {
             ctx.add_known(&af.target_path, &af.body);
         } else {
             ctx.keep.insert(af.target_path.clone());
@@ -3455,6 +3485,13 @@ mod tests {
             decide_workspace_write(Some("committed"), "old", true, Some(&rec), head, true, true),
             write(false, true)
         );
+        // Committed version is what Nexus last delivered and the fork moved
+        // on: a plain update, no --force needed.
+        let head = || Some("old".to_string());
+        assert_eq!(
+            decide_workspace_write(Some("old"), "new", true, Some(&rec), head, false, false),
+            write(false, false)
+        );
         // Local differs from HEAD (uncommitted edit): not a committed revert.
         let head = || Some("other".to_string());
         assert_eq!(
@@ -3652,13 +3689,37 @@ mod tests {
 
     #[test]
     fn test_is_other_runtime_path_is_symmetric() {
-        assert!(is_other_runtime_path(".opencode/plugins/x.ts", true));
-        assert!(is_other_runtime_path("opencode.json", true));
-        assert!(!is_other_runtime_path(".claude/rules/a.md", true));
-        assert!(is_other_runtime_path(".claude/rules/a.md", false));
-        assert!(!is_other_runtime_path(".opencode/plugins/x.ts", false));
-        assert!(!is_other_runtime_path(".nexus/AGENTS.md", false));
-        assert!(!is_other_runtime_path(".nexus/AGENTS.md", true));
+        assert!(is_other_runtime_path(
+            ".opencode/plugins/x.ts",
+            true,
+            ".nexus"
+        ));
+        assert!(is_other_runtime_path("opencode.json", true, ".nexus"));
+        assert!(!is_other_runtime_path(".claude/rules/a.md", true, ".nexus"));
+        assert!(is_other_runtime_path(".claude/rules/a.md", false, ".nexus"));
+        assert!(!is_other_runtime_path(
+            ".opencode/plugins/x.ts",
+            false,
+            ".nexus"
+        ));
+        assert!(!is_other_runtime_path(".nexus/AGENTS.md", false, ".nexus"));
+        assert!(!is_other_runtime_path(".nexus/AGENTS.md", true, ".nexus"));
+        // Legacy agentic root `.claude`: only the agents dir is Claude-only.
+        assert!(!is_other_runtime_path(
+            ".claude/AGENTS.md",
+            false,
+            ".claude"
+        ));
+        assert!(!is_other_runtime_path(
+            ".claude/skills/a/SKILL.md",
+            false,
+            ".claude"
+        ));
+        assert!(is_other_runtime_path(
+            ".claude/agents/a.md",
+            false,
+            ".claude"
+        ));
     }
 
     fn export_for_cleanup() -> nexus_core::api::AgentFileExportResponse {

@@ -4,7 +4,10 @@
 //! scan) rely on `git config core.hooksPath .githooks`, which is local
 //! state: a fresh clone, a re-created checkout or a tool resetting the
 //! config silently disables the hooks. `nexus pull` restores the setting
-//! and warns when the hook needs a scanner that is not installed. Repos
+//! when `core.hooksPath` is unset in every scope (a value set on purpose,
+//! e.g. company-wide global hooks or husky, is never overridden; that only
+//! gets a hint) and warns when the hook needs a scanner that is not
+//! installed. Repos
 //! using the pre-commit framework instead only get a hint when its hook is
 //! not installed. Never fails the pull (not a git repo, git missing, ...).
 
@@ -22,8 +25,10 @@ pub enum HookOutcome {
     Nothing,
     /// `.githooks/` is already active.
     Active,
-    /// `core.hooksPath` was set to `.githooks` (previous value, if any).
-    Set { previous: Option<String> },
+    /// `core.hooksPath` was unset and is now `.githooks`.
+    Set,
+    /// `core.hooksPath` points elsewhere (any scope): left alone, hint only.
+    Elsewhere { current: String },
     /// `core.hooksPath` could not be set.
     SetFailed,
     /// `.pre-commit-config.yaml` exists but its git hook is not installed.
@@ -83,11 +88,12 @@ pub fn self_heal(workspace: &Path, gitleaks_available: impl Fn() -> bool) -> Hoo
         let current = git(&root, &["config", "--get", "core.hooksPath"]);
         let outcome = match current.as_deref() {
             Some(v) if points_at_githooks(v, &root) => HookOutcome::Active,
-            previous => {
+            Some(v) => HookOutcome::Elsewhere {
+                current: v.to_string(),
+            },
+            None => {
                 if git(&root, &["config", "--local", "core.hooksPath", HOOKS_DIR]).is_some() {
-                    HookOutcome::Set {
-                        previous: previous.map(str::to_string),
-                    }
+                    HookOutcome::Set
                 } else {
                     HookOutcome::SetFailed
                 }
@@ -127,11 +133,16 @@ pub fn self_heal(workspace: &Path, gitleaks_available: impl Fn() -> bool) -> Hoo
 /// Print the pull output lines for `report` (nothing when all is well).
 pub fn print_report(report: &HookReport) {
     match &report.outcome {
-        HookOutcome::Set { previous } => println!(
-            "   {} git hooks: core.hooksPath set to {} (was {})",
+        HookOutcome::Set => println!(
+            "   {} git hooks: core.hooksPath set to {}",
             style("+").bold().green(),
+            HOOKS_DIR
+        ),
+        HookOutcome::Elsewhere { current } => println!(
+            "   {} git hooks: core.hooksPath is {current}, so {}/pre-commit is not active; to use it: git config core.hooksPath {}",
+            style("i").bold().blue(),
             HOOKS_DIR,
-            previous.as_deref().unwrap_or("unset")
+            HOOKS_DIR
         ),
         HookOutcome::SetFailed => println!(
             "   {} git hooks: could not set core.hooksPath; run: git config core.hooksPath {}",
@@ -186,15 +197,24 @@ mod tests {
         let dir = repo("set");
         fs::create_dir_all(dir.join(".githooks")).unwrap();
         fs::write(dir.join(".githooks/pre-commit"), HOOK).unwrap();
-        git(&dir, &["config", "--local", "core.hooksPath", ".git/hooks"]).unwrap();
-
-        let report = self_heal(&dir, || true);
+        // A value set on purpose is never overridden.
+        git(&dir, &["config", "--local", "core.hooksPath", ".husky"]).unwrap();
         assert_eq!(
-            report.outcome,
-            HookOutcome::Set {
-                previous: Some(".git/hooks".into())
+            self_heal(&dir, || true).outcome,
+            HookOutcome::Elsewhere {
+                current: ".husky".into()
             }
         );
+        assert_eq!(local_hooks_path(&dir).as_deref(), Some(".husky"));
+        git(&dir, &["config", "--local", "--unset", "core.hooksPath"]).unwrap();
+
+        let report = self_heal(&dir, || true);
+        if git(&dir, &["config", "--get", "core.hooksPath"]).is_some() {
+            // A global hooksPath on this machine: left alone as well.
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+        assert_eq!(report.outcome, HookOutcome::Set);
         assert!(!report.gitleaks_missing);
         assert_eq!(local_hooks_path(&dir).as_deref(), Some(".githooks"));
 

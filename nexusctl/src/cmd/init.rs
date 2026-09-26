@@ -428,7 +428,11 @@ pub async fn run(
                     if !af_export.agent_files.is_empty() {
                         for af in &af_export.agent_files {
                             // Only the selected runtime's projection.
-                            if super::pull::is_other_runtime_path(&af.target_path, is_claude) {
+                            if super::pull::is_other_runtime_path(
+                                &af.target_path,
+                                is_claude,
+                                &agentic_root,
+                            ) {
                                 continue;
                             }
                             let written = write_agent_file(&target, af)?;

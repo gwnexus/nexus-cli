@@ -58,9 +58,29 @@ pub fn with_single_trailing_newline(content: &str) -> String {
     }
 }
 
-/// Whether two text files differ at most in their trailing newlines.
+/// Whether two text files differ at most in their trailing newlines, or
+/// are the same JSON document. The backend stores `devbox.json` as JSON and
+/// returns it with its own key order, so a byte comparison reported every
+/// freshly pushed `devbox.json` as changed (NEXUS-APP dispatch 95d81511).
 pub fn text_equivalent(a: &str, b: &str) -> bool {
-    trim_trailing_newlines(a) == trim_trailing_newlines(b)
+    let (a, b) = (trim_trailing_newlines(a), trim_trailing_newlines(b));
+    a == b || json_equivalent(a, b)
+}
+
+/// Whether both texts parse as JSON objects/arrays with equal values
+/// (object key order is not significant).
+fn json_equivalent(a: &str, b: &str) -> bool {
+    let looks_json = |s: &str| matches!(s.trim_start().as_bytes().first(), Some(b'{' | b'['));
+    if !looks_json(a) || !looks_json(b) {
+        return false;
+    }
+    match (
+        serde_json::from_str::<serde_json::Value>(a),
+        serde_json::from_str::<serde_json::Value>(b),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// [`hash_matches`] that also accepts `content` with its trailing newlines
@@ -72,7 +92,9 @@ pub fn hash_matches_text(recorded: &str, content: &str) -> bool {
         return true;
     }
     let trimmed = trim_trailing_newlines(content);
-    recorded == sha256_hex(trimmed) || recorded == sha256_hex(&format!("{trimmed}\n"))
+    ["", "\n", "\r\n", "\n\n"]
+        .iter()
+        .any(|end| recorded == sha256_hex(&format!("{trimmed}{end}")))
 }
 
 #[cfg(test)]
@@ -83,8 +105,15 @@ mod tests {
     fn test_text_equivalent_ignores_trailing_newlines_only() {
         assert!(text_equivalent("{}", "{}\n"));
         assert!(text_equivalent("{}\n\n", "{}\r\n"));
-        assert!(!text_equivalent("{}", "{ }"));
+        assert!(!text_equivalent("a b", "a  b"));
+        assert!(text_equivalent("{}", "{ }"));
         assert!(!text_equivalent("a\nb", "a\n\nb"));
+        assert!(text_equivalent(
+            "{\"a\": 1, \"b\": [1, 2]}",
+            "{\n  \"b\": [1, 2],\n  \"a\": 1\n}\n"
+        ));
+        assert!(!text_equivalent("{\"b\": [1, 2]}", "{\"b\": [2, 1]}"));
+        assert!(!text_equivalent("{\"a\": 1}", "{\"a\": 1, \"b\": 2}"));
         assert_eq!(with_single_trailing_newline("x"), "x\n");
         assert_eq!(with_single_trailing_newline("x\n\n"), "x\n");
         assert_eq!(with_single_trailing_newline(""), "");
@@ -97,6 +126,9 @@ mod tests {
         assert!(hash_matches_text(&recorded, "{\"a\":1}\n"));
         assert!(hash_matches_text(&recorded, "{\"a\":1}\n\n"));
         assert!(hash_matches_text(&sha256_hex("x\n"), "x"));
+        // Pull writes one `\n` but records the backend body's hash.
+        assert!(hash_matches_text(&sha256_hex("x\r\n"), "x\n"));
+        assert!(hash_matches_text(&sha256_hex("x\n\n"), "x\n"));
         assert!(!hash_matches_text(&recorded, "{\"a\":2}\n"));
     }
 
