@@ -10,6 +10,7 @@ mod deinit;
 pub(crate) mod display;
 mod env_cmd;
 pub(crate) mod git;
+pub(crate) mod githooks;
 pub(crate) mod import;
 mod init;
 mod link;

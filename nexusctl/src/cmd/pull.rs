@@ -1524,6 +1524,9 @@ pub async fn run(
         }
     }
 
+    // Git hook self-heal (v0.29.0): cheap, never fails the pull.
+    super::githooks::run(&workspace);
+
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
 
