@@ -16,6 +16,7 @@ mod link;
 pub(crate) mod mcp_local;
 pub(crate) mod preflight;
 pub(crate) mod project;
+pub(crate) mod projection_cleanup;
 pub(crate) mod pull;
 pub(crate) mod push;
 pub(crate) mod run;

@@ -73,7 +73,8 @@ pub enum Kind {
     ClaudeMdBlock,
     /// A managed `.claude/settings.json` key.
     SettingsKey(String),
-    /// A stale projection directory of the non-selected runtime.
+    /// Leftovers of the non-selected runtime's projection (removed by the
+    /// next `nexus pull`).
     Stale,
 }
 
@@ -95,7 +96,9 @@ impl Entry {
     pub fn next_action(&self) -> String {
         let p = &self.path;
         match (self.class, self.state) {
-            (_, State::Stale) => "not used by this project's runtime; remove manually".into(),
+            (_, State::Stale) => {
+                "not used by this project's runtime; run nexus pull to remove it (nexus pull --force also removes modified files)".into()
+            }
             (FileClass::Content, State::Modified) => {
                 format!("nexus push {p} (or nexus reset {p})")
             }
@@ -544,11 +547,21 @@ pub async fn load(
         });
     }
 
-    // Stale projection of the non-selected runtime (never deleted).
-    let stale = if is_claude { ".opencode" } else { ".claude" };
-    if workspace.join(stale).is_dir() {
+    // Leftovers of the non-selected runtime's projection, which the next
+    // `nexus pull` removes (v0.29.0). The operator's own files under
+    // `.claude/` do not count.
+    let unselected = super::projection_cleanup::Projection::unselected(is_claude);
+    let cleanup_ctx = super::pull::cleanup_context(
+        &export,
+        &[],
+        &agentic_root,
+        &export.project_name,
+        is_claude,
+        false,
+    );
+    if super::projection_cleanup::plan(workspace, unselected, &cleanup_ctx).has_leftovers() {
         entries.push(Entry {
-            path: format!("{stale}/"),
+            path: unselected.dir().to_string(),
             class: FileClass::Projection,
             state: State::Stale,
             kind: Kind::Stale,
@@ -885,7 +898,7 @@ mod tests {
             State::Stale,
             Kind::Stale,
         );
-        assert!(e.next_action().contains("remove manually"));
+        assert!(e.next_action().contains("run nexus pull to remove"));
     }
 
     #[test]

@@ -1543,6 +1543,25 @@ fn load_dotenv(target: &Path) -> HashMap<String, String> {
 ///
 /// To add a new plugin: add an entry here with `source = "github-raw"` and the
 /// raw URL of the `.ts` file in the `gwnexus/nexus-oc-plugins` repository.
+/// Slugs of every plugin in the built-in registry of
+/// [`resolve_platform_plugins`].
+pub const PLATFORM_PLUGIN_SLUGS: &[&str] = &["nexus-compaction-plus", "nexus-cost-control"];
+
+/// File names under `.opencode/plugins/` of every registry plugin, so a
+/// registry download can be recognised as Nexus-owned (projection cleanup).
+pub fn platform_plugin_filenames() -> Vec<String> {
+    let slugs: Vec<String> = PLATFORM_PLUGIN_SLUGS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut names: Vec<String> = resolve_platform_plugins(&slugs)
+        .into_iter()
+        .map(|(slug, def)| def.filename.unwrap_or_else(|| format!("{slug}.ts")))
+        .collect();
+    names.sort();
+    names
+}
+
 pub fn resolve_platform_plugins(slugs: &[String]) -> HashMap<String, PluginDef> {
     let mut registry: HashMap<&str, PluginDef> = HashMap::new();
 
@@ -2764,6 +2783,17 @@ url = "https://example.com/plugin.ts"
         let result = resolve_platform_plugins(&slugs);
         assert_eq!(result.len(), 1, "only known slugs should resolve");
         assert!(result.contains_key("nexus-compaction-plus"));
+    }
+
+    #[test]
+    fn test_platform_plugin_filenames_cover_registry() {
+        assert_eq!(
+            platform_plugin_filenames(),
+            vec![
+                "nexus-compaction-plus.ts".to_string(),
+                "nexus-cost-control.ts".to_string()
+            ]
+        );
     }
 
     #[test]

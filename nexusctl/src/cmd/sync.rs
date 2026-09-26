@@ -138,3 +138,29 @@ pub fn update_manifest_after_pull(
     );
     save_manifest(workspace, &manifest)
 }
+
+/// Drop the sync-manifest entries whose `target_path` matches `remove`
+/// (e.g. files of a projection that was just removed). Returns the number
+/// of entries dropped; the manifest is only rewritten when that is > 0.
+pub fn remove_manifest_entries(
+    workspace: &Path,
+    remove: impl Fn(&str) -> bool,
+) -> anyhow::Result<usize> {
+    let mut manifest = load_manifest(workspace);
+    let Some(obj) = manifest.as_object_mut() else {
+        return Ok(0);
+    };
+    let before = obj.len();
+    obj.retain(|key, entry| {
+        let target = entry
+            .get("target_path")
+            .and_then(|t| t.as_str())
+            .unwrap_or(key);
+        !remove(target)
+    });
+    let dropped = before - obj.len();
+    if dropped > 0 {
+        save_manifest(workspace, &manifest)?;
+    }
+    Ok(dropped)
+}

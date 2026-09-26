@@ -80,9 +80,23 @@ pub(crate) fn strip_frontmatter(body: &str) -> &str {
 /// Claude Code (project skill directory names are command names).
 /// Returns `true` if any file was written (unchanged files are left alone).
 pub fn write_claude_skill(target: &Path, skill: &ExportedSkill) -> anyhow::Result<bool> {
+    let mut written = false;
+    for (rel, content) in render_claude_skill_files(skill) {
+        let path = target.join(&rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        written |= write_if_changed(&path, &content)?;
+    }
+    Ok(written)
+}
+
+/// The files [`write_claude_skill`] writes for `skill`, as
+/// `(workspace-relative path, content)` pairs: `SKILL.md` first, then the
+/// resource files.
+pub fn render_claude_skill_files(skill: &ExportedSkill) -> Vec<(String, String)> {
     let canonical_id = canonical_claude_skill_id(&skill.skill_id);
-    let skill_dir = target.join(".claude").join("skills").join(&canonical_id);
-    fs::create_dir_all(&skill_dir)?;
+    let skill_dir = format!(".claude/skills/{canonical_id}");
 
     let raw_body = skill
         .body
@@ -110,18 +124,16 @@ source: nexus-platform
         body = body,
     );
 
-    let mut written = write_if_changed(&skill_dir.join("SKILL.md"), &content)?;
-
+    let mut files = vec![(format!("{skill_dir}/SKILL.md"), content)];
     for res in &skill.resources {
         // Sanitize filename: prevent directory traversal.
         let filename = res.filename.replace(['/', '\\'], "_");
         if filename.is_empty() || filename == "SKILL.md" {
             continue;
         }
-        written |= write_if_changed(&skill_dir.join(&filename), &res.body)?;
+        files.push((format!("{skill_dir}/{filename}"), res.body.clone()));
     }
-
-    Ok(written)
+    files
 }
 
 /// Write `content` to `path` unless it already has exactly that content.
@@ -187,6 +199,26 @@ pub fn write_claude_agents(
     actors: &[ExportedActorFile],
     agent_files: &[ExportedAgentFile],
 ) -> anyhow::Result<usize> {
+    let files = claude_agent_files(actors, agent_files);
+    if files.is_empty() {
+        return Ok(0);
+    }
+
+    let agents_dir = target.join(".claude").join("agents");
+    fs::create_dir_all(&agents_dir)?;
+
+    for (rel, body) in &files {
+        fs::write(target.join(rel), body)?;
+    }
+    Ok(files.len())
+}
+
+/// The files [`write_claude_agents`] writes, as `(workspace-relative path,
+/// content)` pairs (`.claude/agents/<slug>.md`), one per actor slug.
+pub fn claude_agent_files(
+    actors: &[ExportedActorFile],
+    agent_files: &[ExportedAgentFile],
+) -> Vec<(String, String)> {
     let mut by_slug: BTreeMap<String, String> = BTreeMap::new();
 
     for actor in actors {
@@ -198,19 +230,10 @@ pub fn write_claude_agents(
         }
     }
 
-    if by_slug.is_empty() {
-        return Ok(0);
-    }
-
-    let agents_dir = target.join(".claude").join("agents");
-    fs::create_dir_all(&agents_dir)?;
-
-    let mut written = 0;
-    for (slug, body) in &by_slug {
-        fs::write(agents_dir.join(format!("{}.md", slug)), body)?;
-        written += 1;
-    }
-    Ok(written)
+    by_slug
+        .into_iter()
+        .map(|(slug, body)| (format!(".claude/agents/{slug}.md"), body))
+        .collect()
 }
 
 /// Write the provider/model routing catalog consumed by the Claude Code
@@ -381,25 +404,7 @@ pub fn merge_claude_hooks(
 
     let mut removed_plugin_names = Vec::new();
     for entry in &removable {
-        for reg in &entry.registrations {
-            if let Some(event_array) = hooks_obj.get_mut(&reg.event).and_then(|v| v.as_array_mut())
-            {
-                event_array.retain(|item| {
-                    let matcher_matches =
-                        item.get("matcher").and_then(|m| m.as_str()) == reg.matcher.as_deref();
-                    let command_matches =
-                        item.get("hooks")
-                            .and_then(|h| h.as_array())
-                            .is_some_and(|hooks| {
-                                hooks.iter().any(|h| {
-                                    h.get("command").and_then(|c| c.as_str())
-                                        == Some(reg.command.as_str())
-                                })
-                            });
-                    !(matcher_matches && command_matches)
-                });
-            }
-        }
+        remove_hook_registrations(hooks_obj, entry);
         let script_path = target.join(&entry.target_path);
         if let Ok(content) = fs::read_to_string(&script_path) {
             if nexus_core::hash::sha256_hex(&content) == entry.file_sha256 {
@@ -476,6 +481,37 @@ pub fn merge_claude_hooks(
     }
 
     Ok((appended, removed_plugin_names))
+}
+
+/// Remove exactly the `.claude/settings.json` hook entries Nexus wrote for
+/// one adapter (matched on event, matcher and command), leaving every other
+/// entry alone. Returns the number of entries removed.
+pub(crate) fn remove_hook_registrations(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    entry: &ccx::CcxLockHookEntry,
+) -> usize {
+    let mut removed = 0;
+    for reg in &entry.registrations {
+        if let Some(event_array) = hooks_obj.get_mut(&reg.event).and_then(|v| v.as_array_mut()) {
+            let before = event_array.len();
+            event_array.retain(|item| {
+                let matcher_matches =
+                    item.get("matcher").and_then(|m| m.as_str()) == reg.matcher.as_deref();
+                let command_matches =
+                    item.get("hooks")
+                        .and_then(|h| h.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command").and_then(|c| c.as_str())
+                                    == Some(reg.command.as_str())
+                            })
+                        });
+                !(matcher_matches && command_matches)
+            });
+            removed += before - event_array.len();
+        }
+    }
+    removed
 }
 
 /// Merge `includeCoAuthoredBy` into `.claude/settings.json` from the
@@ -663,8 +699,8 @@ fn json_set_path(value: &mut serde_json::Value, path: &str, new_value: serde_jso
     }
 }
 
-const CLAUDE_MD_MANAGED_BEGIN: &str = "<!-- BEGIN:nexus-managed -->";
-const CLAUDE_MD_MANAGED_END: &str = "<!-- END:nexus-managed -->";
+pub(crate) const CLAUDE_MD_MANAGED_BEGIN: &str = "<!-- BEGIN:nexus-managed -->";
+pub(crate) const CLAUDE_MD_MANAGED_END: &str = "<!-- END:nexus-managed -->";
 
 /// Result of [`merge_claude_md_managed_block`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -790,7 +826,7 @@ pub fn merge_claude_md_managed_block(
 /// `task_create`, `dispatch_create`, `dispatch_resolve`, `sk_update`,
 /// `doc_ingest`, `doc_delete`, etc.) stay behind an explicit per-session
 /// approval on purpose.
-const BASELINE_MCP_PERMISSIONS: &[&str] = &[
+pub(crate) const BASELINE_MCP_PERMISSIONS: &[&str] = &[
     "mcp__nexus__session_list",
     "mcp__nexus__session_create",
     "mcp__nexus__session_append",
@@ -926,6 +962,58 @@ pub fn write_claude_settings(
     Ok(true)
 }
 
+/// `env` keys pointing the routing-guard adapter at its generated inputs
+/// (see [`write_claude_settings`]).
+pub(crate) const ROUTING_ENV_KEYS: [&str; 2] = [
+    "NEXUS_ROUTING_GUARD_CATALOG_PATH",
+    "NEXUS_ROUTING_GUARD_AGENTS_PATH",
+];
+
+/// Add the routing-guard `env` keys to an existing `.claude/settings.json`
+/// when they are missing (e.g. after switching a project back to Claude
+/// Code removed them). Existing values are never changed. Returns `true` if
+/// the file was rewritten.
+pub fn merge_claude_routing_env(
+    target: &Path,
+    routing_catalog_path: Option<&str>,
+    agent_routing_path: Option<&str>,
+) -> anyhow::Result<bool> {
+    let path = target.join(".claude").join("settings.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(false);
+    };
+    let Some(obj) = settings.as_object_mut() else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for (key, value) in ROUTING_ENV_KEYS
+        .iter()
+        .zip([routing_catalog_path, agent_routing_path])
+    {
+        let Some(value) = value else { continue };
+        let env = obj
+            .entry("env")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let Some(env) = env.as_object_mut() else {
+            continue;
+        };
+        if !env.contains_key(*key) {
+            env.insert(
+                (*key).to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+            changed = true;
+        }
+    }
+    if changed {
+        fs::write(&path, serde_json::to_string_pretty(&settings)? + "\n")?;
+    }
+    Ok(changed)
+}
+
 /// Write the root `CLAUDE.md` as a thin wrapper importing Nexus-owned
 /// instructions, if it does not already exist (user-managed, never
 /// overwritten). Per ADR-C04, runtime-neutral policy stays in
@@ -941,7 +1029,13 @@ pub fn write_claude_root_md(
     if path.exists() {
         return Ok(false);
     }
-    let content = format!(
+    fs::write(&path, render_claude_root_md(project_name, agentic_root))?;
+    Ok(true)
+}
+
+/// The bootstrap template [`write_claude_root_md`] creates.
+pub fn render_claude_root_md(project_name: &str, agentic_root: &str) -> String {
+    format!(
         r#"---
 type: bootstrap
 scope: repo
@@ -973,9 +1067,7 @@ servers are configured in `.mcp.json`.
 "#,
         name = project_name,
         agentic_root = agentic_root,
-    );
-    fs::write(&path, content)?;
-    Ok(true)
+    )
 }
 
 /// Render the full Claude Code projection for a project: root `CLAUDE.md`,
@@ -1030,6 +1122,14 @@ pub fn render_claude_projection(
         );
     }
 
+    // Record what was written in the pull manifest, so a later switch to
+    // OpenCode can tell these files (unmodified) apart from local edits
+    // and the operator's own skills/agents (v0.29.0 projection cleanup).
+    let mut rendered: Vec<(String, String)> =
+        skills.iter().flat_map(render_claude_skill_files).collect();
+    rendered.extend(claude_agent_files(actors, agent_files));
+    super::pull::record_generated_many(target, agentic_root, &rendered)?;
+
     // Routing-guard adapter inputs (NEXUS-APP dispatch 7a2d2adb, ADR-C05
     // Track B2): only written when the backend supplies runtime_spec.
     let routing_catalog_path = write_routing_catalog(target, agentic_root, runtime_spec)?;
@@ -1047,6 +1147,15 @@ pub fn render_claude_projection(
         agent_routing_path.as_deref(),
     )? {
         println!("   {} .claude/settings.json", style("+").bold().green());
+    } else if merge_claude_routing_env(
+        target,
+        routing_catalog_path.as_deref(),
+        agent_routing_path.as_deref(),
+    )? {
+        println!(
+            "   {} .claude/settings.json (routing-guard env)",
+            style("+").bold().green()
+        );
     }
 
     if write_claude_root_md(target, project_name, agentic_root)? {

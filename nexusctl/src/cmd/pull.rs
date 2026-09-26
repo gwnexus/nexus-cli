@@ -32,7 +32,7 @@ use super::shadow;
 /// Marker in YAML frontmatter indicating the file is managed by Nexus CLI.
 /// Files without this marker are considered user-managed and will not be
 /// overwritten by `nexus pull`.
-const MANAGED_MARKER: &str = "source: nexus-platform";
+pub(crate) const MANAGED_MARKER: &str = "source: nexus-platform";
 
 // ---------------------------------------------------------------------------
 // URL allowlist for remote downloads (SEC-003)
@@ -548,22 +548,26 @@ pub async fn run(
     // Resolve the runtime before writing anything, so only the selected
     // runtime's projection is rendered (NEXUS-APP dispatches 4820e584,
     // 442f0e97).
-    let tool_flavor = match af_export_result
+    // `flavor_known`: the backend actually answered (an absent owner then
+    // legitimately means OpenCode); an unreachable backend must never
+    // trigger the removal of the Claude Code projection below.
+    let (tool_flavor, flavor_known) = match af_export_result
         .as_ref()
         .ok()
         .and_then(|r| r.agent_owner.clone())
     {
-        Some(owner) => Some(owner),
+        Some(owner) => (Some(owner), true),
         None => {
             // Fallback: fetch from project details API
-            client
-                .get_project(&project_id)
-                .await
-                .ok()
-                .and_then(|d| d.project.agent_owner)
+            match client.get_project(&project_id).await {
+                Ok(d) => (d.project.agent_owner, true),
+                Err(_) => (None, false),
+            }
         }
     };
     let is_claude = config::is_claude_owner(tool_flavor.as_deref());
+    // The owner cached by the previous pull, before it is overwritten below.
+    let previous_owner = config::load_agent_owner(Some(&workspace));
 
     // Load sync manifest for local-modification detection
     let manifest = super::sync::load_manifest_pub(&workspace);
@@ -703,7 +707,7 @@ pub async fn run(
                     let target_path = workspace.join(&af.target_path);
 
                     // Only the selected runtime's projection is written.
-                    if is_claude && is_opencode_path(&af.target_path) {
+                    if is_other_runtime_path(&af.target_path, is_claude) {
                         continue;
                     }
 
@@ -986,30 +990,6 @@ pub async fn run(
     // since mcp.json carries no model/agent routing config).
     let opencode_will_be_written = !is_claude;
 
-    // Stale-projection warning (follow-up to the run-1 claude-cli
-    // diagnostic pass): pull is intentionally additive-only and never
-    // deletes a toolstack projection on its own, so switching a project's
-    // agent_owner (e.g. "both"/"opencode" -> "claude-cli") leaves the
-    // no-longer-selected projection's files orphaned on disk instead of
-    // removing them. Surface this loudly instead of silently leaving stale
-    // duplicated files for the operator to discover later.
-    if is_claude && workspace.join(".opencode").exists() {
-        println!(
-            "   {} .opencode/ still present but agent_owner is now \"claude-cli\" -- \
-             these files are stale (pull never deletes an unselected projection). \
-             Remove .opencode/ manually if it's no longer needed.",
-            style("!").bold().yellow()
-        );
-    }
-    if !is_claude && workspace.join(".claude").exists() {
-        println!(
-            "   {} .claude/ still present but agent_owner is now \"opencode\" -- \
-             these files are stale (pull never deletes an unselected projection). \
-             Remove .claude/ manually if it's no longer needed.",
-            style("!").bold().yellow()
-        );
-    }
-
     let mut claude_report: Option<claude_render::ClaudeProjectionReport> = None;
     let proceed_with_opencode = if opencode_will_be_written {
         confirm_export_warnings(&export_warnings, force)?
@@ -1101,8 +1081,9 @@ pub async fn run(
 
     // CCX files (NEXUS-APP ADR-0117, dispatch 99f335e8): reconciled against
     // the CCX lock; the lock is only rewritten once everything succeeded.
+    // Claude Code only: an OpenCode project gets no .claude/rules etc.
     let mut ccx_outcomes: Vec<super::ccx::FileOutcome> = Vec::new();
-    if let Ok(ref af_export) = af_export_result {
+    if let (true, Ok(ref af_export)) = (is_claude, &af_export_result) {
         if let Some(ref info) = af_export.ccx {
             let lock = super::ccx::load_lock(&workspace, &agentic_root);
             let desired = super::ccx::ccx_files(&af_export.agent_files);
@@ -1199,6 +1180,33 @@ pub async fn run(
                 }
             }
         }
+    }
+
+    // Remove the projection of the runtime this project no longer uses
+    // (v0.29.0), now that the selected one is on disk. Skipped when the
+    // owner is unknown or the OpenCode config write was declined, so a
+    // failed pull never leaves the workspace without a projection.
+    if let (true, true, Ok(ref af_export)) = (
+        flavor_known,
+        is_claude || proceed_with_opencode,
+        &af_export_result,
+    ) {
+        let projection = super::projection_cleanup::Projection::unselected(is_claude);
+        let ctx = cleanup_context(
+            af_export,
+            &export.skills,
+            &agentic_root,
+            &project_name,
+            is_claude,
+            explicit_force,
+        );
+        let plan = super::projection_cleanup::plan(&workspace, projection, &ctx);
+        let report = super::projection_cleanup::apply(&workspace, &plan, &ctx)?;
+        let previous = previous_owner.as_deref().unwrap_or("opencode");
+        let current = tool_flavor.as_deref().unwrap_or("opencode");
+        let switched = (config::is_claude_owner(previous_owner.as_deref()) != is_claude)
+            .then_some((previous, current));
+        super::projection_cleanup::print_report(&report, projection, switched);
     }
 
     // Check prerequisites from af_export response.
@@ -1505,7 +1513,7 @@ pub async fn run(
 
     print_committed_workspace_summary(&ws_report);
 
-    if let Ok(ref af_export) = af_export_result {
+    if let (true, Ok(ref af_export)) = (is_claude, &af_export_result) {
         if let Some(ref info) = af_export.ccx {
             print_ccx_summary(
                 info,
@@ -2404,6 +2412,7 @@ fn write_mcp_configs(
         let exists = opencode_path.exists();
         let needs_write = !exists
             || force
+            || json_lacks_nexus_server(&opencode_path, "mcp")
             || !plugin_mcp_servers.is_empty()
             || !providers.is_empty()
             || opencode_agents.is_some()
@@ -2627,7 +2636,10 @@ fn write_mcp_configs(
     // ── .mcp.json (project root, Claude Code project scope) ────────────────
     if !skip_claude {
         let exists = claude_mcp_path.exists();
-        let needs_write = !exists || force || !plugin_mcp_servers.is_empty();
+        let needs_write = !exists
+            || force
+            || !plugin_mcp_servers.is_empty()
+            || json_lacks_nexus_server(&claude_mcp_path, "mcpServers");
 
         if needs_write {
             let mut servers_block: serde_json::Map<String, serde_json::Value> = if exists && !force
@@ -2749,6 +2761,16 @@ fn write_mcp_configs(
     }
 
     Ok(())
+}
+
+/// Whether the JSON config at `path` parses but has no `nexus` entry under
+/// `block` (e.g. a runtime switch removed it and the operator's own servers
+/// remain): the next pull adds it back. Unparseable files are left alone.
+fn json_lacks_nexus_server(path: &Path, block: &str) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .is_some_and(|v| v.get(block).and_then(|b| b.get("nexus")).is_none())
 }
 
 // ---------------------------------------------------------------------------
@@ -2987,6 +3009,60 @@ pub(crate) fn unique_agent_files(
     (kept, dropped)
 }
 
+/// Record several files as last written by pull (one manifest write).
+pub(crate) fn record_generated_many(
+    workspace: &Path,
+    agentic_root: &str,
+    files: &[(String, String)],
+) -> anyhow::Result<()> {
+    let mut recorded = load_pull_manifest(workspace, agentic_root);
+    let mut changed = false;
+    for (rel, content) in files {
+        let hash = sha256_hex(content);
+        if recorded.get(rel) != Some(&hash) {
+            recorded.insert(rel.clone(), hash);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    save_pull_manifest(workspace, agentic_root, &recorded)
+}
+
+/// Drop the pull-manifest records of the paths matching `remove`. Returns
+/// the number of records dropped.
+pub(crate) fn remove_generated_records(
+    workspace: &Path,
+    agentic_root: &str,
+    remove: impl Fn(&str) -> bool,
+) -> anyhow::Result<usize> {
+    let mut recorded = load_pull_manifest(workspace, agentic_root);
+    let before = recorded.len();
+    recorded.retain(|path, _| !remove(path));
+    let dropped = before - recorded.len();
+    if dropped > 0 {
+        save_pull_manifest(workspace, agentic_root, &recorded)?;
+    }
+    Ok(dropped)
+}
+
+fn save_pull_manifest(
+    workspace: &Path,
+    agentic_root: &str,
+    recorded: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let manifest_path = pull_manifest_path(workspace, agentic_root);
+    if let Some(parent) = manifest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(recorded)? + "\n",
+    )?;
+    Ok(())
+}
+
 /// Record `content` as last written by pull for `rel` in the pull manifest.
 fn record_generated(
     workspace: &Path,
@@ -3014,6 +3090,68 @@ fn record_generated(
 /// Whether an agent file belongs to the OpenCode projection.
 fn is_opencode_path(target_path: &str) -> bool {
     target_path == "opencode.json" || target_path.starts_with(".opencode/")
+}
+
+/// Whether an agent file belongs to the projection of the runtime the
+/// project does not use (`.opencode/`/`opencode.json` for Claude Code,
+/// `.claude/` for OpenCode). Same rule as `nexus status`.
+pub(crate) fn is_other_runtime_path(target_path: &str, is_claude: bool) -> bool {
+    if is_claude {
+        is_opencode_path(target_path)
+    } else {
+        target_path.starts_with(".claude/")
+    }
+}
+
+/// The [`super::projection_cleanup::CleanupContext`] for this pull: the
+/// selected runtime's paths are kept; the unselected runtime's rendered
+/// content identifies its unmodified files.
+pub(crate) fn cleanup_context(
+    af_export: &nexus_core::api::AgentFileExportResponse,
+    skills: &[nexus_core::api::ExportedSkill],
+    agentic_root: &str,
+    project_name: &str,
+    is_claude: bool,
+    force: bool,
+) -> super::projection_cleanup::CleanupContext {
+    let mut ctx = super::projection_cleanup::CleanupContext {
+        agentic_root: agentic_root.to_string(),
+        project_name: project_name.to_string(),
+        plugin_filenames: super::init::platform_plugin_filenames(),
+        mcp_server_names: af_export.mcp_servers.keys().cloned().collect(),
+        force,
+        ..Default::default()
+    };
+    for af in &af_export.agent_files {
+        let ccx_file = af.category == super::ccx::CCX_CATEGORY;
+        if is_other_runtime_path(&af.target_path, is_claude) || (ccx_file && !is_claude) {
+            ctx.add_known(&af.target_path, &af.body);
+        } else {
+            ctx.keep.insert(af.target_path.clone());
+        }
+    }
+    for skill in skills {
+        for (path, _) in render_skill_files(skill, agentic_root) {
+            ctx.keep.insert(path);
+        }
+        if is_claude {
+            if let Some((path, content)) = render_command_file(skill, agentic_root) {
+                ctx.add_known(&path, &content);
+            }
+        } else {
+            for (path, content) in claude_render::render_claude_skill_files(skill) {
+                ctx.add_known(&path, &content);
+            }
+        }
+    }
+    if !is_claude {
+        for (path, content) in
+            claude_render::claude_agent_files(&af_export.actors, &af_export.agent_files)
+        {
+            ctx.add_known(&path, &content);
+        }
+    }
+    ctx
 }
 
 fn print_synced(path: &str) {
@@ -3494,6 +3632,80 @@ mod tests {
             assert_eq!(git_head_content(&dir, "devbox.json"), None);
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── projection switch (v0.29.0) ────────────────────────────────────────
+
+    #[test]
+    fn test_is_other_runtime_path_is_symmetric() {
+        assert!(is_other_runtime_path(".opencode/plugins/x.ts", true));
+        assert!(is_other_runtime_path("opencode.json", true));
+        assert!(!is_other_runtime_path(".claude/rules/a.md", true));
+        assert!(is_other_runtime_path(".claude/rules/a.md", false));
+        assert!(!is_other_runtime_path(".opencode/plugins/x.ts", false));
+        assert!(!is_other_runtime_path(".nexus/AGENTS.md", false));
+        assert!(!is_other_runtime_path(".nexus/AGENTS.md", true));
+    }
+
+    fn export_for_cleanup() -> nexus_core::api::AgentFileExportResponse {
+        let af = |key: &str, path: &str, category: &str| {
+            serde_json::json!({
+                "file_key": key, "target_path": path, "name": key,
+                "category": category, "version": 1, "body": format!("body {key}\n")
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "project_id": "p",
+            "project_name": "Demo",
+            "count": 4,
+            "agentic_root": ".nexus",
+            "agent_files": [
+                af("agents", ".nexus/AGENTS.md", "agent"),
+                af("plugin", ".opencode/plugins/nexus-x.ts", "plugin"),
+                af("rules", ".claude/rules/10.md", "claude_experience"),
+                af("actor", ".nexus/actors/planner.md", "actor"),
+            ],
+            "mcp_servers": { "task-master-ai": { "command": "npx" } }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_cleanup_context_claude_project_keeps_claude_side() {
+        let export = export_for_cleanup();
+        let skill = nexus_core::api::ExportedSkill {
+            skill_id: "nx-a".into(),
+            name: "a".into(),
+            description: None,
+            version: 1,
+            body: None,
+            command_slug: Some("a".into()),
+            pinned: false,
+            resources: vec![],
+        };
+        let ctx = cleanup_context(&export, &[skill], ".nexus", "Demo", true, false);
+        assert!(ctx.keep.contains(".nexus/AGENTS.md"));
+        assert!(ctx.keep.contains(".claude/rules/10.md"));
+        assert!(ctx.keep.contains(".nexus/skills/nx-a/SKILL.md"));
+        assert!(!ctx.keep.contains(".opencode/plugins/nexus-x.ts"));
+        // The OpenCode side is known content (identifies unmodified files).
+        assert!(ctx.known.contains_key(".opencode/plugins/nexus-x.ts"));
+        assert!(ctx.known.contains_key(".opencode/commands/a.md"));
+        assert_eq!(ctx.mcp_server_names, vec!["task-master-ai".to_string()]);
+        assert!(!ctx.force);
+    }
+
+    #[test]
+    fn test_cleanup_context_opencode_project_knows_claude_side() {
+        let export = export_for_cleanup();
+        let ctx = cleanup_context(&export, &[], ".nexus", "Demo", false, true);
+        assert!(ctx.keep.contains(".opencode/plugins/nexus-x.ts"));
+        // CCX is Claude-only: known, never kept, for an OpenCode project.
+        assert!(!ctx.keep.contains(".claude/rules/10.md"));
+        assert!(ctx.known.contains_key(".claude/rules/10.md"));
+        // Actor agents rendered for Claude Code are known content.
+        assert!(ctx.known.contains_key(".claude/agents/planner.md"));
+        assert!(ctx.force);
     }
 
     // ── generated files (skills/commands), NEXUS-APP dispatch 4820e584 ─────
@@ -4852,6 +5064,40 @@ mod tests {
             "existing-cm"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_readds_missing_nexus_server() {
+        // After a switch away and back, .mcp.json may hold only the
+        // operator's servers: a plain pull adds the Nexus server again.
+        let dir = temp_pull_dir("mcp-readd");
+        fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"mine":{"command":"mine"}}}"#,
+        )
+        .unwrap();
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "tok",
+            "pid",
+            McpSource::Npm,
+            Some("claude-cli"),
+            ".nexus",
+            &HashMap::new(),
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            &None,
+            false,
+        )
+        .unwrap();
+        let mcp: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap();
+        assert!(mcp["mcpServers"]["nexus"].is_object());
+        assert!(mcp["mcpServers"]["mine"].is_object());
         let _ = fs::remove_dir_all(&dir);
     }
 

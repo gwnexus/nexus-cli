@@ -519,7 +519,9 @@ fn reset_entry(state: &WorkspaceState, e: &Entry) -> anyhow::Result<Option<Strin
             )?;
             Ok(None)
         }
-        (Kind::Stale, _) => Ok(Some("stale projection; remove manually".into())),
+        (Kind::Stale, _) => Ok(Some(
+            "stale projection of the unused runtime; run nexus pull to remove it".into(),
+        )),
     }
 }
 
