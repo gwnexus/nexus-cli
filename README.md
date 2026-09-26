@@ -52,6 +52,8 @@ nexus init [path]                       Initialize a Nexus project workspace
 nexus login                             Authenticate with the Nexus platform
 nexus logout                            Remove stored credentials
 nexus status                            Auth, project, environment, and every non-clean file with its next action
+nexus status --agents [--watch] [--json] Local agent fleet view (main agent, subagents, background, state, tool, runtime)
+nexus doctor claude [--fix]             Check the host tools of the Claude Code workspace, offer install commands
 nexus diff [path]                       Unified diffs for non-clean files (content and projection)
 nexus link [--project-id <id>]          Bind a project to the current workspace
 nexus unlink                            Remove project binding from the workspace
@@ -347,6 +349,42 @@ workspace = "none"   # or "zellij"
 Precedence: flag, then `[run] workspace`, then the project default
 (`run_target.workspace`). The pre-launch check shows the choice and its
 source in a `Workspace` row; the session summary repeats it.
+
+**Personal layout (ADR-0119).** When the backend renders a workspace layout
+for you (`af_export.claude_workspace`, e.g. a different preset than the team
+default), `nexus pull` writes it to `.nexus/claude/workspace.local.kdl`,
+which is added to `.git/info/exclude` and never committed. `run_target.layout`
+points to it. It is regenerated on every pull; a local edit is reported and
+kept unless `nexus pull --force` (`nexus status` / `diff` / `reset` list it as
+a projection). Until it has been pulled, `nexus run` falls back to the
+committed team layout `.nexus/claude/nexus-claude.kdl` with a WARN.
+
+### Agent Observability (`nexus status --agents`)
+
+The Nexus Claude Code hook appends `nexus.agent-observation.v1` events to
+`.nexus/claude/observer/events.jsonl` (local, git-excluded). `nexus status
+--agents` folds them per session and agent and shows the fleet: counts,
+main agent, subagents as a tree, background processes, state, current tool,
+runtime, model and repository/worktree. No network or login needed.
+
+```bash
+nexus status --agents            # one-shot view (finished sessions older than 30 min hidden; --all shows them)
+nexus status --agents --watch    # follow the file, redraw every second (the workspace observer pane runs this)
+nexus status --agents --json     # the folded agent list as JSON
+```
+
+It also works in a second terminal next to `nexus run --plain`. Without the
+hook it reports "no observation data".
+
+### Doctor (`nexus doctor claude`)
+
+Checks `claude`, `zellij`, `lazygit`, `ccusage` and `delta`. Which ones are
+required comes from your workspace layout (`claude_workspace.requires`),
+else from the run target (zellij). Missing required tools fail (exit 1),
+missing optional ones are informational; the Claude Code version is checked
+against the project's CCX compatibility range. `--fix` prints devbox (for
+devbox projects), brew or npm install commands and runs them only after
+confirmation (`-y`). `nexus pull` never installs anything.
 
 `nexus run` embeds the same checks and adds a **launch countdown** after
 they complete. The countdown gives you a moment to review the results before

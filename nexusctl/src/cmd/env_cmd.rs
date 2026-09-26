@@ -244,9 +244,42 @@ fn print_changes(resp: &ProjectSettingsResponse, dry_run: bool) {
             display(&c.to)
         );
     }
+    for line in agent_file_lines(resp, dry_run || resp.dry_run) {
+        println!("{line}");
+    }
     if dry_run || resp.dry_run {
         println!("   {} Dry run, nothing applied.", style("i").bold().blue());
     }
+}
+
+/// The agent files a change assigns / unassigns (e.g. an executioner
+/// switch), as reported by the backend.
+fn agent_file_lines(resp: &ProjectSettingsResponse, dry_run: bool) -> Vec<String> {
+    let Some(delta) = resp.agent_files.as_ref() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    let mut section = |keys: &[String], verb: &str, sign: console::StyledObject<&str>| {
+        if keys.is_empty() {
+            return;
+        }
+        lines.push(format!(
+            "   {} {} agent file(s) {}:",
+            sign,
+            keys.len(),
+            if dry_run {
+                format!("would be {verb}")
+            } else {
+                verb.to_string()
+            }
+        ));
+        for key in keys {
+            lines.push(format!("      {key}"));
+        }
+    };
+    section(&delta.assign, "assigned", style("+").bold().green());
+    section(&delta.unassign, "unassigned", style("-").bold().red());
+    lines
 }
 
 fn confirm(question: &str) -> anyhow::Result<bool> {
@@ -324,5 +357,34 @@ mod tests {
             resp.run_target.unwrap().workspace.as_deref(),
             Some("zellij")
         );
+    }
+
+    #[test]
+    fn test_agent_files_of_executioner_switch() {
+        let mut resp: ProjectSettingsResponse = serde_json::from_value(serde_json::json!({
+            "revision": "r", "settings": {"executioner": "claude-cli"},
+            "changes": [{"key": "executioner", "from": "opencode", "to": "claude-cli"}],
+            "dry_run": true,
+            "agent_files": {"assign": ["ccx-rule-base", "claude-md"], "unassign": ["opencode-json"]}
+        }))
+        .unwrap();
+        let lines: Vec<String> = agent_file_lines(&resp, true)
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "   + 2 agent file(s) would be assigned:",
+                "      ccx-rule-base",
+                "      claude-md",
+                "   - 1 agent file(s) would be unassigned:",
+                "      opencode-json",
+            ]
+        );
+        assert!(agent_file_lines(&resp, false)[0].contains("assigned:"));
+        // Older backends: nothing shown.
+        resp.agent_files = None;
+        assert!(agent_file_lines(&resp, false).is_empty());
     }
 }

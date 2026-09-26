@@ -524,6 +524,15 @@ pub async fn load(
             ));
         }
     }
+    // The per-user workspace layout (ADR-0119): a projection like the
+    // files above, recorded in the same pull manifest.
+    if let (true, Some(layout)) = (is_claude, export.claude_workspace.as_ref()) {
+        if !layout.body.trim().is_empty()
+            && super::pull::validate_agent_file_target_path(workspace, &layout.path).is_ok()
+        {
+            generated.push((layout.path.clone(), layout.body.clone()));
+        }
+    }
     let recorded = super::pull::load_pull_manifest(workspace, &agentic_root);
     for (path, content) in generated {
         let local = read(&path);

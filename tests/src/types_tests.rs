@@ -980,3 +980,41 @@ fn test_inference_token_issue_request_with_ceiling() {
     assert_eq!(value["profile_ceiling"]["profiles"][0], "coding");
     assert_eq!(value["expires_at"], "2027-01-01T00:00:00Z");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// claude_workspace (NEXUS-APP ADR-0119, dispatch c4f507b5)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_agent_file_export_response_claude_workspace() {
+    let json = r#"{
+        "project_id": "abc",
+        "project_name": "Test",
+        "agent_files": [],
+        "count": 0,
+        "run_target": {"tool": "claude", "workspace": "zellij", "layout": ".nexus/claude/workspace.local.kdl"},
+        "claude_workspace": {
+            "schema": "nexus.claude-workspace.v1",
+            "multiplexer": "zellij",
+            "path": ".nexus/claude/workspace.local.kdl",
+            "body": "layout {}\n",
+            "sha256": "ab",
+            "preset": "standard",
+            "source": "user",
+            "requires": ["zellij", "lazygit", "ccusage"]
+        }
+    }"#;
+    let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+    let layout = resp.claude_workspace.unwrap();
+    assert_eq!(layout.path, ".nexus/claude/workspace.local.kdl");
+    assert_eq!(layout.source.as_deref(), Some("user"));
+    assert_eq!(layout.requires, vec!["zellij", "lazygit", "ccusage"]);
+    assert_eq!(
+        resp.run_target.unwrap().layout.as_deref(),
+        Some(".nexus/claude/workspace.local.kdl")
+    );
+
+    let old = r#"{"project_id": "abc", "project_name": "Test", "agent_files": [], "count": 0}"#;
+    let resp: AgentFileExportResponse = serde_json::from_str(old).unwrap();
+    assert!(resp.claude_workspace.is_none());
+}

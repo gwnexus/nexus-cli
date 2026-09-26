@@ -287,7 +287,16 @@ pub fn is_workspace_shadow_active() -> anyhow::Result<bool> {
 /// exclude file cannot be written, errors are silently ignored. The function
 /// is intended to protect token-bearing config files from accidental commit.
 pub fn ensure_git_excluded(paths: &[&str]) {
-    let git_dir = match find_git_dir() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    ensure_git_excluded_in(&cwd, paths, "token-bearing files");
+}
+
+/// [`ensure_git_excluded`] for the repository containing `start`, with the
+/// reason shown in the comment line above the added entries.
+pub fn ensure_git_excluded_in(start: &Path, paths: &[&str], reason: &str) {
+    let git_dir = match find_git_dir_from(start.to_path_buf()) {
         Ok(d) => d,
         Err(_) => return,
     };
@@ -315,7 +324,7 @@ pub fn ensure_git_excluded(paths: &[&str]) {
     if !content.ends_with('\n') && !content.is_empty() {
         content.push('\n');
     }
-    content.push_str("# nexus: token-bearing files (auto-added)\n");
+    content.push_str(&format!("# nexus: {reason} (auto-added)\n"));
     for path in additions {
         content.push_str(path);
         content.push('\n');
@@ -329,7 +338,11 @@ pub fn ensure_git_excluded(paths: &[&str]) {
 
 /// Find the `.git` directory by walking up from CWD.
 fn find_git_dir() -> anyhow::Result<PathBuf> {
-    let mut dir = std::env::current_dir()?;
+    find_git_dir_from(std::env::current_dir()?)
+}
+
+/// Find the `.git` directory by walking up from `dir`.
+fn find_git_dir_from(mut dir: PathBuf) -> anyhow::Result<PathBuf> {
     loop {
         let candidate = dir.join(".git");
         if candidate.is_dir() {

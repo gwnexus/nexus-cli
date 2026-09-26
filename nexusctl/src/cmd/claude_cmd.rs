@@ -101,7 +101,7 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
 
 /// Whether `version` satisfies a space-separated comparator range such as
 /// `">=2.1.257 <3.0.0"`. `None` if either side cannot be parsed.
-fn version_satisfies(version: &str, range: &str) -> Option<bool> {
+pub(crate) fn version_satisfies(version: &str, range: &str) -> Option<bool> {
     let v = parse_version(version)?;
     for comparator in range.split_whitespace() {
         let (op, rest) = [">=", "<=", ">", "<", "="]

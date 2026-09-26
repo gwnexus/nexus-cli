@@ -1099,6 +1099,27 @@ pub async fn run(
         }
     }
 
+    // Per-caller workspace layout (NEXUS-APP ADR-0119, dispatch c4f507b5):
+    // personal, git-excluded, regenerated on every pull; a local edit is
+    // kept unless --force.
+    if let (true, Ok(ref af_export)) = (is_claude, &af_export_result) {
+        let layout = af_export
+            .claude_workspace
+            .as_ref()
+            .filter(|l| !l.body.trim().is_empty());
+        if let Some(layout) = layout {
+            match sync_claude_workspace(&workspace, &agentic_root, layout, explicit_force) {
+                Ok(outcome) => print_claude_workspace_outcome(layout, &outcome),
+                Err(e) => println!(
+                    "   {} Workspace layout {} not written: {}",
+                    style("!").bold().yellow(),
+                    layout.path,
+                    e
+                ),
+            }
+        }
+    }
+
     // Write .nexus/env from af_export.plugin_env (platform-managed, full overwrite)
     let plugin_env = af_export_result
         .as_ref()
@@ -3017,6 +3038,118 @@ fn sync_generated_files_with(
         serde_json::to_string_pretty(&recorded)? + "\n",
     )?;
     Ok((written, skipped))
+}
+
+/// Result of [`sync_claude_workspace`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClaudeWorkspaceOutcome {
+    Written,
+    Unchanged,
+    /// Edited locally since the last pull; kept (no --force).
+    KeptLocalEdit,
+}
+
+/// Git-exclude entries for the per-user layout and the local observer
+/// events (never committed).
+pub(crate) fn claude_workspace_excludes(
+    layout: &nexus_core::api::ClaudeWorkspace,
+    agentic_root: &str,
+) -> Vec<String> {
+    vec![
+        layout.path.clone(),
+        format!("{}/claude/observer/", agentic_root.trim_end_matches('/')),
+    ]
+}
+
+/// Write `af_export.claude_workspace` to its git-excluded path. Tracked in
+/// the pull manifest, so `nexus status` / `diff` / `reset` see it as a
+/// projection; a local edit is kept unless `force`.
+pub(crate) fn sync_claude_workspace(
+    workspace: &Path,
+    agentic_root: &str,
+    layout: &nexus_core::api::ClaudeWorkspace,
+    force: bool,
+) -> anyhow::Result<ClaudeWorkspaceOutcome> {
+    validate_agent_file_target_path(workspace, &layout.path)
+        .map_err(|e| anyhow::anyhow!("invalid path: {e}"))?;
+    if let Some(ref expected) = layout.sha256 {
+        if !expected.eq_ignore_ascii_case(&sha256_hex(&layout.body)) {
+            anyhow::bail!("sha256 does not match the delivered body");
+        }
+    }
+    let excludes = claude_workspace_excludes(layout, agentic_root);
+    let excludes: Vec<&str> = excludes.iter().map(String::as_str).collect();
+    super::shadow::ensure_git_excluded_in(workspace, &excludes, "per-user Claude Code workspace");
+
+    let mut recorded = load_pull_manifest(workspace, agentic_root);
+    let target = workspace.join(&layout.path);
+    let local = fs::read(&target).ok();
+    let outcome = match classify_generated(
+        local.as_deref(),
+        &layout.body,
+        recorded.get(&layout.path).map(String::as_str),
+    ) {
+        GeneratedState::Unchanged => ClaudeWorkspaceOutcome::Unchanged,
+        GeneratedState::LocallyModified if !force => {
+            return Ok(ClaudeWorkspaceOutcome::KeptLocalEdit)
+        }
+        _ => {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&target, &layout.body)?;
+            ClaudeWorkspaceOutcome::Written
+        }
+    };
+    recorded.insert(layout.path.clone(), sha256_hex(&layout.body));
+    let manifest_path = pull_manifest_path(workspace, agentic_root);
+    if let Some(parent) = manifest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&recorded)? + "\n",
+    )?;
+    Ok(outcome)
+}
+
+fn print_claude_workspace_outcome(
+    layout: &nexus_core::api::ClaudeWorkspace,
+    outcome: &ClaudeWorkspaceOutcome,
+) {
+    let detail = [
+        layout.preset.as_deref().map(|p| format!("preset {p}")),
+        layout.source.as_deref().map(|s| format!("from {s} level")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ");
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" ({detail})")
+    };
+    match outcome {
+        ClaudeWorkspaceOutcome::Written => println!(
+            "   {} Workspace layout {}{} (personal, git-excluded)",
+            style("+").bold().green(),
+            layout.path,
+            detail
+        ),
+        ClaudeWorkspaceOutcome::Unchanged => println!(
+            "   {} Workspace layout {}{} up to date",
+            style("=").dim(),
+            layout.path,
+            detail
+        ),
+        ClaudeWorkspaceOutcome::KeptLocalEdit => println!(
+            "   {} Workspace layout {} edited locally, kept (nexus diff {} to compare, nexus pull --force to replace)",
+            style("!").bold().yellow(),
+            layout.path,
+            layout.path
+        ),
+    }
 }
 
 /// The agent files to materialize, one per `target_path` (the first one
@@ -6032,5 +6165,79 @@ mod tests {
         assert!(is_locally_modified(&tmp, "AGENTS.md", &manifest));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    fn claude_layout(body: &str) -> nexus_core::api::ClaudeWorkspace {
+        nexus_core::api::ClaudeWorkspace {
+            schema: Some("nexus.claude-workspace.v1".into()),
+            multiplexer: Some("zellij".into()),
+            path: ".nexus/claude/workspace.local.kdl".into(),
+            body: body.into(),
+            sha256: Some(sha256_hex(body)),
+            preset: Some("focus".into()),
+            source: Some("user".into()),
+            requires: vec!["zellij".into()],
+        }
+    }
+
+    #[test]
+    fn test_sync_claude_workspace_writes_excludes_and_keeps_local_edit() {
+        let dir = temp_pull_dir("claude-workspace");
+        fs::create_dir_all(dir.join(".git/info")).unwrap();
+        let v1 = claude_layout("layout { pane }\n");
+        let path = dir.join(&v1.path);
+
+        assert_eq!(
+            sync_claude_workspace(&dir, ".nexus", &v1, false).unwrap(),
+            ClaudeWorkspaceOutcome::Written
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), v1.body);
+        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        assert!(exclude
+            .lines()
+            .any(|l| l == ".nexus/claude/workspace.local.kdl"));
+        assert!(exclude.lines().any(|l| l == ".nexus/claude/observer/"));
+        assert_eq!(
+            sync_claude_workspace(&dir, ".nexus", &v1, false).unwrap(),
+            ClaudeWorkspaceOutcome::Unchanged
+        );
+        // Excludes are added once.
+        let exclude2 = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude, exclude2);
+
+        // Unmodified since the last pull: regenerated silently.
+        let v2 = claude_layout("layout { pane; pane }\n");
+        assert_eq!(
+            sync_claude_workspace(&dir, ".nexus", &v2, false).unwrap(),
+            ClaudeWorkspaceOutcome::Written
+        );
+
+        // Local edit: kept without --force, replaced with it.
+        fs::write(&path, "my layout\n").unwrap();
+        let v3 = claude_layout("layout { v3 }\n");
+        assert_eq!(
+            sync_claude_workspace(&dir, ".nexus", &v3, false).unwrap(),
+            ClaudeWorkspaceOutcome::KeptLocalEdit
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "my layout\n");
+        assert_eq!(
+            sync_claude_workspace(&dir, ".nexus", &v3, true).unwrap(),
+            ClaudeWorkspaceOutcome::Written
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), v3.body);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sync_claude_workspace_rejects_bad_hash_and_path() {
+        let dir = temp_pull_dir("claude-workspace-bad");
+        let mut bad = claude_layout("layout {}\n");
+        bad.sha256 = Some("00".into());
+        assert!(sync_claude_workspace(&dir, ".nexus", &bad, true).is_err());
+        let mut escape = claude_layout("layout {}\n");
+        escape.path = "../outside.kdl".into();
+        assert!(sync_claude_workspace(&dir, ".nexus", &escape, true).is_err());
+        assert!(!dir.join(".nexus/claude/workspace.local.kdl").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

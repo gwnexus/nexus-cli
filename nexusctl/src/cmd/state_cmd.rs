@@ -287,6 +287,8 @@ fn refuse_projection(e: &Entry) -> Option<String> {
             e.path,
             if e.kind == Kind::Generated && e.path.contains("/skills/") {
                 " (skills are managed in the Nexus dashboard)"
+            } else if e.path.ends_with(".local.kdl") {
+                " (the workspace layout is your personal preference in the Nexus dashboard)"
             } else {
                 ""
             }

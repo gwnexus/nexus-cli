@@ -909,6 +909,10 @@ fn tool_label(tool: &str) -> String {
     }
 }
 
+/// The committed team-default layout (CCX), kept for older CLIs and as
+/// fallback while the personal layout has not been pulled yet.
+const TEAM_LAYOUT: &str = ".nexus/claude/nexus-claude.kdl";
+
 /// Resolve the start (NEXUS-APP dispatches 442f0e97, be6be18e).
 ///
 /// Tool: `--tool`, else `run_target.tool`, else [`resolve_effective_tool`]
@@ -966,8 +970,20 @@ fn resolve_launch(
     }
     let layout_rel = run_target
         .and_then(|t| t.layout.as_deref())
-        .unwrap_or(".nexus/claude/nexus-claude.kdl");
-    let layout = workspace.join(layout_rel);
+        .unwrap_or(TEAM_LAYOUT);
+    let mut layout = workspace.join(layout_rel);
+    // The personal layout (ADR-0119) is written by `nexus pull`; until then
+    // the committed team default still starts the workspace.
+    let mut fallback_note = String::new();
+    if !layout.is_file() && layout_rel != TEAM_LAYOUT && workspace.join(TEAM_LAYOUT).is_file() {
+        layout = workspace.join(TEAM_LAYOUT);
+        fallback_note = format!("; {layout_rel} not found, run nexus pull");
+    }
+    let layout_rel = if fallback_note.is_empty() {
+        layout_rel
+    } else {
+        TEAM_LAYOUT
+    };
     if !zellij_available {
         return direct(
             (
@@ -990,8 +1006,12 @@ fn resolve_launch(
         tool: "zellij".to_string(),
         leading_args: vec!["--layout".to_string(), layout.display().to_string()],
         row: (
-            RowLevel::Pass,
-            format!("{label} in zellij ({layout_rel}) [{src}]"),
+            if fallback_note.is_empty() {
+                RowLevel::Pass
+            } else {
+                RowLevel::Warn
+            },
+            format!("{label} in zellij ({layout_rel}{fallback_note}) [{src}]"),
         ),
         summary: format!("zellij ({src})"),
     }
@@ -3089,6 +3109,34 @@ mod tests {
             )
         );
         assert_eq!(l.summary, "zellij (project default)");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_launch_personal_layout_and_team_fallback() {
+        const LOCAL: &str = ".nexus/claude/workspace.local.kdl";
+        let dir = with_layout("personal");
+        let t = target("claude", Some("zellij"), Some(LOCAL));
+        // Not pulled yet: the team default starts, with a WARN.
+        let l = launch(None, Some(&t), &dir, true);
+        assert_eq!(l.tool, "zellij");
+        assert_eq!(l.leading_args[1], dir.join(KDL).display().to_string());
+        assert_eq!(l.row.0, RowLevel::Warn);
+        assert!(l
+            .row
+            .1
+            .contains("workspace.local.kdl not found, run nexus pull"));
+        // Pulled: the personal layout.
+        fs::write(dir.join(LOCAL), "layout {}").unwrap();
+        let l = launch(None, Some(&t), &dir, true);
+        assert_eq!(l.leading_args[1], dir.join(LOCAL).display().to_string());
+        assert_eq!(
+            l.row,
+            (
+                RowLevel::Pass,
+                format!("Claude Code in zellij ({LOCAL}) [project default]")
+            )
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

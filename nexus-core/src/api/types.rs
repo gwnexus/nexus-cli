@@ -393,6 +393,38 @@ pub struct AgentFileExportResponse {
     /// 442f0e97). `None` on older backends; then `agent_owner` decides.
     #[serde(default)]
     pub run_target: Option<RunTarget>,
+    /// Per-caller workspace layout (NEXUS-APP ADR-0119, dispatch
+    /// c4f507b5). Rendered for the calling user, so it is written to a
+    /// git-excluded path and never committed. When present,
+    /// `run_target.layout` points to `claude_workspace.path`.
+    #[serde(default)]
+    pub claude_workspace: Option<ClaudeWorkspace>,
+}
+
+/// `af_export.claude_workspace` (schema `nexus.claude-workspace.v1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeWorkspace {
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// `"zellij"` or `"none"`.
+    #[serde(default)]
+    pub multiplexer: Option<String>,
+    /// Workspace-relative target, e.g. `.nexus/claude/workspace.local.kdl`.
+    pub path: String,
+    /// The rendered layout.
+    pub body: String,
+    /// SHA-256 (hex) of `body`.
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// `standard` | `focus` | `review` | `custom`.
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// Which level decided the layout: `user` | `project` | `system`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Host tools the layout needs (e.g. `zellij`, `lazygit`, `ccusage`).
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 /// `GET /api/mcp/projects/{id}/settings` (and the 200 body of `PATCH`):
@@ -417,6 +449,19 @@ pub struct ProjectSettingsResponse {
     pub changes: Vec<SettingChange>,
     #[serde(default)]
     pub dry_run: bool,
+    /// PATCH only: agent files the change assigns / unassigns (e.g. an
+    /// executioner switch, NEXUS-APP 0.14.1). `None` on older backends.
+    #[serde(default)]
+    pub agent_files: Option<AgentFilesDelta>,
+}
+
+/// `agent_files` of a settings PATCH: file keys by direction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentFilesDelta {
+    #[serde(default)]
+    pub assign: Vec<String>,
+    #[serde(default)]
+    pub unassign: Vec<String>,
 }
 
 /// One entry of the settings `schema`.

@@ -129,7 +129,38 @@ pub enum Command {
     /// non-clean workspace file with its class (content/projection), state
     /// and next action. Supports --output json. Exits 1 when changes are
     /// pending.
-    Status,
+    ///
+    /// With --agents: the local Agent Observability view instead (main
+    /// agent, subagents, background processes, state, tool, runtime),
+    /// folded from .nexus/claude/observer/events.jsonl. No network.
+    Status {
+        /// Show the agent fleet from the local observation events.
+        #[arg(long)]
+        agents: bool,
+
+        /// Follow the events and redraw once per second (with --agents).
+        #[arg(long, requires = "agents")]
+        watch: bool,
+
+        /// Print the folded agent list as JSON (with --agents; same as
+        /// --output json).
+        #[arg(long, requires = "agents")]
+        json: bool,
+
+        /// Include sessions that finished long ago (with --agents).
+        #[arg(long, requires = "agents")]
+        all: bool,
+
+        /// Events file (default: .nexus/claude/observer/events.jsonl).
+        #[arg(long, requires = "agents", value_name = "PATH")]
+        file: Option<String>,
+    },
+
+    /// Check the host environment.
+    Doctor {
+        #[command(subcommand)]
+        target: DoctorTarget,
+    },
 
     /// Show unified diffs for non-clean files: content vs. the backend,
     /// projection vs. what the next pull writes (incl. managed settings keys
@@ -397,6 +428,20 @@ pub enum EnvAction {
         /// Run `nexus pull` afterwards to apply the change locally.
         #[arg(long)]
         pull: bool,
+    },
+}
+
+/// `nexus doctor` targets.
+#[derive(Debug, Subcommand)]
+pub enum DoctorTarget {
+    /// Check the tools the Claude Code workspace needs (claude, zellij,
+    /// lazygit, ccusage, delta), driven by your workspace layout. Exits 1
+    /// when a required tool is missing. Supports --output json.
+    Claude {
+        /// Print install commands (devbox, brew or npm) and run them after
+        /// confirmation. Nothing is installed without it.
+        #[arg(long)]
+        fix: bool,
     },
 }
 
@@ -1193,7 +1238,14 @@ mod tests {
     #[test]
     fn test_parse_status() {
         let cli = Cli::try_parse_from(["nexus", "status"]).unwrap();
-        assert!(matches!(cli.command, Command::Status));
+        assert!(matches!(
+            cli.command,
+            Command::Status {
+                agents: false,
+                watch: false,
+                ..
+            }
+        ));
     }
 
     #[test]

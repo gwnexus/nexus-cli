@@ -8,6 +8,7 @@ pub(crate) mod claude_render;
 mod config_cmd;
 mod deinit;
 pub(crate) mod display;
+mod doctor;
 mod env_cmd;
 pub(crate) mod git;
 pub(crate) mod githooks;
@@ -15,6 +16,7 @@ pub(crate) mod import;
 mod init;
 mod link;
 pub(crate) mod mcp_local;
+pub(crate) mod observer;
 pub(crate) mod preflight;
 pub(crate) mod project;
 pub(crate) mod projection_cleanup;
@@ -30,9 +32,9 @@ mod upgrade;
 pub(crate) mod workspace_state;
 
 use crate::{
-    ActorAvatarAction, ActorsAction, ClaudeAction, Cli, Command, ConfigAction, EnvAction,
-    GitAction, ProjectAction, ShadowAction, SkillsAction, StashAction, SyncAction, WorkspaceAction,
-    WorkspaceShadowAction,
+    ActorAvatarAction, ActorsAction, ClaudeAction, Cli, Command, ConfigAction, DoctorTarget,
+    EnvAction, GitAction, ProjectAction, ShadowAction, SkillsAction, StashAction, SyncAction,
+    WorkspaceAction, WorkspaceShadowAction,
 };
 
 /// Dispatch the parsed CLI command to the appropriate handler.
@@ -117,7 +119,40 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Logout { global, .. } => {
             auth::logout(global)?;
         }
-        Command::Status => {
+        Command::Status {
+            agents: true,
+            watch,
+            json,
+            all,
+            ref file,
+        } => {
+            // Local only: no config, auth or network needed.
+            let json = json
+                || matches!(
+                    cli.output
+                        .as_deref()
+                        .map(str::to_ascii_lowercase)
+                        .as_deref(),
+                    Some("json")
+                );
+            if watch {
+                observer::watch(file.as_deref(), json, all)?;
+            } else {
+                observer::show(file.as_deref(), json, all)?;
+            }
+        }
+        Command::Doctor {
+            target: DoctorTarget::Claude { fix },
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            let json = matches!(
+                cli.resolve_output(&config),
+                nexus_core::OutputPreference::Json
+            );
+            exit_with(doctor::claude(&api_url, fix, cli.yes, json).await?);
+        }
+        Command::Status { .. } => {
             let workspace = std::env::current_dir()?;
             let effective =
                 nexus_core::config::Config::load_effective_with_provenance(Some(&workspace))?;
