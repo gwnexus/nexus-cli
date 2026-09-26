@@ -501,6 +501,25 @@ pub struct ClaudeSettingsSpec {
     pub values: serde_json::Map<String, serde_json::Value>,
 }
 
+impl ClaudeSettingsSpec {
+    /// The value for a managed dot-path. The backend sends `values` nested
+    /// (`{"permissions": {"deny": [...]}}` for `"permissions.deny"`); a
+    /// literal dotted key is accepted as well. Looking up only the dotted
+    /// key silently dropped every nested managed setting
+    /// (NEXUS-APP dispatch 95d81511).
+    pub fn value(&self, path: &str) -> Option<&serde_json::Value> {
+        if let Some(v) = self.values.get(path) {
+            return Some(v);
+        }
+        let mut parts = path.split('.');
+        let mut current = self.values.get(parts.next()?)?;
+        for part in parts {
+            current = current.as_object()?.get(part)?;
+        }
+        Some(current)
+    }
+}
+
 /// A single Claude Code hook adapter script to materialize on disk
 /// (Track B3, NEXUS-APP dispatch 2d5017f7).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1433,5 +1452,33 @@ mod tests {
             resp.plugin_env.get("HEADROOM_MODE").map(|s| s.as_str()),
             Some("transform")
         );
+    }
+}
+
+#[cfg(test)]
+mod claude_settings_spec_tests {
+    use super::ClaudeSettingsSpec;
+
+    fn spec(values: serde_json::Value) -> ClaudeSettingsSpec {
+        ClaudeSettingsSpec {
+            managed_keys: vec!["permissions.deny".into()],
+            values: values.as_object().unwrap().clone(),
+        }
+    }
+
+    #[test]
+    fn value_resolves_nested_and_dotted_keys() {
+        let nested = spec(serde_json::json!({"permissions": {"deny": ["a"]}}));
+        assert_eq!(
+            nested.value("permissions.deny"),
+            Some(&serde_json::json!(["a"]))
+        );
+        let dotted = spec(serde_json::json!({"permissions.deny": ["b"]}));
+        assert_eq!(
+            dotted.value("permissions.deny"),
+            Some(&serde_json::json!(["b"]))
+        );
+        assert_eq!(nested.value("permissions.allow"), None);
+        assert_eq!(nested.value("model"), None);
     }
 }

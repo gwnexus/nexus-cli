@@ -643,12 +643,11 @@ pub(crate) fn strip_nexus_settings(
     };
 
     let mut nexus_evidence = lock.is_some();
-    if let Some(previous) = lock.and_then(|l| l.settings.as_ref()).map(flatten_spec) {
-        let previous = &previous;
+    if let Some(previous) = lock.and_then(|l| l.settings.as_ref()) {
         ccx::reconcile_settings_removed_keys(settings, None, Some(previous));
         if force {
             for key in &previous.managed_keys {
-                if !previous.values.get(key).is_some_and(|v| v.is_array()) {
+                if !previous.value(key).is_some_and(|v| v.is_array()) {
                     ccx::json_remove_path(settings, key);
                 }
             }
@@ -705,28 +704,6 @@ pub(crate) fn strip_nexus_settings(
     }
 
     *settings != before
-}
-
-/// `spec` with one `values` entry per managed dot path. Backends send a
-/// dotted key's value either under the dotted key itself
-/// (`"permissions.deny": [...]`) or nested (`"permissions": {"deny": [...]}`);
-/// the lock records whichever arrived.
-fn flatten_spec(spec: &nexus_core::api::ClaudeSettingsSpec) -> nexus_core::api::ClaudeSettingsSpec {
-    let nested = serde_json::Value::Object(spec.values.clone());
-    let values = spec
-        .managed_keys
-        .iter()
-        .filter_map(|key| {
-            spec.values
-                .get(key)
-                .or_else(|| ccx::json_get_path(&nested, key))
-                .map(|v| (key.clone(), v.clone()))
-        })
-        .collect();
-    nexus_core::api::ClaudeSettingsSpec {
-        managed_keys: spec.managed_keys.clone(),
-        values,
-    }
 }
 
 /// Whether a settings value has nothing left but (at most) `$schema`.

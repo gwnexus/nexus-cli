@@ -1661,7 +1661,7 @@ fn print_ccx_summary(
         );
     }
     let nexus_core_plugin = claude_settings
-        .and_then(|s| s.values.get("enabledPlugins"))
+        .and_then(|s| s.value("enabledPlugins"))
         .and_then(|v| v.as_object())
         .is_some_and(|plugins| {
             plugins

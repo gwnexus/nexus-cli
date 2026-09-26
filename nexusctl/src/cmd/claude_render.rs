@@ -635,7 +635,7 @@ pub fn apply_generic_settings(
     let mut changed = 0usize;
     if let Some(spec) = spec {
         for key_path in &spec.managed_keys {
-            let Some(new_value) = spec.values.get(key_path) else {
+            let Some(new_value) = spec.value(key_path) else {
                 continue;
             };
             let merged_value = match (json_get_path(settings, key_path), new_value) {
@@ -2162,6 +2162,61 @@ mod tests {
         assert_eq!(deny.len(), 2);
         assert!(deny.iter().any(|v| v == "Read(./secrets.json)"));
         assert!(deny.iter().any(|v| v == "Read(./.env)"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_generic_settings_applies_nested_values() {
+        // The backend sends `values` nested, not under the dotted key
+        // (NEXUS-APP dispatch 95d81511): the deny list must still land.
+        let dir = temp_dir("ccx-nested-values");
+        let spec = sample_ccx_spec(
+            &["permissions.deny", "statusLine"],
+            &[
+                (
+                    "permissions",
+                    serde_json::json!({"deny": ["Read(./.env)", "Read(./.env.*)"]}),
+                ),
+                ("statusLine", serde_json::json!({"type": "command"})),
+            ],
+        );
+        assert_eq!(
+            merge_claude_generic_settings(&dir, Some(&spec), None).unwrap(),
+            2
+        );
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!(["Read(./.env)", "Read(./.env.*)"])
+        );
+        assert_eq!(settings["statusLine"]["type"], "command");
+        assert_eq!(
+            merge_claude_generic_settings(&dir, Some(&spec), Some(&spec)).unwrap(),
+            0
+        );
+
+        // Dropping the key later removes exactly the entries Nexus added.
+        let mut raw = settings.clone();
+        raw["permissions"]["deny"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("Read(./mine)"));
+        fs::write(dir.join(".claude/settings.json"), raw.to_string()).unwrap();
+        let current = sample_ccx_spec(
+            &["statusLine"],
+            &[("statusLine", serde_json::json!({"type": "command"}))],
+        );
+        merge_claude_generic_settings(&dir, Some(&current), Some(&spec)).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!(["Read(./mine)"])
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -486,7 +486,7 @@ pub async fn load(
                 continue;
             }
             // Local edit when the value differs from what the lock recorded.
-            let recorded = previous.and_then(|p| p.values.get(key.as_str()));
+            let recorded = previous.and_then(|p| p.value(key));
             let state = if before.is_some() && recorded.is_some() && before != recorded {
                 State::Drifted
             } else {

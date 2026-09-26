@@ -670,13 +670,13 @@ pub fn reconcile_settings_removed_keys(
 
     let mut changed = 0usize;
     for key_path in &previous.managed_keys {
-        let Some(lock_value) = previous.values.get(key_path) else {
+        let Some(lock_value) = previous.value(key_path) else {
             continue;
         };
         if still_managed.contains(key_path.as_str()) {
             // Still managed: for array unions, drop only the entries Nexus
             // previously added but no longer sends (operator entries stay).
-            let new_value = current.and_then(|c| c.values.get(key_path));
+            let new_value = current.and_then(|c| c.value(key_path));
             if let (
                 Some(serde_json::Value::Array(existing)),
                 serde_json::Value::Array(lock_arr),
