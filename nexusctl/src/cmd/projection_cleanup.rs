@@ -625,7 +625,11 @@ fn plan_claude(
         let Ok(bytes) = fs::read(workspace.join(&rel)) else {
             continue;
         };
-        match records.origin(&rel, &bytes, false) {
+        // Actor sub-agent files an older CLI wrote without a record: their
+        // frontmatter identifies them as Nexus actors.
+        let actor_file =
+            rel.starts_with(".claude/agents/") && bytes.starts_with(b"---\nid: actor-");
+        match records.origin(&rel, &bytes, actor_file) {
             Origin::Pristine => actions.push(Action::RemoveFile {
                 path: rel,
                 note: "projection removed",
@@ -901,13 +905,45 @@ pub(crate) fn strip_claude_md(
     };
     let is_template = rest.trim_start().starts_with("---\ntype: bootstrap")
         && rest.contains(super::pull::MANAGED_MARKER);
-    if rest.trim().is_empty() || rest == template || (force && is_template) {
-        ClaudeMdCleanup::Remove
-    } else if had_block {
+    if rest.trim().is_empty() || rest == template {
+        return ClaudeMdCleanup::Remove;
+    }
+    if force && is_template {
+        // Another tool's managed block (e.g. `next dev`'s
+        // nextjs-agent-rules) is not Nexus content: it survives.
+        let foreign = foreign_managed_blocks(&rest);
+        return if foreign.is_empty() {
+            ClaudeMdCleanup::Remove
+        } else {
+            ClaudeMdCleanup::Rewrite(foreign.join("\n\n") + "\n")
+        };
+    }
+    if had_block {
         ClaudeMdCleanup::Rewrite(rest)
     } else {
         ClaudeMdCleanup::Untouched
     }
+}
+
+/// `<!-- BEGIN:x -->...<!-- END:x -->` blocks of other tools in `content`,
+/// verbatim and in order.
+fn foreign_managed_blocks(content: &str) -> Vec<&str> {
+    let mut blocks = Vec::new();
+    let mut rest = content;
+    while let Some(start) = rest.find("<!-- BEGIN:") {
+        let after = &rest[start + "<!-- BEGIN:".len()..];
+        let Some(name_end) = after.find(" -->") else {
+            break;
+        };
+        let end_marker = format!("<!-- END:{} -->", &after[..name_end]);
+        let Some(end) = rest[start..].find(&end_marker) else {
+            break;
+        };
+        let stop = start + end + end_marker.len();
+        blocks.push(&rest[start..stop]);
+        rest = &rest[stop..];
+    }
+    blocks
 }
 
 // ---------------------------------------------------------------------------
@@ -1753,6 +1789,23 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_cleanup_unrecorded_actor_files_need_force() {
+        let dir = temp_dir("cl-actors");
+        let actor = "---\nid: actor-docs\nslug: docs\nsource: workspace\n---\nbody\n";
+        put(&dir, ".claude/agents/docs.md", actor);
+        put(&dir, ".claude/agents/mine.md", "---\nname: mine\n---\n");
+        let report = run(&dir, Projection::Claude, &claude_ctx(false));
+        assert_eq!(
+            kept(&report),
+            vec![(".claude/agents/docs.md".into(), KeepReason::Modified)]
+        );
+        let report = run(&dir, Projection::Claude, &claude_ctx(true));
+        assert_eq!(removed(&report), vec![".claude/agents/docs.md"]);
+        assert!(dir.join(".claude/agents/mine.md").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_claude_cleanup_legacy_claude_root_keeps_canonical_skills() {
         let dir = temp_dir("cl-legacy-root");
         put(
@@ -1891,6 +1944,17 @@ mod tests {
         assert_eq!(
             strip_claude_md(&with_block(&edited), Some(&ok), &template, true),
             ClaudeMdCleanup::Remove
+        );
+        // --force on the bootstrap template keeps another tool's block.
+        let next = "<!-- BEGIN:nextjs-agent-rules -->\nrules\n<!-- END:nextjs-agent-rules -->";
+        let with_next = format!("{template}\n{next}\n");
+        assert_eq!(
+            strip_claude_md(&with_block(&with_next), Some(&ok), &template, true),
+            ClaudeMdCleanup::Rewrite(format!("{next}\n"))
+        );
+        assert_eq!(
+            strip_claude_md(&with_block(&with_next), Some(&ok), &template, false),
+            ClaudeMdCleanup::Rewrite(with_next.clone())
         );
         // No block, plain user file: untouched.
         assert_eq!(

@@ -384,8 +384,19 @@ pub async fn run(
         return Ok(());
     }
 
-    // Read files and push
+    // Read files and push: only the files Nexus tracks, the same set the
+    // comparison above used (untracked local scripts were reported as
+    // skipped but still uploaded into the fork).
     let (devbox_json, script_files) = read_workspace_files(&workspace);
+    let devbox_json = devbox_json.filter(|_| local_hashes.contains_key("devbox.json"));
+    let script_files = script_files
+        .map(|files| {
+            files
+                .into_iter()
+                .filter(|(rel, _)| local_hashes.contains_key(&format!("{SCRIPTS_DIR}/{rel}")))
+                .collect::<HashMap<_, _>>()
+        })
+        .filter(|files| !files.is_empty());
 
     let name_display = fork_name.unwrap_or("(auto-generated)");
     println!(

@@ -425,6 +425,34 @@ pub fn merge_claude_hooks(
             }
             let event_array = event_array.as_array_mut().expect("just ensured array");
 
+            let command = format!(
+                "node \"${{CLAUDE_PROJECT_DIR}}/{}\" {}",
+                adapter.target_path,
+                kebab_case_event(&hook_event.event)
+            );
+            // Nexus's own entry (exactly its command, nothing else): keep
+            // its matcher in sync, since the backend widens matchers over
+            // time (e.g. `mcp__nexus__.*`). An entry the operator changed
+            // or extended is left alone.
+            if let Some(own) = event_array
+                .iter_mut()
+                .find(|entry| hook_entry_is_only(entry, &command))
+            {
+                let current = own.get("matcher").and_then(|m| m.as_str());
+                if current != hook_event.matcher.as_deref() {
+                    let obj = own.as_object_mut().expect("entry is an object");
+                    match hook_event.matcher {
+                        Some(ref m) => {
+                            obj.insert("matcher".into(), serde_json::Value::String(m.clone()));
+                        }
+                        None => {
+                            obj.remove("matcher");
+                        }
+                    }
+                    appended += 1;
+                }
+                continue;
+            }
             let already_registered = event_array.iter().any(|entry| {
                 entry
                     .get("hooks")
@@ -442,11 +470,6 @@ pub fn merge_claude_hooks(
                 continue;
             }
 
-            let command = format!(
-                "node \"${{CLAUDE_PROJECT_DIR}}/{}\" {}",
-                adapter.target_path,
-                kebab_case_event(&hook_event.event)
-            );
             let mut hook_command = serde_json::json!({
                 "type": "command",
                 "command": command,
@@ -483,33 +506,47 @@ pub fn merge_claude_hooks(
     Ok((appended, removed_plugin_names))
 }
 
-/// Remove exactly the `.claude/settings.json` hook entries Nexus wrote for
-/// one adapter (matched on event, matcher and command), leaving every other
-/// entry alone. Returns the number of entries removed.
+/// Whether a `settings.json` hook entry holds exactly one hook, running
+/// `command`.
+fn hook_entry_is_only(entry: &serde_json::Value, command: &str) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .is_some_and(|hooks| {
+            hooks.len() == 1 && hooks[0].get("command").and_then(|c| c.as_str()) == Some(command)
+        })
+}
+
+/// Remove exactly the `.claude/settings.json` hooks Nexus wrote for one
+/// adapter: every hook running a recorded command (the adapter script path
+/// makes it Nexus's), whatever matcher its entry has by now -- the matcher
+/// may be an older one the backend has since widened. Other hooks in the
+/// same entry stay; an entry left without hooks is dropped. Returns the
+/// number of hooks removed.
 pub(crate) fn remove_hook_registrations(
     hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
     entry: &ccx::CcxLockHookEntry,
 ) -> usize {
     let mut removed = 0;
     for reg in &entry.registrations {
-        if let Some(event_array) = hooks_obj.get_mut(&reg.event).and_then(|v| v.as_array_mut()) {
-            let before = event_array.len();
-            event_array.retain(|item| {
-                let matcher_matches =
-                    item.get("matcher").and_then(|m| m.as_str()) == reg.matcher.as_deref();
-                let command_matches =
-                    item.get("hooks")
-                        .and_then(|h| h.as_array())
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|h| {
-                                h.get("command").and_then(|c| c.as_str())
-                                    == Some(reg.command.as_str())
-                            })
-                        });
-                !(matcher_matches && command_matches)
-            });
-            removed += before - event_array.len();
+        let Some(event_array) = hooks_obj.get_mut(&reg.event).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for item in event_array.iter_mut() {
+            if let Some(hooks) = item.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                let before = hooks.len();
+                hooks.retain(|h| {
+                    h.get("command").and_then(|c| c.as_str()) != Some(reg.command.as_str())
+                });
+                removed += before - hooks.len();
+            }
         }
+        event_array.retain(|item| {
+            !item
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(|h| h.is_empty())
+        });
     }
     removed
 }
@@ -2566,6 +2603,82 @@ mod tests {
         assert!(settings.contains("nexus-session-guard.mjs"));
         assert!(settings.contains("post-tool-use"));
         assert!(settings.contains("${CLAUDE_PROJECT_DIR}"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_updates_matcher_of_own_entry_only() {
+        // The backend widened the matcher; an earlier pull wrote the old
+        // one (NEXUS-APP dispatch 95d81511 E2E finding).
+        let dir = temp_dir("hooks-matcher-update");
+        let cmd =
+            "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/nexus-session-guard.mjs\" post-tool-use";
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"PostToolUse": [
+                {"matcher": "Edit", "hooks": [{"type": "command", "command": cmd}]}
+            ]}})
+            .to_string(),
+        )
+        .unwrap();
+        let adapter = ClaudeHookAdapter {
+            plugin_name: "session-guard".to_string(),
+            target_path: ".claude/hooks/nexus-session-guard.mjs".to_string(),
+            body: String::new(),
+            hook_events: vec![nexus_core::api::ClaudeHookEvent {
+                event: "PostToolUse".to_string(),
+                matcher: Some("Edit|mcp__nexus__.*".to_string()),
+                timeout: None,
+            }],
+        };
+        let (changed, _) = merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
+        assert_eq!(changed, 1);
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap()
+        };
+        let post = read()["hooks"]["PostToolUse"].clone();
+        assert_eq!(post.as_array().unwrap().len(), 1);
+        assert_eq!(post[0]["matcher"], "Edit|mcp__nexus__.*");
+        let (again, _) = merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
+        assert_eq!(again, 0);
+
+        // An entry the operator extended is not rewritten.
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"PostToolUse": [
+                {"matcher": "Edit", "hooks": [
+                    {"type": "command", "command": cmd},
+                    {"type": "command", "command": "./mine.sh"}
+                ]}
+            ]}})
+            .to_string(),
+        )
+        .unwrap();
+        let (changed, _) = merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
+        assert_eq!(changed, 0);
+        assert_eq!(read()["hooks"]["PostToolUse"][0]["matcher"], "Edit");
+
+        // Removal ignores the (old) matcher and keeps the operator's hook.
+        let entry = ccx::CcxLockHookEntry {
+            plugin_name: "session-guard".into(),
+            target_path: ".claude/hooks/nexus-session-guard.mjs".into(),
+            file_sha256: String::new(),
+            registrations: vec![ccx::CcxLockHookRegistration {
+                event: "PostToolUse".into(),
+                matcher: Some("Edit|mcp__nexus__.*".into()),
+                command: cmd.into(),
+            }],
+        };
+        let mut settings = read();
+        let hooks = settings["hooks"].as_object_mut().unwrap();
+        assert_eq!(remove_hook_registrations(hooks, &entry), 1);
+        assert_eq!(
+            hooks["PostToolUse"],
+            serde_json::json!([{"matcher": "Edit", "hooks": [{"type": "command", "command": "./mine.sh"}]}])
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
