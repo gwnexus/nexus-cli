@@ -1201,12 +1201,23 @@ pub async fn run(
             explicit_force,
         );
         let plan = super::projection_cleanup::plan(&workspace, projection, &ctx);
-        let report = super::projection_cleanup::apply(&workspace, &plan, &ctx)?;
-        let previous = previous_owner.as_deref().unwrap_or("opencode");
-        let current = tool_flavor.as_deref().unwrap_or("opencode");
-        let switched = (config::is_claude_owner(previous_owner.as_deref()) != is_claude)
-            .then_some((previous, current));
-        super::projection_cleanup::print_report(&report, projection, switched);
+        // The selected projection is already complete: a cleanup error is
+        // reported, and the rest of the pull continues.
+        match super::projection_cleanup::apply(&workspace, &plan, &ctx) {
+            Ok(report) => {
+                let previous = previous_owner.as_deref().unwrap_or("opencode");
+                let current = tool_flavor.as_deref().unwrap_or("opencode");
+                let switched = (config::is_claude_owner(previous_owner.as_deref()) != is_claude)
+                    .then_some((previous, current));
+                super::projection_cleanup::print_report(&report, projection, switched);
+            }
+            Err(e) => println!(
+                "   {} Could not remove the unused {} projection: {} (re-run nexus pull)",
+                style("!").bold().yellow(),
+                projection.label(),
+                e
+            ),
+        }
     }
 
     // Check prerequisites from af_export response.
