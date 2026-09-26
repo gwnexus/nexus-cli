@@ -447,7 +447,12 @@ fn reset_entry(state: &WorkspaceState, e: &Entry) -> anyhow::Result<Option<Strin
         }
         (Kind::Workspace, _) => match e.desired.as_deref() {
             Some(body) => {
-                write_file(ws, &e.path, body)?;
+                // Same on-disk form as nexus pull: exactly one final newline.
+                write_file(
+                    ws,
+                    &e.path,
+                    &nexus_core::hash::with_single_trailing_newline(body),
+                )?;
                 super::sync::update_manifest_after_pull(ws, &e.path, &e.path, &sha256_hex(body))?;
                 Ok(None)
             }

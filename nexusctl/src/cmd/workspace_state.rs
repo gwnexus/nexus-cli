@@ -213,6 +213,31 @@ pub fn classify(
     })
 }
 
+/// [`classify`] for text workspace files (`devbox.json`, scripts):
+/// differences only in trailing newlines are not changes, and a hash
+/// recorded for the backend's copy still matches a local file that only
+/// gained (or lost) its final newline.
+pub fn classify_workspace_file(
+    local: Option<&[u8]>,
+    recorded: Option<&str>,
+    desired: &str,
+) -> Option<State> {
+    use nexus_core::hash::{hash_matches_text, text_equivalent};
+    let Some(local) = local else {
+        return classify(FileClass::Content, None, recorded, desired, false);
+    };
+    let local = String::from_utf8_lossy(local);
+    if text_equivalent(&local, desired) {
+        return None;
+    }
+    Some(match recorded {
+        Some(r) if hash_matches_text(r, &local) => State::Update,
+        Some(r) if hash_matches_text(r, desired) => State::Modified,
+        Some(_) => State::Conflict,
+        None => State::Unmanaged,
+    })
+}
+
 fn sync_manifest_hash(manifest: &serde_json::Value, target_path: &str) -> Option<String> {
     let obj = manifest.as_object()?;
     obj.values()
@@ -561,12 +586,10 @@ async fn workspace_entries(
 
     for (path, body) in desired {
         let local = std::fs::read(workspace.join(&path)).ok();
-        if let Some(state) = classify(
-            FileClass::Content,
+        if let Some(state) = classify_workspace_file(
             local.as_deref(),
             sync_manifest_hash(manifest, &path).as_deref(),
             &body,
-            false,
         ) {
             // An untracked local file where the backend has one is a
             // conflict for content, never silently "unmanaged".
@@ -593,9 +616,14 @@ async fn workspace_entries(
             continue;
         }
         let recorded = sync_manifest_hash(manifest, &path);
+        let unchanged = |r: &str| {
+            r == hash
+                || std::fs::read_to_string(workspace.join(&path))
+                    .is_ok_and(|c| nexus_core::hash::hash_matches_text(r, &c))
+        };
         let state = match recorded {
             None => State::New,
-            Some(r) if r != hash => State::Modified,
+            Some(r) if !unchanged(&r) => State::Modified,
             Some(_) => continue,
         };
         entries.push(Entry {
@@ -619,6 +647,31 @@ mod tests {
 
     fn h(s: &str) -> String {
         sha256_hex(s)
+    }
+
+    #[test]
+    fn test_classify_workspace_file_ignores_trailing_newline() {
+        let server = "{\"packages\":[]}";
+        let recorded = h(server);
+        // End-of-file fixer added a newline: clean, not modified/conflict.
+        assert_eq!(
+            classify_workspace_file(Some(b"{\"packages\":[]}\n"), Some(&recorded), server),
+            None
+        );
+        // Unchanged local (with newline), backend moved on: update.
+        assert_eq!(
+            classify_workspace_file(Some(b"{\"packages\":[]}\n"), Some(&recorded), "{}"),
+            Some(State::Update)
+        );
+        // A real local edit is still modified.
+        assert_eq!(
+            classify_workspace_file(Some(b"{\"packages\":[1]}\n"), Some(&recorded), server),
+            Some(State::Modified)
+        );
+        assert_eq!(
+            classify_workspace_file(None, Some(&recorded), server),
+            Some(State::Deleted)
+        );
     }
 
     #[test]

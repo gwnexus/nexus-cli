@@ -463,7 +463,10 @@ pub fn plan_files(
 
 /// Hash recorded in `.nexus/sync-manifest.json` (`file_key -> { hash,
 /// target_path }`) for `target_path`, if any.
-fn sync_manifest_hash(manifest: &serde_json::Value, target_path: &str) -> Option<String> {
+pub(crate) fn sync_manifest_hash(
+    manifest: &serde_json::Value,
+    target_path: &str,
+) -> Option<String> {
     manifest.as_object()?.values().find_map(|entry| {
         if entry.get("target_path")?.as_str()? == target_path {
             entry.get("hash")?.as_str().map(str::to_string)
@@ -682,7 +685,7 @@ pub fn reconcile_settings_removed_keys(
             {
                 let filtered: Vec<serde_json::Value> = existing
                     .iter()
-                    .filter(|item| !(lock_arr.contains(item) && !new_arr.contains(item)))
+                    .filter(|item| !lock_arr.contains(item) || new_arr.contains(item))
                     .cloned()
                     .collect();
                 if &filtered != existing {

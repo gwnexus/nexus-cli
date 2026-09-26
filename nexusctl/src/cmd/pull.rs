@@ -572,6 +572,11 @@ pub async fn run(
     detect_importable_files(&workspace, is_claude, &manifest);
     let mut skipped_modified: Vec<String> = Vec::new();
     let mut overwrote_modified: Vec<String> = Vec::new();
+    // Only the explicit flags, never -y (see cmd/mod.rs): destructive
+    // decisions (projection cleanup of modified files, reverting committed
+    // workspace files) need --force / --force-unmanaged.
+    let explicit_force = ccx_force != super::ccx::ForceMode::None;
+    let mut ws_report = WorkspaceSyncReport::default();
 
     // Export skills (always needed for project_name)
     let export = client.export_skills(&project_id).await?;
@@ -1281,118 +1286,33 @@ pub async fn run(
                 v2_ok = true;
                 let mut ws_written = 0;
 
-                // Write devbox.json
-                let target = workspace.join("devbox.json");
-                if content_matches(&target, &export.devbox_json) {
-                    let _ = super::sync::update_manifest_after_pull(
-                        &workspace,
-                        "devbox.json",
-                        "devbox.json",
-                        &sha256_hex(&export.devbox_json),
-                    );
-                } else if target.exists()
-                    && !force
-                    && !is_pull_managed(&workspace, "devbox.json", &manifest)
-                {
-                    println!(
-                        "   {} devbox.json is user-managed, skipping",
-                        style("--").yellow(),
-                    );
-                } else if target.exists()
-                    && is_locally_modified(&workspace, "devbox.json", &manifest)
-                {
-                    if !force {
-                        println!(
-                            "   {} skipped: devbox.json (locally modified, use --force to overwrite or nexus stash to save)",
-                            style("!").bold().yellow(),
-                        );
-                        skipped_modified.push("devbox.json".to_string());
-                    } else {
-                        overwrote_modified.push("devbox.json".to_string());
-                        fs::write(&target, &export.devbox_json)?;
-                        let hash = sha256_hex(&export.devbox_json);
-                        let _ = super::sync::update_manifest_after_pull(
-                            &workspace,
-                            "devbox.json",
-                            "devbox.json",
-                            &hash,
-                        );
-                        ws_written += 1;
-                    }
-                } else {
-                    fs::write(&target, &export.devbox_json)?;
-                    let hash = sha256_hex(&export.devbox_json);
-                    let _ = super::sync::update_manifest_after_pull(
-                        &workspace,
-                        "devbox.json",
-                        "devbox.json",
-                        &hash,
-                    );
+                // devbox.json and scripts: same rules for every workspace
+                // file (see sync_workspace_file).
+                if sync_workspace_file(
+                    &workspace,
+                    "devbox.json",
+                    &export.devbox_json,
+                    false,
+                    force,
+                    explicit_force,
+                    &manifest,
+                    &mut ws_report,
+                )? {
                     ws_written += 1;
                 }
-
-                // Write scripts
                 for script in &export.scripts {
-                    let target = workspace.join(&script.path);
-                    if let Some(parent) = target.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-
-                    if content_matches(&target, &script.body) {
-                        let _ = super::sync::update_manifest_after_pull(
-                            &workspace,
-                            &script.path,
-                            &script.path,
-                            &sha256_hex(&script.body),
-                        );
-                        continue;
-                    }
-
-                    if target.exists()
-                        && !force
-                        && !is_pull_managed(&workspace, &script.path, &manifest)
-                    {
-                        println!(
-                            "   {} {} is user-managed, skipping",
-                            style("--").yellow(),
-                            script.path
-                        );
-                        continue;
-                    }
-
-                    if target.exists() && is_locally_modified(&workspace, &script.path, &manifest) {
-                        if !force {
-                            println!(
-                                "   {} skipped: {} (locally modified, use --force to overwrite or nexus stash to save)",
-                                style("!").bold().yellow(),
-                                script.path
-                            );
-                            skipped_modified.push(script.path.clone());
-                            continue;
-                        } else {
-                            overwrote_modified.push(script.path.clone());
-                        }
-                    }
-
-                    fs::write(&target, &script.body)?;
-
-                    // Track in sync manifest for origin guard
-                    let hash = sha256_hex(&script.body);
-                    let _ = super::sync::update_manifest_after_pull(
+                    if sync_workspace_file(
                         &workspace,
                         &script.path,
-                        &script.path,
-                        &hash,
-                    );
-
-                    #[cfg(unix)]
-                    if script.executable {
-                        use std::os::unix::fs::PermissionsExt;
-                        let perms = std::fs::Permissions::from_mode(0o755);
-                        fs::set_permissions(&target, perms)?;
+                        &script.body,
+                        script.executable,
+                        force,
+                        explicit_force,
+                        &manifest,
+                        &mut ws_report,
+                    )? {
+                        ws_written += 1;
                     }
-
-                    ws_written += 1;
                 }
 
                 if ws_written > 0 {
@@ -1463,86 +1383,35 @@ pub async fn run(
                     } else {
                         let mut ws_written = 0;
 
-                        // Write composed workspace template (devbox.json)
+                        // Composed workspace template (devbox.json) and
+                        // scripts, with the same rules as the v2 path.
                         if let Some(ref tpl) = ws_export.workspace {
-                            let target = workspace.join(&tpl.target_path);
-                            if let Some(parent) = target.parent() {
-                                fs::create_dir_all(parent)?;
-                            }
-
-                            if content_matches(&target, &tpl.body) {
-                                // Already identical.
-                            } else if target.exists()
-                                && !force
-                                && !is_pull_managed(&workspace, &tpl.target_path, &manifest)
-                            {
-                                println!(
-                                    "   {} {} is user-managed, skipping",
-                                    style("--").yellow(),
-                                    tpl.target_path
-                                );
-                            } else {
-                                fs::write(&target, &tpl.body)?;
-                                let hash = sha256_hex(&tpl.body);
-                                let _ = super::sync::update_manifest_after_pull(
-                                    &workspace,
-                                    &tpl.target_path,
-                                    &tpl.target_path,
-                                    &hash,
-                                );
+                            if sync_workspace_file(
+                                &workspace,
+                                &tpl.target_path,
+                                &tpl.body,
+                                false,
+                                force,
+                                explicit_force,
+                                &manifest,
+                                &mut ws_report,
+                            )? {
                                 ws_written += 1;
                             }
                         }
-
-                        // Write scripts
-                        let _scripts_base = if ws_export.scripts_path.is_empty() {
-                            ".nexus/scripts/devbox".to_string()
-                        } else {
-                            ws_export.scripts_path.clone()
-                        };
-
                         for script in &ws_export.scripts {
-                            let target = workspace.join(&script.target_path);
-                            if let Some(parent) = target.parent() {
-                                fs::create_dir_all(parent)?;
-                            }
-
-                            if content_matches(&target, &script.body) {
-                                continue;
-                            }
-
-                            if target.exists()
-                                && !force
-                                && !is_pull_managed(&workspace, &script.target_path, &manifest)
-                            {
-                                println!(
-                                    "   {} {} is user-managed, skipping",
-                                    style("--").yellow(),
-                                    script.target_path
-                                );
-                                continue;
-                            }
-
-                            fs::write(&target, &script.body)?;
-
-                            // Track in sync manifest for origin guard
-                            let hash = sha256_hex(&script.body);
-                            let _ = super::sync::update_manifest_after_pull(
+                            if sync_workspace_file(
                                 &workspace,
                                 &script.target_path,
-                                &script.target_path,
-                                &hash,
-                            );
-
-                            // Make executable on Unix
-                            #[cfg(unix)]
-                            if script.executable {
-                                use std::os::unix::fs::PermissionsExt;
-                                let perms = std::fs::Permissions::from_mode(0o755);
-                                fs::set_permissions(&target, perms)?;
+                                &script.body,
+                                script.executable,
+                                force,
+                                explicit_force,
+                                &manifest,
+                                &mut ws_report,
+                            )? {
+                                ws_written += 1;
                             }
-
-                            ws_written += 1;
                         }
 
                         if ws_written > 0 {
@@ -1602,6 +1471,9 @@ pub async fn run(
         }
     }
 
+    skipped_modified.append(&mut ws_report.skipped_modified);
+    overwrote_modified.append(&mut ws_report.overwrote_modified);
+
     // Summary: locally modified files
     if !skipped_modified.is_empty() {
         println!();
@@ -1630,6 +1502,8 @@ pub async fn run(
             println!("      {}", style(path).yellow());
         }
     }
+
+    print_committed_workspace_summary(&ws_report);
 
     if let Ok(ref af_export) = af_export_result {
         if let Some(ref info) = af_export.ccx {
@@ -1818,6 +1692,252 @@ fn is_pull_managed(workspace: &Path, target_path: &str, manifest: &serde_json::V
                 || m.values()
                     .any(|e| e.get("target_path").and_then(|t| t.as_str()) == Some(target_path))
         })
+}
+
+// ---------------------------------------------------------------------------
+// Workspace files (devbox.json, scripts/devbox/**)
+// ---------------------------------------------------------------------------
+
+/// What happened to workspace files during one pull, for the summary.
+#[derive(Debug, Default)]
+pub(crate) struct WorkspaceSyncReport {
+    pub skipped_modified: Vec<String>,
+    pub overwrote_modified: Vec<String>,
+    /// Committed files kept because the fork version differs (no --force).
+    pub skipped_committed: Vec<String>,
+    /// Committed files replaced by the fork version (--force).
+    pub overwrote_committed: Vec<String>,
+}
+
+/// Why a workspace file is not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceSkip {
+    /// Exists, carries no marker and is not in the sync manifest.
+    UserManaged,
+    /// Edited since the last pull.
+    LocallyModified,
+    /// Tracked in git, the local file equals HEAD, and the fork version
+    /// differs from HEAD: writing it would revert committed repo state.
+    CommittedDiffers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceAction {
+    /// Local file already equals the fork version (modulo trailing
+    /// newlines).
+    Unchanged,
+    Skip(WorkspaceSkip),
+    Write {
+        /// Overwrites a local edit (--force / -y).
+        overwrote_modified: bool,
+        /// Overwrites a committed version (explicit --force).
+        reverted_commit: bool,
+    },
+}
+
+/// Decide what pull does with one workspace file. Text comparisons ignore
+/// trailing newlines (the backend sends e.g. `devbox.json` without one;
+/// repos with an end-of-file fixer commit it with one). `head` is only
+/// evaluated when the local file differs from `incoming`.
+///
+/// `force` is `--force` or `-y`; `explicit_force` only `--force` /
+/// `--force-unmanaged`, required to revert a committed file.
+pub(crate) fn decide_workspace_write(
+    local: Option<&str>,
+    incoming: &str,
+    pull_managed: bool,
+    recorded: Option<&str>,
+    head: impl FnOnce() -> Option<String>,
+    force: bool,
+    explicit_force: bool,
+) -> WorkspaceAction {
+    let Some(local) = local else {
+        return WorkspaceAction::Write {
+            overwrote_modified: false,
+            reverted_commit: false,
+        };
+    };
+    if nexus_core::hash::text_equivalent(local, incoming) {
+        return WorkspaceAction::Unchanged;
+    }
+    if !pull_managed && !force {
+        return WorkspaceAction::Skip(WorkspaceSkip::UserManaged);
+    }
+    let committed = head().is_some_and(|h| {
+        nexus_core::hash::text_equivalent(local, &h)
+            && !nexus_core::hash::text_equivalent(&h, incoming)
+    });
+    if committed && !explicit_force {
+        return WorkspaceAction::Skip(WorkspaceSkip::CommittedDiffers);
+    }
+    let modified = recorded.is_some_and(|r| !nexus_core::hash::hash_matches_text(r, local));
+    if modified && !force {
+        return WorkspaceAction::Skip(WorkspaceSkip::LocallyModified);
+    }
+    WorkspaceAction::Write {
+        overwrote_modified: modified && !committed,
+        reverted_commit: committed,
+    }
+}
+
+/// Content of `rel` at `HEAD`, if the file is tracked by git in the
+/// repository containing `workspace`. `None` outside a repository, for
+/// untracked files, and before the first commit.
+pub(crate) fn git_head_content(workspace: &Path, rel: &str) -> Option<String> {
+    let tracked = std::process::Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--", rel])
+        .current_dir(workspace)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !tracked {
+        return None;
+    }
+    let out = std::process::Command::new("git")
+        .args(["--no-pager", "show", &format!("HEAD:./{rel}")])
+        .current_dir(workspace)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Sync one workspace file (`devbox.json` or a script) per
+/// [`decide_workspace_write`]. Written files always end with exactly one
+/// newline; the sync manifest records the hash of the backend's copy.
+/// Returns `true` if the file was written.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sync_workspace_file(
+    workspace: &Path,
+    rel: &str,
+    body: &str,
+    executable: bool,
+    force: bool,
+    explicit_force: bool,
+    manifest: &serde_json::Value,
+    report: &mut WorkspaceSyncReport,
+) -> anyhow::Result<bool> {
+    let target = workspace.join(rel);
+    let local = fs::read(&target)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
+    let recorded = super::ccx::sync_manifest_hash(manifest, rel);
+    let action = decide_workspace_write(
+        local.as_deref(),
+        body,
+        local.is_some() && is_pull_managed(workspace, rel, manifest),
+        recorded.as_deref(),
+        || git_head_content(workspace, rel),
+        force,
+        explicit_force,
+    );
+    let record = || {
+        let _ = super::sync::update_manifest_after_pull(workspace, rel, rel, &sha256_hex(body));
+    };
+    match action {
+        WorkspaceAction::Unchanged => {
+            record();
+            Ok(false)
+        }
+        WorkspaceAction::Skip(WorkspaceSkip::UserManaged) => {
+            println!(
+                "   {} {} is user-managed, skipping",
+                style("--").yellow(),
+                rel
+            );
+            Ok(false)
+        }
+        WorkspaceAction::Skip(WorkspaceSkip::LocallyModified) => {
+            println!(
+                "   {} skipped: {} (locally modified, use --force to overwrite or nexus stash to save)",
+                style("!").bold().yellow(),
+                rel
+            );
+            report.skipped_modified.push(rel.to_string());
+            Ok(false)
+        }
+        WorkspaceAction::Skip(WorkspaceSkip::CommittedDiffers) => {
+            println!(
+                "   {} skipped: {} (committed locally and differs from the Nexus workspace fork; \
+                 run `nexus push` to update the fork, or `nexus pull --force` to take the fork version)",
+                style("!").bold().yellow(),
+                rel
+            );
+            report.skipped_committed.push(rel.to_string());
+            Ok(false)
+        }
+        WorkspaceAction::Write {
+            overwrote_modified,
+            reverted_commit,
+        } => {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(
+                &target,
+                nexus_core::hash::with_single_trailing_newline(body),
+            )?;
+            record();
+            #[cfg(unix)]
+            if executable {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+            }
+            #[cfg(not(unix))]
+            let _ = executable;
+            if overwrote_modified {
+                report.overwrote_modified.push(rel.to_string());
+            }
+            if reverted_commit {
+                report.overwrote_committed.push(rel.to_string());
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Summary lines for committed workspace files the fork version would
+/// revert (C3 overwrite guard).
+fn print_committed_workspace_summary(report: &WorkspaceSyncReport) {
+    if !report.overwrote_committed.is_empty() {
+        println!();
+        println!(
+            "   {} Overwrote {} committed file(s) with the Nexus workspace fork version (--force):",
+            style("!!").bold().red(),
+            report.overwrote_committed.len()
+        );
+        for path in &report.overwrote_committed {
+            println!("      {}", style(path).red());
+        }
+        println!(
+            "   They now differ from HEAD. Review with {}; if the committed version was newer,",
+            style("git diff").bold()
+        );
+        println!(
+            "   restore it ({}) and run {} to update the fork.",
+            style("git checkout -- <file>").bold(),
+            style("nexus push").bold()
+        );
+    }
+    if !report.skipped_committed.is_empty() {
+        println!();
+        println!(
+            "   {} {} committed file(s) differ from the Nexus workspace fork and were kept:",
+            style("!").bold().yellow(),
+            report.skipped_committed.len()
+        );
+        for path in &report.skipped_committed {
+            println!("      {}", style(path).yellow());
+        }
+        println!(
+            "   Run {} to update the fork, or {} to take the fork version.",
+            style("nexus push").bold(),
+            style("nexus pull --force").bold()
+        );
+    }
 }
 
 /// Check whether a file contains the `source: nexus-platform` marker,
@@ -3095,6 +3215,285 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ── workspace files: newline tolerance and overwrite guard ─────────────
+
+    /// `git init` + one commit of `files` in `dir` (signing disabled, fixed
+    /// identity), for tests that need tracked files and a HEAD.
+    pub(crate) fn init_git_repo(dir: &Path, files: &[(&str, &str)]) {
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed: {out:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["config", "core.hooksPath", "/dev/null"]);
+        for (rel, content) in files {
+            let path = dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+            git(&["add", rel]);
+        }
+        git(&["commit", "-q", "--allow-empty", "-m", "initial"]);
+    }
+
+    fn ws_manifest(rel: &str, recorded_body: &str) -> serde_json::Value {
+        serde_json::json!({ rel: { "target_path": rel, "hash": sha256_hex(recorded_body) } })
+    }
+
+    #[test]
+    fn test_decide_workspace_write_matrix() {
+        use WorkspaceAction as A;
+        let none = || None;
+        let write = |m, r| A::Write {
+            overwrote_modified: m,
+            reverted_commit: r,
+        };
+        assert_eq!(
+            decide_workspace_write(None, "x", false, None, none, false, false),
+            write(false, false)
+        );
+        // Trailing newline only: unchanged, even with --force.
+        assert_eq!(
+            decide_workspace_write(Some("x\n"), "x", true, None, none, true, true),
+            A::Unchanged
+        );
+        assert_eq!(
+            decide_workspace_write(Some("mine"), "x", false, None, none, false, false),
+            A::Skip(WorkspaceSkip::UserManaged)
+        );
+        let rec = sha256_hex("old");
+        assert_eq!(
+            decide_workspace_write(Some("edited"), "new", true, Some(&rec), none, false, false),
+            A::Skip(WorkspaceSkip::LocallyModified)
+        );
+        assert_eq!(
+            decide_workspace_write(Some("edited"), "new", true, Some(&rec), none, true, false),
+            write(true, false)
+        );
+        // Unmodified since the last pull (modulo newline): plain update.
+        assert_eq!(
+            decide_workspace_write(Some("old\n"), "new", true, Some(&rec), none, false, false),
+            write(false, false)
+        );
+        // Committed version differs from the fork: -y alone never reverts it.
+        let head = || Some("committed\n".to_string());
+        assert_eq!(
+            decide_workspace_write(
+                Some("committed"),
+                "old",
+                true,
+                Some(&rec),
+                head,
+                true,
+                false
+            ),
+            A::Skip(WorkspaceSkip::CommittedDiffers)
+        );
+        assert_eq!(
+            decide_workspace_write(Some("committed"), "old", true, Some(&rec), head, true, true),
+            write(false, true)
+        );
+        // Local differs from HEAD (uncommitted edit): not a committed revert.
+        let head = || Some("other".to_string());
+        assert_eq!(
+            decide_workspace_write(Some("edited"), "new", true, Some(&rec), head, false, false),
+            A::Skip(WorkspaceSkip::LocallyModified)
+        );
+    }
+
+    #[test]
+    fn test_sync_workspace_file_trailing_newline_no_flip_flop() {
+        let dir = temp_dir("ws-newline");
+        let server = "{\"packages\":[]}";
+        // Committed by an end-of-file fixer with a final newline.
+        fs::write(dir.join("devbox.json"), format!("{server}\n")).unwrap();
+        let manifest = ws_manifest("devbox.json", server);
+        for (force, explicit) in [(false, false), (true, true)] {
+            let mut report = WorkspaceSyncReport::default();
+            let written = sync_workspace_file(
+                &dir,
+                "devbox.json",
+                server,
+                false,
+                force,
+                explicit,
+                &manifest,
+                &mut report,
+            )
+            .unwrap();
+            assert!(!written, "newline-only difference must not be rewritten");
+            assert!(report.overwrote_modified.is_empty());
+            assert!(report.skipped_modified.is_empty());
+        }
+        assert_eq!(
+            fs::read_to_string(dir.join("devbox.json")).unwrap(),
+            format!("{server}\n")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sync_workspace_file_writes_single_trailing_newline() {
+        let dir = temp_dir("ws-write-newline");
+        let mut report = WorkspaceSyncReport::default();
+        let manifest = serde_json::json!({});
+        assert!(sync_workspace_file(
+            &dir,
+            "scripts/devbox/a.sh",
+            "echo a",
+            true,
+            false,
+            false,
+            &manifest,
+            &mut report
+        )
+        .unwrap());
+        assert!(sync_workspace_file(
+            &dir,
+            "devbox.json",
+            "{}\n\n",
+            false,
+            false,
+            false,
+            &manifest,
+            &mut report
+        )
+        .unwrap());
+        assert_eq!(
+            fs::read_to_string(dir.join("scripts/devbox/a.sh")).unwrap(),
+            "echo a\n"
+        );
+        assert_eq!(fs::read_to_string(dir.join("devbox.json")).unwrap(), "{}\n");
+        // The manifest keeps the backend's hash, so the next pull is clean.
+        let m = super::super::sync::load_manifest_pub(&dir);
+        assert_eq!(
+            m["devbox.json"]["hash"].as_str().unwrap(),
+            sha256_hex("{}\n\n")
+        );
+        let written = sync_workspace_file(
+            &dir,
+            "devbox.json",
+            "{}\n\n",
+            false,
+            false,
+            false,
+            &m,
+            &mut report,
+        )
+        .unwrap();
+        assert!(!written);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sync_workspace_file_locally_modified_skipped_without_force() {
+        // Same rule for the v1 fallback, which used to overwrite edits.
+        let dir = temp_dir("ws-modified");
+        fs::write(dir.join("devbox.json"), "edited\n").unwrap();
+        let manifest = ws_manifest("devbox.json", "old");
+        let mut report = WorkspaceSyncReport::default();
+        let written = sync_workspace_file(
+            &dir,
+            "devbox.json",
+            "new",
+            false,
+            false,
+            false,
+            &manifest,
+            &mut report,
+        )
+        .unwrap();
+        assert!(!written);
+        assert_eq!(report.skipped_modified, vec!["devbox.json".to_string()]);
+        assert_eq!(
+            fs::read_to_string(dir.join("devbox.json")).unwrap(),
+            "edited\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sync_workspace_file_guards_committed_file() {
+        let dir = temp_dir("ws-committed");
+        let committed = "{\"packages\":[\"new\"]}\n";
+        let fork = "{\"packages\":[\"old\"]}";
+        init_git_repo(&dir, &[("devbox.json", committed)]);
+        assert_eq!(
+            git_head_content(&dir, "devbox.json").as_deref(),
+            Some(committed)
+        );
+        assert_eq!(git_head_content(&dir, "untracked.json"), None);
+        // The last pull wrote the (older) fork version; the repo moved on.
+        let manifest = ws_manifest("devbox.json", fork);
+
+        // -y (force without explicit flag) must not revert the commit.
+        let mut report = WorkspaceSyncReport::default();
+        let written = sync_workspace_file(
+            &dir,
+            "devbox.json",
+            fork,
+            false,
+            true,
+            false,
+            &manifest,
+            &mut report,
+        )
+        .unwrap();
+        assert!(!written);
+        assert_eq!(report.skipped_committed, vec!["devbox.json".to_string()]);
+        assert_eq!(
+            fs::read_to_string(dir.join("devbox.json")).unwrap(),
+            committed
+        );
+
+        // --force: overwritten, reported prominently.
+        let mut report = WorkspaceSyncReport::default();
+        let written = sync_workspace_file(
+            &dir,
+            "devbox.json",
+            fork,
+            false,
+            true,
+            true,
+            &manifest,
+            &mut report,
+        )
+        .unwrap();
+        assert!(written);
+        assert_eq!(report.overwrote_committed, vec!["devbox.json".to_string()]);
+        assert!(report.overwrote_modified.is_empty());
+        assert_eq!(
+            fs::read_to_string(dir.join("devbox.json")).unwrap(),
+            format!("{fork}\n")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_git_head_content_outside_repo_is_none() {
+        let dir = temp_dir("ws-no-git");
+        fs::write(dir.join("devbox.json"), "{}").unwrap();
+        // temp dirs may live inside a repo on some machines; only assert
+        // when git itself says this is not a work tree.
+        let in_repo = std::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(&dir)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !in_repo {
+            assert_eq!(git_head_content(&dir, "devbox.json"), None);
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── generated files (skills/commands), NEXUS-APP dispatch 4820e584 ─────

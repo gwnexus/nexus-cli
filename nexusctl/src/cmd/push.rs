@@ -129,6 +129,37 @@ fn is_manifest_tracked(key: &str, manifest: &serde_json::Value) -> bool {
     })
 }
 
+/// The hash to report for a tracked workspace file: the recorded hash of
+/// the last pulled backend version when the local file differs from it only
+/// in trailing newlines (e.g. an end-of-file fixer added one), so such a
+/// file is not reported as modified; otherwise the local hash.
+fn baseline_hash(
+    workspace: &Path,
+    key: &str,
+    local_hash: String,
+    manifest: &serde_json::Value,
+) -> String {
+    let recorded = manifest
+        .get(key)
+        .and_then(|e| e.get("hash"))
+        .and_then(|h| h.as_str())
+        .or_else(|| {
+            manifest.as_object()?.values().find_map(|e| {
+                (e.get("target_path")?.as_str()? == key)
+                    .then(|| e.get("hash")?.as_str())
+                    .flatten()
+            })
+        });
+    match (recorded, fs::read_to_string(workspace.join(key))) {
+        (Some(r), Ok(content))
+            if r != local_hash && nexus_core::hash::hash_matches_text(r, &content) =>
+        {
+            r.to_string()
+        }
+        _ => local_hash,
+    }
+}
+
 /// Verify the target project exists and is reachable on the configured backend.
 ///
 /// Maps API errors to actionable messages so a wrong `NEXUS_API_URL` (project on a
@@ -296,6 +327,7 @@ pub async fn run(
     let mut local_hashes = HashMap::new();
     for (key, hash) in all_hashes {
         if is_manifest_tracked(&key, &manifest) {
+            let hash = baseline_hash(&workspace, &key, hash, &manifest);
             local_hashes.insert(key, hash);
         } else {
             println!(
@@ -422,6 +454,30 @@ mod tests {
         let (devbox, scripts) = read_workspace_files(dir.path());
         assert!(devbox.is_some());
         assert!(scripts.is_none());
+    }
+
+    #[test]
+    fn test_baseline_hash_ignores_trailing_newline_only_difference() {
+        let dir = TempDir::new().unwrap();
+        let server = r#"{"packages":[]}"#;
+        let manifest = serde_json::json!({
+            "devbox.json": { "hash": sha256_hex(server), "target_path": "devbox.json" }
+        });
+        // End-of-file fixer added a newline: report the recorded hash.
+        fs::write(dir.path().join("devbox.json"), format!("{server}\n")).unwrap();
+        let local = collect_workspace_hashes(dir.path())["devbox.json"].clone();
+        assert_ne!(local, sha256_hex(server));
+        assert_eq!(
+            baseline_hash(dir.path(), "devbox.json", local, &manifest),
+            sha256_hex(server)
+        );
+        // A real edit keeps the local hash.
+        fs::write(dir.path().join("devbox.json"), "{\"packages\":[1]}\n").unwrap();
+        let local = collect_workspace_hashes(dir.path())["devbox.json"].clone();
+        assert_eq!(
+            baseline_hash(dir.path(), "devbox.json", local.clone(), &manifest),
+            local
+        );
     }
 
     #[test]

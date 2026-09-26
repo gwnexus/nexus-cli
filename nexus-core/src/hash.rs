@@ -38,9 +38,67 @@ pub fn hash_matches(recorded: &str, content: &str) -> bool {
     recorded == sha256_hex(content) || recorded == sha256_hex_normalized(content)
 }
 
+/// `content` without trailing line breaks (`\n` / `\r\n`).
+///
+/// Text workspace files (`devbox.json`, `scripts/devbox/**`) are compared
+/// modulo trailing newlines: the backend delivers some of them without a
+/// final newline, while repos running e.g. pre-commit's end-of-file-fixer
+/// commit them with exactly one.
+pub fn trim_trailing_newlines(content: &str) -> &str {
+    content.trim_end_matches(['\n', '\r'])
+}
+
+/// `content` ending with exactly one `\n` (empty content stays empty).
+pub fn with_single_trailing_newline(content: &str) -> String {
+    let trimmed = trim_trailing_newlines(content);
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\n")
+    }
+}
+
+/// Whether two text files differ at most in their trailing newlines.
+pub fn text_equivalent(a: &str, b: &str) -> bool {
+    trim_trailing_newlines(a) == trim_trailing_newlines(b)
+}
+
+/// [`hash_matches`] that also accepts `content` with its trailing newlines
+/// removed or normalized to exactly one, so a hash recorded for the
+/// backend's copy still matches a local file whose only difference is the
+/// final newline.
+pub fn hash_matches_text(recorded: &str, content: &str) -> bool {
+    if hash_matches(recorded, content) {
+        return true;
+    }
+    let trimmed = trim_trailing_newlines(content);
+    recorded == sha256_hex(trimmed) || recorded == sha256_hex(&format!("{trimmed}\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_text_equivalent_ignores_trailing_newlines_only() {
+        assert!(text_equivalent("{}", "{}\n"));
+        assert!(text_equivalent("{}\n\n", "{}\r\n"));
+        assert!(!text_equivalent("{}", "{ }"));
+        assert!(!text_equivalent("a\nb", "a\n\nb"));
+        assert_eq!(with_single_trailing_newline("x"), "x\n");
+        assert_eq!(with_single_trailing_newline("x\n\n"), "x\n");
+        assert_eq!(with_single_trailing_newline(""), "");
+    }
+
+    #[test]
+    fn test_hash_matches_text_accepts_newline_variants() {
+        let server = "{\"a\":1}";
+        let recorded = sha256_hex(server);
+        assert!(hash_matches_text(&recorded, "{\"a\":1}\n"));
+        assert!(hash_matches_text(&recorded, "{\"a\":1}\n\n"));
+        assert!(hash_matches_text(&sha256_hex("x\n"), "x"));
+        assert!(!hash_matches_text(&recorded, "{\"a\":2}\n"));
+    }
 
     #[test]
     fn test_normalized_ignores_generated_at_only() {
