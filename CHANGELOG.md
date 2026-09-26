@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.5] - 2026-09-26
+
+Claude Code workspace per user (ADR-0119) and the native Agent Observability renderer (ADR-0120), CLI side for NEXUS-APP 0.15 (dispatch c4f507b5).
+
+### Added
+- **Personal workspace layout.** `af_export.claude_workspace` (`nexus.claude-workspace.v1`) is written by `nexus pull` to its `path` (normally `.nexus/claude/workspace.local.kdl`) after checking `sha256` and the path. The file and `.nexus/claude/observer/` are added to `.git/info/exclude`. It is recorded in the pull manifest: regenerated on every pull, a local edit is reported and kept unless `--force` (not `-y`), and `nexus status` / `diff` / `reset` show it as a projection (`nexus push` refuses it). `nexus run` keeps using `run_target.layout` with the existing precedence (`--plain`/`--workspace`, then `[run] workspace`, then the run target); while the personal layout has not been pulled yet it falls back to the committed `.nexus/claude/nexus-claude.kdl` with a WARN row.
+- **`nexus status --agents [--watch] [--json] [--all] [--file <path>]`.** Folds the `nexus.agent-observation.v1` events in `.nexus/claude/observer/events.jsonl` per session and agent (later `null` values never erase known ones; an event without `agentId` is the session's main agent) and renders counts, the main agent with its subagents as a tree, background processes, state, current tool, runtime (counting up while working), model and repository/worktree. Sessions finished more than 30 minutes ago are hidden unless `--all`. `--watch` reads incrementally once per second, handles partial lines, rotation and truncation, and redraws in place; with `--json` it prints one compact DTO array per change. Local only: no config, login or network, so it also runs in a second terminal for `--plain` sessions. Without the file it reports "no observation data".
+- **`nexus doctor claude [--fix]`.** Detects `claude`, `zellij`, `lazygit`, `ccusage` and `delta`; the required set comes from `claude_workspace.requires` (best effort, else the cached run target). Missing required tools fail (exit 1), optional ones are INFO, and the Claude Code version is checked against the CCX compatibility range. `--fix` prints devbox (devbox projects), brew or npm install commands and runs them only after confirmation or `-y`; optional tools are only listed. Supports `--output json`.
+- **`nexus env set` shows the agent files a change assigns and unassigns** (`agent_files: { assign, unassign }`, e.g. an executioner switch), also for `--dry-run` ("would be assigned").
+
+The backend `claude_workspace` field is not live yet (staging first); the layout handling is covered by unit tests against the proposed contract and awaits staging E2E. 16 new tests; 732/732 passing, clippy/fmt clean.
+
 ## [0.28.4] - 2026-09-26
 
 Runtime switch without leftovers, plus workspace, git-hook and CCX safety (NEXUS-APP dispatch 95d81511).
