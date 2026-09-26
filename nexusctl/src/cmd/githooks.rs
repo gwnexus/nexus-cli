@@ -1,4 +1,4 @@
-//! Git hook self-heal, run at the end of every `nexus pull` (v0.29.0).
+//! Git hook self-heal, run at the end of every `nexus pull` (v0.28.4).
 //!
 //! Repos that ship their hooks in `.githooks/` (e.g. a gitleaks pre-commit
 //! scan) rely on `git config core.hooksPath .githooks`, which is local

@@ -148,8 +148,12 @@ One command per activity; each classifies every file itself:
   Claude Code Experience files, generated agent files, skills and OpenCode
   commands, the `CLAUDE.md` managed block and managed `.claude/settings.json`
   keys. States: DRIFTED, CONFLICT, UPDATE, CREATE, ORPHANED, UNMANAGED.
-- Files of the runtime the project does not use are reported as STALE
-  (never deleted); unmanaged files are never touched.
+- Leftovers of the runtime the project does not use are reported as STALE
+  with "run nexus pull to remove it" (see below); unmanaged files are never
+  touched.
+- `devbox.json` and scripts that differ only in trailing newlines (or, for
+  JSON, in key order) count as unchanged (the backend sends some without a final newline, end-of-file
+  fixers commit them with one); pull writes them with exactly one.
 
 ```bash
 nexus status                        # overview with the next action per file (exit 1 if pending)
@@ -498,6 +502,9 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 - Run `nexus pull` periodically (or after skill/agent file changes in the dashboard) to keep your workspace in sync.
 - Start the agent environment with `nexus run`, then use `/nexus-init` inside OpenCode or Claude Code to bootstrap the agent.
 - Each project uses exactly one runtime (`agent_owner`: OpenCode or Claude Code); `nexus pull` only writes that runtime's files. Run `nexus link` to see which runtime is configured.
+- Switching `agent_owner` is safe at any time: the next `nexus pull` writes the new runtime's projection and then removes what Nexus had put on disk for the old one (OpenCode: `.opencode/` commands, plugins, install artifacts, the Nexus parts of `opencode.json`; Claude Code: CCX files and hooks, rendered skills and agents, the Nexus keys in `.claude/settings.json`, the Nexus servers in `.mcp.json`, the `CLAUDE.md` managed block). Locally modified Nexus files are kept and listed; `nexus pull --force` removes them too (for OpenCode the whole `.opencode/`). Files Nexus never wrote under `.claude/` and `.claude/settings.local.json` are never touched. Switching back recreates everything.
+- Committed workspace files are protected: when `devbox.json` or a script equals `HEAD`, differs from what Nexus last delivered and the workspace fork has a different version, `nexus pull` keeps it and suggests `nexus diff`, then `nexus push` (publish the committed version) or `nexus pull --force` (take the fork version, with a warning to review `git diff`).
+- If the repo ships `.githooks/pre-commit`, `nexus pull` sets `git config core.hooksPath .githooks` when it is unset (a value set on purpose is never overridden, only hinted) and warns when the hook needs `gitleaks` but it is not installed.
 
 ## Cost Control Tools
 

@@ -1161,7 +1161,7 @@ pub fn render_claude_projection(
 
     // Record what was written in the pull manifest, so a later switch to
     // OpenCode can tell these files (unmodified) apart from local edits
-    // and the operator's own skills/agents (v0.29.0 projection cleanup).
+    // and the operator's own skills/agents (v0.28.4 projection cleanup).
     let mut rendered: Vec<(String, String)> =
         skills.iter().flat_map(render_claude_skill_files).collect();
     rendered.extend(claude_agent_files(actors, agent_files));

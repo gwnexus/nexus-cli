@@ -1,4 +1,4 @@
-//! Removal of the runtime projection a project no longer uses (v0.29.0).
+//! Removal of the runtime projection a project no longer uses (v0.28.4).
 //!
 //! A project's `agent_owner` selects exactly one runtime projection:
 //! OpenCode (`.opencode/`, `opencode.json`) or Claude Code (`.claude/`,

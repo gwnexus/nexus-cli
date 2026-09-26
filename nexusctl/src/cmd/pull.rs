@@ -1191,7 +1191,7 @@ pub async fn run(
     }
 
     // Remove the projection of the runtime this project no longer uses
-    // (v0.29.0), now that the selected one is on disk. Skipped when the
+    // (v0.28.4), now that the selected one is on disk. Skipped when the
     // owner is unknown or the OpenCode config write was declined, so a
     // failed pull never leaves the workspace without a projection.
     if let (true, true, Ok(ref af_export)) = (
@@ -1543,7 +1543,7 @@ pub async fn run(
         }
     }
 
-    // Git hook self-heal (v0.29.0): cheap, never fails the pull.
+    // Git hook self-heal (v0.28.4): cheap, never fails the pull.
     super::githooks::run(&workspace);
 
     println!();
@@ -3685,7 +3685,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ── projection switch (v0.29.0) ────────────────────────────────────────
+    // ── projection switch (v0.28.4) ────────────────────────────────────────
 
     #[test]
     fn test_is_other_runtime_path_is_symmetric() {

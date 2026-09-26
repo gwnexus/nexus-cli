@@ -548,7 +548,7 @@ pub async fn load(
     }
 
     // Leftovers of the non-selected runtime's projection, which the next
-    // `nexus pull` removes (v0.29.0). The operator's own files under
+    // `nexus pull` removes (v0.28.4). The operator's own files under
     // `.claude/` do not count.
     let unselected = super::projection_cleanup::Projection::unselected(is_claude);
     let cleanup_ctx = super::pull::cleanup_context(
