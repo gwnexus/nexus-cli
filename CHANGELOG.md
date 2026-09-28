@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.6] - 2026-09-28
+
+`.mcp.json` project binding (NEXUS-APP dispatch dc24bbae) and the staging follow-up to the per-user workspace and agent observer (dispatch c4f507b5, staging 4083959c).
+
+### Fixed
+- **The Claude Code `nexus` MCP server got no `NEXUS_PROJECT_ID`.** `nexus init` and `nexus pull` now write it into `mcpServers.nexus.env` of `.mcp.json` as a literal (from `.nexus/config.toml`), like `opencode.json` since dispatch ef9b0b0e, so project-scoped MCP tools work without an explicit `project_id`. A plain pull also rewrites an existing `.mcp.json` whose id is missing or stale (operator servers are kept), and `nexus run` adds or repairs it in place alongside the token refresh, so existing workspaces heal without a pull.
+- **`export_warnings` were never shown in Claude Code projects.** They were only printed inside the `opencode.json` confirmation gate. Claude Code projects now print them too (no prompt, nothing is gated), e.g. the new `actors_not_exported`; the heading says "export warning(s)" instead of "model-routing warning(s)".
+
+### Added
+- **AgentHUD in `nexus doctor claude`.** When `claude_workspace.requires` contains `agenthud` (observer set to AgentHUD in My Settings > Workspace), doctor checks it and fails when it is missing. It is marked as third-party and unsupported: `--fix` prints the upstream install instruction (`npm i -g agenthud`) and never runs it. JSON output carries it as `third_party`. It is not in the default tool list.
+- **`claude_workspace.observer_provider`** is parsed (any value, so future providers do not break pull) and shown when it is not `nexus`: in the pull line for the workspace layout (`observer agenthud`) and in `nexus doctor claude` (`observer_provider` in JSON).
+
+### Changed
+- `nexus status --agents` shows compact model names (`haiku-4-5` instead of a cut-off `claude-hai`); `--json` keeps the full model id.
+
+7 new tests; 739/739 passing, clippy/fmt clean. Verified against staging (`ade9d446`); see the dispatch reply for details.
+
 ## [0.28.5] - 2026-09-26
 
 Claude Code workspace per user (ADR-0119) and the native Agent Observability renderer (ADR-0120), CLI side for NEXUS-APP 0.15 (dispatch c4f507b5).
