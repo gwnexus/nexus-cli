@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.7] - 2026-09-28
+
+Project-local Zellij config per user (NEXUS-APP dispatch bb1ee3a0).
+
+### Added
+- **Personal Zellij config.** `af_export.claude_workspace.zellij_config` (`{ path, body, sha256 }`, normally `.nexus/claude/zellij.local.kdl`) is written by `nexus pull` and now also by `nexus init` (which also writes the personal workspace layout now). It is handled like the layout: `sha256` and path checked, added to `.git/info/exclude`, recorded in the pull manifest (a local edit is kept unless `--force`; `nexus status` / `diff` / `reset` show it as a projection). When the backend stops sending the field, a file written by an earlier pull is removed (a locally edited one is kept and no longer managed).
+- **`nexus run` passes the config to Zellij.** When `run_target.config` is set and the file exists, the workspace starts with `zellij --config <path> --layout <layout>`. If the file has not been pulled yet, the session starts with the global config and the Workspace row is a WARN ("run nexus pull"). An explicit `ZELLIJ_CONFIG_FILE` set by the user wins: no `--config` is passed and the row names it. `zellij --config` replaces the global `~/.config/zellij/config.kdl` for that session (Zellij has no include or merge); the CLI does not merge configs.
+- **`nexus doctor claude` shows the Zellij config** a zellij workspace uses: project-local, `ZELLIJ_CONFIG_FILE`, or global (WARN when the project config is missing). JSON: `zellij_config: { source, label }`.
+
+Older backends without the fields behave as before. The backend fields are not live yet; covered by unit tests against the proposed contract and smoke-tested against production (no field: unchanged; a stale pulled config is removed). 6 new tests; 745/745 passing, clippy/fmt clean.
+
 ## [0.28.6] - 2026-09-28
 
 `.mcp.json` project binding (NEXUS-APP dispatch dc24bbae) and the staging follow-up to the per-user workspace and agent observer (dispatch c4f507b5, staging 4083959c).
