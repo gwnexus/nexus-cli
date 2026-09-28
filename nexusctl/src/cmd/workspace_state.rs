@@ -532,6 +532,14 @@ pub async fn load(
         {
             generated.push((layout.path.clone(), layout.body.clone()));
         }
+        // The per-user Zellij config (dispatch bb1ee3a0), same handling.
+        if let Some(cfg) = layout.zellij_config.as_ref() {
+            if !cfg.body.trim().is_empty()
+                && super::pull::validate_agent_file_target_path(workspace, &cfg.path).is_ok()
+            {
+                generated.push((cfg.path.clone(), cfg.body.clone()));
+            }
+        }
     }
     let recorded = super::pull::load_pull_manifest(workspace, &agentic_root);
     for (path, content) in generated {

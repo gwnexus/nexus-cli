@@ -1102,25 +1102,16 @@ pub async fn run(
         }
     }
 
-    // Per-caller workspace layout (NEXUS-APP ADR-0119, dispatch c4f507b5):
-    // personal, git-excluded, regenerated on every pull; a local edit is
-    // kept unless --force.
-    if let (true, Ok(ref af_export)) = (is_claude, &af_export_result) {
-        let layout = af_export
-            .claude_workspace
-            .as_ref()
-            .filter(|l| !l.body.trim().is_empty());
-        if let Some(layout) = layout {
-            match sync_claude_workspace(&workspace, &agentic_root, layout, explicit_force) {
-                Ok(outcome) => print_claude_workspace_outcome(layout, &outcome),
-                Err(e) => println!(
-                    "   {} Workspace layout {} not written: {}",
-                    style("!").bold().yellow(),
-                    layout.path,
-                    e
-                ),
-            }
-        }
+    // Personal, git-excluded workspace files: the layout (ADR-0119) and
+    // the Zellij config (dispatch bb1ee3a0).
+    if let Ok(ref af_export) = af_export_result {
+        sync_personal_workspace_files(
+            &workspace,
+            &agentic_root,
+            af_export,
+            is_claude,
+            explicit_force,
+        );
     }
 
     // Write .nexus/env from af_export.plugin_env (platform-managed, full overwrite)
@@ -3068,6 +3059,76 @@ fn sync_generated_files_with(
     Ok((written, skipped))
 }
 
+/// Write the personal, git-excluded workspace files from `af_export`: the
+/// layout (NEXUS-APP ADR-0119) and the Zellij config (dispatch bb1ee3a0).
+/// Shared by `nexus pull` and `nexus init`.
+pub(crate) fn sync_personal_workspace_files(
+    workspace: &Path,
+    agentic_root: &str,
+    af_export: &nexus_core::api::AgentFileExportResponse,
+    is_claude: bool,
+    force: bool,
+) {
+    // Per-caller workspace layout (NEXUS-APP ADR-0119, dispatch c4f507b5):
+    // personal, git-excluded, regenerated on every pull; a local edit is
+    // kept unless --force.
+    if is_claude {
+        let layout = af_export
+            .claude_workspace
+            .as_ref()
+            .filter(|l| !l.body.trim().is_empty());
+        if let Some(layout) = layout {
+            match sync_claude_workspace(workspace, agentic_root, layout, force) {
+                Ok(outcome) => print_claude_workspace_outcome(layout, &outcome),
+                Err(e) => println!(
+                    "   {} Workspace layout {} not written: {}",
+                    style("!").bold().yellow(),
+                    layout.path,
+                    e
+                ),
+            }
+        }
+    }
+
+    // Per-caller Zellij config (NEXUS-APP dispatch bb1ee3a0): written like
+    // the layout; removed again once the backend stops sending it.
+    let zellij_config = af_export
+        .claude_workspace
+        .as_ref()
+        .filter(|_| is_claude)
+        .and_then(|l| l.zellij_config.as_ref())
+        .filter(|c| !c.body.trim().is_empty());
+    match zellij_config {
+        Some(config) => match sync_zellij_config(workspace, agentic_root, config, force) {
+            Ok(outcome) => print_zellij_config_outcome(&config.path, &outcome),
+            Err(e) => println!(
+                "   {} Zellij config {} not written: {}",
+                style("!").bold().yellow(),
+                config.path,
+                e
+            ),
+        },
+        None => match remove_zellij_config(workspace, agentic_root, force) {
+            Ok(ZellijConfigRemoval::Removed(path)) => println!(
+                "   {} Zellij config {} removed (no longer sent by the project)",
+                style("-").bold().red(),
+                path
+            ),
+            Ok(ZellijConfigRemoval::KeptLocalEdit(path)) => println!(
+                "   {} Zellij config {} is no longer sent by the project; edited locally, kept",
+                style("!").bold().yellow(),
+                path
+            ),
+            Ok(ZellijConfigRemoval::None) => {}
+            Err(e) => println!(
+                "   {} Zellij config not removed: {}",
+                style("!").bold().yellow(),
+                e
+            ),
+        },
+    }
+}
+
 /// Result of [`sync_claude_workspace`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClaudeWorkspaceOutcome {
@@ -3098,24 +3159,117 @@ pub(crate) fn sync_claude_workspace(
     layout: &nexus_core::api::ClaudeWorkspace,
     force: bool,
 ) -> anyhow::Result<ClaudeWorkspaceOutcome> {
-    validate_agent_file_target_path(workspace, &layout.path)
+    let excludes = claude_workspace_excludes(layout, agentic_root);
+    sync_personal_file(
+        workspace,
+        agentic_root,
+        &layout.path,
+        &layout.body,
+        layout.sha256.as_deref(),
+        &excludes,
+        "per-user Claude Code workspace",
+        force,
+    )
+}
+
+/// Default target of `claude_workspace.zellij_config`; used to clean up a
+/// previously pulled config once the backend stops sending it.
+pub(crate) fn zellij_config_default_path(agentic_root: &str) -> String {
+    format!(
+        "{}/claude/zellij.local.kdl",
+        agentic_root.trim_end_matches('/')
+    )
+}
+
+/// Write `claude_workspace.zellij_config` (NEXUS-APP dispatch bb1ee3a0),
+/// handled like the personal layout: sha256 check, git-excluded, recorded
+/// in the pull manifest, a local edit kept unless `force`.
+pub(crate) fn sync_zellij_config(
+    workspace: &Path,
+    agentic_root: &str,
+    config: &nexus_core::api::ZellijConfigFile,
+    force: bool,
+) -> anyhow::Result<ClaudeWorkspaceOutcome> {
+    sync_personal_file(
+        workspace,
+        agentic_root,
+        &config.path,
+        &config.body,
+        config.sha256.as_deref(),
+        std::slice::from_ref(&config.path),
+        "per-user Zellij config",
+        force,
+    )
+}
+
+/// Result of [`remove_zellij_config`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ZellijConfigRemoval {
+    /// Nothing pulled earlier.
+    None,
+    Removed(String),
+    /// Edited locally since the last pull; left on disk, no longer managed.
+    KeptLocalEdit(String),
+}
+
+/// The backend no longer sends `zellij_config`: remove the file a previous
+/// pull wrote (tracked in the pull manifest). A local edit is kept unless
+/// `force`; either way the manifest entry is dropped.
+pub(crate) fn remove_zellij_config(
+    workspace: &Path,
+    agentic_root: &str,
+    force: bool,
+) -> anyhow::Result<ZellijConfigRemoval> {
+    let path = zellij_config_default_path(agentic_root);
+    let mut recorded = load_pull_manifest(workspace, agentic_root);
+    let Some(hash) = recorded.remove(&path) else {
+        return Ok(ZellijConfigRemoval::None);
+    };
+    let target = workspace.join(&path);
+    let outcome = match fs::read(&target) {
+        Ok(local) if !force && nexus_core::hash::sha256_hex_bytes(&local) != hash => {
+            ZellijConfigRemoval::KeptLocalEdit(path)
+        }
+        Ok(_) => {
+            fs::remove_file(&target)?;
+            ZellijConfigRemoval::Removed(path)
+        }
+        Err(_) => ZellijConfigRemoval::None,
+    };
+    write_pull_manifest(workspace, agentic_root, &recorded)?;
+    Ok(outcome)
+}
+
+/// Write a personal, git-excluded projection and record it in the pull
+/// manifest.
+#[allow(clippy::too_many_arguments)]
+fn sync_personal_file(
+    workspace: &Path,
+    agentic_root: &str,
+    path: &str,
+    body: &str,
+    sha256: Option<&str>,
+    excludes: &[String],
+    reason: &str,
+    force: bool,
+) -> anyhow::Result<ClaudeWorkspaceOutcome> {
+    validate_agent_file_target_path(workspace, path)
         .map_err(|e| anyhow::anyhow!("invalid path: {e}"))?;
-    if let Some(ref expected) = layout.sha256 {
-        if !expected.eq_ignore_ascii_case(&sha256_hex(&layout.body)) {
+    if let Some(expected) = sha256 {
+        if !expected.eq_ignore_ascii_case(&sha256_hex(body)) {
             anyhow::bail!("sha256 does not match the delivered body");
         }
     }
-    let excludes = claude_workspace_excludes(layout, agentic_root);
     let excludes: Vec<&str> = excludes.iter().map(String::as_str).collect();
-    super::shadow::ensure_git_excluded_in(workspace, &excludes, "per-user Claude Code workspace");
+    super::shadow::ensure_git_excluded_in(workspace, &excludes, reason);
 
     let mut recorded = load_pull_manifest(workspace, agentic_root);
-    let target = workspace.join(&layout.path);
+    let target = workspace.join(path);
     let local = fs::read(&target).ok();
     let outcome = match classify_generated(
         local.as_deref(),
-        &layout.body,
-        recorded.get(&layout.path).map(String::as_str),
+        body,
+        recorded.get(path).map(String::as_str),
     ) {
         GeneratedState::Unchanged => ClaudeWorkspaceOutcome::Unchanged,
         GeneratedState::LocallyModified if !force => {
@@ -3125,20 +3279,48 @@ pub(crate) fn sync_claude_workspace(
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&target, &layout.body)?;
+            fs::write(&target, body)?;
             ClaudeWorkspaceOutcome::Written
         }
     };
-    recorded.insert(layout.path.clone(), sha256_hex(&layout.body));
+    recorded.insert(path.to_string(), sha256_hex(body));
+    write_pull_manifest(workspace, agentic_root, &recorded)?;
+    Ok(outcome)
+}
+
+fn write_pull_manifest(
+    workspace: &Path,
+    agentic_root: &str,
+    recorded: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
     let manifest_path = pull_manifest_path(workspace, agentic_root);
     if let Some(parent) = manifest_path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(
         &manifest_path,
-        serde_json::to_string_pretty(&recorded)? + "\n",
+        serde_json::to_string_pretty(recorded)? + "\n",
     )?;
-    Ok(outcome)
+    Ok(())
+}
+
+fn print_zellij_config_outcome(path: &str, outcome: &ClaudeWorkspaceOutcome) {
+    match outcome {
+        ClaudeWorkspaceOutcome::Written => println!(
+            "   {} Zellij config {} (personal, git-excluded, used by nexus run)",
+            style("+").bold().green(),
+            path
+        ),
+        ClaudeWorkspaceOutcome::Unchanged => {
+            println!("   {} Zellij config {} up to date", style("=").dim(), path)
+        }
+        ClaudeWorkspaceOutcome::KeptLocalEdit => println!(
+            "   {} Zellij config {} edited locally, kept (nexus diff {} to compare, nexus pull --force to replace)",
+            style("!").bold().yellow(),
+            path,
+            path
+        ),
+    }
 }
 
 fn print_claude_workspace_outcome(
@@ -4221,6 +4403,7 @@ mod tests {
             tool: tool.to_string(),
             workspace: ws.map(str::to_string),
             layout: None,
+            config: None,
         };
         assert_eq!(
             run_start_label(Some(&t("claude", Some("zellij"))), true),
@@ -6286,6 +6469,7 @@ mod tests {
             source: Some("user".into()),
             requires: vec!["zellij".into()],
             observer_provider: None,
+            zellij_config: None,
         }
     }
 
@@ -6359,6 +6543,89 @@ mod tests {
             ClaudeWorkspaceOutcome::Written
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), v3.body);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_claude_workspace_parses_zellij_config() {
+        // Additive field (dispatch bb1ee3a0): older payloads parse as None.
+        let old: nexus_core::api::ClaudeWorkspace =
+            serde_json::from_str(r#"{"path":"a.kdl","body":"layout {}"}"#).unwrap();
+        assert_eq!(old.zellij_config, None);
+        let new: nexus_core::api::ClaudeWorkspace = serde_json::from_str(
+            r#"{"path":"a.kdl","body":"layout {}","zellij_config":{"path":".nexus/claude/zellij.local.kdl","body":"x","sha256":"ab"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            new.zellij_config.unwrap().path,
+            ".nexus/claude/zellij.local.kdl"
+        );
+        let t: nexus_core::api::RunTarget = serde_json::from_str(
+            r#"{"tool":"claude","workspace":"zellij","config":".nexus/claude/zellij.local.kdl"}"#,
+        )
+        .unwrap();
+        assert_eq!(t.config.as_deref(), Some(".nexus/claude/zellij.local.kdl"));
+    }
+
+    fn zellij_config(body: &str) -> nexus_core::api::ZellijConfigFile {
+        nexus_core::api::ZellijConfigFile {
+            path: ".nexus/claude/zellij.local.kdl".into(),
+            body: body.into(),
+            sha256: Some(sha256_hex(body)),
+        }
+    }
+
+    #[test]
+    fn test_sync_and_remove_zellij_config() {
+        let dir = temp_pull_dir("zellij-config");
+        fs::create_dir_all(dir.join(".git/info")).unwrap();
+        let v1 = zellij_config("copy_command \"pbcopy\"\n");
+        let path = dir.join(&v1.path);
+        assert_eq!(
+            sync_zellij_config(&dir, ".nexus", &v1, false).unwrap(),
+            ClaudeWorkspaceOutcome::Written
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), v1.body);
+        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
+        assert!(exclude
+            .lines()
+            .any(|l| l == ".nexus/claude/zellij.local.kdl"));
+        assert_eq!(
+            sync_zellij_config(&dir, ".nexus", &v1, false).unwrap(),
+            ClaudeWorkspaceOutcome::Unchanged
+        );
+        let mut bad = zellij_config("x");
+        bad.sha256 = Some("00".into());
+        assert!(sync_zellij_config(&dir, ".nexus", &bad, false).is_err());
+
+        // Field gone: the pulled file is removed and forgotten.
+        assert_eq!(
+            remove_zellij_config(&dir, ".nexus", false).unwrap(),
+            ZellijConfigRemoval::Removed(".nexus/claude/zellij.local.kdl".into())
+        );
+        assert!(!path.exists());
+        assert!(!load_pull_manifest(&dir, ".nexus").contains_key(&v1.path));
+        assert_eq!(
+            remove_zellij_config(&dir, ".nexus", false).unwrap(),
+            ZellijConfigRemoval::None
+        );
+
+        // A local edit is kept (no longer managed).
+        sync_zellij_config(&dir, ".nexus", &v1, false).unwrap();
+        fs::write(&path, "mine\n").unwrap();
+        assert_eq!(
+            remove_zellij_config(&dir, ".nexus", false).unwrap(),
+            ZellijConfigRemoval::KeptLocalEdit(".nexus/claude/zellij.local.kdl".into())
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine\n");
+        assert!(!load_pull_manifest(&dir, ".nexus").contains_key(&v1.path));
+
+        // A user's own file that pull never wrote is left alone.
+        assert_eq!(
+            remove_zellij_config(&dir, ".nexus", true).unwrap(),
+            ZellijConfigRemoval::None
+        );
+        assert!(path.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

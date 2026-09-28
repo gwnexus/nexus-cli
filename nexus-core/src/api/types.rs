@@ -430,6 +430,23 @@ pub struct ClaudeWorkspace {
     /// only displays it.
     #[serde(default)]
     pub observer_provider: Option<String>,
+    /// Per-caller Zellij config (NEXUS-APP dispatch bb1ee3a0), present only
+    /// when the caller has Zellij settings. `nexus run` passes it to
+    /// `zellij --config`; it replaces the global config for that session.
+    #[serde(default)]
+    pub zellij_config: Option<ZellijConfigFile>,
+}
+
+/// `af_export.claude_workspace.zellij_config`: a complete, rendered Zellij
+/// config written to a git-excluded path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZellijConfigFile {
+    /// Workspace-relative target, e.g. `.nexus/claude/zellij.local.kdl`.
+    pub path: String,
+    pub body: String,
+    /// SHA-256 (hex) of `body`.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 impl ClaudeWorkspace {
@@ -519,7 +536,7 @@ pub enum SettingsPatchOutcome {
 }
 
 /// `af_export.run_target`: `{ tool: "opencode"|"claude", workspace:
-/// "none"|"zellij", layout? }`.
+/// "none"|"zellij", layout?, config? }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunTarget {
     pub tool: String,
@@ -528,6 +545,10 @@ pub struct RunTarget {
     /// Workspace-relative layout file, for `workspace: "zellij"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
+    /// Workspace-relative Zellij config file (`claude_workspace.zellij_config`),
+    /// set only together with `workspace: "zellij"` (dispatch bb1ee3a0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
 }
 
 /// `af_export.ccx`: identifies the CCX bundle revision being delivered.

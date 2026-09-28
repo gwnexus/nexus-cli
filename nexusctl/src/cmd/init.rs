@@ -456,6 +456,14 @@ pub async fn run(
                             af_export.agent_files.len()
                         );
                     }
+                    // Personal layout + Zellij config, same as `nexus pull`.
+                    super::pull::sync_personal_workspace_files(
+                        &target,
+                        &agentic_root,
+                        af_export,
+                        is_claude,
+                        false,
+                    );
                 }
                 Err(ref e) => {
                     println!(

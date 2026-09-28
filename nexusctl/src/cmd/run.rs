@@ -297,7 +297,7 @@ pub async fn run(
         run_target.as_ref(),
         workspace_choice,
         &workspace,
-        on_path("zellij"),
+        &ZellijHost::detect(),
     );
     let workspace_row = row_check(&launch.row);
     if skip_checks && workspace_row.is_warn() {
@@ -885,6 +885,83 @@ fn tool_label(tool: &str) -> String {
 /// fallback while the personal layout has not been pulled yet.
 const TEAM_LAYOUT: &str = ".nexus/claude/nexus-claude.kdl";
 
+/// What `nexus run` needs to know about the host's Zellij.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ZellijHost {
+    pub available: bool,
+    /// `ZELLIJ_CONFIG_FILE` set by the user (non-empty).
+    pub config_env: Option<String>,
+}
+
+impl ZellijHost {
+    pub(crate) fn detect() -> Self {
+        ZellijHost {
+            available: on_path("zellij"),
+            config_env: env::var("ZELLIJ_CONFIG_FILE")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+        }
+    }
+}
+
+/// Which Zellij config a `nexus run` session uses (NEXUS-APP dispatch
+/// bb1ee3a0). `zellij --config` replaces the global config completely, so
+/// the project file is a full config rendered by the backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ZellijConfigSource {
+    /// `ZELLIJ_CONFIG_FILE` set by the user: it wins, no `--config`.
+    Env(String),
+    /// The project-local `run_target.config`, present on disk.
+    Project(String),
+    /// `run_target.config` is set but not pulled yet: global config.
+    ProjectMissing(String),
+    /// No project config: Zellij's global config.
+    Global,
+}
+
+impl ZellijConfigSource {
+    /// Human label (doctor, JSON).
+    pub(crate) fn label(&self) -> String {
+        match self {
+            ZellijConfigSource::Env(p) => format!("{p} (ZELLIJ_CONFIG_FILE)"),
+            ZellijConfigSource::Project(p) => format!("{p} (project-local)"),
+            ZellijConfigSource::ProjectMissing(p) => {
+                format!("global (project-local {p} not found, run nexus pull)")
+            }
+            ZellijConfigSource::Global => "global (~/.config/zellij/config.kdl)".into(),
+        }
+    }
+
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            ZellijConfigSource::Env(_) => "env",
+            ZellijConfigSource::Project(_) => "project",
+            ZellijConfigSource::ProjectMissing(_) => "project_missing",
+            ZellijConfigSource::Global => "global",
+        }
+    }
+}
+
+/// Resolve the Zellij config source: an explicit `ZELLIJ_CONFIG_FILE`,
+/// then `run_target.config` when the file exists, else the global config.
+pub(crate) fn zellij_config_source(
+    run_target: Option<&nexus_core::api::RunTarget>,
+    workspace: &Path,
+    config_env: Option<&str>,
+) -> ZellijConfigSource {
+    if let Some(p) = config_env.filter(|p| !p.trim().is_empty()) {
+        return ZellijConfigSource::Env(p.to_string());
+    }
+    match run_target
+        .and_then(|t| t.config.as_deref())
+        .filter(|c| !c.trim().is_empty())
+    {
+        Some(rel) if workspace.join(rel).is_file() => ZellijConfigSource::Project(rel.to_string()),
+        Some(rel) => ZellijConfigSource::ProjectMissing(rel.to_string()),
+        None => ZellijConfigSource::Global,
+    }
+}
+
 /// Resolve the start (NEXUS-APP dispatches 442f0e97, be6be18e).
 ///
 /// Tool: `--tool`, else `run_target.tool`, else [`resolve_effective_tool`]
@@ -893,8 +970,9 @@ const TEAM_LAYOUT: &str = ".nexus/claude/nexus-claude.kdl";
 /// Workspace, highest priority first: `--plain` / `--workspace`, the local
 /// `[run] workspace`, then `run_target.workspace` (the project default,
 /// not applied when `--tool` overrides the tool). `zellij` starts the tool
-/// through `zellij --layout <run_target.layout>`; if zellij or the layout is
-/// missing the tool starts directly and the row is a WARN.
+/// through `zellij [--config <run_target.config>] --layout <run_target.layout>`;
+/// if zellij or the layout is missing the tool starts directly and the row
+/// is a WARN. A missing project config falls back to the global one (WARN).
 fn resolve_launch(
     cli_tool: Option<&str>,
     configured_default: Option<&str>,
@@ -902,7 +980,7 @@ fn resolve_launch(
     run_target: Option<&nexus_core::api::RunTarget>,
     workspace_choice: Option<(&str, WorkspaceSource)>,
     workspace: &Path,
-    zellij_available: bool,
+    zellij: &ZellijHost,
 ) -> Launch {
     let cli_tool = cli_tool.filter(|t| !t.is_empty());
     let tool = match (cli_tool, run_target) {
@@ -956,7 +1034,7 @@ fn resolve_launch(
     } else {
         TEAM_LAYOUT
     };
-    if !zellij_available {
+    if !zellij.available {
         return direct(
             (
                 RowLevel::Warn,
@@ -974,16 +1052,29 @@ fn resolve_launch(
             format!("plain, layout missing ({src})"),
         );
     }
+    let config = zellij_config_source(run_target, workspace, zellij.config_env.as_deref());
+    let mut leading_args = Vec::new();
+    if let ZellijConfigSource::Project(ref rel) = config {
+        leading_args.push("--config".to_string());
+        leading_args.push(workspace.join(rel).display().to_string());
+    }
+    leading_args.push("--layout".to_string());
+    leading_args.push(layout.display().to_string());
+    let config_note = match &config {
+        ZellijConfigSource::Env(p) => format!(", config {p} (ZELLIJ_CONFIG_FILE)"),
+        ZellijConfigSource::Project(rel) => format!(", config {rel}"),
+        ZellijConfigSource::ProjectMissing(rel) => {
+            format!("; config {rel} not found, run nexus pull")
+        }
+        ZellijConfigSource::Global => String::new(),
+    };
+    let warn = !fallback_note.is_empty() || matches!(config, ZellijConfigSource::ProjectMissing(_));
     Launch {
         tool: "zellij".to_string(),
-        leading_args: vec!["--layout".to_string(), layout.display().to_string()],
+        leading_args,
         row: (
-            if fallback_note.is_empty() {
-                RowLevel::Pass
-            } else {
-                RowLevel::Warn
-            },
-            format!("{label} in zellij ({layout_rel}{fallback_note}) [{src}]"),
+            if warn { RowLevel::Warn } else { RowLevel::Pass },
+            format!("{label} in zellij ({layout_rel}{fallback_note}{config_note}) [{src}]"),
         ),
         summary: format!("zellij ({src})"),
     }
@@ -3121,6 +3212,7 @@ mod tests {
             tool: tool.to_string(),
             workspace: workspace.map(str::to_string),
             layout: layout.map(str::to_string),
+            config: None,
         }
     }
 
@@ -3136,13 +3228,20 @@ mod tests {
         dir
     }
 
+    fn host(available: bool) -> ZellijHost {
+        ZellijHost {
+            available,
+            config_env: None,
+        }
+    }
+
     fn launch(
         choice: Option<(&str, WorkspaceSource)>,
         t: Option<&nexus_core::api::RunTarget>,
         ws: &Path,
         zellij: bool,
     ) -> Launch {
-        resolve_launch(None, None, Some("claude-cli"), t, choice, ws, zellij)
+        resolve_launch(None, None, Some("claude-cli"), t, choice, ws, &host(zellij))
     }
 
     #[test]
@@ -3291,7 +3390,7 @@ mod tests {
     fn test_launch_without_run_target_falls_back_to_agent_owner() {
         let ws = Path::new("/x");
         let r = |default: Option<&str>, owner: &str| {
-            resolve_launch(None, default, Some(owner), None, None, ws, true).tool
+            resolve_launch(None, default, Some(owner), None, None, ws, &host(true)).tool
         };
         assert_eq!(r(None, "claude-cli"), "claude");
         assert_eq!(r(None, "opencode"), "opencode");
@@ -3312,7 +3411,7 @@ mod tests {
             Some(&t),
             None,
             &dir,
-            true,
+            &host(true),
         );
         assert_eq!(l.tool, "opencode");
         assert!(l.leading_args.is_empty());
@@ -3324,9 +3423,126 @@ mod tests {
             Some(&t),
             Some(("zellij", WorkspaceSource::Flag)),
             &dir,
-            true,
+            &host(true),
         );
         assert_eq!(l.tool, "zellij");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── Zellij config (NEXUS-APP dispatch bb1ee3a0) ────────────────────────
+
+    const ZCFG: &str = ".nexus/claude/zellij.local.kdl";
+
+    fn with_config(t: &nexus_core::api::RunTarget) -> nexus_core::api::RunTarget {
+        nexus_core::api::RunTarget {
+            config: Some(ZCFG.to_string()),
+            ..t.clone()
+        }
+    }
+
+    #[test]
+    fn test_launch_passes_project_zellij_config() {
+        let dir = with_layout("zcfg");
+        fs::write(dir.join(ZCFG), "copy_command \"pbcopy\"\n").unwrap();
+        let t = with_config(&target("claude", Some("zellij"), Some(KDL)));
+        let l = launch(None, Some(&t), &dir, true);
+        assert_eq!(
+            l.leading_args,
+            vec![
+                "--config".to_string(),
+                dir.join(ZCFG).display().to_string(),
+                "--layout".to_string(),
+                dir.join(KDL).display().to_string(),
+            ]
+        );
+        assert_eq!(
+            l.row,
+            (
+                RowLevel::Pass,
+                format!("Claude Code in zellij ({KDL}, config {ZCFG}) [project default]")
+            )
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_launch_missing_zellij_config_falls_back_with_warn() {
+        let dir = with_layout("zcfg-missing");
+        let t = with_config(&target("claude", Some("zellij"), Some(KDL)));
+        let l = launch(None, Some(&t), &dir, true);
+        assert_eq!(l.tool, "zellij");
+        assert_eq!(
+            l.leading_args,
+            vec!["--layout".to_string(), dir.join(KDL).display().to_string()]
+        );
+        assert_eq!(l.row.0, RowLevel::Warn);
+        assert!(
+            l.row
+                .1
+                .contains("config .nexus/claude/zellij.local.kdl not found, run nexus pull"),
+            "{}",
+            l.row.1
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_launch_zellij_config_env_wins() {
+        let dir = with_layout("zcfg-env");
+        fs::write(dir.join(ZCFG), "theme \"x\"\n").unwrap();
+        let t = with_config(&target("claude", Some("zellij"), Some(KDL)));
+        let zellij = ZellijHost {
+            available: true,
+            config_env: Some("/home/me/z.kdl".into()),
+        };
+        let l = resolve_launch(
+            None,
+            None,
+            Some("claude-cli"),
+            Some(&t),
+            None,
+            &dir,
+            &zellij,
+        );
+        assert!(!l.leading_args.contains(&"--config".to_string()));
+        assert_eq!(l.row.0, RowLevel::Pass);
+        assert!(l
+            .row
+            .1
+            .contains("config /home/me/z.kdl (ZELLIJ_CONFIG_FILE)"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_zellij_config_source() {
+        let dir = with_layout("zcfg-source");
+        let plain = target("claude", Some("zellij"), Some(KDL));
+        let t = with_config(&plain);
+        assert_eq!(
+            zellij_config_source(Some(&plain), &dir, None),
+            ZellijConfigSource::Global
+        );
+        assert_eq!(
+            zellij_config_source(None, &dir, None),
+            ZellijConfigSource::Global
+        );
+        assert_eq!(
+            zellij_config_source(Some(&t), &dir, None),
+            ZellijConfigSource::ProjectMissing(ZCFG.into())
+        );
+        fs::write(dir.join(ZCFG), "x").unwrap();
+        assert_eq!(
+            zellij_config_source(Some(&t), &dir, None),
+            ZellijConfigSource::Project(ZCFG.into())
+        );
+        assert_eq!(
+            zellij_config_source(Some(&t), &dir, Some(" ")),
+            ZellijConfigSource::Project(ZCFG.into())
+        );
+        assert_eq!(
+            zellij_config_source(Some(&t), &dir, Some("/z.kdl")),
+            ZellijConfigSource::Env("/z.kdl".into())
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

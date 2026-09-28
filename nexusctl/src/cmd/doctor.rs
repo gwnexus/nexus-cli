@@ -216,6 +216,14 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
     }
     let zellij_workspace =
         run_target.as_ref().and_then(|t| t.workspace.as_deref()) == Some("zellij");
+    // Which Zellij config `nexus run` uses (NEXUS-APP dispatch bb1ee3a0).
+    let zellij_config = zellij_workspace.then(|| {
+        super::run::zellij_config_source(
+            run_target.as_ref(),
+            &workspace,
+            super::run::ZellijHost::detect().config_env.as_deref(),
+        )
+    });
     let required = required_tools(requires.as_deref(), zellij_workspace);
     let preference = installer_preference(&workspace, super::run::on_path);
     let tools = collect(&required, &preference, probe_tool);
@@ -247,6 +255,10 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                 "tools": tools,
                 "claude_code_compatibility": compat_range,
                 "claude_code_compatible": claude_compatible,
+                "zellij_config": zellij_config.as_ref().map(|c| serde_json::json!({
+                    "source": c.kind(),
+                    "label": c.label(),
+                })),
                 "ok": code == 0,
             }))?
         );
@@ -286,6 +298,13 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                 )),
             );
         }
+    }
+    if let Some(c) = &zellij_config {
+        let result = match c {
+            super::run::ZellijConfigSource::ProjectMissing(_) => CheckResult::Warn(c.label()),
+            _ => CheckResult::Info(c.label()),
+        };
+        print_check("zellij config", &result);
     }
     let optional: Vec<String> = tools
         .iter()
