@@ -1269,7 +1269,8 @@ fn write_mcp_configs(
       "args": [{args}],
       "env": {{
         "NEXUS_API_URL": "{api_url}",
-        "NEXUS_PRIVATE_TOKEN": "{token}"
+        "NEXUS_PRIVATE_TOKEN": "{token}",
+        "NEXUS_PROJECT_ID": "{project_id}"
       }}
     }},
     "nexus-local-tools": {{
@@ -1283,6 +1284,7 @@ fn write_mcp_configs(
                 args = args,
                 api_url = api_url,
                 token = token,
+                project_id = project_id,
             );
 
             fs::write(&claude_mcp_path, claude_mcp_json)?;
@@ -2317,6 +2319,12 @@ mod tests {
         assert!(cm.contains("\"mcpServers\""));
         assert!(cm.contains("@gwdn/nexus-mcp"));
         assert!(cm.contains("nxs_pat_test-token-1234567890"));
+        // Dispatch dc24bbae: same NEXUS_PROJECT_ID literal as opencode.json.
+        let parsed: serde_json::Value = serde_json::from_str(&cm).unwrap();
+        assert_eq!(
+            parsed["mcpServers"]["nexus"]["env"]["NEXUS_PROJECT_ID"],
+            "test-project-id"
+        );
         // Claude uses "command" + "args" format, not "command": [array]
         assert!(cm.contains("\"command\": \"npx\""));
         assert!(cm.contains("\"args\""));

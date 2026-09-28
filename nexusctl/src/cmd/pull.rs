@@ -999,6 +999,9 @@ pub async fn run(
     let proceed_with_opencode = if opencode_will_be_written {
         confirm_export_warnings(&export_warnings, force)?
     } else {
+        // Nothing to gate, but the operator still needs to see them (e.g.
+        // `actors_not_exported`, NEXUS-APP staging 4083959c).
+        print_export_warnings(&export_warnings);
         true
     };
 
@@ -2348,8 +2351,8 @@ fn confirm_overwrite() -> anyhow::Result<bool> {
     Ok(answer == "y" || answer == "yes")
 }
 
-/// Render `af_export`'s `export_warnings` grouped by code and gate the
-/// `opencode.json` write on operator confirmation.
+/// Render `af_export`'s `export_warnings` (see [`print_export_warnings`])
+/// and gate the `opencode.json` write on operator confirmation.
 ///
 /// Returns `true` if it's safe to proceed writing `opencode.json`, `false`
 /// if the operator declined. `bypass` (`--yes` / `--force`) skips the prompt
@@ -2365,9 +2368,41 @@ fn confirm_export_warnings(warnings: &[ExportWarning], bypass: bool) -> anyhow::
         return Ok(true);
     }
 
+    print_export_warnings(warnings);
+
+    if bypass {
+        println!(
+            "   {} Continuing (--yes/--force): opencode.json will be written despite the warning(s) above.",
+            style("--yes").dim()
+        );
+        return Ok(true);
+    }
+
+    use std::io::IsTerminal;
+    if !io::stdin().is_terminal() {
+        println!(
+            "   {} Non-interactive session: proceeding despite the warning(s) above. Pass --yes to silence this notice.",
+            style("!").dim()
+        );
+        return Ok(true);
+    }
+
+    print!("   {} Continue anyway? [y/N] ", style("?").bold().cyan());
+    io::stdout().flush()?;
+    let ch = console::Term::stdout().read_char().unwrap_or('n');
+    println!("{}", ch);
+    Ok(ch == 'y' || ch == 'Y')
+}
+
+/// Print `af_export`'s `export_warnings` verbatim, grouped by code.
+fn print_export_warnings(warnings: &[ExportWarning]) {
+    if warnings.is_empty() {
+        return;
+    }
+
     println!();
     println!(
-        "   {} Nexus detected {} model-routing warning(s) for this project:",
+        "   {} Nexus reported {} export warning(s) for this project:",
         style("!").bold().yellow(),
         warnings.len()
     );
@@ -2396,29 +2431,6 @@ fn confirm_export_warnings(warnings: &[ExportWarning], bypass: bool) -> anyhow::
         }
     }
     println!();
-
-    if bypass {
-        println!(
-            "   {} Continuing (--yes/--force): opencode.json will be written despite the warning(s) above.",
-            style("--yes").dim()
-        );
-        return Ok(true);
-    }
-
-    use std::io::IsTerminal;
-    if !io::stdin().is_terminal() {
-        println!(
-            "   {} Non-interactive session: proceeding despite the warning(s) above. Pass --yes to silence this notice.",
-            style("!").dim()
-        );
-        return Ok(true);
-    }
-
-    print!("   {} Continue anyway? [y/N] ", style("?").bold().cyan());
-    io::stdout().flush()?;
-    let ch = console::Term::stdout().read_char().unwrap_or('n');
-    println!("{}", ch);
-    Ok(ch == 'y' || ch == 'Y')
 }
 
 // ---------------------------------------------------------------------------
@@ -2694,7 +2706,12 @@ fn write_mcp_configs(
         let needs_write = !exists
             || force
             || !plugin_mcp_servers.is_empty()
-            || json_lacks_nexus_server(&claude_mcp_path, "mcpServers");
+            || json_lacks_nexus_server(&claude_mcp_path, "mcpServers")
+            || json_nexus_env_differs(
+                &claude_mcp_path,
+                "/mcpServers/nexus/env/NEXUS_PROJECT_ID",
+                project_id,
+            );
 
         if needs_write {
             let mut servers_block: serde_json::Map<String, serde_json::Value> = if exists && !force
@@ -2723,7 +2740,8 @@ fn write_mcp_configs(
                     "args": args,
                     "env": {
                         "NEXUS_API_URL": api_url,
-                        "NEXUS_PRIVATE_TOKEN": token
+                        "NEXUS_PRIVATE_TOKEN": token,
+                        "NEXUS_PROJECT_ID": project_id
                     }
                 }),
             );
@@ -2826,6 +2844,16 @@ fn json_lacks_nexus_server(path: &Path, block: &str) -> bool {
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .is_some_and(|v| v.get(block).and_then(|b| b.get("nexus")).is_none())
+}
+
+/// Whether the JSON config at `path` parses but the value at `pointer` is not
+/// `expected` (missing or stale, e.g. a `.mcp.json` written before
+/// `NEXUS_PROJECT_ID` was baked in). Unparseable files are left alone.
+fn json_nexus_env_differs(path: &Path, pointer: &str, expected: &str) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .is_some_and(|v| v.pointer(pointer).and_then(|x| x.as_str()) != Some(expected))
 }
 
 // ---------------------------------------------------------------------------
@@ -3120,6 +3148,9 @@ fn print_claude_workspace_outcome(
     let detail = [
         layout.preset.as_deref().map(|p| format!("preset {p}")),
         layout.source.as_deref().map(|s| format!("from {s} level")),
+        layout
+            .non_default_observer()
+            .map(|o| format!("observer {o}")),
     ]
     .into_iter()
     .flatten()
@@ -5237,6 +5268,83 @@ mod tests {
     }
 
     #[test]
+    fn test_write_mcp_configs_claude_includes_nexus_project_id() {
+        // Dispatch dc24bbae: the Claude Code path gets NEXUS_PROJECT_ID too.
+        let dir = temp_pull_dir("mcp-claude-project-id");
+        write_mcp_configs(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_project-id-token",
+            "07303f0c-3713-4cb0-b03e-35f4db0c1acb",
+            McpSource::Npm,
+            Some("claude-cli"),
+            ".nexus",
+            &HashMap::new(),
+            &HashMap::new(),
+            &None,
+            &None,
+            &None,
+            &None,
+            false,
+        )
+        .unwrap();
+        let mcp: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap();
+        assert_eq!(
+            mcp["mcpServers"]["nexus"]["env"]["NEXUS_PROJECT_ID"],
+            "07303f0c-3713-4cb0-b03e-35f4db0c1acb"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_mcp_configs_claude_adds_missing_project_id() {
+        // A .mcp.json written by <= 0.28.5 (no NEXUS_PROJECT_ID, no plugin
+        // servers) is repaired by a plain pull; operator servers survive.
+        let dir = temp_pull_dir("mcp-claude-heal-project-id");
+        fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"nexus":{"command":"npx","args":[],"env":{"NEXUS_API_URL":"u","NEXUS_PRIVATE_TOKEN":"t"}},"mine":{"command":"mine"}}}"#,
+        )
+        .unwrap();
+        let pull = |id: &str| {
+            write_mcp_configs(
+                &dir,
+                "https://nexus.gatewarden.eu",
+                "tok",
+                id,
+                McpSource::Npm,
+                Some("claude-cli"),
+                ".nexus",
+                &HashMap::new(),
+                &HashMap::new(),
+                &None,
+                &None,
+                &None,
+                &None,
+                false,
+            )
+            .unwrap();
+            let v: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap();
+            v
+        };
+        let mcp = pull("pid-1");
+        assert_eq!(
+            mcp["mcpServers"]["nexus"]["env"]["NEXUS_PROJECT_ID"],
+            "pid-1"
+        );
+        assert!(mcp["mcpServers"]["mine"].is_object());
+        // A stale id (workspace relinked) is repaired too.
+        let mcp = pull("pid-2");
+        assert_eq!(
+            mcp["mcpServers"]["nexus"]["env"]["NEXUS_PROJECT_ID"],
+            "pid-2"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_write_mcp_configs_if_missing_skips_existing() {
         let dir = temp_pull_dir("mcp-skips");
 
@@ -6177,7 +6285,33 @@ mod tests {
             preset: Some("focus".into()),
             source: Some("user".into()),
             requires: vec!["zellij".into()],
+            observer_provider: None,
         }
+    }
+
+    #[test]
+    fn test_claude_workspace_observer_provider_parses_unknown_values() {
+        // Staging 4083959c: additive `observer_provider`; unknown future
+        // values must parse and only the non-default one is displayed.
+        let parse = |extra: &str| -> nexus_core::api::ClaudeWorkspace {
+            serde_json::from_str(&format!(
+                r#"{{"path":".nexus/claude/workspace.local.kdl","body":"layout {{}}"{extra}}}"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(parse("").non_default_observer(), None);
+        assert_eq!(
+            parse(r#","observer_provider":"nexus""#).non_default_observer(),
+            None
+        );
+        assert_eq!(
+            parse(r#","observer_provider":"agenthud""#).non_default_observer(),
+            Some("agenthud")
+        );
+        assert_eq!(
+            parse(r#","observer_provider":"future-hud""#).non_default_observer(),
+            Some("future-hud")
+        );
     }
 
     #[test]

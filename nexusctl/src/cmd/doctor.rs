@@ -28,7 +28,17 @@ fn purpose(tool: &str) -> &'static str {
         "lazygit" => "git pane",
         "ccusage" => "usage pane",
         "delta" => "diff pager",
+        "agenthud" => "agent observer, AgentHUD",
         _ => "required by the workspace",
+    }
+}
+
+/// Upstream install instructions for third-party tools Nexus does not
+/// support or install (ADR-0120 §4). Printed only, never run.
+fn third_party_instructions(tool: &str) -> Option<&'static str> {
+    match tool {
+        "agenthud" => Some("npm i -g agenthud (see https://github.com/neochoon/agenthud)"),
+        _ => None,
     }
 }
 
@@ -88,6 +98,10 @@ pub struct ToolStatus {
     pub version: Option<String>,
     /// Suggested install command for a missing tool.
     pub install: Option<String>,
+    /// Upstream install instructions for a missing third-party tool
+    /// (unsupported by Nexus, never run by `--fix`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub third_party: Option<String>,
 }
 
 /// Which tools are required: `requires` from the workspace layout when the
@@ -132,6 +146,10 @@ fn collect(
                 None
             };
             ToolStatus {
+                third_party: probed
+                    .is_none()
+                    .then(|| third_party_instructions(&tool).map(str::to_string))
+                    .flatten(),
                 required: required.contains(&tool),
                 found: probed.is_some(),
                 version: probed.flatten(),
@@ -175,6 +193,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
     // Best effort: the layout's `requires` for this caller.
     let mut requires: Option<Vec<String>> = None;
     let mut preset: Option<String> = None;
+    let mut observer: Option<String> = None;
     let mut compat_range: Option<String> = None;
     let mut run_target = config::load_run_target(Some(&workspace));
     if let (Some(token), Ok(project_id)) = (
@@ -184,6 +203,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
         if let Ok(client) = NexusClient::new(api_url, Some(token)) {
             if let Ok(export) = client.export_agent_files(&project_id).await {
                 if let Some(layout) = export.claude_workspace {
+                    observer = layout.non_default_observer().map(str::to_string);
                     requires = Some(layout.requires);
                     preset = layout.preset;
                 }
@@ -222,6 +242,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
             serde_json::to_string_pretty(&serde_json::json!({
                 "source": if requires.is_some() { "claude_workspace.requires" } else { "run_target" },
                 "preset": preset,
+                "observer_provider": observer,
                 "installers": preference,
                 "tools": tools,
                 "claude_code_compatibility": compat_range,
@@ -240,6 +261,12 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
         (None, _) => "required by the project run target".into(),
     };
     println!("  {}", style(source).dim());
+    if let Some(o) = &observer {
+        println!(
+            "  {}",
+            style(format!("observer pane: {o} (experimental)")).dim()
+        );
+    }
     println!();
     for t in &tools {
         let result = match (t.found, t.required) {
@@ -305,11 +332,19 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
         println!("  Optional (not run): {}", optional.join("; "));
     }
     for t in &unfixable {
-        println!(
-            "  {} no installer found for {} (devbox, brew or npm); install it manually.",
-            style("!").bold().yellow(),
-            t.tool
-        );
+        match &t.third_party {
+            Some(how) => println!(
+                "  {} {} is third-party and not supported by Nexus; install it yourself (not run): {}",
+                style("!").bold().yellow(),
+                t.tool,
+                how
+            ),
+            None => println!(
+                "  {} no installer found for {} (devbox, brew or npm); install it manually.",
+                style("!").bold().yellow(),
+                t.tool
+            ),
+        }
     }
     if fixable.is_empty() {
         return Ok(code);
@@ -412,6 +447,35 @@ mod tests {
         assert!(!get("lazygit").required);
         // Unknown required tools are listed, without an installer.
         assert!(get("atuin").required && get("atuin").install.is_none());
+    }
+
+    #[test]
+    fn test_collect_agenthud_is_third_party_and_only_listed_when_required() {
+        // Staging 4083959c: observer_provider=agenthud puts it in `requires`.
+        let missing = |_: &str| None;
+        let prefs = [Installer::Devbox, Installer::Brew, Installer::Npm];
+        let tools = collect(&["claude".to_string(), "agenthud".into()], &prefs, missing);
+        let hud = tools.iter().find(|t| t.tool == "agenthud").unwrap();
+        assert!(hud.required && !hud.found);
+        // Never an install command --fix would run, only upstream guidance.
+        assert_eq!(hud.install, None);
+        assert!(hud
+            .third_party
+            .as_deref()
+            .unwrap()
+            .contains("npm i -g agenthud"));
+        let json = serde_json::to_value(hud).unwrap();
+        assert!(json["third_party"].is_string());
+
+        // Not part of the default tool list.
+        let tools = collect(&["claude".to_string()], &prefs, missing);
+        assert!(tools.iter().all(|t| t.tool != "agenthud"));
+
+        // Installed: no guidance.
+        let found = |t: &str| (t == "agenthud").then_some(Some("0.9.0".to_string()));
+        let tools = collect(&["agenthud".to_string()], &prefs, found);
+        let hud = tools.iter().find(|t| t.tool == "agenthud").unwrap();
+        assert!(hud.found && hud.third_party.is_none());
     }
 
     #[test]

@@ -328,6 +328,16 @@ fn short(id: &str, n: usize) -> String {
     id.chars().take(n).collect()
 }
 
+/// Compact model label for the table: `claude-haiku-4-5-20251001` ->
+/// `haiku-4-5` (vendor prefix and date suffix dropped). JSON keeps the id.
+fn model_label(model: &str) -> &str {
+    let m = model.strip_prefix("claude-").unwrap_or(model);
+    match m.rsplit_once('-') {
+        Some((head, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => m,
+    }
+}
+
 /// Display name of an agent within its session.
 fn agent_name(v: &AgentView) -> String {
     match (v.role.as_str(), v.agent_id.as_deref()) {
@@ -349,7 +359,7 @@ fn agent_line(v: &AgentView, prefix: &str, now: i64) -> String {
         .runtime_at(now)
         .map(fmt_duration)
         .unwrap_or_else(|| "-".into());
-    let model = v.model.as_deref().unwrap_or("");
+    let model = model_label(v.model.as_deref().unwrap_or(""));
     let task = v.task.as_deref().unwrap_or("").replace(['\n', '\r'], " ");
     // Keep the columns aligned whatever the tree indent.
     let name_width = NAME_COLUMN.saturating_sub(prefix.chars().count()).max(8);
@@ -857,6 +867,14 @@ mod tests {
         std::fs::write(&path, "{\"d\":4}\n").unwrap();
         assert_eq!(follower.poll(&path).unwrap(), "{\"d\":4}\n");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_model_label() {
+        assert_eq!(model_label("claude-haiku-4-5-20251001"), "haiku-4-5");
+        assert_eq!(model_label("claude-opus-5-5"), "opus-5-5");
+        assert_eq!(model_label("opus"), "opus");
+        assert_eq!(model_label(""), "");
     }
 
     #[test]

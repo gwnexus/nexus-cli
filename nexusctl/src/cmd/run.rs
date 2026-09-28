@@ -426,7 +426,8 @@ pub async fn run(
     // automatically — the user only ever has to think about one place
     // (`nexus login`), and every subsequent `nexus run` self-heals the rest.
     if let Some(token) = resolve_token() {
-        match sync_mcp_credentials(&workspace, api_url, &token) {
+        let project_id = config::resolve_project_id(None, Some(&workspace)).ok();
+        match sync_mcp_credentials(&workspace, api_url, &token, project_id.as_deref()) {
             Ok(paths) if !paths.is_empty() => {
                 println!(
                     "   {} refreshed Nexus credentials in: {}",
@@ -628,85 +629,56 @@ pub async fn run(
 
 /// Patch the `mcp.nexus.environment` block of `opencode.json` (and, if
 /// present, the top-level `mcpServers.nexus.env` block of `.mcp.json`)
-/// in place, only touching `NEXUS_API_URL`/`NEXUS_PRIVATE_TOKEN` and only if
-/// they differ from the currently-resolved values. Returns the list of
-/// relative paths that were actually rewritten (empty if already in sync or
-/// the files don't exist — this is best-effort and silent when there's
-/// nothing to do).
+/// in place, only touching `NEXUS_API_URL`/`NEXUS_PRIVATE_TOKEN` (and
+/// `NEXUS_PROJECT_ID` when the workspace is linked) and only if they differ
+/// from the currently-resolved values. Returns the list of relative paths
+/// that were actually rewritten (empty if already in sync or the files don't
+/// exist — this is best-effort and silent when there's nothing to do).
 ///
-/// Deliberately does NOT touch any other keys/formatting beyond the two
-/// credential fields, and does not create either file if absent (that's
+/// Deliberately does NOT touch any other keys/formatting beyond those
+/// fields, and does not create either file if absent (that's
 /// `nexus init`/`nexus pull`'s job).
 fn sync_mcp_credentials(
     workspace: &Path,
     api_url: &str,
     token: &str,
+    project_id: Option<&str>,
 ) -> anyhow::Result<Vec<String>> {
-    let mut changed = Vec::new();
-
-    // opencode.json: mcp.nexus.environment.{NEXUS_API_URL,NEXUS_PRIVATE_TOKEN}
-    let oc_path = workspace.join("opencode.json");
-    if oc_path.is_file() {
-        let raw = fs::read_to_string(&oc_path)?;
-        if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(env) = root
-                .pointer_mut("/mcp/nexus/environment")
-                .and_then(|v| v.as_object_mut())
-            {
-                let mut dirty = false;
-                if env.get("NEXUS_API_URL").and_then(|v| v.as_str()) != Some(api_url) {
-                    env.insert(
-                        "NEXUS_API_URL".to_string(),
-                        serde_json::Value::String(api_url.to_string()),
-                    );
-                    dirty = true;
-                }
-                if env.get("NEXUS_PRIVATE_TOKEN").and_then(|v| v.as_str()) != Some(token) {
-                    env.insert(
-                        "NEXUS_PRIVATE_TOKEN".to_string(),
-                        serde_json::Value::String(token.to_string()),
-                    );
-                    dirty = true;
-                }
-                if dirty {
-                    let out = serde_json::to_string_pretty(&root)?;
-                    fs::write(&oc_path, out + "\n")?;
-                    changed.push("opencode.json".to_string());
-                }
-            }
-        }
+    let mut wanted = vec![("NEXUS_API_URL", api_url), ("NEXUS_PRIVATE_TOKEN", token)];
+    if let Some(id) = project_id.filter(|id| !id.is_empty()) {
+        wanted.push(("NEXUS_PROJECT_ID", id));
     }
 
-    // .mcp.json (project root): mcpServers.nexus.env.{NEXUS_API_URL,NEXUS_PRIVATE_TOKEN}
-    let claude_path = workspace.join(".mcp.json");
-    if claude_path.is_file() {
-        let raw = fs::read_to_string(&claude_path)?;
-        if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(env) = root
-                .pointer_mut("/mcpServers/nexus/env")
-                .and_then(|v| v.as_object_mut())
-            {
-                let mut dirty = false;
-                if env.get("NEXUS_API_URL").and_then(|v| v.as_str()) != Some(api_url) {
-                    env.insert(
-                        "NEXUS_API_URL".to_string(),
-                        serde_json::Value::String(api_url.to_string()),
-                    );
-                    dirty = true;
-                }
-                if env.get("NEXUS_PRIVATE_TOKEN").and_then(|v| v.as_str()) != Some(token) {
-                    env.insert(
-                        "NEXUS_PRIVATE_TOKEN".to_string(),
-                        serde_json::Value::String(token.to_string()),
-                    );
-                    dirty = true;
-                }
-                if dirty {
-                    let out = serde_json::to_string_pretty(&root)?;
-                    fs::write(&claude_path, out + "\n")?;
-                    changed.push(".mcp.json".to_string());
-                }
+    let mut changed = Vec::new();
+    for (rel, pointer) in [
+        ("opencode.json", "/mcp/nexus/environment"),
+        (".mcp.json", "/mcpServers/nexus/env"),
+    ] {
+        let path = workspace.join(rel);
+        if !path.is_file() {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)?;
+        let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(env) = root.pointer_mut(pointer).and_then(|v| v.as_object_mut()) else {
+            continue;
+        };
+        let mut dirty = false;
+        for (key, value) in &wanted {
+            if env.get(*key).and_then(|v| v.as_str()) != Some(*value) {
+                env.insert(
+                    (*key).to_string(),
+                    serde_json::Value::String((*value).to_string()),
+                );
+                dirty = true;
             }
+        }
+        if dirty {
+            let out = serde_json::to_string_pretty(&root)?;
+            fs::write(&path, out + "\n")?;
+            changed.push(rel.to_string());
         }
     }
 
@@ -2456,6 +2428,7 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_NEW-FRESH-TOKEN",
+            None,
         )
         .unwrap();
         assert_eq!(changed, vec!["opencode.json".to_string()]);
@@ -2493,9 +2466,13 @@ mod tests {
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let changed =
-            sync_mcp_credentials(&dir, "https://nexus.gatewarden.eu", "nxs_pat_ALREADY-FRESH")
-                .unwrap();
+        let changed = sync_mcp_credentials(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_ALREADY-FRESH",
+            None,
+        )
+        .unwrap();
         assert!(changed.is_empty());
 
         let mtime_after = fs::metadata(dir.join("opencode.json"))
@@ -2512,7 +2489,7 @@ mod tests {
     fn test_sync_mcp_credentials_missing_file_is_ok() {
         let dir = tmp_dir("sync_creds_missing");
         let changed =
-            sync_mcp_credentials(&dir, "https://nexus.gatewarden.eu", "nxs_pat_x").unwrap();
+            sync_mcp_credentials(&dir, "https://nexus.gatewarden.eu", "nxs_pat_x", None).unwrap();
         assert!(changed.is_empty());
     }
 
@@ -2538,11 +2515,88 @@ mod tests {
         .unwrap();
 
         let changed =
-            sync_mcp_credentials(&dir, "https://nexus.gatewarden.eu", "nxs_pat_NEW").unwrap();
+            sync_mcp_credentials(&dir, "https://nexus.gatewarden.eu", "nxs_pat_NEW", None).unwrap();
         assert_eq!(changed, vec![".mcp.json".to_string()]);
         let updated = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(updated.contains("nxs_pat_NEW"));
         assert!(!updated.contains("nxs_pat_OLD"));
+    }
+
+    // NEXUS-APP dispatch dc24bbae: `.mcp.json` written before 0.28.6 has no
+    // NEXUS_PROJECT_ID; `nexus run` adds it (and repairs a stale one).
+    #[test]
+    fn test_sync_mcp_credentials_heals_claude_project_id() {
+        let dir = tmp_dir("sync_creds_claude_project_id");
+        fs::write(
+            dir.join(".mcp.json"),
+            r#"{
+  "mcpServers": {
+    "nexus": {
+      "command": "npx",
+      "env": {
+        "NEXUS_API_URL": "https://nexus.gatewarden.eu",
+        "NEXUS_PRIVATE_TOKEN": "nxs_pat_FRESH"
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let changed = sync_mcp_credentials(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_FRESH",
+            Some("project-a"),
+        )
+        .unwrap();
+        assert_eq!(changed, vec![".mcp.json".to_string()]);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap();
+        assert_eq!(
+            parsed["mcpServers"]["nexus"]["env"]["NEXUS_PROJECT_ID"],
+            "project-a"
+        );
+
+        // Stale id is repaired; a second run with the same id is a no-op.
+        let changed = sync_mcp_credentials(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_FRESH",
+            Some("project-b"),
+        )
+        .unwrap();
+        assert_eq!(changed, vec![".mcp.json".to_string()]);
+        let changed = sync_mcp_credentials(
+            &dir,
+            "https://nexus.gatewarden.eu",
+            "nxs_pat_FRESH",
+            Some("project-b"),
+        )
+        .unwrap();
+        assert!(changed.is_empty());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap();
+        assert_eq!(
+            parsed["mcpServers"]["nexus"]["env"]["NEXUS_PROJECT_ID"],
+            "project-b"
+        );
+    }
+
+    #[test]
+    fn test_sync_mcp_credentials_unlinked_keeps_project_id() {
+        let dir = tmp_dir("sync_creds_unlinked");
+        fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"nexus":{"env":{"NEXUS_API_URL":"u","NEXUS_PRIVATE_TOKEN":"t","NEXUS_PROJECT_ID":"keep"}}}}"#,
+        )
+        .unwrap();
+        let changed = sync_mcp_credentials(&dir, "u", "t", None).unwrap();
+        assert!(changed.is_empty());
+        assert!(fs::read_to_string(dir.join(".mcp.json"))
+            .unwrap()
+            .contains("\"keep\""));
     }
 
     fn tmp_dir(suffix: &str) -> PathBuf {

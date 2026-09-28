@@ -425,6 +425,20 @@ pub struct ClaudeWorkspace {
     /// Host tools the layout needs (e.g. `zellij`, `lazygit`, `ccusage`).
     #[serde(default)]
     pub requires: Vec<String>,
+    /// Which observer the `observer` pane runs: `nexus` (default) or
+    /// `agenthud` (experimental). Free-form so future values parse; the CLI
+    /// only displays it.
+    #[serde(default)]
+    pub observer_provider: Option<String>,
+}
+
+impl ClaudeWorkspace {
+    /// The observer provider when it is not the default `nexus`.
+    pub fn non_default_observer(&self) -> Option<&str> {
+        self.observer_provider
+            .as_deref()
+            .filter(|p| !p.is_empty() && *p != "nexus")
+    }
 }
 
 /// `GET /api/mcp/projects/{id}/settings` (and the 200 body of `PATCH`):
