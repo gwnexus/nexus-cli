@@ -761,8 +761,20 @@ pub(crate) fn strip_nexus_settings(
         ccx::reconcile_settings_removed_keys(settings, None, Some(previous));
         if force {
             for key in &previous.managed_keys {
-                if !previous.value(key).is_some_and(|v| v.is_array()) {
-                    ccx::json_remove_path(settings, key);
+                match previous.value(key) {
+                    Some(v) if v.is_array() => {}
+                    // Keyed maps (`enabledPlugins`, ...): only the entries
+                    // Nexus wrote, even if edited; the operator's stay.
+                    Some(serde_json::Value::Object(lock_map)) if ccx::is_keyed_map(key) => {
+                        if let Some(map) = settings
+                            .as_object_mut()
+                            .and_then(|o| o.get_mut(key.as_str()))
+                            .and_then(|v| v.as_object_mut())
+                        {
+                            map.retain(|k, _| !lock_map.contains_key(k));
+                        }
+                    }
+                    _ => ccx::json_remove_path(settings, key),
                 }
             }
         }
@@ -808,7 +820,14 @@ pub(crate) fn strip_nexus_settings(
     if let Some(perms) = obj.get_mut("permissions").and_then(|p| p.as_object_mut()) {
         perms.retain(|_, v| !v.as_array().is_some_and(|a| a.is_empty()));
     }
-    for key in ["hooks", "permissions", "env", "attribution"] {
+    for key in [
+        "hooks",
+        "permissions",
+        "env",
+        "attribution",
+        "enabledPlugins",
+        "extraKnownMarketplaces",
+    ] {
         if obj
             .get(key)
             .is_some_and(|v| v.as_object().is_some_and(|o| o.is_empty()))
@@ -1980,6 +1999,52 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_nexus_settings_keeps_operator_plugins() {
+        // dispatch ff608ed4: switching away from Claude Code removes only the
+        // plugin entries Nexus wrote, with and without --force.
+        let lock = ccx::CcxLock {
+            schema: 1,
+            bundle: None,
+            version: None,
+            revision: None,
+            compatibility: Default::default(),
+            applied_at: String::new(),
+            files: Default::default(),
+            settings: Some(
+                serde_json::from_value(serde_json::json!({
+                    "managed_keys": ["enabledPlugins"],
+                    "values": { "enabledPlugins": { "nexus@m": true, "edited@m": true } }
+                }))
+                .unwrap(),
+            ),
+            claude_md_block_sha256: None,
+            hooks: Default::default(),
+            plugins: Default::default(),
+        };
+        let fresh = || {
+            serde_json::json!({ "enabledPlugins": {
+                "nexus@m": true, "edited@m": false, "mine@m": true
+            }})
+        };
+        let mut settings = fresh();
+        assert!(strip_nexus_settings(&mut settings, Some(&lock), false));
+        assert_eq!(
+            settings["enabledPlugins"],
+            serde_json::json!({ "edited@m": false, "mine@m": true })
+        );
+        let mut settings = fresh();
+        assert!(strip_nexus_settings(&mut settings, Some(&lock), true));
+        assert_eq!(
+            settings["enabledPlugins"],
+            serde_json::json!({ "mine@m": true })
+        );
+        // Only Nexus entries: the emptied map is removed.
+        let mut settings = serde_json::json!({ "enabledPlugins": { "nexus@m": true } });
+        assert!(strip_nexus_settings(&mut settings, Some(&lock), false));
+        assert!(settings.get("enabledPlugins").is_none());
+    }
+
+    #[test]
     fn test_strip_nexus_settings_nested_lock_values() {
         // A lock recording a dotted key's value nested (as some backends
         // send it) still identifies the Nexus entries.
@@ -2003,6 +2068,7 @@ mod tests {
             ),
             claude_md_block_sha256: None,
             hooks: Default::default(),
+            plugins: Default::default(),
         };
         let mut settings = serde_json::json!({
             "permissions": { "deny": ["Read(./.env)", "Read(./mine)"] },

@@ -21,7 +21,18 @@ pub fn runtime_details(
         _ => None,
     };
     let plugins = enabled_plugins(settings);
-    let installed = installed_plugins();
+    let lock = super::ccx::load_lock(workspace, &super::run::resolve_agentic_root(workspace));
+    let managed =
+        super::claude_plugins::managed_plugins(lock.as_ref().and_then(|l| l.settings.as_ref()));
+    let installed_by_nexus = lock.map(|l| l.plugins).unwrap_or_default();
+    let installed = super::claude_plugins::list_installed(&super::claude_plugins::SystemClaude {
+        workspace: workspace.to_path_buf(),
+    });
+    let scope_of = |id: &str| {
+        installed
+            .as_ref()
+            .map(|i| super::claude_plugins::present_scope(i, id, workspace))
+    };
     let headroom = super::run::read_headroom_stats(workspace, 0);
 
     if print {
@@ -40,12 +51,23 @@ pub fn runtime_details(
             (Some(v), None, _) => println!("  Version:  {v}"),
         }
         for plugin in &plugins {
-            let state = match installed.as_ref().map(|i| plugin_installed(i, plugin)) {
-                Some(true) => style("installed".to_string()).green(),
-                Some(false) => style("NOT INSTALLED".to_string()).yellow(),
+            let state = match scope_of(plugin) {
+                Some(Some(scope)) if installed_by_nexus.contains_key(plugin) => {
+                    style(format!("installed ({scope} scope, by nexus)")).green()
+                }
+                Some(Some(scope)) => style(format!("installed ({scope} scope)")).green(),
+                Some(None) if managed.contains(plugin) => {
+                    style("NOT INSTALLED (nexus run installs it)".to_string()).yellow()
+                }
+                Some(None) => style("NOT INSTALLED".to_string()).yellow(),
                 None => style("unknown (claude plugin list unavailable)".to_string()).dim(),
             };
-            println!("  Plugin:   {plugin}: {state}");
+            let tag = if managed.contains(plugin) {
+                format!(" {}", style("[managed]").cyan())
+            } else {
+                String::new()
+            };
+            println!("  Plugin:   {plugin}{tag}: {state}");
         }
         if let Some(ref h) = headroom {
             println!(
@@ -62,10 +84,16 @@ pub fn runtime_details(
         "version": version,
         "compatibility": compat_range,
         "compatible": compatible,
-        "plugins": plugins.iter().map(|p| serde_json::json!({
-            "id": p,
-            "installed": installed.as_ref().map(|i| plugin_installed(i, p)),
-        })).collect::<Vec<_>>(),
+        "plugins": plugins.iter().map(|p| {
+            let scope = scope_of(p);
+            serde_json::json!({
+                "id": p,
+                "managed": managed.contains(p),
+                "installed": scope.as_ref().map(Option::is_some),
+                "scope": scope.flatten(),
+                "installed_by_nexus": installed_by_nexus.contains_key(p),
+            })
+        }).collect::<Vec<_>>(),
         "headroom": headroom.map(|h| serde_json::json!({
             "mode": h.mode,
             "compressions": h.compressions,
@@ -137,58 +165,6 @@ fn enabled_plugins(settings: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Installed plugin ids from `claude plugin list --json`; `None` when the
-/// command is unavailable or its output cannot be read.
-fn installed_plugins() -> Option<Vec<String>> {
-    let out = std::process::Command::new("claude")
-        .args(["plugin", "list", "--json"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_plugin_list(&serde_json::from_slice(&out.stdout).ok()?)
-}
-
-/// Accepts an array of plugin objects (`id`, or `name` plus optional
-/// `marketplace`), an object wrapping such an array under `plugins`, or an
-/// object keyed by plugin id.
-fn parse_plugin_list(value: &serde_json::Value) -> Option<Vec<String>> {
-    let items = match value {
-        serde_json::Value::Array(items) => items,
-        serde_json::Value::Object(map) => match map.get("plugins") {
-            Some(serde_json::Value::Array(items)) => items,
-            _ => return Some(map.keys().cloned().collect()),
-        },
-        _ => return None,
-    };
-    Some(
-        items
-            .iter()
-            .filter_map(|item| {
-                if let Some(id) = item.as_str() {
-                    return Some(id.to_string());
-                }
-                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                    return Some(id.to_string());
-                }
-                let name = item.get("name")?.as_str()?;
-                Some(match item.get("marketplace").and_then(|v| v.as_str()) {
-                    Some(m) => format!("{name}@{m}"),
-                    None => name.to_string(),
-                })
-            })
-            .collect(),
-    )
-}
-
-/// `nexus-core@gatewarden-nexus` matches an installed entry with the same
-/// id, or with the same name when the list omits the marketplace.
-fn plugin_installed(installed: &[String], id: &str) -> bool {
-    let name = id.split('@').next().unwrap_or(id);
-    installed.iter().any(|i| i == id || i == name)
-}
-
 /// `nexus claude launch`: deprecated alias (NEXUS-APP dispatch 442f0e97).
 /// `nexus run` is the only start command; it follows the backend's
 /// `run_target` (including the CCX zellij workspace).
@@ -241,32 +217,6 @@ mod tests {
         assert_eq!(version_satisfies("v2.2.0-beta.1", ">2.1"), Some(true));
         assert_eq!(version_satisfies("garbage", ">=1.0.0"), None);
         assert_eq!(version_satisfies("1.0.0", ">=x"), None);
-    }
-
-    #[test]
-    fn test_parse_plugin_list_shapes() {
-        let arr = serde_json::json!([
-            {"id": "nexus-core@gatewarden-nexus"},
-            {"name": "other", "marketplace": "mkt"},
-            {"name": "bare"}
-        ]);
-        assert_eq!(
-            parse_plugin_list(&arr).unwrap(),
-            vec!["nexus-core@gatewarden-nexus", "other@mkt", "bare"]
-        );
-        let wrapped = serde_json::json!({"plugins": [{"id": "a@b"}]});
-        assert_eq!(parse_plugin_list(&wrapped).unwrap(), vec!["a@b"]);
-        let keyed = serde_json::json!({"a@b": {"version": "1"}});
-        assert_eq!(parse_plugin_list(&keyed).unwrap(), vec!["a@b"]);
-        assert!(parse_plugin_list(&serde_json::json!(42)).is_none());
-    }
-
-    #[test]
-    fn test_plugin_installed_matches_id_or_name() {
-        let installed = vec!["nexus-core".to_string(), "x@y".to_string()];
-        assert!(plugin_installed(&installed, "nexus-core@gatewarden-nexus"));
-        assert!(plugin_installed(&installed, "x@y"));
-        assert!(!plugin_installed(&installed, "z@y"));
     }
 
     #[test]

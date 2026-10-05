@@ -534,6 +534,15 @@ pub async fn run(
         }
     }
 
+    // ── 7.5. Managed Claude Code plugins (NEXUS-APP dispatch ff608ed4) ──────
+    // After the env injection so a named account (CLAUDE_CONFIG_DIR) gets
+    // the plugins. Uses the settings the last pull recorded in the CCX
+    // lock; failures are printed and never block the launch.
+    if wants_claude(agent_owner.as_deref()) {
+        let spec = super::claude_plugins::locked_spec(&workspace, &agentic_root);
+        super::claude_plugins::sync_workspace(&workspace, &agentic_root, spec.as_ref());
+    }
+
     // ── 8. Launch the tool ───────────────────────────────────────────────────
     if use_exec {
         exec_tool(effective_tool, args)

@@ -274,7 +274,8 @@ on this environment), `nexus pull` renders it before writing `opencode.json`:
 `nexus status` shows auth, workspace, and project state (with real
 server-side validation, not just a local echo), then the agent environment
 (what `nexus run` starts), the Claude Code runtime (version vs. the CCX
-compatibility range, plugins, last headroom summary), git identity, and the
+compatibility range, enabled plugins with `[managed]` marker and install
+scope, last headroom summary), git identity, and the
 workspace file list described above. `--output json` is supported; the exit
 code is 1 when changes are pending.
 
@@ -384,11 +385,58 @@ else from the run target (zellij). Missing required tools fail (exit 1),
 missing optional ones are informational; the Claude Code version is checked
 against the project's CCX compatibility range. `--fix` prints devbox (for
 devbox projects), brew or npm install commands and runs them only after
-confirmation (`-y`). `nexus pull` never installs anything.
+confirmation (`-y`). `nexus pull` never installs tools (managed Claude Code
+plugins are the one exception, see below).
 
 `nexus run` embeds the same checks and adds a **launch countdown** after
 they complete. The countdown gives you a moment to review the results before
 the tool starts. Press `Ctrl+C` at any time to abort.
+
+### Claude Code Plugins
+
+Projects with executioner `claude-cli` can select Claude Code plugins in
+Nexus (e.g. `frontend-design@claude-plugins-official`). They arrive in
+`af_export.claude_settings` as `enabledPlugins` (and
+`extraKnownMarketplaces` for non-default marketplaces such as
+`gatewarden-nexus`) and are merged into `.claude/settings.json` by every
+pull. Enabling a plugin there does not install it, so `nexus pull --force`
+and `nexus run` (before every launch) also install them:
+
+1. `claude plugin list --json` decides what is present: installed at user
+   scope, or at project/local scope **for this workspace**.
+2. A marketplace a missing plugin needs is added from
+   `extraKnownMarketplaces` (`claude plugin marketplace add <repo>#<ref>
+   --scope project`) or, if already registered, refreshed.
+3. Each missing plugin: `claude plugin install <id> --scope project --json`.
+   Never with `--yes` / `--accept-command`: a plugin that declares an
+   install command needs a person to confirm it (`/plugin` in Claude Code).
+
+```
+Claude Code plugins:
+  MARKETPLACE gatewarden-nexus   added (project scope)
+  INSTALLED   frontend-design@claude-plugins-official   project scope
+  PRESENT     nexus-core@gatewarden-nexus
+  FAILED      foo@claude-plugins-official   Plugin "foo" not found in marketplace ...
+```
+
+Nothing is printed when every managed plugin is already present. A failure
+never blocks the pull or the launch. `nexus run` installs into the selected
+`--account` (`CLAUDE_CONFIG_DIR`). Set `NEXUS_SKIP_PLUGIN_SYNC=1` to skip
+the step (CI, offline).
+
+Rules:
+
+- User- and local-scope plugins are never touched; `enabledPlugins` and
+  `extraKnownMarketplaces` are merged **per entry**, so plugins you enabled
+  at project scope yourself survive a pull.
+- What Nexus installed is recorded in the CCX lock
+  (`.nexus/claude/manifest.lock.json`, `plugins`). When a plugin drops out
+  of the managed list, pull removes its `enabledPlugins` entry only if
+  Nexus wrote it and you have not changed it since (shown as `RELEASED`).
+  Nothing is uninstalled.
+- `nexus status` lists each enabled plugin with `[managed]`, its install
+  scope and whether Nexus installed it (`--output json`: `managed`,
+  `installed`, `scope`, `installed_by_nexus`).
 
 ### Configuration
 

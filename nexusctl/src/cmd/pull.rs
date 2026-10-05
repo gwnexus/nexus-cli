@@ -1558,6 +1558,18 @@ pub async fn run(
         }
     }
 
+    // Managed Claude Code plugins (NEXUS-APP dispatch ff608ed4): install
+    // what `enabledPlugins` names but Claude Code does not have yet. Only
+    // on --force (a plain pull stays offline-cheap); `nexus run` does the
+    // same before every launch. Never fails the pull.
+    if let (true, true, Ok(ref af_export)) = (is_claude, force, &af_export_result) {
+        super::claude_plugins::sync_workspace(
+            &workspace,
+            &agentic_root,
+            af_export.claude_settings.as_ref(),
+        );
+    }
+
     // Git hook self-heal (v0.28.4): cheap, never fails the pull.
     super::githooks::run(&workspace);
 

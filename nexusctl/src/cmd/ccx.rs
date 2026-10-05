@@ -60,6 +60,19 @@ pub struct CcxLock {
     /// keyed by `target_path`.
     #[serde(default)]
     pub hooks: std::collections::BTreeMap<String, CcxLockHookEntry>,
+    /// Claude Code plugins `nexus pull --force` / `nexus run` installed at
+    /// project scope (NEXUS-APP dispatch ff608ed4), keyed by plugin id
+    /// (`name@marketplace`). Provenance only: a plugin that was already
+    /// present (user scope, or installed by hand) is never recorded here.
+    #[serde(default)]
+    pub plugins: std::collections::BTreeMap<String, CcxLockPluginEntry>,
+}
+
+/// A Claude Code plugin installed by Nexus, as recorded in the CCX lock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CcxLockPluginEntry {
+    pub scope: String,
+    pub installed_at: String,
 }
 
 /// A single Nexus-managed Claude Code hook adapter as recorded in the CCX
@@ -186,13 +199,32 @@ fn empty_lock() -> CcxLock {
         settings: None,
         claude_md_block_sha256: None,
         hooks: std::collections::BTreeMap::new(),
+        plugins: std::collections::BTreeMap::new(),
     }
+}
+
+/// Record the Claude Code plugins Nexus installed (see
+/// [`CcxLock::plugins`]), creating a minimal lock if none exists yet.
+pub fn record_plugins_in_lock(
+    workspace: &Path,
+    agentic_root: &str,
+    plugins: std::collections::BTreeMap<String, CcxLockPluginEntry>,
+) -> anyhow::Result<()> {
+    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+
+    if lock.plugins == plugins {
+        return Ok(());
+    }
+
+    lock.plugins = plugins;
+    lock.applied_at = chrono_like_now();
+    save_lock(workspace, agentic_root, &lock)
 }
 
 /// A UTC timestamp string in the same shape as the dispatch's example
 /// (`"2026-09-24T12:00:00Z"`), without pulling in a `chrono` dependency
 /// for a single formatted timestamp.
-fn chrono_like_now() -> String {
+pub(crate) fn chrono_like_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -626,6 +658,15 @@ pub fn describe_settings_changes(
                 let added = a.iter().filter(|x| !b.contains(x)).count();
                 let removed = b.iter().filter(|x| !a.contains(x)).count();
                 format!("{key} +{added}/-{removed}")
+            } else if is_keyed_map(key)
+                && (b.is_some_and(|v| v.is_object()) || a.is_some_and(|v| v.is_object()))
+            {
+                let empty_map = serde_json::Map::new();
+                let b = b.and_then(|v| v.as_object()).unwrap_or(&empty_map);
+                let a = a.and_then(|v| v.as_object()).unwrap_or(&empty_map);
+                let added = a.iter().filter(|(k, v)| b.get(*k) != Some(*v)).count();
+                let removed = b.keys().filter(|k| !a.contains_key(*k)).count();
+                format!("{key} +{added}/-{removed}")
             } else if b == a {
                 format!("{key} unchanged")
             } else if a.is_none() {
@@ -678,6 +719,27 @@ pub fn reconcile_settings_removed_keys(
             // previously added but no longer sends (operator entries stay).
             let new_value = current.and_then(|c| c.value(key_path));
             if let (
+                Some(serde_json::Value::Object(existing)),
+                serde_json::Value::Object(lock_map),
+                Some(serde_json::Value::Object(new_map)),
+            ) = (json_get_path(settings, key_path), lock_value, new_value)
+            {
+                if is_keyed_map(key_path) {
+                    // Keyed map: drop only entries Nexus wrote, no longer
+                    // sends, and the operator has not changed since.
+                    let filtered: serde_json::Map<String, serde_json::Value> = existing
+                        .iter()
+                        .filter(|(k, v)| new_map.contains_key(*k) || lock_map.get(*k) != Some(*v))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    if &filtered != existing {
+                        json_set_path(settings, key_path, serde_json::Value::Object(filtered));
+                        changed += 1;
+                    }
+                }
+                continue;
+            }
+            if let (
                 Some(serde_json::Value::Array(existing)),
                 serde_json::Value::Array(lock_arr),
                 Some(serde_json::Value::Array(new_arr)),
@@ -696,6 +758,19 @@ pub fn reconcile_settings_removed_keys(
             continue;
         }
         match (json_get_path(settings, key_path), lock_value) {
+            (Some(serde_json::Value::Object(existing)), serde_json::Value::Object(lock_map))
+                if is_keyed_map(key_path) =>
+            {
+                let filtered: serde_json::Map<String, serde_json::Value> = existing
+                    .iter()
+                    .filter(|(k, v)| lock_map.get(*k) != Some(*v))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if &filtered != existing {
+                    json_set_path(settings, key_path, serde_json::Value::Object(filtered));
+                    changed += 1;
+                }
+            }
             (Some(serde_json::Value::Array(existing)), serde_json::Value::Array(lock_arr)) => {
                 let filtered: Vec<serde_json::Value> = existing
                     .iter()
@@ -718,6 +793,16 @@ pub fn reconcile_settings_removed_keys(
         }
     }
     changed
+}
+
+/// `.claude/settings.json` keys whose value is a map of independent
+/// entries (plugin id -> enabled, marketplace name -> source). Nexus sets
+/// and removes these per entry, so entries the operator added at project
+/// scope survive a pull (NEXUS-APP dispatch ff608ed4).
+pub const KEYED_MAP_KEYS: &[&str] = &["enabledPlugins", "extraKnownMarketplaces"];
+
+pub(crate) fn is_keyed_map(key_path: &str) -> bool {
+    KEYED_MAP_KEYS.contains(&key_path)
 }
 
 pub(crate) fn json_get_path<'a>(
@@ -806,6 +891,7 @@ mod tests {
             settings: None,
             claude_md_block_sha256: None,
             hooks: std::collections::BTreeMap::new(),
+            plugins: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1468,5 +1554,71 @@ mod tests {
         );
         let changed = reconcile_settings_removed_keys(&mut settings, None, Some(&previous));
         assert_eq!(changed, 0);
+    }
+
+    #[test]
+    fn test_reconcile_keyed_map_drops_only_nexus_entries_no_longer_sent() {
+        // dispatch ff608ed4: a plugin dropped from the managed list is only
+        // disabled when Nexus enabled it; operator entries stay.
+        let mut settings = serde_json::json!({"enabledPlugins": {
+            "a@m": true, "dropped@m": true, "edited@m": false, "mine@m": true
+        }});
+        let previous = spec(
+            &["enabledPlugins"],
+            &[(
+                "enabledPlugins",
+                serde_json::json!({"a@m": true, "dropped@m": true, "edited@m": true}),
+            )],
+        );
+        let current = spec(
+            &["enabledPlugins"],
+            &[("enabledPlugins", serde_json::json!({"a@m": true}))],
+        );
+        let changed =
+            reconcile_settings_removed_keys(&mut settings, Some(&current), Some(&previous));
+        assert_eq!(changed, 1);
+        assert_eq!(
+            settings["enabledPlugins"],
+            serde_json::json!({"a@m": true, "edited@m": false, "mine@m": true})
+        );
+    }
+
+    #[test]
+    fn test_reconcile_keyed_map_no_longer_managed_keeps_operator_entries() {
+        let mut settings = serde_json::json!({"enabledPlugins": {"nexus@m": true, "mine@m": true}});
+        let previous = spec(
+            &["enabledPlugins"],
+            &[("enabledPlugins", serde_json::json!({"nexus@m": true}))],
+        );
+        let changed = reconcile_settings_removed_keys(&mut settings, None, Some(&previous));
+        assert_eq!(changed, 1);
+        assert_eq!(
+            settings["enabledPlugins"],
+            serde_json::json!({"mine@m": true})
+        );
+    }
+
+    #[test]
+    fn test_describe_settings_changes_keyed_map_counts_entries() {
+        let before = serde_json::json!({"enabledPlugins": {"a@m": true, "old@m": true}});
+        let after = serde_json::json!({"enabledPlugins": {"a@m": true, "new@m": true}});
+        let current = spec(
+            &["enabledPlugins"],
+            &[(
+                "enabledPlugins",
+                serde_json::json!({"a@m": true, "new@m": true}),
+            )],
+        );
+        assert_eq!(
+            describe_settings_changes(&before, &after, Some(&current), None),
+            vec!["enabledPlugins +1/-1"]
+        );
+    }
+
+    #[test]
+    fn test_lock_without_plugins_field_still_parses() {
+        let raw = r#"{"schema":1,"applied_at":"2026-09-24T12:00:00Z"}"#;
+        let lock: CcxLock = serde_json::from_str(raw).unwrap();
+        assert!(lock.plugins.is_empty());
     }
 }

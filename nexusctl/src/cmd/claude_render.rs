@@ -688,6 +688,18 @@ pub fn apply_generic_settings(
                     }
                     serde_json::Value::Array(merged)
                 }
+                // Keyed maps (`enabledPlugins`, `extraKnownMarketplaces`):
+                // set the managed entries, keep the operator's own.
+                (
+                    Some(serde_json::Value::Object(existing_map)),
+                    serde_json::Value::Object(new_map),
+                ) if super::ccx::is_keyed_map(key_path) => {
+                    let mut merged = existing_map.clone();
+                    for (k, v) in new_map {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    serde_json::Value::Object(merged)
+                }
                 _ => new_value.clone(),
             };
             if json_get_path(settings, key_path) != Some(&merged_value) {
@@ -2305,6 +2317,46 @@ mod tests {
         assert_eq!(
             settings["enabledPlugins"]["nexus-core@gatewarden-nexus"],
             true
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_generic_settings_keeps_operator_plugins() {
+        // dispatch ff608ed4: enabledPlugins is merged per entry, a plugin
+        // the operator enabled at project scope survives a pull.
+        let dir = temp_dir("ccx-keep-operator-plugins");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{ "enabledPlugins": { "mine@claude-plugins-official": true } }"#,
+        )
+        .unwrap();
+        let spec = sample_ccx_spec(
+            &["enabledPlugins"],
+            &[(
+                "enabledPlugins",
+                serde_json::json!({"frontend-design@claude-plugins-official": true}),
+            )],
+        );
+        assert_eq!(
+            merge_claude_generic_settings(&dir, Some(&spec), None).unwrap(),
+            1
+        );
+        let settings = read_claude_settings(&dir);
+        assert_eq!(
+            settings["enabledPlugins"]["mine@claude-plugins-official"],
+            true
+        );
+        assert_eq!(
+            settings["enabledPlugins"]["frontend-design@claude-plugins-official"],
+            true
+        );
+        // Idempotent.
+        assert_eq!(
+            merge_claude_generic_settings(&dir, Some(&spec), Some(&spec)).unwrap(),
+            0
         );
 
         let _ = fs::remove_dir_all(&dir);
