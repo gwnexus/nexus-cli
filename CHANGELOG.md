@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.8] - 2026-10-05
+
+Install the Claude Code plugins a project selects in Nexus (NEXUS-APP dispatch ff608ed4, ADR-0117 Tier A).
+
+### Added
+- **Managed plugins are installed, not only enabled.** `nexus pull --force` and `nexus run` (before every launch) install each `enabledPlugins` entry from `af_export.claude_settings` that Claude Code does not have yet: `claude plugin install <id> --scope project --json`. A plugin counts as present at user scope, or at project/local scope for this workspace (`projectPath`). A marketplace a missing plugin needs is added first from `extraKnownMarketplaces` (`claude plugin marketplace add <repo>#<ref> --scope project`, e.g. `gatewarden-nexus`) or refreshed if already registered. Never with `--yes` / `--accept-command`; each plugin is reported as `INSTALLED` / `PRESENT` / `FAILED` (with reason), and a failure never blocks the pull or the launch. Nothing is printed when everything is present. `nexus run` installs into the selected `--account`. `NEXUS_SKIP_PLUGIN_SYNC=1` skips the step.
+- **Provenance in the CCX lock.** `.nexus/claude/manifest.lock.json` records the plugins Nexus installed (`plugins`). A plugin dropping out of the managed list is reported as `RELEASED`; nothing is uninstalled.
+- **`nexus status`** marks managed plugins (`[managed]`) and shows the install scope and whether Nexus installed it (JSON: `managed`, `installed`, `scope`, `installed_by_nexus`).
+
+### Fixed
+- **`enabledPlugins` / `extraKnownMarketplaces` were replaced as a whole** on every pull, dropping plugins the operator enabled at project scope. Both are now merged per entry; a dropped entry is removed only if Nexus wrote it and it is unchanged (on an executioner switch, `--force` removes Nexus entries even if edited, never the operator's).
+- **`nexus status` reported a plugin installed for another project as installed.** Project/local-scope installs only count for their own workspace.
+
+Until now `nexus-core@gatewarden-nexus` was only enabled in `.claude/settings.json`; installing it relied on Claude Code's trust/install prompt. 16 net new tests; 761/761 passing, clippy/fmt clean. Verified end to end with Claude Code 2.1.289 in a scratch workspace (marketplace added, both plugins installed at project scope, unknown plugin reported without blocking, operator entry kept, second launch quiet).
+
 ## [0.28.7] - 2026-09-28
 
 Project-local Zellij config per user (NEXUS-APP dispatch bb1ee3a0).
