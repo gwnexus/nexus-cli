@@ -1461,6 +1461,7 @@ mod tests {
             command_slug: Some(id.into()),
             pinned: false,
             resources: vec![],
+            invocation: None,
         }
     }
 

@@ -1102,6 +1102,16 @@ pub async fn run(
         }
     }
 
+    // Server exclude list (ADR-0125, dispatch 15497fa2): personal files,
+    // plus the agentic paths when policy.shadow is ai/nexus. Managed block
+    // in .git/info/exclude; tracked files are never untracked, only hinted.
+    if let Ok(ref af_export) = af_export_result {
+        if !af_export.git_exclude.is_empty() || af_export.shadow.is_some() {
+            let report = super::shadow::apply_server_excludes(&workspace, &af_export.git_exclude);
+            super::shadow::print_server_exclude_report(&report, af_export.shadow.as_deref());
+        }
+    }
+
     // Personal, git-excluded workspace files: the layout (ADR-0119) and
     // the Zellij config (dispatch bb1ee3a0).
     if let Ok(ref af_export) = af_export_result {
@@ -2139,7 +2149,8 @@ fn sync_claude_md(
         return Ok(());
     }
 
-    let content = render_claude_md(project_name, has_directives, agentic_root);
+    let rules_file = workspace.join(DIRECTIVES_RULES_FILE).is_file();
+    let content = render_claude_md(project_name, has_directives, agentic_root, rules_file);
     fs::write(&path, content)?;
     print_synced(&format!("{}/CLAUDE.md", agentic_root));
 
@@ -2228,18 +2239,33 @@ pub fn write_agent_file(
 // Template renderers (fallback when af_export is unavailable)
 // ---------------------------------------------------------------------------
 
+/// The CCX rules file carrying the project directives (`file_key`
+/// `ccx-rule-directives`), always loaded by Claude Code.
+pub const DIRECTIVES_RULES_FILE: &str = ".claude/rules/15-nexus-directives.md";
+
 /// Render the `.claude/CLAUDE.md` bootstrap file content.
 ///
 /// When `has_directives` is true, a step to load directives is included
 /// in the bootstrap sequence.
-pub fn render_claude_md(project_name: &str, has_directives: bool, agentic_root: &str) -> String {
-    let directives_step = if has_directives {
-        format!(
+pub fn render_claude_md(
+    project_name: &str,
+    has_directives: bool,
+    agentic_root: &str,
+    rules_file: bool,
+) -> String {
+    // Claude Code always loads `.claude/rules/`; when the directives rules
+    // file is there, `directives.md` is only the readable copy (ADR-0125,
+    // dispatch 15497fa2).
+    let directives_step = match (has_directives, rules_file) {
+        (true, true) => format!(
+            "\n3. Follow the project directives: Claude Code loads them from `{}` (readable copy: `{}/directives.md`)",
+            DIRECTIVES_RULES_FILE, agentic_root
+        ),
+        (true, false) => format!(
             "\n3. Load project directives from `{}/directives.md`",
             agentic_root
-        )
-    } else {
-        String::new()
+        ),
+        _ => String::new(),
     };
 
     // Adjust step numbering based on whether directives are included
@@ -2884,7 +2910,7 @@ name: {name}
 description: {description}
 version: {version}
 command_slug: {command_slug}
-source: nexus-platform
+{invocation}source: nexus-platform
 ---
 
 {body}
@@ -2894,6 +2920,7 @@ source: nexus-platform
         description = claude_render::yaml_escape(skill.description.as_deref().unwrap_or("")),
         version = skill.version,
         command_slug = skill.command_slug.as_deref().unwrap_or("none"),
+        invocation = claude_render::invocation_frontmatter(skill),
         body = body,
     );
 
@@ -3560,10 +3587,8 @@ fn print_synced(path: &str) {
     println!("   {} {}", style("~").bold().blue(), path);
 }
 
-/// Write all directives to `.claude/directives.md` as a single Markdown file.
-///
-/// Directives are grouped by category, with priority indicated inline.
-/// High and urgent directives are tagged with `[HIGH]` / `[URGENT]`.
+/// Write all directives to `<agentic_root>/directives.md` as a single
+/// Markdown file (see [`render_directives_markdown`]).
 pub fn write_directives(
     target: &Path,
     directives: &[nexus_core::api::ExportedDirective],
@@ -3587,42 +3612,41 @@ pub fn write_directives(
     Ok(())
 }
 
-/// Render directives into a Markdown string.
-///
-/// Exported as a standalone function for testability.
+/// Render directives as short rules (ADR-0125, NEXUS-APP dispatch
+/// 15497fa2): one `- MUST: <rule>` / `- SHOULD: <rule>` line each, grouped
+/// by category in the order the server sends them (already render order).
+/// MUST/SHOULD comes from `level`, or from `priority` (high/urgent = MUST)
+/// on older servers. A `body` (older servers only; the rationale is no
+/// longer sent) is kept as an indented continuation.
 pub fn render_directives_markdown(directives: &[nexus_core::api::ExportedDirective]) -> String {
     let mut content = String::from(
         "---\ntype: project-directives\nsource: nexus-platform\n---\n\n# Project Directives\n\n",
     );
 
-    // Group by category (BTreeMap for stable ordering)
-    let mut categories: std::collections::BTreeMap<
-        String,
-        Vec<&nexus_core::api::ExportedDirective>,
-    > = std::collections::BTreeMap::new();
+    let mut categories: Vec<(&str, Vec<&nexus_core::api::ExportedDirective>)> = Vec::new();
     for d in directives {
-        categories.entry(d.category.clone()).or_default().push(d);
+        match categories.iter_mut().find(|(c, _)| *c == d.category) {
+            Some((_, items)) => items.push(d),
+            None => categories.push((&d.category, vec![d])),
+        }
     }
 
     for (category, items) in &categories {
         content.push_str(&format!("## {}\n\n", capitalize(category)));
-
         for d in items {
-            let priority_tag = match d.priority.as_str() {
-                "high" => " [HIGH]".to_string(),
-                "urgent" => " [URGENT]".to_string(),
-                _ => String::new(),
-            };
-
-            content.push_str(&format!("### {}{}\n\n", d.title, priority_tag));
-
-            if let Some(ref body) = d.body {
-                if !body.is_empty() {
-                    content.push_str(body);
-                    content.push_str("\n\n");
+            let level = if d.is_must() { "MUST" } else { "SHOULD" };
+            content.push_str(&format!("- {level}: {}\n", d.title.trim()));
+            if let Some(body) = d.body.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+                for line in body.lines() {
+                    if line.trim().is_empty() {
+                        content.push('\n');
+                    } else {
+                        content.push_str(&format!("  {line}\n"));
+                    }
                 }
             }
         }
+        content.push('\n');
     }
 
     format!("{}\n", content.trim_end())
@@ -4115,6 +4139,7 @@ mod tests {
             command_slug: Some("a".into()),
             pinned: false,
             resources: vec![],
+            invocation: None,
         };
         let ctx = cleanup_context(&export, &[skill], ".nexus", "Demo", true, false);
         assert!(ctx.keep.contains(".nexus/AGENTS.md"));
@@ -4295,6 +4320,7 @@ mod tests {
             command_slug: None,
             pinned: false,
             resources: vec![],
+            invocation: None,
         };
         assert!(render_command_file(&skill, ".nexus").is_none());
         skill.command_slug = Some("a".to_string());
@@ -4348,6 +4374,8 @@ mod tests {
             body: Some("Always.".into()),
             category: "security".into(),
             priority: "normal".into(),
+            level: None,
+            source: None,
         }];
         write_directives(&dir, &directives, ".nexus").unwrap();
         let content = render_directives_markdown(&directives);
@@ -4446,6 +4474,7 @@ mod tests {
             command_slug: Some("nexus-test-skill".to_string()),
             pinned: false,
             resources: vec![],
+            invocation: None,
         };
 
         write_skill(&dir, &skill, ".claude").unwrap();
@@ -4476,6 +4505,7 @@ mod tests {
             command_slug: Some("nexus-dup".to_string()),
             pinned: false,
             resources: vec![],
+            invocation: None,
         };
 
         write_skill(&dir, &skill, ".claude").unwrap();
@@ -4492,56 +4522,102 @@ mod tests {
     }
 
     #[test]
-    fn test_render_directives_groups_by_category() {
-        let directives = vec![
-            ExportedDirective {
-                id: "1".into(),
-                title: "Use HTTPS".into(),
-                body: Some("Always use HTTPS in production.".into()),
-                category: "security".into(),
-                priority: "high".into(),
-            },
-            ExportedDirective {
-                id: "2".into(),
-                title: "Run migrations locally".into(),
-                body: Some("Use makefile targets.".into()),
-                category: "migration".into(),
-                priority: "medium".into(),
-            },
-            ExportedDirective {
-                id: "3".into(),
-                title: "Enable MFA".into(),
-                body: None,
-                category: "security".into(),
-                priority: "urgent".into(),
-            },
-        ];
+    fn test_render_skill_files_user_invoked_in_agentic_root_copy() {
+        // dispatch 3dc4f5c2: same key in `<root>/skills/<id>/SKILL.md`.
+        let mut skill = nexus_core::api::ExportedSkill {
+            skill_id: "nx-grill-me".into(),
+            name: "Grill me".into(),
+            description: None,
+            version: 1,
+            body: Some("# Grill".into()),
+            command_slug: Some("nx-grill-me".into()),
+            pinned: false,
+            resources: vec![],
+            invocation: Some("user".into()),
+        };
+        let files = render_skill_files(&skill, ".nexus");
+        assert_eq!(files[0].0, ".nexus/skills/nx-grill-me/SKILL.md");
+        assert!(files[0].1.contains(
+            "command_slug: nx-grill-me\ndisable-model-invocation: true\nsource: nexus-platform\n"
+        ));
+        skill.invocation = None;
+        assert!(!render_skill_files(&skill, ".nexus")[0]
+            .1
+            .contains("disable-model-invocation"));
+    }
 
+    fn directive(
+        title: &str,
+        category: &str,
+        priority: &str,
+        level: Option<&str>,
+    ) -> ExportedDirective {
+        ExportedDirective {
+            id: title.into(),
+            title: title.into(),
+            body: None,
+            category: category.into(),
+            priority: priority.into(),
+            level: level.map(Into::into),
+            source: None,
+        }
+    }
+
+    #[test]
+    fn test_render_directives_short_rules_in_server_order() {
+        // ADR-0125 (dispatch 15497fa2): compact MUST/SHOULD list, grouped
+        // by category in the order the server sends (not alphabetical).
+        let directives = vec![
+            directive(
+                "Never put secrets into output.",
+                "security",
+                "high",
+                Some("must"),
+            ),
+            directive(
+                "Track every session in Nexus.",
+                "workflow",
+                "high",
+                Some("must"),
+            ),
+            directive(
+                "Prefer small commits.",
+                "workflow",
+                "medium",
+                Some("should"),
+            ),
+            directive("Rotate keys yearly.", "security", "medium", Some("should")),
+        ];
         let md = render_directives_markdown(&directives);
 
-        // Frontmatter
         assert!(md.starts_with("---\ntype: project-directives\n"));
         assert!(md.contains("source: nexus-platform"));
-
-        // Category headings (BTreeMap => alphabetical: Migration before Security)
-        let migration_pos = md.find("## Migration").unwrap();
-        let security_pos = md.find("## Security").unwrap();
+        let security = md.find("## Security").unwrap();
+        let workflow = md.find("## Workflow").unwrap();
+        assert!(security < workflow, "server order, not alphabetical");
+        assert!(md.contains(
+            "## Security\n\n- MUST: Never put secrets into output.\n- SHOULD: Rotate keys yearly.\n\n## Workflow"
+        ));
         assert!(
-            migration_pos < security_pos,
-            "categories should be alphabetical"
+            md.contains("- MUST: Track every session in Nexus.\n- SHOULD: Prefer small commits.\n")
         );
+        assert!(!md.contains("###"), "no headings per rule");
+        assert!(md.ends_with("small commits.\n"));
+    }
 
-        // Priority tags
-        assert!(md.contains("### Use HTTPS [HIGH]"));
-        assert!(md.contains("### Enable MFA [URGENT]"));
-        assert!(md.contains("### Run migrations locally\n")); // no tag for medium
-
-        // Body content
-        assert!(md.contains("Always use HTTPS in production."));
-        assert!(md.contains("Use makefile targets."));
-
-        // Ends with newline
-        assert!(md.ends_with('\n'));
+    #[test]
+    fn test_render_directives_level_falls_back_to_priority() {
+        // Older servers send no `level`: high/urgent = MUST, else SHOULD.
+        let directives = vec![
+            directive("A", "general", "high", None),
+            directive("B", "general", "urgent", None),
+            directive("C", "general", "medium", None),
+            directive("D", "general", "low", None),
+            // `level` wins over `priority` when both are sent.
+            directive("E", "general", "high", Some("should")),
+        ];
+        let md = render_directives_markdown(&directives);
+        assert!(md.contains("- MUST: A\n- MUST: B\n- SHOULD: C\n- SHOULD: D\n- SHOULD: E\n"));
     }
 
     #[test]
@@ -4552,33 +4628,17 @@ mod tests {
     }
 
     #[test]
-    fn test_render_directives_empty_body_skipped() {
-        let directives = vec![ExportedDirective {
-            id: "1".into(),
-            title: "No body directive".into(),
-            body: Some("".into()),
-            category: "general".into(),
-            priority: "low".into(),
-        }];
-
-        let md = render_directives_markdown(&directives);
-        assert!(md.contains("### No body directive\n"));
-        // Should NOT have double newlines after the heading (empty body skipped)
-        assert!(!md.contains("### No body directive\n\n\n"));
-    }
-
-    #[test]
-    fn test_render_directives_null_body() {
-        let directives = vec![ExportedDirective {
-            id: "1".into(),
-            title: "Null body".into(),
-            body: None,
-            category: "general".into(),
-            priority: "medium".into(),
-        }];
-
-        let md = render_directives_markdown(&directives);
-        assert!(md.contains("### Null body\n"));
+    fn test_render_directives_legacy_body_indented() {
+        // Older servers still send a body: kept as a continuation, an empty
+        // body adds nothing.
+        let mut with_body = directive("Use HTTPS", "security", "high", None);
+        with_body.body = Some("Always use HTTPS.\n\nAlso internally.".into());
+        let mut empty_body = directive("No body", "security", "low", None);
+        empty_body.body = Some("  ".into());
+        let md = render_directives_markdown(&[with_body, empty_body]);
+        assert!(md.contains(
+            "- MUST: Use HTTPS\n  Always use HTTPS.\n\n  Also internally.\n- SHOULD: No body\n"
+        ));
     }
 
     #[test]
@@ -4602,6 +4662,8 @@ mod tests {
             body: Some("Do the thing.".into()),
             category: "testing".into(),
             priority: "high".into(),
+            level: None,
+            source: None,
         }];
 
         write_directives(&tmp, &directives, ".claude").unwrap();
@@ -4609,8 +4671,7 @@ mod tests {
         let path = tmp.join(".claude/directives.md");
         assert!(path.exists());
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("### Test directive [HIGH]"));
-        assert!(content.contains("Do the thing."));
+        assert!(content.contains("- MUST: Test directive\n  Do the thing.\n"));
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -4619,7 +4680,7 @@ mod tests {
 
     #[test]
     fn test_render_claude_md_with_directives() {
-        let md = render_claude_md("MyProject", true, ".claude");
+        let md = render_claude_md("MyProject", true, ".claude", false);
         assert!(md.contains("source: nexus-platform"));
         assert!(md.contains("project: MyProject"));
         assert!(md.contains("Load project directives from `.claude/directives.md`"));
@@ -4632,7 +4693,7 @@ mod tests {
 
     #[test]
     fn test_render_claude_md_without_directives() {
-        let md = render_claude_md("MyProject", false, ".claude");
+        let md = render_claude_md("MyProject", false, ".claude", false);
         assert!(md.contains("source: nexus-platform"));
         assert!(!md.contains("directives"));
         assert!(md.contains("3. Review active planning"));
@@ -4641,7 +4702,7 @@ mod tests {
 
     #[test]
     fn test_render_claude_md_environment_section() {
-        let md = render_claude_md("Test", true, ".claude");
+        let md = render_claude_md("Test", true, ".claude", false);
         assert!(md.contains("Read secrets only from `.env.local`"));
         assert!(md.contains("NEVER:"));
         assert!(md.contains("- print secrets"));
@@ -5028,8 +5089,22 @@ mod tests {
 
     #[test]
     fn test_render_claude_md_alternate_root() {
-        let md = render_claude_md("MyProject", true, ".nexus");
+        let md = render_claude_md("MyProject", true, ".nexus", false);
         assert!(md.contains("Load project directives from `.nexus/directives.md`"));
+    }
+
+    #[test]
+    fn test_render_claude_md_rules_file_makes_directives_md_a_readable_copy() {
+        // dispatch 15497fa2: Claude Code loads the rules file itself.
+        let md = render_claude_md("MyProject", true, ".nexus", true);
+        assert!(!md.contains("Load project directives from"));
+        assert!(md.contains(
+            "3. Follow the project directives: Claude Code loads them from `.claude/rules/15-nexus-directives.md` (readable copy: `.nexus/directives.md`)"
+        ));
+        assert!(md.contains("4. Review active planning"));
+        // Without directives the rules file changes nothing.
+        let md = render_claude_md("MyProject", false, ".nexus", true);
+        assert!(!md.contains("directives"));
     }
 
     #[test]
@@ -5044,6 +5119,8 @@ mod tests {
             body: Some("Under .nexus".into()),
             category: "testing".into(),
             priority: "high".into(),
+            level: None,
+            source: None,
         }];
 
         write_directives(&tmp, &directives, ".nexus").unwrap();
@@ -5051,7 +5128,7 @@ mod tests {
         let path = tmp.join(".nexus/directives.md");
         assert!(path.exists());
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("### Alt root directive [HIGH]"));
+        assert!(content.contains("- MUST: Alt root directive"));
 
         let _ = fs::remove_dir_all(&tmp);
     }

@@ -1,8 +1,16 @@
-//! `nexus shadow on|off|status` — hide/unhide agentic scaffold files from Git.
+//! `nexus shadow on|ai|nexus|off|status` — hide agentic scaffold files from Git.
 //!
-//! Uses `.git/info/exclude` (local, never committed) instead of `.gitignore`.
-//! On `on`: adds exclude patterns and runs `git rm --cached` for tracked files.
-//! On `off`: removes exclude patterns from the file.
+//! Since ADR-0125 (NEXUS-APP dispatch 15497fa2) the shadow level is a
+//! project setting on the server (`policy.shadow`: `off` | `ai` | `nexus`)
+//! and `nexus shadow` is a thin client of it: it sets the level, then
+//! applies the server's `af_export.git_exclude` list as a managed block in
+//! `.git/info/exclude` (local, never committed). `nexus pull` applies the
+//! same block on every run. Files already tracked in git are never
+//! untracked automatically; a `git rm -r --cached` hint is printed instead.
+//!
+//! Backends without `policy.shadow` (or an unlinked workspace) keep the
+//! old local mode: `on` adds a fixed pattern block and untracks matching
+//! files without history, `off` removes it and re-adds them.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -330,6 +338,273 @@ pub fn ensure_git_excluded_in(start: &Path, paths: &[&str], reason: &str) {
         content.push('\n');
     }
     let _ = fs::write(&exclude_path, content);
+}
+
+// ---------------------------------------------------------------------------
+// Server-driven exclude block (ADR-0125, NEXUS-APP dispatch 15497fa2)
+// ---------------------------------------------------------------------------
+
+/// Marker comments for the block holding `af_export.git_exclude`.
+const SERVER_MARKER_START: &str = "# >>> nexus managed exclude (server)";
+const SERVER_MARKER_END: &str = "# <<< nexus managed exclude (server)";
+
+/// What [`apply_server_excludes`] changed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ServerExcludeReport {
+    /// Paths newly written to the managed block.
+    pub added: Vec<String>,
+    /// Paths dropped from the block (the server no longer sends them).
+    pub removed: Vec<String>,
+    /// Paths refused as unsafe (absolute, `..`, negation, comments).
+    pub rejected: Vec<String>,
+    /// Excluded paths that git still tracks (an exclude does not untrack).
+    pub tracked: Vec<String>,
+}
+
+/// Whether a server-sent exclude entry is a plain relative path pattern.
+/// Refuses anything that could change the meaning of the exclude file or
+/// point outside the repository: empty, absolute, `..` segments, line
+/// breaks, negation (`!`) and comments (`#`).
+pub fn valid_exclude_path(path: &str) -> bool {
+    let p = path.trim();
+    !p.is_empty()
+        && !p.contains(['\n', '\r', '\\'])
+        && !p.starts_with(['/', '!', '#'])
+        && !p.split('/').any(|seg| seg == "..")
+        && !(p.len() > 1 && p.as_bytes()[1] == b':')
+}
+
+/// Entries of a marker-delimited block.
+fn block_entries(content: &str, marker_start: &str, marker_end: &str) -> Vec<String> {
+    let mut inside = false;
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line == marker_start {
+            inside = true;
+        } else if line == marker_end {
+            inside = false;
+        } else if inside && !line.is_empty() && !line.starts_with('#') {
+            entries.push(line.to_string());
+        }
+    }
+    entries
+}
+
+/// Rewrite the managed block in `.git/info/exclude` of the repository
+/// containing `workspace` so it holds exactly the valid `paths` not already
+/// listed elsewhere in the file (an empty list removes the block), and
+/// report which excluded paths git still tracks. Best effort: outside a git
+/// repository, or when the file cannot be written, nothing happens.
+pub fn apply_server_excludes(workspace: &Path, paths: &[String]) -> ServerExcludeReport {
+    let mut report = ServerExcludeReport::default();
+    let Ok(git_dir) = find_git_dir_from(workspace.to_path_buf()) else {
+        return report;
+    };
+    let exclude_path = git_dir.join("info").join("exclude");
+    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
+    let previous = block_entries(&existing, SERVER_MARKER_START, SERVER_MARKER_END);
+    let outside = remove_block(&existing, SERVER_MARKER_START, SERVER_MARKER_END);
+
+    let mut valid: Vec<String> = Vec::new();
+    for raw in paths {
+        let p = raw.trim().to_string();
+        if !valid_exclude_path(&p) {
+            report.rejected.push(raw.clone());
+        } else if !valid.contains(&p) {
+            valid.push(p);
+        }
+    }
+    let wanted: Vec<String> = valid
+        .iter()
+        .filter(|p| !outside.lines().any(|l| l.trim() == p.as_str()))
+        .cloned()
+        .collect();
+
+    report.added = wanted
+        .iter()
+        .filter(|p| !previous.contains(p))
+        .cloned()
+        .collect();
+    report.removed = previous
+        .iter()
+        .filter(|p| !wanted.contains(p))
+        .cloned()
+        .collect();
+
+    let mut content = outside;
+    if !wanted.is_empty() {
+        if !content.is_empty() && !content.ends_with("\n\n") {
+            content.push('\n');
+        }
+        content.push_str(SERVER_MARKER_START);
+        content.push('\n');
+        for p in &wanted {
+            content.push_str(p);
+            content.push('\n');
+        }
+        content.push_str(SERVER_MARKER_END);
+        content.push('\n');
+    }
+    if content != existing {
+        if let Some(parent) = exclude_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::write(&exclude_path, &content).is_err() {
+            return ServerExcludeReport {
+                rejected: report.rejected,
+                ..Default::default()
+            };
+        }
+    }
+
+    let workdir = git_dir.parent().unwrap_or(workspace);
+    report.tracked = valid
+        .iter()
+        .filter(|p| !resolve_tracked_paths_in(p.trim_end_matches('/'), Some(workdir)).is_empty())
+        .cloned()
+        .collect();
+    report
+}
+
+/// Print what [`apply_server_excludes`] did (pull and `nexus shadow`).
+pub fn print_server_exclude_report(report: &ServerExcludeReport, shadow: Option<&str>) {
+    let level = shadow
+        .filter(|l| !l.is_empty())
+        .map(|l| format!(" (shadow: {l})"))
+        .unwrap_or_default();
+    if !report.added.is_empty() || !report.removed.is_empty() {
+        println!(
+            "   {} .git/info/exclude: +{}/-{} server path(s){}",
+            style("~").bold().cyan(),
+            report.added.len(),
+            report.removed.len(),
+            level
+        );
+    }
+    for path in &report.rejected {
+        println!(
+            "   {} ignored unsafe exclude entry from the server: {:?}",
+            style("!").bold().yellow(),
+            path
+        );
+    }
+    for path in &report.tracked {
+        println!(
+            "   {} {} is excluded but still tracked by git; untrack it with: git rm -r --cached {}",
+            style("!").bold().yellow(),
+            path,
+            path.trim_end_matches('/')
+        );
+    }
+}
+
+/// The server exclude block's entries for the repository containing
+/// `workspace` (for `nexus shadow status`).
+pub fn server_exclude_entries(workspace: &Path) -> Vec<String> {
+    find_git_dir_from(workspace.to_path_buf())
+        .ok()
+        .and_then(|g| fs::read_to_string(g.join("info").join("exclude")).ok())
+        .map(|c| block_entries(&c, SERVER_MARKER_START, SERVER_MARKER_END))
+        .unwrap_or_default()
+}
+
+/// Map a `nexus shadow` subcommand to a `policy.shadow` value
+/// (`on` = `ai`).
+pub fn policy_value(action: &str) -> Option<&'static str> {
+    match action {
+        "on" | "ai" => Some("ai"),
+        "nexus" => Some("nexus"),
+        "off" => Some("off"),
+        _ => None,
+    }
+}
+
+/// `nexus shadow on|ai|nexus|off`: set `policy.shadow` on the server and
+/// apply the resulting `git_exclude` list now. Falls back to the local
+/// mode when the workspace is not linked or the backend has no
+/// `policy.shadow` setting.
+pub async fn set_level(api_url: &str, action: &str, assume_yes: bool) -> anyhow::Result<()> {
+    let level =
+        policy_value(action).ok_or_else(|| anyhow::anyhow!("unknown shadow level '{action}'"))?;
+    if !super::env_cmd::has_setting(api_url, "policy.shadow")
+        .await
+        .unwrap_or(false)
+    {
+        println!(
+            "   {} No server shadow setting (workspace not linked or backend without policy.shadow); using local shadow mode.",
+            style("i").bold().blue()
+        );
+        return if level == "off" { off() } else { on() };
+    }
+
+    super::env_cmd::set(api_url, "policy.shadow", level, false, assume_yes).await?;
+    let workspace = std::env::current_dir()?;
+    let (project_id, client) = super::env_cmd::connect(api_url)?;
+    let export = client.export_agent_files(&project_id).await?;
+    let report = apply_server_excludes(&workspace, &export.git_exclude);
+    print_server_exclude_report(&report, export.shadow.as_deref());
+
+    // The old local block would keep hiding the agentic files.
+    if level == "off" {
+        let exclude_path = find_git_dir_from(workspace)?.join("info").join("exclude");
+        if is_block_active(&exclude_path, MARKER_START) {
+            let content = fs::read_to_string(&exclude_path)?;
+            fs::write(
+                &exclude_path,
+                remove_block(&content, MARKER_START, MARKER_END),
+            )?;
+            println!(
+                "   {} removed the local shadow block from .git/info/exclude (files stay untracked; git add them if wanted)",
+                style("~").bold().cyan()
+            );
+        }
+    }
+    println!(
+        "{} Shadow level {}.",
+        style("●").green().bold(),
+        style(level).bold()
+    );
+    Ok(())
+}
+
+/// `nexus shadow status`: the server level and its exclude block, then the
+/// local blocks.
+pub async fn status_with_server(api_url: &str) -> anyhow::Result<()> {
+    let workspace = std::env::current_dir()?;
+    if let Ok((project_id, client)) = super::env_cmd::connect(api_url) {
+        match client.export_agent_files(&project_id).await {
+            Ok(export) => {
+                let level = export
+                    .shadow
+                    .as_deref()
+                    .unwrap_or("not set (older backend)");
+                println!(
+                    "{} Server shadow level: {}",
+                    style("●").cyan().bold(),
+                    style(level).bold()
+                );
+                let entries = server_exclude_entries(&workspace);
+                if entries.is_empty() {
+                    println!(
+                        "  {}",
+                        style("No server exclude block (run nexus pull).").dim()
+                    );
+                } else {
+                    println!("  Server exclude block:");
+                    for e in entries {
+                        println!("    {}", style(e).dim());
+                    }
+                }
+            }
+            Err(e) => println!(
+                "{} Server shadow level unavailable: {}",
+                style("○").dim(),
+                e
+            ),
+        }
+    }
+    status()
 }
 
 // ---------------------------------------------------------------------------
@@ -744,5 +1019,150 @@ mod tests {
             !has_history,
             "staged-only file must not have history — guard must allow removal"
         );
+    }
+
+    fn git_repo(suffix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nexus-shadow-server-{}-{}",
+            std::process::id(),
+            suffix
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let ok = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        dir
+    }
+
+    fn exclude_of(dir: &Path) -> String {
+        fs::read_to_string(dir.join(".git/info/exclude")).unwrap_or_default()
+    }
+
+    #[test]
+    fn test_valid_exclude_path() {
+        for ok in [
+            ".claude/",
+            ".nexus/",
+            "AGENTS.md",
+            ".nexus/claude/zellij.local.kdl",
+            "*.log",
+        ] {
+            assert!(valid_exclude_path(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "  ",
+            "/etc/passwd",
+            "../x",
+            "a/../../b",
+            "!keep",
+            "# c",
+            "a\nb",
+            "C:\\x",
+            "a\\b",
+        ] {
+            assert!(!valid_exclude_path(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_policy_value_maps_on_to_ai() {
+        assert_eq!(policy_value("on"), Some("ai"));
+        assert_eq!(policy_value("ai"), Some("ai"));
+        assert_eq!(policy_value("nexus"), Some("nexus"));
+        assert_eq!(policy_value("off"), Some("off"));
+        assert_eq!(policy_value("status"), None);
+    }
+
+    #[test]
+    fn test_apply_server_excludes_writes_and_replaces_block() {
+        let dir = git_repo("block");
+        fs::create_dir_all(dir.join(".git/info")).unwrap();
+        fs::write(dir.join(".git/info/exclude"), "# user\n.env.nexus.local\n").unwrap();
+
+        // shadow=ai: agentic paths plus personal files; one already listed
+        // by the user stays outside the block, unsafe entries are refused.
+        let paths: Vec<String> = [
+            ".env.nexus.local",
+            ".claude/",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "../evil",
+            "!x",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+        let report = apply_server_excludes(&dir, &paths);
+        assert_eq!(report.added, vec![".claude/", "AGENTS.md", "CLAUDE.md"]);
+        assert!(report.removed.is_empty());
+        assert_eq!(report.rejected, vec!["../evil", "!x"]);
+        let content = exclude_of(&dir);
+        assert!(content.starts_with("# user\n.env.nexus.local\n"));
+        assert_eq!(
+            server_exclude_entries(&dir),
+            vec![".claude/", "AGENTS.md", "CLAUDE.md"]
+        );
+        assert_eq!(content.matches(".env.nexus.local").count(), 1);
+
+        // Idempotent.
+        let again = apply_server_excludes(&dir, &paths);
+        assert!(again.added.is_empty() && again.removed.is_empty());
+        assert_eq!(exclude_of(&dir), content);
+
+        // shadow=off: the agentic paths leave, the user's lines stay.
+        let off = apply_server_excludes(&dir, &[".env.nexus.local".to_string()]);
+        assert_eq!(off.removed, vec![".claude/", "AGENTS.md", "CLAUDE.md"]);
+        assert_eq!(exclude_of(&dir), "# user\n.env.nexus.local\n");
+        assert!(server_exclude_entries(&dir).is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_apply_server_excludes_reports_tracked_without_untracking() {
+        let dir = git_repo("tracked");
+        fs::write(dir.join("AGENTS.md"), "agents\n").unwrap();
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(dir.join(".claude/settings.json"), "{}\n").unwrap();
+        let ok = Command::new("git")
+            .args(["add", "AGENTS.md", ".claude/settings.json"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+
+        let paths: Vec<String> = ["AGENTS.md", ".claude/", "CLAUDE.md"]
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        let report = apply_server_excludes(&dir, &paths);
+        assert_eq!(report.tracked, vec!["AGENTS.md", ".claude/"]);
+        // Still tracked: nothing was removed from the index.
+        assert_eq!(
+            resolve_tracked_paths_in("AGENTS.md", Some(&dir)),
+            vec!["AGENTS.md"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_apply_server_excludes_outside_git_is_noop() {
+        let dir = std::env::temp_dir().join(format!("nexus-shadow-nogit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // temp dirs are not inside a repo; if they were, skip silently.
+        if find_git_dir_from(dir.clone()).is_err() {
+            let report = apply_server_excludes(&dir, &[".claude/".to_string()]);
+            assert_eq!(report, ServerExcludeReport::default());
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }

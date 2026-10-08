@@ -9,7 +9,7 @@ use nexus_core::api::{NexusClient, ProjectSettingsResponse, SettingSchema, Setti
 use nexus_core::auth::resolve_token;
 use nexus_core::config;
 
-fn connect(api_url: &str) -> anyhow::Result<(String, NexusClient)> {
+pub(crate) fn connect(api_url: &str) -> anyhow::Result<(String, NexusClient)> {
     let workspace = std::env::current_dir()?;
     let project_id = config::resolve_project_id(None, Some(&workspace))?;
     let token = resolve_token().ok_or_else(|| {
@@ -77,6 +77,15 @@ pub async fn get(api_url: &str, key: Option<&str>, json: bool) -> anyhow::Result
         );
     }
     Ok(())
+}
+
+/// Whether the backend's settings schema has `key` (e.g. `policy.shadow`,
+/// ADR-0125). Errors when the workspace is not linked or the backend is
+/// unreachable.
+pub(crate) async fn has_setting(api_url: &str, key: &str) -> anyhow::Result<bool> {
+    let (project_id, client) = connect(api_url)?;
+    let resp = fetch(&client, &project_id).await?;
+    Ok(resp.schema.iter().any(|s| s.key == key))
 }
 
 /// `nexus env keys`: the settings schema.

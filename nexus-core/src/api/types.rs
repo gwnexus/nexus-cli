@@ -138,6 +138,20 @@ pub struct ExportedSkill {
     pub pinned: bool,
     #[serde(default)]
     pub resources: Vec<SkillResource>,
+    /// `model` (default; the model may load the skill on its own) or
+    /// `user` (only invoked explicitly). Absent on older servers
+    /// (NEXUS-APP dispatch 3dc4f5c2, ADR-0124).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<String>,
+}
+
+impl ExportedSkill {
+    /// Whether only the user may invoke this skill (`invocation == "user"`).
+    pub fn user_invoked(&self) -> bool {
+        self.invocation
+            .as_deref()
+            .is_some_and(|i| i.eq_ignore_ascii_case("user"))
+    }
 }
 
 /// Response from `sk_export` action.
@@ -161,6 +175,24 @@ pub struct ExportedDirective {
     pub body: Option<String>,
     pub category: String,
     pub priority: String,
+    /// `must` | `should` (ADR-0125, NEXUS-APP dispatch 15497fa2). Absent on
+    /// older servers: derived from `priority` (high/urgent = must).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    /// `mandatory` | `flag` | `template` | `project` (informational).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+impl ExportedDirective {
+    /// Whether this is a MUST rule: `level` when sent, else `priority`
+    /// high/urgent.
+    pub fn is_must(&self) -> bool {
+        match self.level.as_deref() {
+            Some(level) => level.eq_ignore_ascii_case("must"),
+            None => matches!(self.priority.as_str(), "high" | "urgent"),
+        }
+    }
 }
 
 /// Response from `directive_export` action.
@@ -399,6 +431,15 @@ pub struct AgentFileExportResponse {
     /// `run_target.layout` points to `claude_workspace.path`.
     #[serde(default)]
     pub claude_workspace: Option<ClaudeWorkspace>,
+    /// Paths the server wants in `.git/info/exclude` (ADR-0125, dispatch
+    /// 15497fa2): always the personal files; for `shadow` `ai`/`nexus`
+    /// also the agentic paths (`.claude/`, `<agentic_root>/`, `AGENTS.md`,
+    /// `CLAUDE.md`, `opencode.json`, `.opencode/`).
+    #[serde(default)]
+    pub git_exclude: Vec<String>,
+    /// Project shadow level `off` | `ai` | `nexus` (`policy.shadow`).
+    #[serde(default)]
+    pub shadow: Option<String>,
 }
 
 /// `af_export.claude_workspace` (schema `nexus.claude-workspace.v1`).

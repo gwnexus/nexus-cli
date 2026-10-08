@@ -358,6 +358,43 @@ fn test_exported_directive_deserialize() {
 }
 
 #[test]
+fn test_exported_skill_invocation() {
+    // NEXUS-APP dispatch 3dc4f5c2: `invocation` is optional (older servers).
+    let base = r#""skill_id":"s","name":"S","description":null,"version":1,"body":null,"command_slug":null"#;
+    let parse = |extra: &str| -> nexus_core::api::ExportedSkill {
+        serde_json::from_str(&format!("{{{base}{extra}}}")).unwrap()
+    };
+    assert!(parse(r#","invocation":"user""#).user_invoked());
+    assert!(!parse(r#","invocation":"model""#).user_invoked());
+    let legacy = parse("");
+    assert!(legacy.invocation.is_none() && !legacy.user_invoked());
+}
+
+#[test]
+fn test_exported_directive_short_rule_fields() {
+    // ADR-0125 (NEXUS-APP dispatch 15497fa2): level + source, body null.
+    let json = r#"{
+        "id": "template:no-secrets",
+        "title": "Never put secrets into output.",
+        "body": null,
+        "category": "security",
+        "priority": "medium",
+        "level": "must",
+        "source": "mandatory"
+    }"#;
+    let d: ExportedDirective = serde_json::from_str(json).unwrap();
+    assert_eq!(d.level.as_deref(), Some("must"));
+    assert_eq!(d.source.as_deref(), Some("mandatory"));
+    assert!(d.is_must(), "level wins over priority");
+    let legacy: ExportedDirective = serde_json::from_str(
+        r#"{"id":"x","title":"t","body":null,"category":"c","priority":"high"}"#,
+    )
+    .unwrap();
+    assert!(legacy.level.is_none());
+    assert!(legacy.is_must());
+}
+
+#[test]
 fn test_exported_directive_null_body() {
     let json = r#"{
         "id": "abc-123",
@@ -445,6 +482,8 @@ fn test_exported_directive_serialize_roundtrip() {
         body: Some("Body text".into()),
         category: "general".into(),
         priority: "low".into(),
+        level: None,
+        source: None,
     };
 
     let json = serde_json::to_string(&d).unwrap();

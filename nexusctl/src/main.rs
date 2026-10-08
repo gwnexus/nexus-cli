@@ -487,11 +487,16 @@ pub enum ClaudeAction {
 /// Shadow mode subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ShadowAction {
-    /// Enable shadow mode: exclude agentic files from Git tracking.
+    /// Hide agentic files from Git: sets the project's policy.shadow to
+    /// `ai` and applies the server's exclude list (same as `ai`).
     On,
-    /// Disable shadow mode: remove exclusions and re-track agentic files.
+    /// Set policy.shadow to `ai` (agentic files git-excluded).
+    Ai,
+    /// Set policy.shadow to `nexus`.
+    Nexus,
+    /// Set policy.shadow to `off` and drop the agentic excludes.
     Off,
-    /// Show current shadow mode status.
+    /// Show the server shadow level and the local exclude blocks.
     Status,
 }
 
@@ -1697,6 +1702,23 @@ mod tests {
                 action: ShadowAction::Status,
             } => {}
             _ => panic!("expected Shadow Status"),
+        }
+    }
+
+    #[test]
+    fn test_parse_shadow_levels() {
+        // ADR-0125: nexus shadow maps to policy.shadow.
+        for (arg, expected) in [("ai", "ai"), ("nexus", "nexus")] {
+            let cli = Cli::try_parse_from(["nexus", "shadow", arg]).unwrap();
+            match cli.command {
+                Command::Shadow {
+                    action: ShadowAction::Ai,
+                } => assert_eq!(expected, "ai"),
+                Command::Shadow {
+                    action: ShadowAction::Nexus,
+                } => assert_eq!(expected, "nexus"),
+                _ => panic!("expected Shadow {arg}"),
+            }
         }
     }
 

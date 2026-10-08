@@ -111,7 +111,7 @@ name: {name}
 description: {description}
 version: {version}
 command_slug: {command_slug}
-source: nexus-platform
+{invocation}source: nexus-platform
 ---
 
 {body}
@@ -121,6 +121,7 @@ source: nexus-platform
         description = yaml_escape(skill.description.as_deref().unwrap_or("")),
         version = skill.version,
         command_slug = skill.command_slug.as_deref().unwrap_or("none"),
+        invocation = invocation_frontmatter(skill),
         body = body,
     );
 
@@ -134,6 +135,19 @@ source: nexus-platform
         files.push((format!("{skill_dir}/{filename}"), res.body.clone()));
     }
     files
+}
+
+/// `disable-model-invocation: true` (plus newline) for a user-invoked skill
+/// (`invocation == "user"`, NEXUS-APP dispatch 3dc4f5c2, ADR-0124): Claude
+/// Code then only runs it when the user calls `/<skill>`. Empty otherwise.
+/// The server's own body frontmatter is stripped, so the key has to be
+/// rendered here.
+pub fn invocation_frontmatter(skill: &ExportedSkill) -> &'static str {
+    if skill.user_invoked() {
+        "disable-model-invocation: true\n"
+    } else {
+        ""
+    }
 }
 
 /// Write `content` to `path` unless it already has exactly that content.
@@ -1407,6 +1421,7 @@ mod tests {
             command_slug: Some(skill_id.to_string()),
             pinned: false,
             resources: vec![],
+            invocation: None,
         }
     }
 
@@ -1567,6 +1582,55 @@ mod tests {
         assert_eq!(fs::read_to_string(resource_path).unwrap(), "print('hi')");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_claude_skill_user_invoked_disables_model_invocation() {
+        // dispatch 3dc4f5c2: invocation=user -> disable-model-invocation in
+        // the frontmatter, even when the server body brings its own.
+        let dir = temp_dir("skill-user-invoked");
+        let mut skill = sample_skill("nx-grill-me");
+        skill.invocation = Some("user".to_string());
+        skill.body =
+            Some("---\nname: x\ndisable-model-invocation: true\n---\n\n# Grill".to_string());
+        skill.resources.push(SkillResource {
+            filename: "questions.md".to_string(),
+            body: "q".to_string(),
+        });
+        write_claude_skill(&dir, &skill).unwrap();
+
+        let files = render_claude_skill_files(&skill);
+        let skill_md = &files[0].0;
+        let content = fs::read_to_string(dir.join(skill_md)).unwrap();
+        let frontmatter = content.split("---").nth(1).unwrap();
+        assert!(
+            frontmatter.contains("\ndisable-model-invocation: true\n"),
+            "got: {content}"
+        );
+        assert_eq!(
+            content.matches("disable-model-invocation").count(),
+            1,
+            "server frontmatter stripped"
+        );
+        assert!(dir
+            .join(skill_md.replace("SKILL.md", "questions.md"))
+            .exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_claude_skill_model_invoked_has_no_key() {
+        // Default and older servers (no `invocation`): no key.
+        for invocation in [None, Some("model")] {
+            let mut skill = sample_skill("nx-review");
+            skill.invocation = invocation.map(str::to_string);
+            let (_, content) = &render_claude_skill_files(&skill)[0];
+            assert!(
+                !content.contains("disable-model-invocation"),
+                "{invocation:?}"
+            );
+        }
     }
 
     #[test]

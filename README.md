@@ -74,7 +74,7 @@ nexus run [-- <args>]                   Start the agent environment the backend 
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
 nexus deinit [--force]                  Remove all AI scaffold files from the workspace
-nexus shadow on|off|status              Manage Git exclusion of workspace agentic files
+nexus shadow on|ai|nexus|off|status    Set the project shadow level (policy.shadow) and apply its Git excludes
 nexus config show                       Display effective configuration (with provenance)
 nexus config set K=V [--local|--global] Update a configuration value
 nexus config path [--local|--global]    Show a config file path
@@ -391,6 +391,68 @@ plugins are the one exception, see below).
 `nexus run` embeds the same checks and adds a **launch countdown** after
 they complete. The countdown gives you a moment to review the results before
 the tool starts. Press `Ctrl+C` at any time to abort.
+
+### Directives
+
+Directives are short binding rules (NEXUS-APP ADR-0125): a platform
+catalog plus project rules. `nexus pull` renders them into
+`.nexus/directives.md` as a compact list, grouped by category in the order
+the server sends them:
+
+```markdown
+## Security
+
+- MUST: Never put secrets, credentials, tokens or private keys into output, logs, commits ...
+
+## Workflow
+
+- MUST: Track every working session in Nexus ...
+- SHOULD: ...
+```
+
+MUST/SHOULD comes from the directive's `level` (older servers: `priority`
+high/urgent = MUST). No rationale is sent to agents. Claude Code projects
+with CCX also get `.claude/rules/15-nexus-directives.md`, which Claude Code
+always loads; `.nexus/directives.md` is then the readable copy.
+
+### Shadow Mode (`nexus shadow`)
+
+The shadow level is a project setting on the server, `policy.shadow`:
+
+| Level   | Effect |
+| ------- | ------ |
+| `off`   | Only personal files are git-excluded. |
+| `ai`    | Agentic files stay out of git: `.claude/`, `.nexus/`, `AGENTS.md`, `CLAUDE.md`, `opencode.json`, `.opencode/`. |
+| `nexus` | As `ai`, plus no Nexus references in repository content and no AI attribution (enforced by the directives). |
+
+```bash
+nexus shadow ai        # or: on (= ai), nexus, off; same as nexus env set policy.shadow ai
+nexus shadow status    # server level, the server exclude block, local blocks
+```
+
+Every `nexus pull` writes the server's `git_exclude` list into a managed
+block in `.git/info/exclude` (`# >>> nexus managed exclude (server)`); paths
+the server stops sending are removed from it, your own lines are never
+touched, and unsafe entries (absolute, `..`, `!`, `#`) are ignored. `nexus
+shadow <level>` sets the level and applies the block at once. An exclude
+does not untrack files already in git: Nexus never untracks them itself
+and prints a hint per path instead:
+
+```
+   ! .claude/ is excluded but still tracked by git; untrack it with: git rm -r --cached .claude
+```
+
+Workspaces not linked to a project, or backends without `policy.shadow`,
+keep the old local mode (`on` adds a fixed pattern block, `off` removes it).
+
+### User-Invoked Skills
+
+A skill with `invocation: user` (e.g. `nexus-grill-me`) gets
+`disable-model-invocation: true` in its `SKILL.md` frontmatter
+(`.claude/skills/<id>/` and `.nexus/skills/<id>/`), so Claude Code runs it
+only when you call `/<skill>`, never on its own. Skills without the field
+(older servers) stay model-invoked. OpenCode has no equivalent; its command
+stub is unchanged.
 
 ### Claude Code Plugins
 

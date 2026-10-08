@@ -302,11 +302,17 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::McpLocal => {
             mcp_local::run().await?;
         }
-        Command::Shadow { ref action } => match action {
-            ShadowAction::On => shadow::on()?,
-            ShadowAction::Off => shadow::off()?,
-            ShadowAction::Status => shadow::status()?,
-        },
+        Command::Shadow { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            match action {
+                ShadowAction::On => shadow::set_level(&api_url, "on", cli.yes).await?,
+                ShadowAction::Ai => shadow::set_level(&api_url, "ai", cli.yes).await?,
+                ShadowAction::Nexus => shadow::set_level(&api_url, "nexus", cli.yes).await?,
+                ShadowAction::Off => shadow::set_level(&api_url, "off", cli.yes).await?,
+                ShadowAction::Status => shadow::status_with_server(&api_url).await?,
+            }
+        }
         Command::Workspace { ref action } => match action {
             WorkspaceAction::Shadow { ref action } => match action {
                 WorkspaceShadowAction::On => shadow::workspace_on()?,

@@ -2144,6 +2144,7 @@ mod tests {
             command_slug: Some("nexus-test-skill".to_string()),
             pinned: false,
             resources: vec![],
+            invocation: None,
         };
 
         write_skill(&dir, &skill, ".claude").unwrap();
@@ -2186,6 +2187,7 @@ mod tests {
             command_slug: Some("nexus-dup".to_string()),
             pinned: false,
             resources: vec![],
+            invocation: None,
         };
 
         write_skill(&dir, &skill, ".claude").unwrap();
@@ -2215,6 +2217,7 @@ mod tests {
             command_slug: Some("nexus-test-skill".to_string()),
             pinned: false,
             resources: vec![],
+            invocation: None,
         };
 
         write_command(&dir, &skill, ".claude").unwrap();
@@ -2244,6 +2247,7 @@ mod tests {
             command_slug: None,
             pinned: false,
             resources: vec![],
+            invocation: None,
         };
 
         write_command(&dir, &skill, ".claude").unwrap();
