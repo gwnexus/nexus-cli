@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.9] - 2026-10-08
+
+Directives as short rules and the server shadow level (NEXUS-APP ADR-0125, dispatch 15497fa2); user-invoked skills (ADR-0124, dispatch 3dc4f5c2).
+
+### Changed
+- **`.nexus/directives.md` is a compact rule list.** One `- MUST: <rule>` / `- SHOULD: <rule>` line per directive, grouped by category in the order the server sends (no longer alphabetical, no heading per directive). MUST/SHOULD comes from the new `level` field, falling back to `priority` (high/urgent = MUST) for older servers; a legacy `body` is kept as an indented continuation. The `nexus-platform` marker stays.
+- **`nexus shadow` is a thin client of `policy.shadow`.** `nexus shadow on|ai|nexus|off` sets the project setting (`on` = `ai`) and applies the resulting exclude list at once; `nexus shadow status` shows the server level and the server exclude block. `off` also removes the old local shadow block. Unlinked workspaces and backends without `policy.shadow` keep the old local mode.
+- The fallback `CLAUDE.md` bootstrap (used when `af_export` is unavailable) names `.claude/rules/15-nexus-directives.md` as the source Claude Code loads and `directives.md` as the readable copy, when the rules file exists.
+
+### Added
+- **`af_export.git_exclude` is applied on every pull** as a managed block in `.git/info/exclude` (`# >>> nexus managed exclude (server)`): paths the server stops sending (e.g. after `policy.shadow` goes back to `off`) leave the block, lines you wrote are never touched, paths already listed elsewhere are not duplicated, and unsafe entries (absolute, `..`, `!`, `#`, line breaks) are ignored. Files already tracked in git are never untracked automatically; pull prints a `git rm -r --cached <path>` hint per path. `af_export.shadow` is shown with the change.
+- **User-invoked skills.** `invocation: user` from the skill export renders `disable-model-invocation: true` into the `SKILL.md` frontmatter of `.claude/skills/<id>/` and `<agentic_root>/skills/<id>/` (the server body's own frontmatter is stripped, so the key was lost before). Missing field = `model` (older servers). OpenCode has no equivalent; its command stub is unchanged.
+- `ExportedDirective.level` / `source`, `ExportedSkill.invocation`, `AgentFileExportResponse.git_exclude` / `shadow` (all optional, additive).
+
+### Verified
+- The `policy.*` keys (`artifacts_language`, `docs_language`, `conventional_commits`, `no_em_dashes`, `personal_address`, `shadow`) appear in `nexus env keys` / `nexus env get` without CLI changes (schema is read dynamically); checked read-only against staging release-0.16.0 with the beta project, where `nexus status` also plans `CREATE .claude/rules/15-nexus-directives.md` through the generic CCX writer.
+- 0.28.8 writes skill resources for claude-cli: the beta project's `.claude/skills/nexus-cr-review/` received its 4 resource files on a 0.28.8 pull.
+
+12 net new tests; 773/773 passing, clippy/fmt clean.
+
 ## [0.28.8] - 2026-10-05
 
 Install the Claude Code plugins a project selects in Nexus (NEXUS-APP dispatch ff608ed4, ADR-0117 Tier A).
