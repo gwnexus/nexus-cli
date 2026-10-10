@@ -133,10 +133,14 @@ pub async fn status(api_url: &str, api_url_source: &str, json: bool) -> anyhow::
         return Ok(i32::from(pending > 0));
     }
 
-    println!(
-        "  Environment: {} (start with {})",
-        style(state.environment_label()).bold(),
-        style("nexus run").bold()
+    println!();
+    super::display::status_line(
+        "Environment:",
+        format_args!(
+            "{} (start with {})",
+            style(state.environment_label()).bold(),
+            style("nexus run").bold()
+        ),
     );
     println!();
 

@@ -13,6 +13,17 @@
 use console::style;
 use nexus_core::api::NexusClient;
 
+/// Key column width shared by the `nexus status` sections (General, Claude
+/// Code runtime, Git Identity Verification), so all values start in the same
+/// column.
+pub const STATUS_KEY_WIDTH: usize = 17;
+
+/// Print one `nexus status` line: `key` padded to [`STATUS_KEY_WIDTH`], then
+/// `value`. An empty `key` prints a continuation line under the value column.
+pub fn status_line(key: &str, value: impl std::fmt::Display) {
+    println!("  {key:<STATUS_KEY_WIDTH$}{value}");
+}
+
 /// Print the standard "API: ... / Project: Name (uuid)" banner used by all
 /// project-scoped commands.
 ///

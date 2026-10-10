@@ -152,13 +152,43 @@ pub fn off() -> anyhow::Result<()> {
 
 /// Show current shadow mode status (agentic files).
 pub fn status() -> anyhow::Result<()> {
+    local_status(false)
+}
+
+/// The local blocks. With `server_level` the server decides the agentic
+/// excludes, so the local agentic block is labelled as the legacy mode
+/// instead of reading like a contradiction to the server level.
+fn local_status(server_level: bool) -> anyhow::Result<()> {
     let git_dir = find_git_dir()?;
     let exclude_path = git_dir.join("info").join("exclude");
 
     let agentic_active = is_block_active(&exclude_path, MARKER_START);
     let workspace_active = is_block_active(&exclude_path, WS_MARKER_START);
+    let workspace_label = if server_level {
+        "Workspace shadow (devbox files)"
+    } else {
+        "Workspace shadow"
+    };
 
-    if agentic_active {
+    if server_level {
+        if agentic_active {
+            println!(
+                "{} Local shadow block (legacy): {}",
+                style("●").yellow().bold(),
+                style("active").yellow().bold()
+            );
+            println!("  Shadowed patterns:");
+            for pat in AGENTIC_PATTERNS {
+                println!("    {}", style(pat).dim());
+            }
+        } else {
+            println!(
+                "{} Local shadow block (legacy): {}",
+                style("○").dim(),
+                style("none").dim()
+            );
+        }
+    } else if agentic_active {
         println!(
             "{} Shadow mode is {}.",
             style("●").green().bold(),
@@ -178,7 +208,7 @@ pub fn status() -> anyhow::Result<()> {
 
     if workspace_active {
         println!(
-            "{} Workspace shadow is {}.",
+            "{} {workspace_label} is {}.",
             style("●").magenta().bold(),
             style("enabled").magenta().bold()
         );
@@ -188,7 +218,7 @@ pub fn status() -> anyhow::Result<()> {
         }
     } else {
         println!(
-            "{} Workspace shadow is {}.",
+            "{} {workspace_label} is {}.",
             style("○").dim(),
             style("disabled").dim()
         );
@@ -572,9 +602,11 @@ pub async fn set_level(api_url: &str, action: &str, assume_yes: bool) -> anyhow:
 /// local blocks.
 pub async fn status_with_server(api_url: &str) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
+    let mut server_level = false;
     if let Ok((project_id, client)) = super::env_cmd::connect(api_url) {
         match client.export_agent_files(&project_id).await {
             Ok(export) => {
+                server_level = export.shadow.is_some();
                 let level = export
                     .shadow
                     .as_deref()
@@ -604,7 +636,7 @@ pub async fn status_with_server(api_url: &str) -> anyhow::Result<()> {
             ),
         }
     }
-    status()
+    local_status(server_level)
 }
 
 // ---------------------------------------------------------------------------

@@ -1087,17 +1087,31 @@ pub fn write_claude_root_md(
     target: &Path,
     project_name: &str,
     agentic_root: &str,
+    rules_file: bool,
 ) -> anyhow::Result<bool> {
     let path = target.join("CLAUDE.md");
     if path.exists() {
         return Ok(false);
     }
-    fs::write(&path, render_claude_root_md(project_name, agentic_root))?;
+    fs::write(
+        &path,
+        render_claude_root_md(project_name, agentic_root, rules_file),
+    )?;
     Ok(true)
 }
 
-/// The bootstrap template [`write_claude_root_md`] creates.
-pub fn render_claude_root_md(project_name: &str, agentic_root: &str) -> String {
+/// The bootstrap template [`write_claude_root_md`] creates. With
+/// `rules_file`, Claude Code loads the directives from the rules file itself
+/// and `directives.md` is only the readable copy.
+pub fn render_claude_root_md(project_name: &str, agentic_root: &str, rules_file: bool) -> String {
+    let directives_step = if rules_file {
+        format!(
+            "Apply the project directives (always loaded from `{}`; readable copy: `{agentic_root}/directives.md`)",
+            super::pull::DIRECTIVES_RULES_FILE
+        )
+    } else {
+        format!("Load project directives from `{agentic_root}/directives.md`")
+    };
     format!(
         r#"---
 type: bootstrap
@@ -1110,7 +1124,7 @@ source: nexus-platform
 # BOOTSTRAP SEQUENCE
 
 1. Load agent identity and directives from `{agentic_root}/AGENTS.md`
-2. Load project directives from `{agentic_root}/directives.md`
+2. {directives_step}
 3. Connect to the Nexus MCP server (`.mcp.json`)
 4. Load the project index from the Nexus platform
 5. Continue with the active workstream
@@ -1221,7 +1235,13 @@ pub fn render_claude_projection(
         );
     }
 
-    if write_claude_root_md(target, project_name, agentic_root)? {
+    // From the export, not the disk: on a first pull the rules file is
+    // written after this projection.
+    let rules_file = agent_files
+        .iter()
+        .any(|af| af.target_path == super::pull::DIRECTIVES_RULES_FILE)
+        || target.join(super::pull::DIRECTIVES_RULES_FILE).is_file();
+    if write_claude_root_md(target, project_name, agentic_root, rules_file)? {
         println!("   {} CLAUDE.md", style("+").bold().green());
     }
 
@@ -1904,16 +1924,17 @@ mod tests {
     fn test_write_claude_root_md_creates_once() {
         let dir = temp_dir("root-md");
 
-        let created = write_claude_root_md(&dir, "Test Project", ".nexus").unwrap();
+        let created = write_claude_root_md(&dir, "Test Project", ".nexus", false).unwrap();
         assert!(created);
         let content = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
         assert!(content.contains("Test Project"));
         assert!(content.contains(".nexus/AGENTS.md"));
         assert!(content.contains(".mcp.json"));
+        assert!(content.contains("2. Load project directives from `.nexus/directives.md`"));
 
         // Must not overwrite an existing (user-managed) CLAUDE.md.
         fs::write(dir.join("CLAUDE.md"), "user-edited").unwrap();
-        let created_again = write_claude_root_md(&dir, "Test Project", ".nexus").unwrap();
+        let created_again = write_claude_root_md(&dir, "Test Project", ".nexus", false).unwrap();
         assert!(!created_again);
         assert_eq!(
             fs::read_to_string(dir.join("CLAUDE.md")).unwrap(),
@@ -1921,6 +1942,17 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_render_claude_root_md_rules_file_wording() {
+        let md = render_claude_root_md("Demo", ".nexus", true);
+        assert!(md.contains(
+            "2. Apply the project directives (always loaded from `.claude/rules/15-nexus-directives.md`; readable copy: `.nexus/directives.md`)"
+        ));
+        assert!(!md.contains("Load project directives from"));
+        // The precedence paragraph stays.
+        assert!(md.contains("Instructions in `.nexus/AGENTS.md` and `.nexus/directives.md`"));
     }
 
     #[test]

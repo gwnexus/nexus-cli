@@ -3,6 +3,11 @@
 
 title = "nexus-cli gitleaks config"
 
+# Without this, a custom config replaces the built-in ruleset and gitleaks
+# runs with zero rules (every scan passes).
+[extend]
+useDefault = true
+
 [allowlist]
   description = "Global allowlist"
   # Synthetic tokens used in the test suite (auth_tests.rs, pull.rs tests, etc.)
@@ -15,4 +20,5 @@ title = "nexus-cli gitleaks config"
     '''nxs_pat_abc1234567890abcdef''',
     '''nxs_pat_abcdefghij''',
     '''nxs_pat_testtoken123''',
+    '''gws_pat_abc1234567890abcdef''',
   ]

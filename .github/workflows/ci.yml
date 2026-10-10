@@ -78,3 +78,21 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  gitleaks:
+    name: Gitleaks config
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Self-test
+        run: scripts/ci/gitleaks_selftest.sh

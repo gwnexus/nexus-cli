@@ -4,12 +4,14 @@
 // `nexus git apply`  — set local git config from project git_config
 
 use anyhow::{Context, Result};
-use console::style;
+use console::{measure_text_width, pad_str, style, Alignment};
 use std::path::Path;
 use std::process::Command;
 
 use nexus_core::api::{GhEffective, GitConfig};
 use nexus_core::config;
+
+use super::display::status_line;
 
 /// Apply git config from the platform to the local repository.
 pub fn apply_git_config(dir: &Path, cfg: &GitConfig) -> Result<u32> {
@@ -42,6 +44,11 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
     println!();
 
     let mut all_ok = true;
+    // (key, actual, status, expected): collected first so the actual and
+    // status columns can be sized to the widest entry. The status sits
+    // directly after the actual value so long values (signing keys) do not
+    // push it out of sight.
+    let mut rows: Vec<(&str, String, String, String)> = Vec::new();
 
     if let Some(cfg) = cfg {
         let checks: [(&str, &Option<String>); 3] = [
@@ -64,10 +71,12 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
                 } else {
                     local
                 };
-                println!(
-                    "  {:<20} local={:<30} expected={:<30} [{}]",
-                    key, local_display, exp, icon
-                );
+                rows.push((
+                    key,
+                    format!("local={local_display}"),
+                    icon,
+                    format!("expected={exp}"),
+                ));
                 if !ok {
                     all_ok = false;
                 }
@@ -90,10 +99,12 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
             } else {
                 local
             };
-            println!(
-                "  {:<20} local={:<30} expected={:<30} [{}]",
-                key, local_display, exp, icon
-            );
+            rows.push((
+                key,
+                format!("local={local_display}"),
+                icon,
+                format!("expected={exp}"),
+            ));
             if !ok {
                 all_ok = false;
             }
@@ -101,6 +112,7 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
     }
 
     // Effective per-project gh CLI profile (NEXUS-APP ADR-0116).
+    let mut gh_error = None;
     if let Some(gh) = gh {
         match config::Config::dir() {
             Ok(config_dir) => {
@@ -136,20 +148,28 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
                         )
                     }
                 };
-                println!(
-                    "  {:<20} profile={:<20} host={:<15} [{}] {}",
-                    "gh", gh.profile, gh.host, icon, detail
-                );
+                rows.push((
+                    "gh",
+                    format!("profile={} host={}", gh.profile, gh.host),
+                    icon,
+                    detail,
+                ));
             }
             Err(e) => {
                 all_ok = false;
-                println!(
-                    "  {:<20} {}",
-                    "gh",
-                    style(format!("could not resolve gh profile directory: {e}")).red()
-                );
+                gh_error = Some(e);
             }
         }
+    }
+
+    for (key, value) in rows.iter().map(|r| r.0).zip(verify_values(&rows)) {
+        status_line(key, value);
+    }
+    if let Some(e) = gh_error {
+        status_line(
+            "gh",
+            style(format!("could not resolve gh profile directory: {e}")).red(),
+        );
     }
 
     println!();
@@ -161,6 +181,32 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
             style("Run `nexus git apply` to fix mismatches.").yellow()
         );
     }
+}
+
+/// Value column of the `run_verify` rows: the actual value padded to the
+/// widest one, then the status padded the same way, then the expected value,
+/// so every `[status]` starts in the same column. Widths ignore ANSI styling.
+fn verify_values(rows: &[(&str, String, String, String)]) -> Vec<String> {
+    let actual_w = rows
+        .iter()
+        .map(|r| measure_text_width(&r.1))
+        .max()
+        .unwrap_or(0);
+    let status_w = rows
+        .iter()
+        .map(|r| measure_text_width(&r.2) + 2)
+        .max()
+        .unwrap_or(0);
+    rows.iter()
+        .map(|(_, actual, status, expected)| {
+            format!(
+                "{}   {} {}",
+                pad_str(actual, actual_w, Alignment::Left, None),
+                pad_str(&format!("[{status}]"), status_w, Alignment::Left, None),
+                expected
+            )
+        })
+        .collect()
 }
 
 /// Run `nexus git apply` — set local git config from platform.
@@ -443,6 +489,45 @@ mod tests {
             std::env::temp_dir().join(format!("nexus-git-test-{}-{}", std::process::id(), suffix));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn test_verify_values_align_status_before_expected() {
+        // A long value (signing key fingerprint length).
+        let long = "0123456789ABCDEF".repeat(3);
+        let rows = vec![
+            (
+                "user.name",
+                "local=dev".to_string(),
+                style("OK").green().to_string(),
+                "expected=dev".to_string(),
+            ),
+            (
+                "user.signingkey",
+                format!("local={long}"),
+                style("MISMATCH").red().to_string(),
+                format!("expected={long}"),
+            ),
+            (
+                "commit.gpgsign",
+                style("(not set)").dim().to_string(),
+                "OK".to_string(),
+                "expected=true".to_string(),
+            ),
+        ];
+        let plain: Vec<String> = verify_values(&rows)
+            .iter()
+            .map(|v| console::strip_ansi_codes(v).into_owned())
+            .collect();
+        // The status comes before the expected value ...
+        assert!(plain[0].find("[OK]").unwrap() < plain[0].find("expected=").unwrap());
+        // ... and starts in the same column on every row, styled or not.
+        let col = plain[0].find('[').unwrap();
+        assert!(plain.iter().all(|v| v.find('[') == Some(col)));
+        assert_eq!(col, format!("local={long}").len() + 3);
+        // The expected values line up too.
+        let exp = plain[0].find("expected=").unwrap();
+        assert!(plain.iter().all(|v| v.find("expected=") == Some(exp)));
     }
 
     #[test]

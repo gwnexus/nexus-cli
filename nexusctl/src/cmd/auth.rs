@@ -5,6 +5,8 @@ use nexus_core::api::NexusClient;
 use nexus_core::auth::{resolve_token_with_source, Credentials, TokenSource, TOKEN_PREFIX};
 use nexus_core::error::Error as CoreError;
 
+use super::display::status_line;
+
 /// Interactive login flow.
 ///
 /// Prompts the user for a personal access token, validates the format,
@@ -110,23 +112,24 @@ pub fn logout(global: bool) -> anyhow::Result<()> {
 pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
     println!("{} Nexus Status", style(">>").bold().cyan());
     println!();
+    println!("{}", style("General").bold());
+    println!();
 
     // --- API URL ---
-    println!(
-        "  API URL:  {} ({})",
-        style(api_url).dim(),
-        style(api_url_source).dim()
+    status_line(
+        "API URL:",
+        format_args!("{} ({})", style(api_url).dim(), style(api_url_source).dim()),
     );
 
     // --- Workspace ---
     let cwd = std::env::current_dir()?;
     let has_nexus_dir = cwd.join(".nexus").exists();
     if has_nexus_dir {
-        println!("  Workspace: {}", cwd.display());
+        status_line("Workspace:", cwd.display());
     } else {
-        println!(
-            "  Workspace: {} (no .nexus/ found)",
-            style(cwd.display()).dim()
+        status_line(
+            "Workspace:",
+            format_args!("{} (no .nexus/ found)", style(cwd.display()).dim()),
         );
     }
     println!();
@@ -139,11 +142,11 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
 
     match token {
         None => {
-            println!(
-                "  Auth:     {} Not authenticated",
-                style("--").bold().yellow()
+            status_line(
+                "Auth:",
+                format_args!("{} Not authenticated", style("--").bold().yellow()),
             );
-            println!("            Run 'nexus login' to authenticate.");
+            status_line("", "Run 'nexus login' to authenticate.");
         }
         Some(ref t) => {
             // Show token prefix + source
@@ -162,32 +165,40 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
             let client = NexusClient::new(api_url, Some(t.clone()))?;
             match client.auth_status().await {
                 Ok(auth) => {
-                    println!(
-                        "  Auth:     {} {} ({})",
-                        style("OK").bold().green(),
-                        style(&auth.user.email).bold(),
-                        auth.user.platform_role,
+                    status_line(
+                        "Auth:",
+                        format_args!(
+                            "{} {} ({})",
+                            style("OK").bold().green(),
+                            style(&auth.user.email).bold(),
+                            auth.user.platform_role,
+                        ),
                     );
                     if let Some(ref name) = auth.user.display_name {
-                        println!("            Name: {}", name);
+                        status_line("", format_args!("Name: {}", name));
                     }
-                    println!(
-                        "            Token: {}{}",
-                        style(prefix).dim(),
-                        style(source_label).dim()
+                    status_line(
+                        "",
+                        format_args!(
+                            "Token: {}{}",
+                            style(prefix).dim(),
+                            style(source_label).dim()
+                        ),
                     );
                     auth_valid = true;
                 }
                 Err(e) => {
-                    println!(
-                        "  Auth:     {} Token invalid: {}",
-                        style("ERR").bold().red(),
-                        e
+                    status_line(
+                        "Auth:",
+                        format_args!("{} Token invalid: {}", style("ERR").bold().red(), e),
                     );
-                    println!(
-                        "            Token: {}{}",
-                        style(prefix).dim(),
-                        style(source_label).dim()
+                    status_line(
+                        "",
+                        format_args!(
+                            "Token: {}{}",
+                            style(prefix).dim(),
+                            style(source_label).dim()
+                        ),
                     );
                 }
             }
@@ -205,89 +216,110 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
             if !auth_valid {
                 // Auth already failed/absent above; skip a second network
                 // call and don't imply a fresh check succeeded.
-                println!(
-                    "  Project:  {} {} ({}) — unverified",
-                    style("--").bold().yellow(),
-                    style(&project.name).bold(),
-                    if !project.slug.is_empty() {
-                        &project.slug
-                    } else {
-                        "-"
-                    }
+                status_line(
+                    "Project:",
+                    format_args!(
+                        "{} {} ({}), unverified",
+                        style("--").bold().yellow(),
+                        style(&project.name).bold(),
+                        if !project.slug.is_empty() {
+                            &project.slug
+                        } else {
+                            "-"
+                        }
+                    ),
                 );
-                println!("            ID: {}", style(&project.id).dim());
+                status_line("", format_args!("ID: {}", style(&project.id).dim()));
                 if token.is_none() {
-                    println!(
-                        "            Run 'nexus login' to verify this project exists at {}.",
-                        api_url
+                    status_line(
+                        "",
+                        format_args!(
+                            "Run 'nexus login' to verify this project exists at {}.",
+                            api_url
+                        ),
                     );
                 } else {
-                    println!("            Cannot verify: authentication failed above.");
+                    status_line("", "Cannot verify: authentication failed above.");
                 }
             } else {
                 let client = NexusClient::new(api_url, token.clone())?;
                 match client.get_project(&project.id).await {
                     Ok(_) => {
-                        println!(
-                            "  Project:  {} {} ({})",
-                            style("OK").bold().green(),
-                            style(&project.name).bold(),
-                            if !project.slug.is_empty() {
-                                &project.slug
-                            } else {
-                                "-"
-                            }
+                        status_line(
+                            "Project:",
+                            format_args!(
+                                "{} {} ({})",
+                                style("OK").bold().green(),
+                                style(&project.name).bold(),
+                                if !project.slug.is_empty() {
+                                    &project.slug
+                                } else {
+                                    "-"
+                                }
+                            ),
                         );
-                        println!("            ID: {}", style(&project.id).dim());
+                        status_line("", format_args!("ID: {}", style(&project.id).dim()));
                     }
                     Err(CoreError::NotFound(_)) => {
-                        println!(
-                            "  Project:  {} Not found at {}",
-                            style("ERR").bold().red(),
-                            api_url
+                        status_line(
+                            "Project:",
+                            format_args!("{} Not found at {}", style("ERR").bold().red(), api_url),
                         );
-                        println!(
-                            "            Configured: {} (id: {})",
-                            style(&project.name).bold(),
-                            style(&project.id).dim()
+                        status_line(
+                            "",
+                            format_args!(
+                                "Configured: {} (id: {})",
+                                style(&project.name).bold(),
+                                style(&project.id).dim()
+                            ),
                         );
-                        println!(
-                            "            This workspace may be pointed at the wrong backend. \
+                        status_line(
+                            "",
+                            "This workspace may be pointed at the wrong backend. \
                              Check NEXUS_API_URL / --api-url / 'nexus config show', \
-                             or re-link with 'nexus link'."
+                             or re-link with 'nexus link'.",
                         );
                     }
                     Err(CoreError::Forbidden(msg)) => {
-                        println!(
-                            "  Project:  {} Access denied at {}: {}",
-                            style("ERR").bold().red(),
-                            api_url,
-                            msg
+                        status_line(
+                            "Project:",
+                            format_args!(
+                                "{} Access denied at {}: {}",
+                                style("ERR").bold().red(),
+                                api_url,
+                                msg
+                            ),
                         );
-                        println!("            ID: {}", style(&project.id).dim());
+                        status_line("", format_args!("ID: {}", style(&project.id).dim()));
                     }
                     Err(e) => {
-                        println!(
-                            "  Project:  {} Could not verify against {}: {}",
-                            style("!").bold().yellow(),
-                            api_url,
-                            e
+                        status_line(
+                            "Project:",
+                            format_args!(
+                                "{} Could not verify against {}: {}",
+                                style("!").bold().yellow(),
+                                api_url,
+                                e
+                            ),
                         );
-                        println!(
-                            "            Local config: {} (id: {})",
-                            style(&project.name).bold(),
-                            style(&project.id).dim()
+                        status_line(
+                            "",
+                            format_args!(
+                                "Local config: {} (id: {})",
+                                style(&project.name).bold(),
+                                style(&project.id).dim()
+                            ),
                         );
                     }
                 }
             }
         }
         None => {
-            println!(
-                "  Project:  {} No project linked",
-                style("--").bold().yellow()
+            status_line(
+                "Project:",
+                format_args!("{} No project linked", style("--").bold().yellow()),
             );
-            println!("            Run 'nexus link' to link this directory to a project.");
+            status_line("", "Run 'nexus link' to link this directory to a project.");
         }
     }
 

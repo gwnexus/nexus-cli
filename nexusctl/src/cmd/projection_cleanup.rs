@@ -704,11 +704,14 @@ fn plan_claude(
     // nothing else remains.
     if !ctx.keep.contains("CLAUDE.md") {
         if let Ok(content) = fs::read_to_string(workspace.join("CLAUDE.md")) {
-            let template = claude_render::render_claude_root_md(&ctx.project_name, root);
+            // Either wording may have been written, depending on whether the
+            // directives rules file was exported at creation time.
+            let templates = [false, true]
+                .map(|rules| claude_render::render_claude_root_md(&ctx.project_name, root, rules));
             let locked = lock
                 .as_ref()
                 .and_then(|l| l.claude_md_block_sha256.as_deref());
-            match strip_claude_md(&content, locked, &template, ctx.force) {
+            match strip_claude_md(&content, locked, &templates, ctx.force) {
                 ClaudeMdCleanup::Untouched => {}
                 ClaudeMdCleanup::Keep => {
                     actions.push(Action::Keep {
@@ -894,7 +897,7 @@ pub(crate) enum ClaudeMdCleanup {
 pub(crate) fn strip_claude_md(
     content: &str,
     locked_block_sha: Option<&str>,
-    template: &str,
+    templates: &[String],
     force: bool,
 ) -> ClaudeMdCleanup {
     let begin = claude_render::CLAUDE_MD_MANAGED_BEGIN;
@@ -924,7 +927,7 @@ pub(crate) fn strip_claude_md(
     };
     let is_template = rest.trim_start().starts_with("---\ntype: bootstrap")
         && rest.contains(super::pull::MANAGED_MARKER);
-    if rest.trim().is_empty() || rest == template {
+    if rest.trim().is_empty() || templates.contains(&rest) {
         return ClaudeMdCleanup::Remove;
     }
     if force && is_template {
@@ -1906,7 +1909,9 @@ mod tests {
 
     #[test]
     fn test_strip_claude_md_variants() {
-        let template = claude_render::render_claude_root_md("Demo", ".nexus");
+        let templates = [false, true]
+            .map(|rules| claude_render::render_claude_root_md("Demo", ".nexus", rules));
+        let template = templates[0].clone();
         let block = claude_render::claude_md_desired_block_text(BLOCK);
         // The lock records the block as written unchanged.
         let ok = sha256_hex(&block);
@@ -1915,70 +1920,75 @@ mod tests {
         };
         // Block + untouched template: Nexus created it all.
         assert_eq!(
-            strip_claude_md(&with_block(&template), Some(&ok), &template, false),
+            strip_claude_md(&with_block(&template), Some(&ok), &templates, false),
+            ClaudeMdCleanup::Remove
+        );
+        // The rules-file wording counts as the untouched template too.
+        assert_eq!(
+            strip_claude_md(&with_block(&templates[1]), Some(&ok), &templates, false),
             ClaudeMdCleanup::Remove
         );
         // Block only.
         assert_eq!(
-            strip_claude_md(&with_block(""), Some(&ok), &template, false),
+            strip_claude_md(&with_block(""), Some(&ok), &templates, false),
             ClaudeMdCleanup::Remove
         );
         // User content around the block survives byte for byte.
         let user = "# Mine\n\ntext\n";
         assert_eq!(
-            strip_claude_md(&with_block(user), Some(&ok), &template, false),
+            strip_claude_md(&with_block(user), Some(&ok), &templates, false),
             ClaudeMdCleanup::Rewrite(user.to_string())
         );
         let middle = format!(
             "# Top\n\n<!-- BEGIN:nexus-managed -->{block}<!-- END:nexus-managed -->\n\n# Bottom\n"
         );
         assert_eq!(
-            strip_claude_md(&middle, Some(&ok), &template, false),
+            strip_claude_md(&middle, Some(&ok), &templates, false),
             ClaudeMdCleanup::Rewrite("# Top\n\n# Bottom\n".into())
         );
         // Without a lock record the block is kept unless --force.
         assert_eq!(
-            strip_claude_md(&with_block(user), None, &template, false),
+            strip_claude_md(&with_block(user), None, &templates, false),
             ClaudeMdCleanup::Keep
         );
         assert_eq!(
-            strip_claude_md(&with_block(user), None, &template, true),
+            strip_claude_md(&with_block(user), None, &templates, true),
             ClaudeMdCleanup::Rewrite(user.to_string())
         );
         // A locally edited block is kept unless --force.
         let locked = sha256_hex("\nsomething else\n");
         assert_eq!(
-            strip_claude_md(&with_block(user), Some(&locked), &template, false),
+            strip_claude_md(&with_block(user), Some(&locked), &templates, false),
             ClaudeMdCleanup::Keep
         );
         assert_eq!(
-            strip_claude_md(&with_block(user), Some(&locked), &template, true),
+            strip_claude_md(&with_block(user), Some(&locked), &templates, true),
             ClaudeMdCleanup::Rewrite(user.to_string())
         );
         // A modified bootstrap template: kept, removed with --force.
         let edited = format!("{template}\nextra line\n");
         assert_eq!(
-            strip_claude_md(&with_block(&edited), Some(&ok), &template, false),
+            strip_claude_md(&with_block(&edited), Some(&ok), &templates, false),
             ClaudeMdCleanup::Rewrite(edited.clone())
         );
         assert_eq!(
-            strip_claude_md(&with_block(&edited), Some(&ok), &template, true),
+            strip_claude_md(&with_block(&edited), Some(&ok), &templates, true),
             ClaudeMdCleanup::Remove
         );
         // --force on the bootstrap template keeps another tool's block.
         let next = "<!-- BEGIN:nextjs-agent-rules -->\nrules\n<!-- END:nextjs-agent-rules -->";
         let with_next = format!("{template}\n{next}\n");
         assert_eq!(
-            strip_claude_md(&with_block(&with_next), Some(&ok), &template, true),
+            strip_claude_md(&with_block(&with_next), Some(&ok), &templates, true),
             ClaudeMdCleanup::Rewrite(format!("{next}\n"))
         );
         assert_eq!(
-            strip_claude_md(&with_block(&with_next), Some(&ok), &template, false),
+            strip_claude_md(&with_block(&with_next), Some(&ok), &templates, false),
             ClaudeMdCleanup::Rewrite(with_next.clone())
         );
         // No block, plain user file: untouched.
         assert_eq!(
-            strip_claude_md(user, None, &template, true),
+            strip_claude_md(user, None, &templates, true),
             ClaudeMdCleanup::Untouched
         );
     }

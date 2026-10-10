@@ -7,6 +7,8 @@ use std::path::Path;
 
 use console::style;
 
+use super::display::status_line;
+
 /// Print the Claude Code runtime block of `nexus status` and return it as
 /// JSON for `--output json`.
 pub fn runtime_details(
@@ -37,18 +39,24 @@ pub fn runtime_details(
 
     if print {
         println!("{}", style("Claude Code runtime").bold());
+        println!();
         match (&version, compat_range, compatible) {
-            (None, _, _) => println!(
-                "  Version:  {}",
-                style("not found (claude --version failed)").yellow()
+            (None, _, _) => status_line(
+                "Version:",
+                style("not found (claude --version failed)").yellow(),
             ),
-            (Some(v), Some(range), Some(false)) => println!(
-                "  Version:  {} {}",
-                v,
-                style(format!("outside supported range {range}")).yellow()
+            (Some(v), Some(range), Some(false)) => status_line(
+                "Version:",
+                format_args!(
+                    "{} {}",
+                    v,
+                    style(format!("outside supported range {range}")).yellow()
+                ),
             ),
-            (Some(v), Some(range), _) => println!("  Version:  {v} (supported: {range})"),
-            (Some(v), None, _) => println!("  Version:  {v}"),
+            (Some(v), Some(range), _) => {
+                status_line("Version:", format_args!("{v} (supported: {range})"))
+            }
+            (Some(v), None, _) => status_line("Version:", v),
         }
         for plugin in &plugins {
             let state = match scope_of(plugin) {
@@ -67,14 +75,17 @@ pub fn runtime_details(
             } else {
                 String::new()
             };
-            println!("  Plugin:   {plugin}{tag}: {state}");
+            status_line("Plugin:", format_args!("{plugin}{tag}: {state}"));
         }
         if let Some(ref h) = headroom {
-            println!(
-                "  Headroom: last session mode {}, {} compression(s), ~{} tokens saved",
-                h.mode.as_deref().unwrap_or("unknown"),
-                h.compressions,
-                h.potential_saved_tokens
+            status_line(
+                "Headroom:",
+                format_args!(
+                    "last session mode {}, {} compression(s), ~{} tokens saved",
+                    h.mode.as_deref().unwrap_or("unknown"),
+                    h.compressions,
+                    h.potential_saved_tokens
+                ),
             );
         }
         println!();

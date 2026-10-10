@@ -286,15 +286,40 @@ nexus status
 ```
 >> Nexus Status
 
-  API URL:  https://nexus.gatewarden.eu (global)
-  Workspace: /path/to/project
+General
 
-  Auth:     OK you@example.com (member)
-            Token: nxs_pat_****... 
+  API URL:         https://nexus.gatewarden.eu (global)
+  Workspace:       /path/to/project
 
-  Project:  OK My Project (my-project)
-            ID: 07303f0c-3713-4cb0-b03e-35f4db0c1acb
+  Auth:            OK you@example.com (member)
+                   Token: nxs_pat_****... (global)
+
+  Project:         OK My Project (my-project)
+                   ID: 07303f0c-3713-4cb0-b03e-35f4db0c1acb
+
+  Environment:     Claude Code (workspace zellij) (start with nexus run)
+
+Claude Code runtime
+
+  Version:         2.1.296 (supported: >=2.1.257 <3.0.0)
+  Plugin:          code-review@claude-plugins-official [managed]: installed (project scope, by nexus)
+
+Git Identity Verification
+
+  user.name        local=dev                         [OK] expected=dev
+  user.email       local=dev@example.com             [OK] expected=dev@example.com
+  user.signingkey  local=<signing key fingerprint>   [OK] expected=<signing key fingerprint>
+  commit.gpgsign   local=true                        [OK] expected=true
+
+All git identity settings match.
+
+OK Workspace is clean.
 ```
+
+All sections share one key column. In the git identity rows the status sits
+between the local and the expected value, aligned across rows, so it stays
+visible next to long values such as signing keys (`nexus git verify` uses
+the same layout).
 
 - **API URL** reports which layer supplied it (`flag`, `env`, `local`,
   `global`, `default`) — see [Configuration](#configuration) below.
@@ -429,6 +454,11 @@ The shadow level is a project setting on the server, `policy.shadow`:
 nexus shadow ai        # or: on (= ai), nexus, off; same as nexus env set policy.shadow ai
 nexus shadow status    # server level, the server exclude block, local blocks
 ```
+
+When the server sets a level, `nexus shadow status` labels the old local
+agentic block as `Local shadow block (legacy)` and the devbox block as
+`Workspace shadow (devbox files)`, so neither reads as a contradiction to the
+server level.
 
 Every `nexus pull` writes the server's `git_exclude` list into a managed
 block in `.git/info/exclude` (`# >>> nexus managed exclude (server)`); paths
@@ -628,7 +658,10 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 ## CI/CD
 
 - **CI** (`ci.yml`): Runs on every push/PR to `main`. Tests on ubuntu-latest
-  and macos-latest, clippy with `-D warnings`, and rustfmt check.
+  and macos-latest, clippy with `-D warnings`, rustfmt check, and a gitleaks
+  self-test (`scripts/ci/gitleaks_selftest.sh`): the repo's `.gitleaks.toml`
+  must detect a synthetic token (so a config that drops the built-in rules
+  fails the build) and find nothing in the source tree.
 - **Release** (`release.yml`): Triggered by `v*` tags. Builds release binaries
   for 4 targets (aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu,
   aarch64-unknown-linux-gnu), generates SHA-256 checksums, and creates a GitHub
