@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.10] - 2026-10-10
+
+Readable `nexus status`, a gitleaks config that actually scans, and two wording fixes for directives and shadow status.
+
+### Changed
+- **`nexus status` layout.** The first block has a `General` heading; all sections (General, Claude Code runtime, Git Identity Verification) share one key column, continuation lines (`Name:`, `Token:`, `ID:`) sit under the value column, `Environment` gets its own line group, and the Claude Code runtime heading is followed by a blank line like the other sections.
+- **Git identity rows put the status before the expected value** (`local=<value>   [OK] expected=<value>`). The local and status columns are sized to the widest row (ANSI styling ignored), so the status stays aligned and visible next to long values such as signing keys. `nexus git verify` and the `gh` row use the same layout.
+- **Root `CLAUDE.md` bootstrap:** when the directives rules file `.claude/rules/15-nexus-directives.md` is exported, step 2 reads "Apply the project directives (always loaded from `.claude/rules/15-nexus-directives.md`; readable copy: `<root>/directives.md`)"; otherwise the previous wording stays. The decision uses the export, because on a first pull the root file is written before the rules file. The file is still created once and never overwritten; `nexus deinit` recognises both wordings as the untouched template.
+- **`nexus shadow status`:** when the server sets a shadow level, the local agentic block is shown as `Local shadow block (legacy): none|active` and the devbox block as `Workspace shadow (devbox files)`, instead of "Shadow mode is disabled" right below the server level.
+
+### Fixed
+- **Gitleaks pre-commit hook detected nothing.** `.gitleaks.toml` had no `[extend] useDefault = true`, so the custom config replaced the built-in ruleset and every scan passed. The defaults are now extended; the synthetic `gws_pat_` test fixture is allowlisted narrowly next to the existing `nxs_pat_` entries. A full history scan found no real secrets.
+
+### Added
+- **Gitleaks self-test in CI** (`scripts/ci/gitleaks_selftest.sh`, job `gitleaks`, pinned gitleaks 8.30.1): a synthetic token built at runtime must produce exactly one finding with the repo config, and `nexus-core/`, `nexusctl/`, `tests/` must produce none.
+
+2 net new tests; 775/775 passing, clippy/fmt clean.
+
 ## [0.28.9] - 2026-10-08
 
 Directives as short rules and the server shadow level (NEXUS-APP ADR-0125, dispatch 15497fa2); user-invoked skills (ADR-0124, dispatch 3dc4f5c2).
