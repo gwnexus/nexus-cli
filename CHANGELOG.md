@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.11] - 2026-10-11
+
+`nexus pull` cleans up workspace files the fork dropped, and the plugin env is available to devbox as a dotenv file.
+
+### Added
+- **Removal of dropped workspace files.** Workspace files (`devbox.json`, `scripts/devbox/**`) are recorded in the sync manifest with a `kind: workspace` marker (older entries are recognised by their shape). When the fork no longer contains a file that an earlier pull wrote, `nexus pull` deletes it if it is unchanged locally (`REMOVE`, empty parent directories are removed too). A locally modified file is never deleted: it is kept and reported (`KEEP ... modified, no longer in the workspace`). Files that pull never wrote are not touched.
+- **`nexus status`** lists such files: unchanged ones as `ORPHANED` (the next pull removes them), modified ones as `DROPPED` (delete, or `nexus push` to add them back).
+- **`nexus pull --dry-run`** previews the devbox workspace changes (create, update, kept files, removals) without writing anything.
+- **`.nexus/plugin.env`.** The plugin variables are also written as a dotenv file (`KEY=value`, no `export`, values quoted only when needed) so devbox can load them with `"env_from": ".nexus/plugin.env"` (devbox only accepts paths ending in `.env`). `.nexus/env` stays for `nexus run`; both files are listed in `.nexus/.gitignore` and removed when the project has no plugin variables.
+
+8 net new tests; 783/783 passing, clippy/fmt clean.
+
 ## [0.28.10] - 2026-10-10
 
 Readable `nexus status`, a gitleaks config that actually scans, and two wording fixes for directives and shadow status.
