@@ -204,6 +204,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                             &[],
                             false,
                             ccx::ForceMode::None,
+                            false,
                         )
                         .await?;
                     } else if changed {
@@ -219,6 +220,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             ref scope,
             with_actor_assets,
             skip_actor_assets,
+            dry_run,
         } => {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
@@ -234,6 +236,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 // Only the explicit flags, never -y: accepting prompts must
                 // not discard local edits to CCX files.
                 ccx::ForceMode::from_flags(force, force_unmanaged),
+                dry_run,
             )
             .await?;
         }

@@ -437,6 +437,9 @@ fn reset_entry(state: &WorkspaceState, e: &Entry) -> anyhow::Result<Option<Strin
         (_, State::Unmanaged) => Ok(Some(
             "not managed by Nexus; left as is (nexus pull --force-unmanaged replaces it)".into(),
         )),
+        (Kind::Workspace, State::Orphaned | State::Dropped) => Ok(Some(
+            "no longer in the workspace; nexus pull removes it if unchanged, otherwise delete it manually".into(),
+        )),
         (Kind::Workspace, State::New) => Ok(Some(
             "not known to the backend; push it with nexus push, or delete it manually".into(),
         )),
@@ -459,7 +462,7 @@ fn reset_entry(state: &WorkspaceState, e: &Entry) -> anyhow::Result<Option<Strin
                     &e.path,
                     &nexus_core::hash::with_single_trailing_newline(body),
                 )?;
-                super::sync::update_manifest_after_pull(ws, &e.path, &e.path, &sha256_hex(body))?;
+                super::sync::update_workspace_manifest_after_pull(ws, &e.path, &sha256_hex(body))?;
                 Ok(None)
             }
             None => Ok(Some(

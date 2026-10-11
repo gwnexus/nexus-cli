@@ -14,7 +14,7 @@ use std::path::Path;
 use tracing::warn;
 
 /// Directory containing workspace scripts.
-const SCRIPTS_DIR: &str = "scripts/devbox";
+pub(crate) const SCRIPTS_DIR: &str = "scripts/devbox";
 
 /// Collect local workspace file hashes for comparison.
 pub fn collect_workspace_hashes(workspace: &Path) -> HashMap<String, String> {

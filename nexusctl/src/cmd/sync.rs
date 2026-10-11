@@ -139,6 +139,53 @@ pub fn update_manifest_after_pull(
     save_manifest(workspace, &manifest)
 }
 
+/// Record a devbox workspace file (`devbox.json`, a script) as last written
+/// by pull. The `kind` marker lets a later pull find the workspace files it
+/// wrote and remove the ones the fork no longer contains.
+pub fn update_workspace_manifest_after_pull(
+    workspace: &Path,
+    path: &str,
+    content_hash: &str,
+) -> anyhow::Result<()> {
+    let mut manifest = load_manifest(workspace);
+    let obj = manifest
+        .as_object_mut()
+        .expect("manifest should be an object");
+    obj.insert(
+        path.to_string(),
+        serde_json::json!({
+            "target_path": path,
+            "hash": content_hash,
+            "kind": WORKSPACE_KIND,
+        }),
+    );
+    save_manifest(workspace, &manifest)
+}
+
+/// `kind` of sync-manifest entries for devbox workspace files.
+const WORKSPACE_KIND: &str = "workspace";
+
+/// The devbox workspace files recorded in the sync manifest, as
+/// `(target_path, hash)`. Entries written before the `kind` marker existed
+/// are recognized by their shape: keyed by their own path, and
+/// `devbox.json` or below `scripts/devbox/`.
+pub fn workspace_manifest_entries(manifest: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(obj) = manifest.as_object() else {
+        return Vec::new();
+    };
+    obj.iter()
+        .filter_map(|(key, entry)| {
+            let target = entry.get("target_path")?.as_str()?;
+            let hash = entry.get("hash")?.as_str()?;
+            let marked = entry.get("kind").and_then(|k| k.as_str()) == Some(WORKSPACE_KIND);
+            let legacy = key == target
+                && (target == "devbox.json"
+                    || target.starts_with(&format!("{}/", super::push::SCRIPTS_DIR)));
+            (marked || legacy).then(|| (target.to_string(), hash.to_string()))
+        })
+        .collect()
+}
+
 /// Drop the sync-manifest entries whose `target_path` matches `remove`
 /// (e.g. files of a projection that was just removed). Returns the number
 /// of entries dropped; the manifest is only rewritten when that is > 0.

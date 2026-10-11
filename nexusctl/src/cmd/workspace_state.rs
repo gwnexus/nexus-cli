@@ -49,8 +49,11 @@ pub enum State {
     Drifted,
     /// Projection file missing locally.
     Create,
-    /// Projection file Nexus no longer sends.
+    /// Projection file Nexus no longer sends, or a workspace file the fork
+    /// no longer contains (unchanged; the next pull removes it).
     Orphaned,
+    /// Workspace file the fork no longer contains, edited locally (kept).
+    Dropped,
     /// A local file in the way of a projection file.
     Unmanaged,
     /// Local file already matches; only the lock would be recorded.
@@ -103,6 +106,12 @@ impl Entry {
                 format!("nexus push {p} (or nexus reset {p})")
             }
             (FileClass::Content, State::New) => format!("nexus push {p}"),
+            (FileClass::Content, State::Orphaned) => {
+                "no longer in the workspace; nexus pull removes it".into()
+            }
+            (_, State::Dropped) => {
+                format!("no longer in the workspace, edited locally; delete it, or nexus push {p} to add it back")
+            }
             (FileClass::Content, State::Deleted) => format!("nexus reset {p}"),
             (_, State::Conflict) => {
                 format!(
@@ -608,10 +617,14 @@ async fn workspace_entries(
 ) -> Vec<Entry> {
     let mut entries = Vec::new();
     let mut desired: Vec<(String, String)> = Vec::new();
-    if let Ok(ws) = client.export_workspace_mcp(project_id).await {
-        desired.push(("devbox.json".into(), ws.devbox_json));
-        desired.extend(ws.scripts.into_iter().map(|s| (s.path, s.body)));
-    }
+    let exported = match client.export_workspace_mcp(project_id).await {
+        Ok(ws) => {
+            desired.push(("devbox.json".into(), ws.devbox_json));
+            desired.extend(ws.scripts.into_iter().map(|s| (s.path, s.body)));
+            true
+        }
+        Err(_) => false,
+    };
     let known: Vec<String> = desired.iter().map(|(p, _)| p.clone()).collect();
 
     for (path, body) in desired {
@@ -640,7 +653,9 @@ async fn workspace_entries(
     }
 
     // Local-only view: modified tracked files when the export is
-    // unavailable, and new scripts the backend does not know.
+    // unavailable, new scripts the backend does not know, and files an
+    // earlier pull wrote that the fork no longer contains (the same rule
+    // nexus pull applies when it removes them).
     for (path, hash) in super::push::collect_workspace_hashes(workspace) {
         if known.contains(&path) {
             continue;
@@ -653,6 +668,8 @@ async fn workspace_entries(
         };
         let state = match recorded {
             None => State::New,
+            Some(r) if exported && unchanged(&r) => State::Orphaned,
+            Some(_) if exported => State::Dropped,
             Some(r) if !unchanged(&r) => State::Modified,
             Some(_) => continue,
         };

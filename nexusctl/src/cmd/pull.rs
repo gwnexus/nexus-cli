@@ -239,9 +239,11 @@ fn is_locally_modified(workspace: &Path, target_path: &str, manifest: &serde_jso
 ///
 /// This file is the single source of truth for non-sensitive, platform-managed env vars
 /// (e.g. `HEADROOM_*`). It is fully platform-owned — full overwrite on every pull/init.
-/// Also ensures `env` is present in `.<agentic_root>/.gitignore`.
+/// The same variables also go to `plugin.env`, for devbox `"env_from"`
+/// (which only accepts paths ending in `.env`). Also ensures both files are
+/// listed in `.<agentic_root>/.gitignore`.
 ///
-/// If `plugin_env` is empty the file is deleted (if it exists) and the function returns `Ok(())`.
+/// If `plugin_env` is empty both files are deleted (if they exist) and the function returns `Ok(())`.
 pub(crate) fn write_plugin_env_file(
     workspace: &Path,
     plugin_env: &std::collections::HashMap<String, String>,
@@ -252,16 +254,20 @@ pub(crate) fn write_plugin_env_file(
 
     let env_dir = workspace.join(agentic_root);
     let env_path = env_dir.join("env");
+    let dotenv_path = env_dir.join(PLUGIN_DOTENV);
     let gitignore_path = env_dir.join(".gitignore");
 
     if plugin_env.is_empty() {
-        if env_path.exists() {
-            let _ = fs::remove_file(&env_path);
-            println!(
-                "   {} {}/env removed (no plugin env vars)",
-                style("-").bold().yellow(),
-                agentic_root
-            );
+        for (path, name) in [(&env_path, "env"), (&dotenv_path, PLUGIN_DOTENV)] {
+            if path.exists() {
+                let _ = fs::remove_file(path);
+                println!(
+                    "   {} {}/{} removed (no plugin env vars)",
+                    style("-").bold().yellow(),
+                    agentic_root,
+                    name
+                );
+            }
         }
         return Ok(());
     }
@@ -305,35 +311,83 @@ pub(crate) fn write_plugin_env_file(
             .map(str::to_string)
             .collect::<Vec<_>>()
     };
-    if fs::read_to_string(&env_path)
+    fs::create_dir_all(&env_dir)?;
+    if !fs::read_to_string(&env_path)
         .is_ok_and(|existing| vars_only(&existing) == vars_only(&content))
     {
-        return Ok(());
+        fs::write(&env_path, &content)?;
+        println!(
+            "   {} {}/env ({} plugin var{})",
+            style("+").bold().green(),
+            agentic_root,
+            sorted.len(),
+            if sorted.len() == 1 { "" } else { "s" }
+        );
     }
 
-    fs::create_dir_all(&env_dir)?;
-    fs::write(&env_path, &content)?;
-    println!(
-        "   {} {}/env ({} plugin var{})",
-        style("+").bold().green(),
-        agentic_root,
-        sorted.len(),
-        if sorted.len() == 1 { "" } else { "s" }
-    );
+    let dotenv = render_plugin_dotenv(&sorted);
+    if fs::read_to_string(&dotenv_path).ok().as_deref() != Some(dotenv.as_str()) {
+        fs::write(&dotenv_path, &dotenv)?;
+        println!(
+            "   {} {}/{} (for devbox env_from)",
+            style("+").bold().green(),
+            agentic_root,
+            PLUGIN_DOTENV
+        );
+    }
 
-    // Ensure `env` is in .<agentic_root>/.gitignore
-    let gitignore_entry = "env\n";
-    if gitignore_path.exists() {
-        let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
-        if !existing.lines().any(|l| l.trim() == "env") {
-            let mut f = fs::OpenOptions::new().append(true).open(&gitignore_path)?;
-            f.write_all(gitignore_entry.as_bytes())?;
+    // Ensure both files are in .<agentic_root>/.gitignore
+    let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
+    let missing: String = ["env", PLUGIN_DOTENV]
+        .iter()
+        .filter(|name| !existing.lines().any(|l| l.trim() == **name))
+        .map(|name| format!("{name}\n"))
+        .collect();
+    if !missing.is_empty() {
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&gitignore_path)?;
+        if !existing.is_empty() && !existing.ends_with('\n') {
+            f.write_all(b"\n")?;
         }
-    } else {
-        fs::write(&gitignore_path, gitignore_entry)?;
+        f.write_all(missing.as_bytes())?;
     }
 
     Ok(())
+}
+
+/// File name of the dotenv copy of the plugin env (devbox `env_from`).
+pub(crate) const PLUGIN_DOTENV: &str = "plugin.env";
+
+/// `KEY=value` lines for a dotenv parser: no `export`, a value is quoted
+/// only when it would otherwise be misread (whitespace, quotes, `#`, `$`,
+/// backslashes). The content carries no timestamp, so it only changes when
+/// a variable does.
+fn render_plugin_dotenv(sorted: &[(&String, &String)]) -> String {
+    let mut out = String::from(
+        "# Platform-managed plugin environment variables (nexus pull).\n\
+         # Loaded by devbox via \"env_from\". Do not edit.\n",
+    );
+    for (k, v) in sorted {
+        out.push_str(&format!("{k}={}\n", dotenv_value(v)));
+    }
+    out
+}
+
+fn dotenv_value(v: &str) -> String {
+    let needs_quotes = v
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '#' | '$' | '\\' | '`'));
+    if !needs_quotes {
+        return v.to_string();
+    }
+    let escaped = v
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
 }
 
 /// What `nexus run` will start, for the post-pull/init tip (NEXUS-APP
@@ -465,6 +519,7 @@ fn read_key_from_env_file(workspace: &Path, key: &str) -> Option<String> {
 }
 
 /// Run the pull command.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     api_url: &str,
     cli_project_id: Option<&str>,
@@ -473,6 +528,7 @@ pub async fn run(
     scope: &[String],
     with_actor_assets: bool,
     ccx_force: super::ccx::ForceMode,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -521,6 +577,10 @@ pub async fn run(
             .await;
     crate::cmd::display::print_project_banner(api_url, &project_id, project_name.as_deref());
     println!();
+
+    if dry_run {
+        return dry_run_workspace(&client, &project_id, &workspace).await;
+    }
 
     // Scope filter: if empty, pull everything. Otherwise only named scopes.
     let pull_all = scope.is_empty();
@@ -1366,6 +1426,10 @@ pub async fn run(
                         ws_written += 1;
                     }
                 }
+                let exported: Vec<&str> = std::iter::once("devbox.json")
+                    .chain(export.scripts.iter().map(|s| s.path.as_str()))
+                    .collect();
+                prune_dropped_workspace_files(&workspace, &exported);
 
                 if ws_written > 0 {
                     println!(
@@ -1465,6 +1529,13 @@ pub async fn run(
                                 ws_written += 1;
                             }
                         }
+                        let exported: Vec<&str> = ws_export
+                            .workspace
+                            .iter()
+                            .map(|t| t.target_path.as_str())
+                            .chain(ws_export.scripts.iter().map(|s| s.target_path.as_str()))
+                            .collect();
+                        prune_dropped_workspace_files(&workspace, &exported);
 
                         if ws_written > 0 {
                             println!(
@@ -1911,7 +1982,8 @@ pub(crate) fn sync_workspace_file(
         explicit_force,
     );
     let record = || {
-        let _ = super::sync::update_manifest_after_pull(workspace, rel, rel, &sha256_hex(body));
+        let _ =
+            super::sync::update_workspace_manifest_after_pull(workspace, rel, &sha256_hex(body));
     };
     match action {
         WorkspaceAction::Unchanged => {
@@ -2017,6 +2089,201 @@ fn print_committed_workspace_summary(report: &WorkspaceSyncReport) {
             style("nexus pull --force").bold()
         );
     }
+}
+
+/// A workspace file an earlier pull wrote that the fork no longer contains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DroppedWorkspaceFile {
+    /// Unchanged since pull wrote it: deleted.
+    Remove(String),
+    /// Edited locally: kept, never deleted.
+    KeepModified(String),
+    /// Already gone locally: only the manifest record is dropped.
+    Gone(String),
+}
+
+/// Plan what happens to the workspace files recorded in the sync manifest
+/// that are not in `exported`. Files pull never wrote are not considered.
+pub(crate) fn plan_dropped_workspace_files(
+    workspace: &Path,
+    manifest: &serde_json::Value,
+    exported: &[&str],
+) -> Vec<DroppedWorkspaceFile> {
+    let mut plan: Vec<DroppedWorkspaceFile> = super::sync::workspace_manifest_entries(manifest)
+        .into_iter()
+        .filter(|(path, _)| !exported.contains(&path.as_str()))
+        .filter(|(path, _)| validate_agent_file_target_path(workspace, path).is_ok())
+        .map(|(path, hash)| match fs::read(workspace.join(&path)) {
+            Err(_) => DroppedWorkspaceFile::Gone(path),
+            Ok(local) => {
+                let local = String::from_utf8_lossy(&local);
+                if nexus_core::hash::hash_matches_text(&hash, &local) {
+                    DroppedWorkspaceFile::Remove(path)
+                } else {
+                    DroppedWorkspaceFile::KeepModified(path)
+                }
+            }
+        })
+        .collect();
+    plan.sort_by(|a, b| a.path().cmp(b.path()));
+    plan
+}
+
+impl DroppedWorkspaceFile {
+    pub(crate) fn path(&self) -> &str {
+        match self {
+            Self::Remove(p) | Self::KeepModified(p) | Self::Gone(p) => p,
+        }
+    }
+}
+
+/// Apply [`plan_dropped_workspace_files`]: delete unchanged files (and the
+/// directories that become empty), drop their manifest records. A locally
+/// modified file stays recorded, so `nexus status` keeps reporting it.
+pub(crate) fn apply_dropped_workspace_files(
+    workspace: &Path,
+    plan: &[DroppedWorkspaceFile],
+) -> anyhow::Result<()> {
+    let mut forget: Vec<&str> = Vec::new();
+    for item in plan {
+        match item {
+            DroppedWorkspaceFile::Remove(path) => {
+                let target = workspace.join(path);
+                fs::remove_file(&target)?;
+                remove_empty_parents(workspace, &target);
+                forget.push(path);
+            }
+            DroppedWorkspaceFile::Gone(path) => forget.push(path),
+            DroppedWorkspaceFile::KeepModified(_) => {}
+        }
+    }
+    if !forget.is_empty() {
+        super::sync::remove_manifest_entries(workspace, |p| forget.contains(&p))?;
+    }
+    Ok(())
+}
+
+/// Remove the now-empty directories above `file`, up to the workspace root.
+fn remove_empty_parents(workspace: &Path, file: &Path) {
+    let mut dir = file.parent();
+    while let Some(d) = dir {
+        if d == workspace || !d.starts_with(workspace) || fs::remove_dir(d).is_err() {
+            break;
+        }
+        dir = d.parent();
+    }
+}
+
+fn print_dropped_workspace_file(item: &DroppedWorkspaceFile) {
+    match item {
+        DroppedWorkspaceFile::Remove(path) => println!(
+            "   {} {} (no longer in the workspace)",
+            style("REMOVE").bold().red(),
+            path
+        ),
+        DroppedWorkspaceFile::KeepModified(path) => println!(
+            "   {} {} (modified, no longer in the workspace; delete it or nexus push to add it back)",
+            style("KEEP").bold().yellow(),
+            path
+        ),
+        DroppedWorkspaceFile::Gone(_) => {}
+    }
+}
+
+/// Remove (or report) the workspace files the fork no longer contains, after
+/// the exported ones were synced.
+fn prune_dropped_workspace_files(workspace: &Path, exported: &[&str]) {
+    let manifest = super::sync::load_manifest_pub(workspace);
+    let plan = plan_dropped_workspace_files(workspace, &manifest, exported);
+    if plan.is_empty() {
+        return;
+    }
+    match apply_dropped_workspace_files(workspace, &plan) {
+        Ok(()) => plan.iter().for_each(print_dropped_workspace_file),
+        Err(e) => println!(
+            "   {} Could not remove workspace files the fork no longer has: {}",
+            style("!").yellow(),
+            e
+        ),
+    }
+}
+
+/// `nexus pull --dry-run`: what a pull would do with the devbox workspace
+/// files (as without --force). Nothing is written.
+async fn dry_run_workspace(
+    client: &NexusClient,
+    project_id: &str,
+    workspace: &Path,
+) -> anyhow::Result<()> {
+    println!(
+        "   {} Dry run: devbox workspace files only; nothing is written.",
+        style("·").dim()
+    );
+    let export = match client.export_workspace_mcp(project_id).await {
+        Ok(export) => export,
+        Err(e) if e.to_string().contains("No active workspace fork") => {
+            println!(
+                "   {} No workspace fork assigned to this project.",
+                style("·").dim()
+            );
+            return Ok(());
+        }
+        Err(e) => anyhow::bail!("could not fetch workspace files: {e}"),
+    };
+    let manifest = super::sync::load_manifest_pub(workspace);
+    let mut files: Vec<(&str, &str)> = vec![("devbox.json", export.devbox_json.as_str())];
+    files.extend(
+        export
+            .scripts
+            .iter()
+            .map(|s| (s.path.as_str(), s.body.as_str())),
+    );
+
+    let mut changes = 0;
+    for (rel, body) in &files {
+        let local = fs::read(workspace.join(rel))
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned());
+        let action = decide_workspace_write(
+            local.as_deref(),
+            body,
+            local.is_some() && is_pull_managed(workspace, rel, &manifest),
+            super::ccx::sync_manifest_hash(&manifest, rel).as_deref(),
+            || git_head_content(workspace, rel),
+            false,
+            false,
+        );
+        let label = match action {
+            WorkspaceAction::Unchanged => continue,
+            WorkspaceAction::Write { .. } if local.is_none() => style("CREATE").bold().green(),
+            WorkspaceAction::Write { .. } => style("UPDATE").bold().green(),
+            WorkspaceAction::Skip(WorkspaceSkip::UserManaged) => {
+                style("SKIP user-managed").bold().yellow()
+            }
+            WorkspaceAction::Skip(WorkspaceSkip::LocallyModified) => {
+                style("KEEP modified").bold().yellow()
+            }
+            WorkspaceAction::Skip(WorkspaceSkip::CommittedDiffers) => {
+                style("KEEP committed, differs from the fork")
+                    .bold()
+                    .yellow()
+            }
+        };
+        println!("   {label} {rel}");
+        changes += 1;
+    }
+
+    let exported: Vec<&str> = files.iter().map(|(p, _)| *p).collect();
+    for item in plan_dropped_workspace_files(workspace, &manifest, &exported) {
+        if !matches!(item, DroppedWorkspaceFile::Gone(_)) {
+            print_dropped_workspace_file(&item);
+            changes += 1;
+        }
+    }
+    if changes == 0 {
+        println!("   {} Workspace files are up to date.", style("=").dim());
+    }
+    Ok(())
 }
 
 /// Check whether a file contains the `source: nexus-platform` marker,
@@ -6729,5 +6996,194 @@ mod tests {
         assert!(sync_claude_workspace(&dir, ".nexus", &escape, true).is_err());
         assert!(!dir.join(".nexus/claude/workspace.local.kdl").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Write a workspace file as pull would and record it in the sync
+    /// manifest.
+    fn pulled_workspace_file(dir: &Path, rel: &str, body: &str) {
+        let target = dir.join(rel);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(
+            &target,
+            nexus_core::hash::with_single_trailing_newline(body),
+        )
+        .unwrap();
+        super::super::sync::update_workspace_manifest_after_pull(dir, rel, &sha256_hex(body))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_dropped_workspace_file_unchanged_is_removed() {
+        let dir = temp_pull_dir("ws-dropped-unchanged");
+        pulled_workspace_file(&dir, "devbox.json", "{}");
+        pulled_workspace_file(&dir, "scripts/devbox/dbx_init.sh", "init");
+        pulled_workspace_file(&dir, "scripts/devbox/init/os_darwin/override.sh", "");
+
+        let manifest = super::super::sync::load_manifest_pub(&dir);
+        let exported = ["devbox.json", "scripts/devbox/dbx_init.sh"];
+        let plan = plan_dropped_workspace_files(&dir, &manifest, &exported);
+        assert_eq!(
+            plan,
+            vec![DroppedWorkspaceFile::Remove(
+                "scripts/devbox/init/os_darwin/override.sh".into()
+            )]
+        );
+        apply_dropped_workspace_files(&dir, &plan).unwrap();
+        assert!(!dir.join("scripts/devbox/init").exists());
+        assert!(dir.join("scripts/devbox/dbx_init.sh").exists());
+        let manifest = super::super::sync::load_manifest_pub(&dir);
+        assert!(manifest
+            .get("scripts/devbox/init/os_darwin/override.sh")
+            .is_none());
+        assert!(plan_dropped_workspace_files(&dir, &manifest, &exported).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_workspace_file_modified_is_kept() {
+        let dir = temp_pull_dir("ws-dropped-modified");
+        pulled_workspace_file(&dir, "scripts/devbox/dbx_tmux_2w.sh", "tmux");
+        fs::write(dir.join("scripts/devbox/dbx_tmux_2w.sh"), "tmux mine\n").unwrap();
+
+        let manifest = super::super::sync::load_manifest_pub(&dir);
+        let plan = plan_dropped_workspace_files(&dir, &manifest, &["devbox.json"]);
+        assert_eq!(
+            plan,
+            vec![DroppedWorkspaceFile::KeepModified(
+                "scripts/devbox/dbx_tmux_2w.sh".into()
+            )]
+        );
+        apply_dropped_workspace_files(&dir, &plan).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("scripts/devbox/dbx_tmux_2w.sh")).unwrap(),
+            "tmux mine\n"
+        );
+        // Still recorded, so status and the next pull keep reporting it.
+        let manifest = super::super::sync::load_manifest_pub(&dir);
+        assert!(manifest.get("scripts/devbox/dbx_tmux_2w.sh").is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_workspace_ignores_files_pull_never_wrote() {
+        let dir = temp_pull_dir("ws-dropped-unmanaged");
+        fs::create_dir_all(dir.join("scripts/devbox")).unwrap();
+        fs::write(dir.join("scripts/devbox/mine.sh"), "mine\n").unwrap();
+        // An agent file keyed by file_key, not a workspace file.
+        super::super::sync::update_manifest_after_pull(
+            &dir,
+            "AGENTS.md",
+            ".nexus/AGENTS.md",
+            &sha256_hex("a"),
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join(".nexus")).unwrap();
+        fs::write(dir.join(".nexus/AGENTS.md"), "a").unwrap();
+
+        let manifest = super::super::sync::load_manifest_pub(&dir);
+        assert!(plan_dropped_workspace_files(&dir, &manifest, &["devbox.json"]).is_empty());
+        assert!(dir.join("scripts/devbox/mine.sh").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_workspace_recognizes_legacy_manifest_entries() {
+        let dir = temp_pull_dir("ws-dropped-legacy");
+        let rel = "scripts/devbox/dbx_tmux_3w.sh";
+        fs::create_dir_all(dir.join("scripts/devbox")).unwrap();
+        fs::write(dir.join(rel), "tmux\n").unwrap();
+        // Recorded by an older CLI: no `kind` marker.
+        super::super::sync::update_manifest_after_pull(&dir, rel, rel, &sha256_hex("tmux"))
+            .unwrap();
+
+        let manifest = super::super::sync::load_manifest_pub(&dir);
+        assert_eq!(
+            plan_dropped_workspace_files(&dir, &manifest, &["devbox.json"]),
+            vec![DroppedWorkspaceFile::Remove(rel.into())]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_workspace_file_already_gone_forgets_record() {
+        let dir = temp_pull_dir("ws-dropped-gone");
+        pulled_workspace_file(&dir, "scripts/devbox/old.sh", "old");
+        fs::remove_file(dir.join("scripts/devbox/old.sh")).unwrap();
+
+        let manifest = super::super::sync::load_manifest_pub(&dir);
+        let plan = plan_dropped_workspace_files(&dir, &manifest, &[]);
+        assert_eq!(
+            plan,
+            vec![DroppedWorkspaceFile::Gone("scripts/devbox/old.sh".into())]
+        );
+        apply_dropped_workspace_files(&dir, &plan).unwrap();
+        let manifest = super::super::sync::load_manifest_pub(&dir);
+        assert!(manifest.get("scripts/devbox/old.sh").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_plugin_env_file_writes_dotenv_copy() {
+        let dir = temp_pull_dir("plugin-dotenv");
+        let mut env = std::collections::HashMap::new();
+        env.insert("HEADROOM_MODE".to_string(), "optimize".to_string());
+        env.insert("HEADROOM_NOTE".to_string(), "a b #c".to_string());
+        env.insert("HEADROOM_EMPTY".to_string(), String::new());
+        write_plugin_env_file(&dir, &env, "p", ".nexus").unwrap();
+
+        assert!(dir.join(".nexus/env").exists());
+        let dotenv = fs::read_to_string(dir.join(".nexus/plugin.env")).unwrap();
+        let vars: Vec<&str> = dotenv.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(
+            vars,
+            vec![
+                "HEADROOM_EMPTY=",
+                "HEADROOM_MODE=optimize",
+                "HEADROOM_NOTE=\"a b #c\""
+            ]
+        );
+        assert!(!dotenv.contains("export "));
+        let gitignore = fs::read_to_string(dir.join(".nexus/.gitignore")).unwrap();
+        assert!(gitignore.lines().any(|l| l == "env"));
+        assert!(gitignore.lines().any(|l| l == "plugin.env"));
+
+        // Missing dotenv copy is restored even when .nexus/env is current.
+        fs::remove_file(dir.join(".nexus/plugin.env")).unwrap();
+        write_plugin_env_file(&dir, &env, "p", ".nexus").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join(".nexus/plugin.env")).unwrap(),
+            dotenv
+        );
+
+        // No plugin vars: both files are removed.
+        write_plugin_env_file(&dir, &Default::default(), "p", ".nexus").unwrap();
+        assert!(!dir.join(".nexus/env").exists());
+        assert!(!dir.join(".nexus/plugin.env").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_plugin_env_file_appends_to_existing_gitignore() {
+        let dir = temp_pull_dir("plugin-dotenv-gitignore");
+        fs::create_dir_all(dir.join(".nexus")).unwrap();
+        fs::write(dir.join(".nexus/.gitignore"), "env\nheadroom-cache/").unwrap();
+        let mut env = std::collections::HashMap::new();
+        env.insert("K".to_string(), "v".to_string());
+        write_plugin_env_file(&dir, &env, "p", ".nexus").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join(".nexus/.gitignore")).unwrap(),
+            "env\nheadroom-cache/\nplugin.env\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dotenv_value_quotes_only_when_needed() {
+        assert_eq!(dotenv_value("plain-value_1.2:/x"), "plain-value_1.2:/x");
+        assert_eq!(dotenv_value("a=b"), "a=b");
+        assert_eq!(dotenv_value("two words"), "\"two words\"");
+        assert_eq!(dotenv_value("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(dotenv_value("$HOME"), "\"\\$HOME\"");
+        assert_eq!(dotenv_value("a\\b"), "\"a\\\\b\"");
     }
 }

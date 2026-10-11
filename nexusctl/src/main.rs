@@ -219,6 +219,12 @@ pub enum Command {
         /// Skip actor asset download (metadata only). This is the default.
         #[arg(long)]
         skip_actor_assets: bool,
+
+        /// Show what pull would do with the devbox workspace files
+        /// (devbox.json, scripts), including removals of files the fork no
+        /// longer has, without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Deprecated: use `nexus status`, `nexus diff`, `nexus run`.
