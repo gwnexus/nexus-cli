@@ -161,7 +161,22 @@ fn parse_value(schema: &SettingSchema, raw: &str) -> anyhow::Result<serde_json::
     }
 }
 
-/// `nexus env set <key> <value> [--dry-run] [--pull]`. Returns `true` when
+/// The key and value of `nexus env set`: `<KEY> <VALUE>`, or `<KEY>=<VALUE>`
+/// as one argument (split at the first `=`; keys never contain one).
+pub fn set_args<'a>(key: &'a str, value: Option<&'a str>) -> anyhow::Result<(&'a str, &'a str)> {
+    match (value, key.split_once('=')) {
+        (Some(value), None) => Ok((key, value)),
+        (None, Some((k, v))) if !k.is_empty() => Ok((k, v)),
+        (Some(_), Some(_)) => anyhow::bail!(
+            "use either `nexus env set <KEY> <VALUE>` or `nexus env set <KEY>=<VALUE>`, not both"
+        ),
+        _ => anyhow::bail!(
+            "missing value: use `nexus env set <KEY> <VALUE>` or `nexus env set <KEY>=<VALUE>`"
+        ),
+    }
+}
+
+/// `nexus env set <key> <value> | <key>=<value> [--dry-run] [--pull]`. Returns `true` when
 /// something changed (so the caller can chain `nexus pull`).
 pub async fn set(
     api_url: &str,
@@ -303,6 +318,32 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_set_args_accepts_both_forms() {
+        assert_eq!(
+            set_args("executioner", Some("opencode")).unwrap(),
+            ("executioner", "opencode")
+        );
+        assert_eq!(
+            set_args("executioner=opencode", None).unwrap(),
+            ("executioner", "opencode")
+        );
+        // Split at the first `=`: the value may contain more.
+        assert_eq!(
+            set_args("git.user_name=a=b", None).unwrap(),
+            ("git.user_name", "a=b")
+        );
+        assert_eq!(
+            set_args("git.user_name", Some("a=b")).unwrap(),
+            ("git.user_name", "a=b")
+        );
+        // An explicit empty value, as with `<KEY> ""`.
+        assert_eq!(set_args("claude.hud=", None).unwrap(), ("claude.hud", ""));
+        assert!(set_args("executioner", None).is_err());
+        assert!(set_args("=opencode", None).is_err());
+        assert!(set_args("executioner=opencode", Some("claude-cli")).is_err());
+    }
 
     fn schema(kind: &str, values: &[&str], nullable: bool) -> SettingSchema {
         SettingSchema {

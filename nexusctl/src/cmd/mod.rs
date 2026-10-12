@@ -194,6 +194,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     dry_run,
                     pull,
                 } => {
+                    let (key, value) = env_cmd::set_args(key, value.as_deref())?;
                     let changed = env_cmd::set(&api_url, key, value, *dry_run, cli.yes).await?;
                     if changed && *pull {
                         pull::run(

@@ -420,12 +420,14 @@ pub enum EnvAction {
     Keys,
 
     /// Change a setting in the backend (requires project admin rights).
+    /// Takes `<KEY> <VALUE>` or `<KEY>=<VALUE>`.
     Set {
-        /// Setting key, e.g. claude.hud.
+        /// Setting key, e.g. claude.hud, or `key=value`.
         key: String,
 
-        /// New value (`true`/`false` for booleans, `unset` clears nullable keys).
-        value: String,
+        /// New value (`true`/`false` for booleans, `unset` clears nullable
+        /// keys). Omit it when the key is given as `key=value`.
+        value: Option<String>,
 
         /// Preview the change without applying it.
         #[arg(long)]
@@ -1559,10 +1561,21 @@ mod tests {
                     }),
             } => {
                 assert_eq!(
-                    (key.as_str(), value.as_str(), pull, dry_run),
-                    ("claude.hud", "minimal", true, false)
+                    (key.as_str(), value.as_deref(), pull, dry_run),
+                    ("claude.hud", Some("minimal"), true, false)
                 );
             }
+            _ => panic!("expected env set"),
+        }
+    }
+
+    #[test]
+    fn test_parse_env_set_key_equals_value() {
+        let cli = Cli::try_parse_from(["nexus", "env", "set", "executioner=opencode"]).unwrap();
+        match cli.command {
+            Command::Env {
+                action: Some(EnvAction::Set { key, value, .. }),
+            } => assert_eq!((key.as_str(), value), ("executioner=opencode", None)),
             _ => panic!("expected env set"),
         }
     }
