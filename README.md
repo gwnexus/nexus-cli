@@ -188,6 +188,14 @@ not touched. `nexus status` lists them as `ORPHANED` or `DROPPED`, and
 files the current fork no longer contains, so a new fork does not bring them
 back by accident; `nexus push <path>` pushes one back on purpose.
 
+Skills follow the same rules: files of a skill that is no longer exported
+(renamed or unassigned) are removed on `nexus pull` if unchanged
+(`REMOVE`), kept and reported if edited (`KEEP`), listed by `nexus status`
+and previewed by `nexus pull --dry-run`. Only the selected runtime's
+directories are pruned (`<agentic_root>/skills/`, plus `.claude/skills/` or
+`.opencode/commands/`). The `name` in each `SKILL.md` frontmatter is the
+skill directory id (e.g. `nexus-code-review`).
+
 The project's plugin variables (e.g. `HEADROOM_*`) are written to
 `.nexus/env` (used by `nexus run`) and, as a dotenv file, to
 `.nexus/plugin.env`, which devbox loads with `"env_from": ".nexus/plugin.env"`.

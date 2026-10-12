@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.14] - 2026-10-12
+
+`nexus pull` removes skills that are no longer exported, and skills carry their directory id as `name`.
+
+### Added
+- **Removal of skills that are no longer exported.** When a skill is renamed or unassigned, `nexus pull` removes the files an earlier pull wrote for it (`<agentic_root>/skills/<id>/`, and `.claude/skills/<id>/` for Claude Code or the `.opencode/commands/` stub for OpenCode) if they are unchanged locally (`REMOVE`); empty skill directories go too, the skill roots stay. Locally modified files are kept and reported (`KEEP`), and files pull never wrote are not touched. Only the selected runtime's directories are pruned; the other runtime's files are still handled by the projection cleanup. `nexus status` lists such files (`ORPHANED` / `DROPPED`), `nexus reset` leaves them alone, and `nexus pull --dry-run` now previews skill removals as well as workspace changes.
+
+### Changed
+- **`SKILL.md` frontmatter `name` is the skill directory id** (e.g. `nexus-code-review`) instead of the display name, as Claude Code expects lowercase-hyphen names; the description carries the meaning. `disable-model-invocation: true` is still rendered for user-invoked skills. Existing skill files are updated silently on the next pull unless edited locally.
+
+6 net new tests; 794/794 passing, clippy/fmt clean.
+
 ## [0.28.13] - 2026-10-12
 
 Interactive `nexus env set`, a filterable `nexus link` picker, `nexus status --json`, and `nexus push` no longer revives dropped workspace files.
