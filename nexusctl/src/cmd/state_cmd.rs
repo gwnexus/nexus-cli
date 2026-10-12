@@ -460,6 +460,9 @@ fn reset_entry(state: &WorkspaceState, e: &Entry) -> anyhow::Result<Option<Strin
         (Kind::Workspace, State::Orphaned | State::Dropped) => Ok(Some(
             "no longer in the workspace; nexus pull removes it if unchanged, otherwise delete it manually".into(),
         )),
+        (Kind::Generated, State::Orphaned | State::Dropped) => Ok(Some(
+            "skill no longer exported; nexus pull removes it if unchanged, otherwise delete it manually".into(),
+        )),
         (Kind::Workspace, State::New) => Ok(Some(
             "not known to the backend; push it with nexus push, or delete it manually".into(),
         )),

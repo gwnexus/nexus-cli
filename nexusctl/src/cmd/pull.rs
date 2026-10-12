@@ -578,10 +578,6 @@ pub async fn run(
     crate::cmd::display::print_project_banner(api_url, &project_id, project_name.as_deref());
     println!();
 
-    if dry_run {
-        return dry_run_workspace(&client, &project_id, &workspace).await;
-    }
-
     // Scope filter: if empty, pull everything. Otherwise only named scopes.
     let pull_all = scope.is_empty();
     let pull_scope = |name: &str| pull_all || scope.iter().any(|s| s.eq_ignore_ascii_case(name));
@@ -658,6 +654,19 @@ pub async fn run(
         style(format!("({})", project_id)).dim()
     );
 
+    // Nothing above writes to the workspace.
+    if dry_run {
+        dry_run_workspace(&client, &project_id, &workspace).await?;
+        let desired = desired_skill_files(&export.skills, &agentic_root, is_claude);
+        let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
+        let skills = plan_dropped_skill_files(&workspace, &agentic_root, is_claude, &desired);
+        skills
+            .iter()
+            .filter(|i| !matches!(i, DroppedFile::Gone(_)))
+            .for_each(print_dropped_skill_file);
+        return Ok(());
+    }
+
     if export.skills.is_empty() {
         println!(
             "   {} No skills assigned to this project.",
@@ -690,6 +699,11 @@ pub async fn run(
             }
         );
     }
+    // Skills an earlier pull wrote that the export no longer contains
+    // (renamed or unassigned).
+    let desired_skills = desired_skill_files(&export.skills, &agentic_root, is_claude);
+    let desired_paths: Vec<&str> = desired_skills.iter().map(|(p, _)| p.as_str()).collect();
+    prune_dropped_skill_files(&workspace, &agentic_root, is_claude, &desired_paths);
 
     // Export directives
     let has_directives = match client.export_directives(&project_id).await {
@@ -2091,9 +2105,10 @@ fn print_committed_workspace_summary(report: &WorkspaceSyncReport) {
     }
 }
 
-/// A workspace file an earlier pull wrote that the fork no longer contains.
+/// A file an earlier pull wrote that the backend no longer sends (a
+/// workspace file the fork dropped, or a skill no longer exported).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DroppedWorkspaceFile {
+pub(crate) enum DroppedFile {
     /// Unchanged since pull wrote it: deleted.
     Remove(String),
     /// Edited locally: kept, never deleted.
@@ -2108,19 +2123,19 @@ pub(crate) fn plan_dropped_workspace_files(
     workspace: &Path,
     manifest: &serde_json::Value,
     exported: &[&str],
-) -> Vec<DroppedWorkspaceFile> {
-    let mut plan: Vec<DroppedWorkspaceFile> = super::sync::workspace_manifest_entries(manifest)
+) -> Vec<DroppedFile> {
+    let mut plan: Vec<DroppedFile> = super::sync::workspace_manifest_entries(manifest)
         .into_iter()
         .filter(|(path, _)| !exported.contains(&path.as_str()))
         .filter(|(path, _)| validate_agent_file_target_path(workspace, path).is_ok())
         .map(|(path, hash)| match fs::read(workspace.join(&path)) {
-            Err(_) => DroppedWorkspaceFile::Gone(path),
+            Err(_) => DroppedFile::Gone(path),
             Ok(local) => {
                 let local = String::from_utf8_lossy(&local);
                 if nexus_core::hash::hash_matches_text(&hash, &local) {
-                    DroppedWorkspaceFile::Remove(path)
+                    DroppedFile::Remove(path)
                 } else {
-                    DroppedWorkspaceFile::KeepModified(path)
+                    DroppedFile::KeepModified(path)
                 }
             }
         })
@@ -2129,7 +2144,7 @@ pub(crate) fn plan_dropped_workspace_files(
     plan
 }
 
-impl DroppedWorkspaceFile {
+impl DroppedFile {
     pub(crate) fn path(&self) -> &str {
         match self {
             Self::Remove(p) | Self::KeepModified(p) | Self::Gone(p) => p,
@@ -2142,19 +2157,19 @@ impl DroppedWorkspaceFile {
 /// modified file stays recorded, so `nexus status` keeps reporting it.
 pub(crate) fn apply_dropped_workspace_files(
     workspace: &Path,
-    plan: &[DroppedWorkspaceFile],
+    plan: &[DroppedFile],
 ) -> anyhow::Result<()> {
     let mut forget: Vec<&str> = Vec::new();
     for item in plan {
         match item {
-            DroppedWorkspaceFile::Remove(path) => {
+            DroppedFile::Remove(path) => {
                 let target = workspace.join(path);
                 fs::remove_file(&target)?;
                 remove_empty_parents(workspace, &target);
                 forget.push(path);
             }
-            DroppedWorkspaceFile::Gone(path) => forget.push(path),
-            DroppedWorkspaceFile::KeepModified(_) => {}
+            DroppedFile::Gone(path) => forget.push(path),
+            DroppedFile::KeepModified(_) => {}
         }
     }
     if !forget.is_empty() {
@@ -2163,31 +2178,32 @@ pub(crate) fn apply_dropped_workspace_files(
     Ok(())
 }
 
-/// Remove the now-empty directories above `file`, up to the workspace root.
-fn remove_empty_parents(workspace: &Path, file: &Path) {
+/// Remove the now-empty directories above `file`, up to (not including)
+/// `stop`.
+fn remove_empty_parents(stop: &Path, file: &Path) {
     let mut dir = file.parent();
     while let Some(d) = dir {
-        if d == workspace || !d.starts_with(workspace) || fs::remove_dir(d).is_err() {
+        if d == stop || !d.starts_with(stop) || fs::remove_dir(d).is_err() {
             break;
         }
         dir = d.parent();
     }
 }
 
-fn print_dropped_workspace_file(item: &DroppedWorkspaceFile) {
+fn print_dropped_workspace_file(item: &DroppedFile) {
     match item {
-        DroppedWorkspaceFile::Remove(path) => println!(
+        DroppedFile::Remove(path) => println!(
             "   {} {} (no longer in the workspace)",
             style("REMOVE").bold().red(),
             path
         ),
-        DroppedWorkspaceFile::KeepModified(path) => println!(
+        DroppedFile::KeepModified(path) => println!(
             "   {} {} (modified, no longer in the workspace; delete it or nexus push {} to add it back)",
             style("KEEP").bold().yellow(),
             path,
             path
         ),
-        DroppedWorkspaceFile::Gone(_) => {}
+        DroppedFile::Gone(_) => {}
     }
 }
 
@@ -2209,6 +2225,133 @@ fn prune_dropped_workspace_files(workspace: &Path, exported: &[&str]) {
     }
 }
 
+/// Workspace-relative directories of the skill projection pull manages for
+/// the selected runtime: the canonical skills, and `.claude/skills/` (Claude
+/// Code) or the OpenCode commands. The other runtime's files are left to the
+/// projection cleanup.
+pub(crate) fn skill_roots(agentic_root: &str, is_claude: bool) -> [String; 2] {
+    [
+        format!("{}/skills", agentic_root.trim_end_matches('/')),
+        if is_claude {
+            ".claude/skills".to_string()
+        } else {
+            ".opencode/commands".to_string()
+        },
+    ]
+}
+
+/// Every skill file pull renders for `skills` and the selected runtime.
+pub(crate) fn desired_skill_files(
+    skills: &[nexus_core::api::ExportedSkill],
+    agentic_root: &str,
+    is_claude: bool,
+) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    for skill in skills {
+        files.extend(render_skill_files(skill, agentic_root));
+        if is_claude {
+            files.extend(claude_render::render_claude_skill_files(skill));
+        } else {
+            files.extend(render_command_file(skill, agentic_root));
+        }
+    }
+    files
+}
+
+/// Plan what happens to skill files recorded in the pull manifest (written
+/// by an earlier pull) below [`skill_roots`] that are not in `desired`.
+/// Files pull never wrote are not considered.
+pub(crate) fn plan_dropped_skill_files(
+    workspace: &Path,
+    agentic_root: &str,
+    is_claude: bool,
+    desired: &[&str],
+) -> Vec<DroppedFile> {
+    let roots = skill_roots(agentic_root, is_claude);
+    load_pull_manifest(workspace, agentic_root)
+        .into_iter()
+        .filter(|(path, _)| roots.iter().any(|r| path.starts_with(&format!("{r}/"))))
+        .filter(|(path, _)| !desired.contains(&path.as_str()))
+        .filter(|(path, _)| validate_agent_file_target_path(workspace, path).is_ok())
+        .map(|(path, hash)| match fs::read(workspace.join(&path)) {
+            Err(_) => DroppedFile::Gone(path),
+            Ok(local) if nexus_core::hash::sha256_hex_bytes(&local) == hash => {
+                DroppedFile::Remove(path)
+            }
+            Ok(_) => DroppedFile::KeepModified(path),
+        })
+        .collect()
+}
+
+/// Apply [`plan_dropped_skill_files`]: delete unchanged files and the
+/// directories that become empty (up to the skill root), drop their
+/// records. A locally modified file stays recorded, so `nexus status`
+/// keeps reporting it.
+pub(crate) fn apply_dropped_skill_files(
+    workspace: &Path,
+    agentic_root: &str,
+    is_claude: bool,
+    plan: &[DroppedFile],
+) -> anyhow::Result<()> {
+    let roots = skill_roots(agentic_root, is_claude);
+    let mut forget: Vec<&str> = Vec::new();
+    for item in plan {
+        match item {
+            DroppedFile::Remove(path) => {
+                let target = workspace.join(path);
+                fs::remove_file(&target)?;
+                if let Some(root) = roots.iter().find(|r| path.starts_with(&format!("{r}/"))) {
+                    remove_empty_parents(&workspace.join(root), &target);
+                }
+                forget.push(path);
+            }
+            DroppedFile::Gone(path) => forget.push(path),
+            DroppedFile::KeepModified(_) => {}
+        }
+    }
+    if !forget.is_empty() {
+        remove_generated_records(workspace, agentic_root, |p| forget.contains(&p))?;
+    }
+    Ok(())
+}
+
+fn print_dropped_skill_file(item: &DroppedFile) {
+    match item {
+        DroppedFile::Remove(path) => println!(
+            "   {} {} (skill no longer exported)",
+            style("REMOVE").bold().red(),
+            path
+        ),
+        DroppedFile::KeepModified(path) => println!(
+            "   {} {} (modified, skill no longer exported; delete it when no longer needed)",
+            style("KEEP").bold().yellow(),
+            path
+        ),
+        DroppedFile::Gone(_) => {}
+    }
+}
+
+/// Remove (or report) the skill files the export no longer contains.
+fn prune_dropped_skill_files(
+    workspace: &Path,
+    agentic_root: &str,
+    is_claude: bool,
+    desired: &[&str],
+) {
+    let plan = plan_dropped_skill_files(workspace, agentic_root, is_claude, desired);
+    if plan.is_empty() {
+        return;
+    }
+    match apply_dropped_skill_files(workspace, agentic_root, is_claude, &plan) {
+        Ok(()) => plan.iter().for_each(print_dropped_skill_file),
+        Err(e) => println!(
+            "   {} Could not remove skills that are no longer exported: {}",
+            style("!").yellow(),
+            e
+        ),
+    }
+}
+
 /// `nexus pull --dry-run`: what a pull would do with the devbox workspace
 /// files (as without --force). Nothing is written.
 async fn dry_run_workspace(
@@ -2217,7 +2360,7 @@ async fn dry_run_workspace(
     workspace: &Path,
 ) -> anyhow::Result<()> {
     println!(
-        "   {} Dry run: devbox workspace files only; nothing is written.",
+        "   {} Dry run: devbox workspace files and skill removals; nothing is written.",
         style("·").dim()
     );
     let export = match client.export_workspace_mcp(project_id).await {
@@ -2276,7 +2419,7 @@ async fn dry_run_workspace(
 
     let exported: Vec<&str> = files.iter().map(|(p, _)| *p).collect();
     for item in plan_dropped_workspace_files(workspace, &manifest, &exported) {
-        if !matches!(item, DroppedWorkspaceFile::Gone(_)) {
+        if !matches!(item, DroppedFile::Gone(_)) {
             print_dropped_workspace_file(&item);
             changes += 1;
         }
@@ -3184,7 +3327,9 @@ command_slug: {command_slug}
 {body}
 "#,
         skill_id = skill.skill_id,
-        name = skill.name,
+        // The directory id: Claude Code expects lowercase-hyphen names; the
+        // description carries the meaning.
+        name = skill.skill_id,
         description = claude_render::yaml_escape(skill.description.as_deref().unwrap_or("")),
         version = skill.version,
         command_slug = skill.command_slug.as_deref().unwrap_or("none"),
@@ -7025,7 +7170,7 @@ mod tests {
         let plan = plan_dropped_workspace_files(&dir, &manifest, &exported);
         assert_eq!(
             plan,
-            vec![DroppedWorkspaceFile::Remove(
+            vec![DroppedFile::Remove(
                 "scripts/devbox/init/os_darwin/override.sh".into()
             )]
         );
@@ -7050,7 +7195,7 @@ mod tests {
         let plan = plan_dropped_workspace_files(&dir, &manifest, &["devbox.json"]);
         assert_eq!(
             plan,
-            vec![DroppedWorkspaceFile::KeepModified(
+            vec![DroppedFile::KeepModified(
                 "scripts/devbox/dbx_tmux_2w.sh".into()
             )]
         );
@@ -7100,7 +7245,7 @@ mod tests {
         let manifest = super::super::sync::load_manifest_pub(&dir);
         assert_eq!(
             plan_dropped_workspace_files(&dir, &manifest, &["devbox.json"]),
-            vec![DroppedWorkspaceFile::Remove(rel.into())]
+            vec![DroppedFile::Remove(rel.into())]
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -7115,7 +7260,7 @@ mod tests {
         let plan = plan_dropped_workspace_files(&dir, &manifest, &[]);
         assert_eq!(
             plan,
-            vec![DroppedWorkspaceFile::Gone("scripts/devbox/old.sh".into())]
+            vec![DroppedFile::Gone("scripts/devbox/old.sh".into())]
         );
         apply_dropped_workspace_files(&dir, &plan).unwrap();
         let manifest = super::super::sync::load_manifest_pub(&dir);
@@ -7186,5 +7331,154 @@ mod tests {
         assert_eq!(dotenv_value("say \"hi\""), "\"say \\\"hi\\\"\"");
         assert_eq!(dotenv_value("$HOME"), "\"\\$HOME\"");
         assert_eq!(dotenv_value("a\\b"), "\"a\\\\b\"");
+    }
+
+    fn export_skill(
+        skill_id: &str,
+        name: &str,
+        invocation: Option<&str>,
+    ) -> nexus_core::api::ExportedSkill {
+        nexus_core::api::ExportedSkill {
+            skill_id: skill_id.into(),
+            name: name.into(),
+            description: Some("Nexus: does things".into()),
+            version: 1,
+            body: Some("# Body".into()),
+            command_slug: Some(skill_id.into()),
+            pinned: false,
+            resources: vec![],
+            invocation: invocation.map(Into::into),
+        }
+    }
+
+    /// Write the Claude Code skill files of `skills` as pull does and record
+    /// them in the pull manifest.
+    fn pulled_claude_skills(dir: &Path, skills: &[nexus_core::api::ExportedSkill]) {
+        let files = desired_skill_files(skills, ".nexus", true);
+        for (rel, content) in &files {
+            let target = dir.join(rel);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(&target, content).unwrap();
+        }
+        record_generated_many(dir, ".nexus", &files).unwrap();
+    }
+
+    #[test]
+    fn test_render_skill_name_is_canonical_dir_id() {
+        let skill = export_skill(
+            "nx-coderabbit-triage",
+            "CodeRabbit Review Triage",
+            Some("user"),
+        );
+        let canonical = &render_skill_files(&skill, ".nexus")[0];
+        assert_eq!(canonical.0, ".nexus/skills/nx-coderabbit-triage/SKILL.md");
+        assert!(canonical.1.contains("\nname: nx-coderabbit-triage\n"));
+        let claude = &claude_render::render_claude_skill_files(&skill)[0];
+        assert_eq!(claude.0, ".claude/skills/nexus-coderabbit-triage/SKILL.md");
+        assert!(claude.1.contains("\nname: nexus-coderabbit-triage\n"));
+        assert!(claude.1.contains("disable-model-invocation: true\n"));
+        assert!(!claude.1.contains("CodeRabbit Review Triage"));
+    }
+
+    #[test]
+    fn test_dropped_skill_unchanged_is_removed() {
+        let dir = temp_pull_dir("skill-dropped-unchanged");
+        let old = export_skill("nx-cr-review", "CR", None);
+        let new = export_skill("nx-coderabbit-triage", "CR", Some("user"));
+        pulled_claude_skills(&dir, &[old, new.clone()]);
+
+        let desired = desired_skill_files(&[new], ".nexus", true);
+        let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
+        let plan = plan_dropped_skill_files(&dir, ".nexus", true, &desired);
+        let mut paths: Vec<&str> = plan.iter().map(DroppedFile::path).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                ".claude/skills/nexus-cr-review/SKILL.md",
+                ".nexus/skills/nx-cr-review/SKILL.md"
+            ]
+        );
+        assert!(plan.iter().all(|i| matches!(i, DroppedFile::Remove(_))));
+        apply_dropped_skill_files(&dir, ".nexus", true, &plan).unwrap();
+        assert!(!dir.join(".claude/skills/nexus-cr-review").exists());
+        assert!(!dir.join(".nexus/skills/nx-cr-review").exists());
+        // The skill roots and the kept skill stay.
+        assert!(dir
+            .join(".claude/skills/nexus-coderabbit-triage/SKILL.md")
+            .exists());
+        assert!(load_pull_manifest(&dir, ".nexus")
+            .keys()
+            .all(|k| !k.contains("cr-review")));
+        assert!(plan_dropped_skill_files(&dir, ".nexus", true, &desired).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_skill_removal_keeps_empty_skill_root() {
+        let dir = temp_pull_dir("skill-dropped-root");
+        pulled_claude_skills(&dir, &[export_skill("nx-only", "Only", None)]);
+        let plan = plan_dropped_skill_files(&dir, ".nexus", true, &[]);
+        apply_dropped_skill_files(&dir, ".nexus", true, &plan).unwrap();
+        assert!(!dir.join(".claude/skills/nexus-only").exists());
+        assert!(dir.join(".claude/skills").is_dir());
+        assert!(dir.join(".nexus/skills").is_dir());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_skill_modified_is_kept() {
+        let dir = temp_pull_dir("skill-dropped-modified");
+        pulled_claude_skills(&dir, &[export_skill("nx-cr-review", "CR", None)]);
+        let edited = dir.join(".claude/skills/nexus-cr-review/SKILL.md");
+        fs::write(&edited, "my notes\n").unwrap();
+
+        let plan = plan_dropped_skill_files(&dir, ".nexus", true, &[]);
+        assert!(plan.contains(&DroppedFile::KeepModified(
+            ".claude/skills/nexus-cr-review/SKILL.md".into()
+        )));
+        apply_dropped_skill_files(&dir, ".nexus", true, &plan).unwrap();
+        assert_eq!(fs::read_to_string(&edited).unwrap(), "my notes\n");
+        assert!(load_pull_manifest(&dir, ".nexus")
+            .contains_key(".claude/skills/nexus-cr-review/SKILL.md"));
+        // The unchanged canonical copy is removed.
+        assert!(!dir.join(".nexus/skills/nx-cr-review").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_skill_ignores_files_pull_never_wrote_and_other_runtime() {
+        let dir = temp_pull_dir("skill-dropped-unmanaged");
+        fs::create_dir_all(dir.join(".claude/skills/mine")).unwrap();
+        fs::write(dir.join(".claude/skills/mine/SKILL.md"), "mine\n").unwrap();
+        // An OpenCode command recorded earlier: left to the projection
+        // cleanup in a Claude Code project.
+        let cmd = render_command_file(&export_skill("nx-old", "Old", None), ".nexus").unwrap();
+        fs::create_dir_all(dir.join(".opencode/commands")).unwrap();
+        fs::write(dir.join(&cmd.0), &cmd.1).unwrap();
+        record_generated_many(&dir, ".nexus", std::slice::from_ref(&cmd)).unwrap();
+
+        assert!(plan_dropped_skill_files(&dir, ".nexus", true, &[]).is_empty());
+        // In an OpenCode project the stale command is pruned.
+        assert_eq!(
+            plan_dropped_skill_files(&dir, ".nexus", false, &[]),
+            vec![DroppedFile::Remove(cmd.0.clone())]
+        );
+        assert!(dir.join(".claude/skills/mine/SKILL.md").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_skill_already_gone_forgets_record() {
+        let dir = temp_pull_dir("skill-dropped-gone");
+        pulled_claude_skills(&dir, &[export_skill("nx-gone", "Gone", None)]);
+        fs::remove_dir_all(dir.join(".claude/skills/nexus-gone")).unwrap();
+        let plan = plan_dropped_skill_files(&dir, ".nexus", true, &[]);
+        assert!(plan.contains(&DroppedFile::Gone(
+            ".claude/skills/nexus-gone/SKILL.md".into()
+        )));
+        apply_dropped_skill_files(&dir, ".nexus", true, &plan).unwrap();
+        assert!(load_pull_manifest(&dir, ".nexus").is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

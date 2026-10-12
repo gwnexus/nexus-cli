@@ -109,6 +109,9 @@ impl Entry {
             (FileClass::Content, State::Orphaned) => {
                 "no longer in the workspace; nexus pull removes it".into()
             }
+            (FileClass::Projection, State::Dropped) => {
+                "no longer exported, edited locally; delete it when no longer needed".into()
+            }
             (_, State::Dropped) => {
                 format!("no longer in the workspace, edited locally; delete it, or nexus push {p} to add it back")
             }
@@ -523,6 +526,27 @@ pub async fn load(
             if !is_claude {
                 generated.extend(super::pull::render_command_file(skill, &agentic_root));
             }
+        }
+        // Skill files an earlier pull wrote that are no longer exported:
+        // the same plan nexus pull applies.
+        let desired = super::pull::desired_skill_files(&skills.skills, &agentic_root, is_claude);
+        let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
+        for item in
+            super::pull::plan_dropped_skill_files(workspace, &agentic_root, is_claude, &desired)
+        {
+            let (path, state) = match item {
+                super::pull::DroppedFile::Remove(p) => (p, State::Orphaned),
+                super::pull::DroppedFile::KeepModified(p) => (p, State::Dropped),
+                super::pull::DroppedFile::Gone(_) => continue,
+            };
+            entries.push(Entry {
+                local: std::fs::read_to_string(workspace.join(&path)).ok(),
+                path,
+                class: FileClass::Projection,
+                state,
+                kind: Kind::Generated,
+                desired: None,
+            });
         }
     }
     if let Ok(dir_export) = client.export_directives(project_id).await {

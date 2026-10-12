@@ -117,7 +117,9 @@ command_slug: {command_slug}
 {body}
 "#,
         skill_id = canonical_id,
-        name = skill.name,
+        // The directory id: Claude Code expects lowercase-hyphen names; the
+        // description carries the meaning.
+        name = canonical_id,
         description = yaml_escape(skill.description.as_deref().unwrap_or("")),
         version = skill.version,
         command_slug = skill.command_slug.as_deref().unwrap_or("none"),
