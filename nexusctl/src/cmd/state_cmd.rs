@@ -314,7 +314,7 @@ pub async fn push(
     adopt_local: bool,
 ) -> anyhow::Result<()> {
     if adopt_local {
-        return super::push::run(api_url, cli_project_id, fork_name, dry_run, true).await;
+        return super::push::run(api_url, cli_project_id, fork_name, dry_run, true, &[]).await;
     }
     let (workspace, project_id, client) = connect(api_url, cli_project_id)?;
     let state = workspace_state::load(&client, &project_id, &workspace).await?;
@@ -341,9 +341,20 @@ pub async fn push(
             _ => None,
         })
         .collect();
-    let workspace_changes = selected
+    // Workspace files the fork no longer contains are only pushed back
+    // when named explicitly.
+    let include_dropped: Vec<String> = selected
         .iter()
-        .any(|e| e.kind == Kind::Workspace && matches!(e.state, State::Modified | State::New));
+        .filter(|_| path.is_some())
+        .filter(|e| {
+            e.kind == Kind::Workspace && matches!(e.state, State::Dropped | State::Orphaned)
+        })
+        .map(|e| e.path.clone())
+        .collect();
+    let workspace_changes = !include_dropped.is_empty()
+        || selected
+            .iter()
+            .any(|e| e.kind == Kind::Workspace && matches!(e.state, State::Modified | State::New));
     for e in selected.iter().filter(|e| e.state == State::Conflict) {
         println!(
             "   {} {} changed locally and in the backend; run nexus diff {}, then edit or nexus reset it",
@@ -371,7 +382,15 @@ pub async fn push(
         }
     }
     if workspace_changes {
-        super::push::run(api_url, Some(&project_id), fork_name, dry_run, false).await?;
+        super::push::run(
+            api_url,
+            Some(&project_id),
+            fork_name,
+            dry_run,
+            false,
+            &include_dropped,
+        )
+        .await?;
     }
     Ok(())
 }

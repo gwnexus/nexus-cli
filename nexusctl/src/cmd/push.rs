@@ -261,12 +261,16 @@ fn print_push_result(result: &nexus_core::api::WorkspacePushResponse) {
 }
 
 /// `nexus push` — push local workspace changes to the platform.
+///
+/// Tracked files the current fork no longer contains are skipped unless
+/// listed in `include_dropped` (named explicitly, e.g. `nexus push <path>`).
 pub async fn run(
     api_url: &str,
     cli_project_id: Option<&str>,
     fork_name: Option<&str>,
     dry_run: bool,
     adopt_local: bool,
+    include_dropped: &[String],
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -323,10 +327,29 @@ pub async fn run(
         return Ok(());
     }
 
+    // Files of the current fork; `None` when there is none or it cannot be
+    // read, then nothing is treated as dropped.
+    let exported = client
+        .export_workspace_mcp(&project_id)
+        .await
+        .ok()
+        .map(|e| exported_paths(&e));
+
     // Filter to only manifest-tracked files (origin guard)
     let mut local_hashes = HashMap::new();
-    for (key, hash) in all_hashes {
+    let mut sorted: Vec<_> = all_hashes.into_iter().collect();
+    sorted.sort();
+    for (key, hash) in sorted {
         if is_manifest_tracked(&key, &manifest) {
+            if is_dropped(&key, exported.as_deref(), include_dropped) {
+                println!(
+                    "     {} {} (no longer in the workspace fork, skipped; nexus push {} adds it back)",
+                    style("D").dim(),
+                    key,
+                    key
+                );
+                continue;
+            }
             let hash = baseline_hash(&workspace, &key, hash, &manifest);
             local_hashes.insert(key, hash);
         } else {
@@ -414,11 +437,44 @@ pub async fn run(
     Ok(())
 }
 
+/// Workspace-relative paths of the files in a fork export.
+fn exported_paths(export: &nexus_core::api::WorkspaceForkExportResponse) -> Vec<String> {
+    std::iter::once("devbox.json".to_string())
+        .chain(export.scripts.iter().map(|s| s.path.clone()))
+        .collect()
+}
+
+/// A tracked file the fork no longer contains and that was not named
+/// explicitly: a new fork must not bring it back by accident.
+fn is_dropped(key: &str, exported: Option<&[String]>, include_dropped: &[String]) -> bool {
+    exported.is_some_and(|ex| !ex.iter().any(|p| p == key))
+        && !include_dropped.iter().any(|p| p == key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_is_dropped() {
+        let exported = vec![
+            "devbox.json".to_string(),
+            "scripts/devbox/dbx_init.sh".to_string(),
+        ];
+        let old = "scripts/devbox/dbx_tmux_2w.sh";
+        assert!(is_dropped(old, Some(&exported), &[]));
+        assert!(!is_dropped(
+            "scripts/devbox/dbx_init.sh",
+            Some(&exported),
+            &[]
+        ));
+        // Named explicitly: pushed back into the fork.
+        assert!(!is_dropped(old, Some(&exported), &[old.to_string()]));
+        // No fork export available: nothing is treated as dropped.
+        assert!(!is_dropped(old, None, &[]));
+    }
 
     #[test]
     fn test_collect_workspace_hashes_empty_dir() {

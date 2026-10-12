@@ -2182,8 +2182,9 @@ fn print_dropped_workspace_file(item: &DroppedWorkspaceFile) {
             path
         ),
         DroppedWorkspaceFile::KeepModified(path) => println!(
-            "   {} {} (modified, no longer in the workspace; delete it or nexus push to add it back)",
+            "   {} {} (modified, no longer in the workspace; delete it or nexus push {} to add it back)",
             style("KEEP").bold().yellow(),
+            path,
             path
         ),
         DroppedWorkspaceFile::Gone(_) => {}
