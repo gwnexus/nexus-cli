@@ -36,6 +36,7 @@ cargo clippy --workspace -- -D warnings
 - Include tests for new functionality
 - Ensure `cargo test --workspace`, `cargo fmt --check`, and `cargo clippy` pass
 - Write clear commit messages following [Conventional Commits](https://www.conventionalcommits.org/)
+- Describe changes on their own terms: no references to internal decision records or work items in code, docs, changelog or commit messages (`scripts/ci/internal_refs_check.sh` checks tracked files in CI)
 
 ## Reporting Bugs
 

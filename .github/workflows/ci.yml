@@ -96,3 +96,12 @@ jobs:
 
       - name: Self-test
         run: scripts/ci/gitleaks_selftest.sh
+
+  internal-refs:
+    name: Internal references
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-test and check
+        run: scripts/ci/internal_refs_check.sh --selftest
