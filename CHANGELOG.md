@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.28.13] - 2026-10-12
 
 Interactive `nexus env set`, a filterable `nexus link` picker, `nexus status --json`, and `nexus push` no longer revives dropped workspace files.
 
@@ -16,6 +16,8 @@ Interactive `nexus env set`, a filterable `nexus link` picker, `nexus status --j
 
 ### Fixed
 - **`nexus push` brought dropped workspace files back.** A locally modified workspace file that the current fork no longer contains (shown as `DROPPED` by `nexus status`) was sent back into the new fork. It is now listed as skipped; `nexus push <path>` pushes it back on purpose. If the fork export cannot be read, nothing is skipped (previous behaviour).
+
+4 net new tests; 788/788 passing, clippy/fmt clean.
 
 ## [0.28.12] - 2026-10-12
 
