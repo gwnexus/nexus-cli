@@ -51,11 +51,11 @@ nexus pull               # Sync skills and agent files from the platform
 nexus init [path]                       Initialize a Nexus project workspace
 nexus login                             Authenticate with the Nexus platform
 nexus logout                            Remove stored credentials
-nexus status                            Auth, project, devbox shell, environment, and every non-clean file with its next action
+nexus status [--json]                   Auth, project, devbox shell, environment, and every non-clean file with its next action
 nexus status --agents [--watch] [--json] Local agent fleet view (main agent, subagents, background, state, tool, runtime)
 nexus doctor claude [--fix]             Check the host tools of the Claude Code workspace, offer install commands
 nexus diff [path]                       Unified diffs for non-clean files (content and projection)
-nexus link [--project-id <id>]          Bind a project to the current workspace (arrow-key picker)
+nexus link [--project-id <id>]          Bind a project to the current workspace (picker: type to filter, arrow keys)
 nexus unlink                            Remove project binding from the workspace
 nexus project link [--runtime-id <n>]   Issue a project inference token (nxs_proj_*) for gateway auth
 nexus project rotate [--finalize]       Rotate the project inference token (zero-downtime overlap)
@@ -72,6 +72,7 @@ nexus env [get [key]]                   Show the project's backend settings
 nexus env keys                          List settable keys, types and allowed values
 nexus env set <key> <value> [--pull]    Change a backend setting (admin), optionally pull afterwards
 nexus env set <key>=<value> [--pull]    Same, as one argument
+nexus env set                           Pick key and value interactively (schema-driven)
 nexus run [-- <args>]                   Start the agent environment the backend selects
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
@@ -100,7 +101,7 @@ nexus upgrade                           Upgrade CLI to latest release version
 | `nexus deinit`  | `--force`        | Skip confirmation prompt                       |
 | `nexus deinit`  | `--yes`          | Auto-confirm removal                           |
 | `nexus link`    | `--project-id`   | Specify project UUID directly (skip picker)    |
-| `nexus link`    | (none)           | Pick with ↑/↓ and Enter, Esc cancels; numbered list without a terminal |
+| `nexus link`    | (none)           | Type to filter, pick with ↑/↓ and Enter, Esc cancels; numbered list without a terminal |
 | `nexus project link` | `--runtime-id` | Logical runtime name for the token (default: hostname) |
 | `nexus project link` | `--expires`  | Token lifetime: 30d, 12h, 2w, or an ISO 8601 timestamp |
 | `nexus project link` | `--restrict-profiles` | Restrict the token to profile slugs (comma-separated) |
@@ -168,6 +169,7 @@ nexus push .nexus/AGENTS.md         # push one content file
 nexus push                          # push all modified content
 nexus reset .claude/rules/10.md     # restore one file (content: backend, projection: desired)
 nexus env set claude.hud minimal --pull   # change the setting a projection comes from
+nexus env set                             # or pick the setting and value interactively
 ```
 
 `nexus push` refuses projection files and names the setting to change
@@ -182,7 +184,9 @@ nexus push --dry-run                # show what would be pushed
 no longer contains, if they are unchanged locally (`REMOVE`); locally
 modified ones are kept and reported (`KEEP`), and files Nexus never wrote are
 not touched. `nexus status` lists them as `ORPHANED` or `DROPPED`, and
-`nexus pull --dry-run` previews all workspace changes.
+`nexus pull --dry-run` previews all workspace changes. `nexus push` skips
+files the current fork no longer contains, so a new fork does not bring them
+back by accident; `nexus push <path>` pushes one back on purpose.
 
 The project's plugin variables (e.g. `HEADROOM_*`) are written to
 `.nexus/env` (used by `nexus run`) and, as a dotenv file, to

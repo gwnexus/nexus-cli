@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Interactive `nexus env set`, a filterable `nexus link` picker, `nexus status --json`, and `nexus push` no longer revives dropped workspace files.
+
+### Added
+- **`nexus env set` without arguments** picks the setting interactively from the backend schema (type to filter, current value shown next to each key), then the value: enum values or `true`/`false` with the current one preselected, plus `unset` for nullable keys, or a text input for free-text settings. Esc cancels without changes; `--dry-run` and `--pull` apply as usual. Read-only users get a clear error, and without a terminal the command still requires `<KEY> <VALUE>` or `<KEY>=<VALUE>`.
+- **`nexus link` filters as you type** (fuzzy match); arrow keys, Enter and Esc work as before.
+- **`nexus status --json`** works without `--agents` as a short form of `nexus --output json status`; with `--agents` it still prints the agent list.
+
+### Fixed
+- **`nexus push` brought dropped workspace files back.** A locally modified workspace file that the current fork no longer contains (shown as `DROPPED` by `nexus status`) was sent back into the new fork. It is now listed as skipped; `nexus push <path>` pushes it back on purpose. If the fork export cannot be read, nothing is skipped (previous behaviour).
+
 ## [0.28.12] - 2026-10-12
 
 Devbox shell state in `nexus status`, `key=value` for `nexus env set`, and an arrow-key project picker for `nexus link`.
