@@ -64,8 +64,8 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
             .unwrap_or(0);
 
         let selection = if console::Term::stderr().is_term() && console::user_attended() {
-            match dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                .with_prompt("Select project (↑/↓, Enter; Esc to cancel)")
+            match dialoguer::FuzzySelect::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt("Select project (type to filter, ↑/↓, Enter; Esc to cancel)")
                 .items(&items)
                 .default(current)
                 .max_length(15)
