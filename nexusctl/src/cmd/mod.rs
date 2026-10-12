@@ -153,16 +153,17 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             );
             exit_with(doctor::claude(&api_url, fix, cli.yes, json).await?);
         }
-        Command::Status { .. } => {
+        Command::Status { json, .. } => {
             let workspace = std::env::current_dir()?;
             let effective =
                 nexus_core::config::Config::load_effective_with_provenance(Some(&workspace))?;
             let api_url = cli.resolve_api_url(&effective.config);
             let api_url_source = cli.resolve_api_url_source(&effective);
-            let json = matches!(
-                cli.resolve_output(&effective.config),
-                nexus_core::OutputPreference::Json
-            );
+            let json = json
+                || matches!(
+                    cli.resolve_output(&effective.config),
+                    nexus_core::OutputPreference::Json
+                );
             exit_with(state_cmd::status(&api_url, api_url_source, json).await?);
         }
         Command::Diff { ref path } => {

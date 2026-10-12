@@ -142,9 +142,9 @@ pub enum Command {
         #[arg(long, requires = "agents")]
         watch: bool,
 
-        /// Print the folded agent list as JSON (with --agents; same as
-        /// --output json).
-        #[arg(long, requires = "agents")]
+        /// Print JSON (same as --output json): the workspace status, or
+        /// with --agents the folded agent list.
+        #[arg(long)]
         json: bool,
 
         /// Include sessions that finished long ago (with --agents).
@@ -1256,6 +1256,16 @@ mod tests {
             Command::Status {
                 agents: false,
                 watch: false,
+                ..
+            }
+        ));
+        // --json works without --agents (short for --output json).
+        let cli = Cli::try_parse_from(["nexus", "status", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Status {
+                agents: false,
+                json: true,
                 ..
             }
         ));
