@@ -120,6 +120,7 @@ pub async fn status(api_url: &str, api_url_source: &str, json: bool) -> anyhow::
                 "executioner": state.export.agent_owner,
                 "run_target": state.export.run_target,
                 "environment": state.environment_label(),
+                "devbox_shell": super::auth::DevboxShell::detect(&workspace).as_str(),
                 "claude_code": state.is_claude.then(|| super::claude_cmd::runtime_details(
                     &workspace,
                     &super::claude_render::read_claude_settings(&workspace),

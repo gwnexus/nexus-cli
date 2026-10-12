@@ -124,12 +124,13 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
     // --- Workspace ---
     let cwd = std::env::current_dir()?;
     let has_nexus_dir = cwd.join(".nexus").exists();
+    let devbox = DevboxShell::detect(&cwd).label();
     if has_nexus_dir {
-        status_line("Workspace:", cwd.display());
+        status_line("Workspace:", format_args!("{}{devbox}", cwd.display()));
     } else {
         status_line(
             "Workspace:",
-            format_args!("{} (no .nexus/ found)", style(cwd.display()).dim()),
+            format_args!("{} (no .nexus/ found){devbox}", style(cwd.display()).dim()),
         );
     }
     println!();
@@ -343,4 +344,125 @@ fn read_token_from_stdin() -> anyhow::Result<String> {
     }
 
     Ok(token)
+}
+
+/// Whether `nexus status` runs inside a devbox shell, from the variables
+/// devbox exports into it (`DEVBOX_SHELL_ENABLED`, `DEVBOX_PROJECT_ROOT`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DevboxShell {
+    /// Inside the devbox shell of this workspace.
+    Active,
+    /// Inside the devbox shell of another project (its root).
+    OtherProject(String),
+    /// The workspace has a `devbox.json`, but no devbox shell is active.
+    Inactive,
+    /// No `devbox.json` and no devbox shell: nothing to report.
+    NotUsed,
+}
+
+impl DevboxShell {
+    pub(crate) fn detect(workspace: &std::path::Path) -> Self {
+        Self::classify(
+            workspace,
+            workspace.join("devbox.json").exists(),
+            std::env::var("DEVBOX_SHELL_ENABLED").ok().as_deref(),
+            std::env::var("DEVBOX_PROJECT_ROOT").ok().as_deref(),
+        )
+    }
+
+    fn classify(
+        workspace: &std::path::Path,
+        has_devbox_json: bool,
+        enabled: Option<&str>,
+        project_root: Option<&str>,
+    ) -> Self {
+        if enabled != Some("1") {
+            return if has_devbox_json {
+                Self::Inactive
+            } else {
+                Self::NotUsed
+            };
+        }
+        let canonical = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        match project_root.filter(|r| !r.is_empty()) {
+            Some(root)
+                if !canonical(workspace).starts_with(canonical(std::path::Path::new(root))) =>
+            {
+                Self::OtherProject(root.to_string())
+            }
+            _ => Self::Active,
+        }
+    }
+
+    /// Machine-readable state for `nexus status --json`.
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::OtherProject(_) => "other_project",
+            Self::Inactive => "inactive",
+            Self::NotUsed => "none",
+        }
+    }
+
+    /// Suffix for the `Workspace:` status line (empty when not used).
+    fn label(&self) -> String {
+        match self {
+            Self::Active => format!("  {}", style("[devbox shell: active]").green()),
+            Self::OtherProject(root) => format!(
+                "  {}",
+                style(format!("[devbox shell: active for {root}]")).yellow()
+            ),
+            Self::Inactive => format!(
+                "  {}",
+                style("[devbox shell: inactive, start with devbox shell]").yellow()
+            ),
+            Self::NotUsed => String::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_devbox_shell_classify() {
+        let ws = Path::new("/nonexistent/project");
+        assert_eq!(
+            DevboxShell::classify(ws, true, Some("1"), Some("/nonexistent/project")),
+            DevboxShell::Active
+        );
+        // A subdirectory of the devbox project is still inside its shell.
+        assert_eq!(
+            DevboxShell::classify(ws, false, Some("1"), Some("/nonexistent")),
+            DevboxShell::Active
+        );
+        // Older devbox without DEVBOX_PROJECT_ROOT: trust the shell flag.
+        assert_eq!(
+            DevboxShell::classify(ws, true, Some("1"), None),
+            DevboxShell::Active
+        );
+        assert_eq!(
+            DevboxShell::classify(ws, true, Some("1"), Some("/nonexistent/other")),
+            DevboxShell::OtherProject("/nonexistent/other".into())
+        );
+        // Prefix of the name only is not the same project.
+        assert_eq!(
+            DevboxShell::classify(ws, true, Some("1"), Some("/nonexistent/proj")),
+            DevboxShell::OtherProject("/nonexistent/proj".into())
+        );
+        assert_eq!(
+            DevboxShell::classify(ws, true, None, None),
+            DevboxShell::Inactive
+        );
+        assert_eq!(
+            DevboxShell::classify(ws, true, Some("0"), Some("/nonexistent/project")),
+            DevboxShell::Inactive
+        );
+        assert_eq!(
+            DevboxShell::classify(ws, false, None, None),
+            DevboxShell::NotUsed
+        );
+    }
 }
