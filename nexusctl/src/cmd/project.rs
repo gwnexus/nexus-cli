@@ -1,8 +1,8 @@
 //! The `nexus project link` command group.
 //!
 //! Provisions and manages project inference tokens (`nxs_proj_*`) used to
-//! authenticate CLIENT inference traffic against the Nexus Model Gateway
-//! (gateway ADR-0005). The user PAT (`nxs_pat_*`) bootstraps issuance and
+//! authenticate CLIENT inference traffic against the Nexus Model Gateway.
+//! The user PAT (`nxs_pat_*`) bootstraps issuance and
 //! remains the CLI/MCP control-plane credential.
 //!
 //! Storage model (nexus-cli ADR: project inference token storage):

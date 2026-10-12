@@ -136,7 +136,7 @@ jobs:
           mkdir -p release-assets
           find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) -exec cp {} release-assets/ \;
           # Installer script plus checksum, so `nexus upgrade` can verify the
-          # whole chain against this release (NEXUS-APP dispatch 4820e584).
+          # whole chain against this release.
           cp install.sh release-assets/
           (cd release-assets && sha256sum install.sh > install.sh.sha256)
           echo "Release assets:"

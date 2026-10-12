@@ -1,7 +1,7 @@
 //! Project inference token storage (`nxs_proj_*`).
 //!
 //! Project tokens authenticate CLIENT inference traffic against the Nexus
-//! Model Gateway (gateway ADR-0005). They are distinct from the user PAT
+//! Model Gateway. They are distinct from the user PAT
 //! (`nxs_pat_*`), which remains the CLI/MCP control-plane credential.
 //!
 //! Tokens are stored per project in `~/.config/nexus/project-tokens.toml`

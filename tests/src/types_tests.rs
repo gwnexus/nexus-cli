@@ -359,7 +359,7 @@ fn test_exported_directive_deserialize() {
 
 #[test]
 fn test_exported_skill_invocation() {
-    // NEXUS-APP dispatch 3dc4f5c2: `invocation` is optional (older servers).
+    // `invocation` is optional (older servers).
     let base = r#""skill_id":"s","name":"S","description":null,"version":1,"body":null,"command_slug":null"#;
     let parse = |extra: &str| -> nexus_core::api::ExportedSkill {
         serde_json::from_str(&format!("{{{base}{extra}}}")).unwrap()
@@ -372,7 +372,7 @@ fn test_exported_skill_invocation() {
 
 #[test]
 fn test_exported_directive_short_rule_fields() {
-    // ADR-0125 (NEXUS-APP dispatch 15497fa2): level + source, body null.
+    // Level + source, body null.
     let json = r#"{
         "id": "template:no-secrets",
         "title": "Never put secrets into output.",
@@ -1021,7 +1021,7 @@ fn test_inference_token_issue_request_with_ceiling() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// claude_workspace (NEXUS-APP ADR-0119, dispatch c4f507b5)
+// claude_workspace
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]

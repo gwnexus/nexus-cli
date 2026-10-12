@@ -811,7 +811,7 @@ pub(crate) fn strip_nexus_settings(
         }
     }
 
-    // Written by Nexus on every Claude Code pull (dispatch 84e38bd7).
+    // Written by Nexus on every Claude Code pull.
     if nexus_evidence {
         obj.remove("includeCoAuthoredBy");
     }
@@ -2011,7 +2011,7 @@ mod tests {
 
     #[test]
     fn test_strip_nexus_settings_keeps_operator_plugins() {
-        // dispatch ff608ed4: switching away from Claude Code removes only the
+        // Switching away from Claude Code removes only the
         // plugin entries Nexus wrote, with and without --force.
         let lock = ccx::CcxLock {
             schema: 1,

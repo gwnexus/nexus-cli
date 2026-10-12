@@ -1,5 +1,4 @@
-//! Install the Claude Code plugins Nexus manages for a project (NEXUS-APP
-//! dispatch ff608ed4, ADR-0117 Tier A).
+//! Install the Claude Code plugins Nexus manages for a project.
 //!
 //! `af_export.claude_settings.values.enabledPlugins` (and
 //! `extraKnownMarketplaces`) are merged into `.claude/settings.json` by

@@ -120,7 +120,7 @@ pub async fn show(api_url: &str, slug: &str, cli_project_id: Option<&str>) -> an
     Ok(())
 }
 
-/// Normalize actor markdown to YAML frontmatter format (ADR-0056).
+/// Normalize actor markdown to YAML frontmatter format.
 ///
 /// Reads a markdown file, extracts or generates frontmatter fields (slug, name,
 /// role, description, route_alias), and rewrites the file with normalized format.
@@ -239,7 +239,7 @@ pub async fn validate(
             {
                 if let Ok(client) = NexusClient::new(api_url, Some(token)) {
                     if let Ok(af_export) = client.export_agent_files(&project_id).await {
-                        // model_routes is now Option<serde_json::Value> map format (ADR-0057)
+                        // model_routes is now Option<serde_json::Value> map format
                         if let Some(ref routes_val) = af_export.model_routes {
                             let route_exists = routes_val
                                 .as_object()

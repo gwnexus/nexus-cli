@@ -104,7 +104,7 @@ fn check_npx() -> CheckResult {
 /// Check: Claude Code CLI.
 ///
 /// Only meaningful for projects whose `agent_owner` includes `claude-cli`
-/// (NEXUS-APP dispatch dfd4e655) — OpenCode-only projects must not be told to
+/// — OpenCode-only projects must not be told to
 /// install a binary they never launch, so callers skip the check entirely by
 /// passing a flavor that does not want Claude.
 fn check_claude() -> CheckResult {
@@ -253,7 +253,7 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
     let npx = check_npx();
     print_check("npx", &npx);
     // Only surfaced for claude-cli / both projects: an OpenCode-only workspace
-    // has no reason to require the Claude binary (dispatch dfd4e655).
+    // has no reason to require the Claude binary.
     let claude = project_wants_claude().then(check_claude);
     if let Some(ref c) = claude {
         print_check("claude", c);

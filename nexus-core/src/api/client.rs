@@ -381,7 +381,7 @@ impl NexusClient {
         self.post("/api/mcp/actors", &body).await
     }
 
-    // -- Sync protocol (ADR-0036) -------------------------------------------
+    // -- Sync protocol -------------------------------------------
 
     /// Check sync status by comparing local file hashes against the platform.
     ///
@@ -654,7 +654,7 @@ impl NexusClient {
         self.post("/api/mcp/agent-files", &payload).await
     }
 
-    // -- Project inference tokens (nxs_proj_*) — gateway ADR-0005 -----------
+    // -- Project inference tokens (nxs_proj_*) -------------------------------
 
     /// Issue a new project inference token via
     /// `POST /api/projects/:projectId/inference-tokens`.

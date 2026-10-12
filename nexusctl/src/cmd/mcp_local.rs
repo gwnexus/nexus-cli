@@ -3,8 +3,8 @@
 //! Exposes tools that need machine-local filesystem/session state and have
 //! no Claude Code custom-tool equivalent (Claude Code has no custom-tool
 //! registration hook; MCP is the only path to a new agent-callable tool).
-//! NEXUS-APP dispatch af407643: nexus-mcp correctly declined to own these
-//! (Dispatch d22de820) since a hosted server has no access to project-local
+//! nexus-mcp correctly declined to own these
+//! since a hosted server has no access to project-local
 //! or session-local machine state.
 //!
 //! - `nexus_headroom_intercept_retrieve`: reads the original uncompressed
@@ -229,8 +229,7 @@ fn current_project_id(workspace: &std::path::Path) -> Result<String, String> {
 }
 
 /// `nexus_cost_summary`: on-demand markdown cost/spend summary for the
-/// current session, queried live from Helicone (NEXUS-APP dispatch
-/// af407643 follow-up: there is no local file with real cost data --
+/// current session, queried live from Helicone (there is no local file with real cost data --
 /// `.nexus/cost-control-state.json` only tracks debounce bookkeeping --
 /// the actual numbers come from a direct Helicone API call, per the exact
 /// spec nexus-oc-plugins' `core/cost-control/helicone.ts` uses).

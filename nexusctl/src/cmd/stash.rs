@@ -64,8 +64,8 @@ fn detect_modified_files(workspace: &Path) -> Vec<(PathBuf, String)> {
         }
     }
 
-    // Agent files (content only; projection files are never stashed,
-    // NEXUS-APP dispatch b5f7bfb0): tracked in the sync manifest and edited
+    // Agent files (content only; projection files are never stashed):
+    // tracked in the sync manifest and edited
     // since the last pull.
     if let Some(entries) = manifest.as_object() {
         for (file_key, info) in entries {

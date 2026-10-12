@@ -1,6 +1,6 @@
 //! `nexus shadow on|ai|nexus|off|status` — hide agentic scaffold files from Git.
 //!
-//! Since ADR-0125 (NEXUS-APP dispatch 15497fa2) the shadow level is a
+//! The shadow level is a
 //! project setting on the server (`policy.shadow`: `off` | `ai` | `nexus`)
 //! and `nexus shadow` is a thin client of it: it sets the level, then
 //! applies the server's `af_export.git_exclude` list as a managed block in
@@ -371,7 +371,7 @@ pub fn ensure_git_excluded_in(start: &Path, paths: &[&str], reason: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Server-driven exclude block (ADR-0125, NEXUS-APP dispatch 15497fa2)
+// Server-driven exclude block
 // ---------------------------------------------------------------------------
 
 /// Marker comments for the block holding `af_export.git_exclude`.
@@ -816,7 +816,7 @@ fn is_file_tracked_in_history_in(path: &str, workdir: Option<&Path>) -> bool {
     let mut cmd = Command::new("git");
     // --no-pager: `git log` can invoke a pager when core.pager/GIT_PAGER
     // forces one, which blocks on a keypress read from the controlling
-    // terminal rather than erroring out (see dispatch 479a4ab5 / the
+    // terminal rather than erroring out (see the
     // identical fix in run.rs's git helpers).
     cmd.args(["--no-pager", "log", "--oneline", "-1", "--", path]);
     if let Some(dir) = workdir {

@@ -1,9 +1,8 @@
 //! Agent-file sync with the Nexus platform: the sync manifest and the
 //! single-file push used by `nexus push` (the former `nexus sync status|
-//! push|reset` commands are deprecated aliases of `nexus status|push|reset`,
-//! NEXUS-APP dispatch b5f7bfb0).
+//! push|reset` commands are deprecated aliases of `nexus status|push|reset`).
 //!
-//! Part of the sync protocol defined in ADR-0036.
+//! Part of the sync protocol.
 
 use console::style;
 use nexus_core::api::NexusClient;

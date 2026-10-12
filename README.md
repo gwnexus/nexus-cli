@@ -406,7 +406,7 @@ Precedence: flag, then `[run] workspace`, then the project default
 (`run_target.workspace`). The pre-launch check shows the choice and its
 source in a `Workspace` row; the session summary repeats it.
 
-**Personal layout (ADR-0119).** When the backend renders a workspace layout
+**Personal layout.** When the backend renders a workspace layout
 for you (`af_export.claude_workspace`, e.g. a different preset than the team
 default), `nexus pull` writes it to `.nexus/claude/workspace.local.kdl`,
 which is added to `.git/info/exclude` and never committed. `run_target.layout`
@@ -449,7 +449,7 @@ the tool starts. Press `Ctrl+C` at any time to abort.
 
 ### Directives
 
-Directives are short binding rules (NEXUS-APP ADR-0125): a platform
+Directives are short binding rules: a platform
 catalog plus project rules. `nexus pull` renders them into
 `.nexus/directives.md` as a compact list, grouped by category in the order
 the server sends them:

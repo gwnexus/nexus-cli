@@ -1,5 +1,5 @@
 //! `nexus status --agents [--watch] [--json]`: the native Agent
-//! Observability renderer (NEXUS-APP ADR-0120, dispatch c4f507b5).
+//! Observability renderer.
 //!
 //! Reads the append-only `nexus.agent-observation.v1` events the Nexus
 //! Claude Code hook writes to `<agentic_root>/claude/observer/events.jsonl`,

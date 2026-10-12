@@ -128,7 +128,7 @@ pub fn is_protected_path(target_path: &str) -> bool {
 
 /// Validate an `ExportedAgentFile.target_path` before it is ever joined
 /// onto a workspace root, rejecting anything that could escape the
-/// workspace (NEXUS-APP ADR-0117 hardening item, dispatch bb782869).
+/// workspace.
 ///
 /// The previous check only rejected `..` (parent-dir) components. That
 /// missed a much simpler escape: `Path::join` on an *absolute* path
@@ -390,8 +390,8 @@ fn dotenv_value(v: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-/// What `nexus run` will start, for the post-pull/init tip (NEXUS-APP
-/// dispatch 442f0e97): the backend's `run_target` when known, else the
+/// What `nexus run` will start, for the post-pull/init tip: the backend's `run_target` when known,
+/// else the
 /// project's runtime.
 pub(crate) fn run_start_label(
     run_target: Option<&nexus_core::api::RunTarget>,
@@ -602,8 +602,7 @@ pub async fn run(
     }
 
     // Resolve the runtime before writing anything, so only the selected
-    // runtime's projection is rendered (NEXUS-APP dispatches 4820e584,
-    // 442f0e97).
+    // runtime's projection is rendered.
     // The owner cached by the previous pull, before it is overwritten below.
     let previous_owner = config::load_agent_owner(Some(&workspace));
     // `flavor_known`: the backend reported the owner. An absent owner means
@@ -676,7 +675,7 @@ pub async fn run(
         // Skills (and, for OpenCode projects, their slash commands) are
         // rendered here and compared with disk: unchanged files are left
         // alone, files unmodified since the last pull are updated silently,
-        // and only locally edited files need confirmation (dispatch 4820e584).
+        // and only locally edited files need confirmation.
         let mut generated: Vec<(String, String)> = Vec::new();
         for skill in &export.skills {
             generated.extend(render_skill_files(skill, &agentic_root));
@@ -778,8 +777,7 @@ pub async fn run(
                     );
                 }
                 for af in agent_files {
-                    // CCX files are reconciled against the CCX lock below
-                    // (NEXUS-APP ADR-0117, dispatch 99f335e8).
+                    // CCX files are reconciled against the CCX lock below.
                     if af_export.ccx.is_some() && af.category == super::ccx::CCX_CATEGORY {
                         continue;
                     }
@@ -960,16 +958,15 @@ pub async fn run(
         }
     }
 
-    // Check for deprecated model routes used by actors (ADR-0055)
-    // Note: model_routes is now Option<serde_json::Value> (map format, ADR-0057)
+    // Check for deprecated model routes used by actors
+    // Note: model_routes is now Option<serde_json::Value> (map format)
     if let Some(Ok(ref _af_export)) = Some(&af_export_result) {
         // Deprecation checks via the new map format are handled when writing model-routes.json
     }
 
     // Cache the flavor (and the backend's run target) in .nexus/config.toml
     // so launch-time commands (`nexus run`, `nexus preflight`) can pick the
-    // right artifacts and binary offline (NEXUS-APP dispatches dfd4e655,
-    // 442f0e97).
+    // right artifacts and binary offline.
     let _ = nexus_core::config::update_agent_owner(Some(&workspace), tool_flavor.as_deref());
     if let Ok(ref af_export) = af_export_result {
         let _ =
@@ -1029,14 +1026,14 @@ pub async fn run(
     // Model routing / provider divergence warnings from the backend (e.g. an
     // agent's model uses a provider Nexus can't verify, or a route-alias
     // migration hasn't been applied). Rendered verbatim and gated on operator
-    // confirmation before opencode.json is written -- see dispatch e0ee68d5.
+    // confirmation before opencode.json is written.
     let export_warnings = af_export_result
         .as_ref()
         .ok()
         .and_then(|r| r.export_warnings.clone())
         .unwrap_or_default();
 
-    // Write model-routes.json for traceability (ADR-0057)
+    // Write model-routes.json for traceability
     if let Some(ref routes) = model_routes_export {
         let generated_dir = workspace.join(&agentic_root).join("generated");
         if let Err(e) = fs::create_dir_all(&generated_dir) {
@@ -1074,7 +1071,7 @@ pub async fn run(
         confirm_export_warnings(&export_warnings, force)?
     } else {
         // Nothing to gate, but the operator still needs to see them (e.g.
-        // `actors_not_exported`, NEXUS-APP staging 4083959c).
+        // `actors_not_exported`).
         print_export_warnings(&export_warnings);
         true
     };
@@ -1098,7 +1095,7 @@ pub async fn run(
             force,
         )?;
 
-        // Render the native Claude Code projection (Track B1, ADR-C04/C06):
+        // Render the native Claude Code projection:
         // CLAUDE.md, .claude/settings.json, .claude/skills/, .claude/agents/.
         // Additive only; skipped entirely for the opencode-only flavor.
         // .mcp.json itself was already written above by write_mcp_configs.
@@ -1161,7 +1158,7 @@ pub async fn run(
         println!("            Re-run 'nexus pull' to retry once the warning(s) are addressed.");
     }
 
-    // CCX files (NEXUS-APP ADR-0117, dispatch 99f335e8): reconciled against
+    // CCX files: reconciled against
     // the CCX lock; the lock is only rewritten once everything succeeded.
     // Claude Code only: an OpenCode project gets no .claude/rules etc.
     let mut ccx_outcomes: Vec<super::ccx::FileOutcome> = Vec::new();
@@ -1176,7 +1173,7 @@ pub async fn run(
         }
     }
 
-    // Server exclude list (ADR-0125, dispatch 15497fa2): personal files,
+    // Server exclude list: personal files,
     // plus the agentic paths when policy.shadow is ai/nexus. Managed block
     // in .git/info/exclude; tracked files are never untracked, only hinted.
     if let Ok(ref af_export) = af_export_result {
@@ -1186,8 +1183,8 @@ pub async fn run(
         }
     }
 
-    // Personal, git-excluded workspace files: the layout (ADR-0119) and
-    // the Zellij config (dispatch bb1ee3a0).
+    // Personal, git-excluded workspace files: the layout and
+    // the Zellij config.
     if let Ok(ref af_export) = af_export_result {
         sync_personal_workspace_files(
             &workspace,
@@ -1403,7 +1400,7 @@ pub async fn run(
         }
     }
 
-    // Export workspace files (devbox.json + scripts) — ADR-0034 (v2 fork API, v1 fallback)
+    // Export workspace files (devbox.json + scripts): v2 fork API, v1 fallback
     if pull_scope("workspace") {
         // Try MCP-authenticated ws_export first (PAT-compatible)
         let mut v2_ok = false;
@@ -1653,7 +1650,7 @@ pub async fn run(
         }
     }
 
-    // Managed Claude Code plugins (NEXUS-APP dispatch ff608ed4): install
+    // Managed Claude Code plugins: install
     // what `enabledPlugins` names but Claude Code does not have yet. Only
     // on --force (a plain pull stays offline-cheap); `nexus run` does the
     // same before every launch. Never fails the pull.
@@ -1672,7 +1669,7 @@ pub async fn run(
     println!("{} Pull complete.", style("OK").bold().green());
 
     // Login follow-up line for the effective gh CLI profile, if one is
-    // configured (NEXUS-APP ADR-0116, dispatch 0350aee7). Informational
+    // configured. Informational
     // only -- pull never seeds or writes an auth token; that is `nexus
     // run`'s job. Applies to all tool flavors, not just Claude Code.
     if let Ok(detail) = client.get_project(&project_id).await {
@@ -1725,8 +1722,7 @@ pub async fn run(
     Ok(())
 }
 
-/// Print the Claude Code Experience section of the pull output (NEXUS-APP
-/// ADR-0117, dispatch 99f335e8).
+/// Print the Claude Code Experience section of the pull output.
 fn print_ccx_summary(
     info: &nexus_core::api::CcxBundleInfo,
     outcomes: &[super::ccx::FileOutcome],
@@ -2443,7 +2439,7 @@ pub fn is_managed_file(path: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Importable .claude/ file detection (replaces conflict detection per ADR-0027)
+// Importable .claude/ file detection (replaces the old conflict detection)
 // ---------------------------------------------------------------------------
 
 /// Scan the workspace for existing `.claude/` files that could be imported into
@@ -2451,8 +2447,8 @@ pub fn is_managed_file(path: &Path) -> bool {
 /// modified, no confirmation is required.
 ///
 /// Replaces the old `detect_agentic_conflicts` + `warn_agentic_conflicts` flow
-/// from ADR-0024. Only files Nexus did not generate are listed (NEXUS-APP
-/// dispatch 4820e584): files carrying the `source: nexus-platform` marker or
+/// it replaced. Only files Nexus did not generate are listed: files carrying the `source:
+/// nexus-platform` marker or
 /// the `CLAUDE.md` nexus-managed block, files tracked in the sync manifest,
 /// and `.claude/settings.json` of a Claude Code project (the projection's own
 /// settings file) are skipped.
@@ -2620,7 +2616,7 @@ pub fn write_agent_file(
 ) -> anyhow::Result<()> {
     // Path traversal / absolute-path escape protection, checked first so
     // a malformed target_path is rejected before any exists()/join() call
-    // touches it (NEXUS-APP ADR-0117 hardening item, dispatch bb782869).
+    // touches it.
     validate_agent_file_target_path(workspace, &af.target_path)?;
 
     // Protected file guard: never overwrite secrets/env files
@@ -2665,8 +2661,7 @@ pub fn render_claude_md(
     rules_file: bool,
 ) -> String {
     // Claude Code always loads `.claude/rules/`; when the directives rules
-    // file is there, `directives.md` is only the readable copy (ADR-0125,
-    // dispatch 15497fa2).
+    // file is there, `directives.md` is only the readable copy.
     let directives_step = match (has_directives, rules_file) {
         (true, true) => format!(
             "\n3. Follow the project directives: Claude Code loads them from `{}` (readable copy: `{}/directives.md`)",
@@ -3080,7 +3075,7 @@ fn write_mcp_configs(
                 );
             }
 
-            // Global default model — DGX Spark local-first (ADR-0057)
+            // Global default model — DGX Spark local-first
             if let Some(ref default_model) = opencode_default_model {
                 opencode_obj.insert(
                     "model".to_string(),
@@ -3088,7 +3083,7 @@ fn write_mcp_configs(
                 );
             }
 
-            // Default agent — starts in planning mode (ADR-0058)
+            // Default agent — starts in planning mode
             if let Some(ref default_agent) = opencode_default_agent {
                 opencode_obj.insert(
                     "default_agent".to_string(),
@@ -3186,7 +3181,7 @@ fn write_mcp_configs(
                 }),
             );
 
-            // Local MCP server (NEXUS-APP dispatch af407643): tools that
+            // Local MCP server: tools that
             // need filesystem/session-local access and have no Claude Code
             // custom-tool equivalent (nexus_headroom_intercept_retrieve,
             // nexus_cost_summary). Added if missing, never overwritten if
@@ -3512,7 +3507,7 @@ fn sync_generated_files_with(
 }
 
 /// Write the personal, git-excluded workspace files from `af_export`: the
-/// layout (NEXUS-APP ADR-0119) and the Zellij config (dispatch bb1ee3a0).
+/// layout and the Zellij config.
 /// Shared by `nexus pull` and `nexus init`.
 pub(crate) fn sync_personal_workspace_files(
     workspace: &Path,
@@ -3521,7 +3516,7 @@ pub(crate) fn sync_personal_workspace_files(
     is_claude: bool,
     force: bool,
 ) {
-    // Per-caller workspace layout (NEXUS-APP ADR-0119, dispatch c4f507b5):
+    // Per-caller workspace layout:
     // personal, git-excluded, regenerated on every pull; a local edit is
     // kept unless --force.
     if is_claude {
@@ -3542,7 +3537,7 @@ pub(crate) fn sync_personal_workspace_files(
         }
     }
 
-    // Per-caller Zellij config (NEXUS-APP dispatch bb1ee3a0): written like
+    // Per-caller Zellij config: written like
     // the layout; removed again once the backend stops sending it.
     let zellij_config = af_export
         .claude_workspace
@@ -3633,7 +3628,7 @@ pub(crate) fn zellij_config_default_path(agentic_root: &str) -> String {
     )
 }
 
-/// Write `claude_workspace.zellij_config` (NEXUS-APP dispatch bb1ee3a0),
+/// Write `claude_workspace.zellij_config`,
 /// handled like the personal layout: sha256 check, git-excluded, recorded
 /// in the pull manifest, a local edit kept unless `force`.
 pub(crate) fn sync_zellij_config(
@@ -4025,8 +4020,7 @@ pub fn write_directives(
     Ok(())
 }
 
-/// Render directives as short rules (ADR-0125, NEXUS-APP dispatch
-/// 15497fa2): one `- MUST: <rule>` / `- SHOULD: <rule>` line each, grouped
+/// Render directives as short rules: one `- MUST: <rule>` / `- SHOULD: <rule>` line each, grouped
 /// by category in the order the server sends them (already render order).
 /// MUST/SHOULD comes from `level`, or from `priority` (high/urgent = MUST)
 /// on older servers. A `body` (older servers only; the rationale is no
@@ -4579,7 +4573,7 @@ mod tests {
         assert!(ctx.force);
     }
 
-    // ── generated files (skills/commands), NEXUS-APP dispatch 4820e584 ─────
+    // ── generated files (skills/commands) ──────────────────────────────────
 
     fn gen_files() -> Vec<(String, String)> {
         vec![
@@ -4876,7 +4870,7 @@ mod tests {
 
     #[test]
     fn test_write_skill_includes_description_and_command_slug() {
-        // NEXUS-APP dispatch 5ddd6355: same defect as init.rs's write_skill.
+        // Same former defect as init.rs's write_skill.
         let dir = temp_dir("write-skill");
         let skill = nexus_core::api::ExportedSkill {
             skill_id: "nx-test-skill".to_string(),
@@ -4936,7 +4930,7 @@ mod tests {
 
     #[test]
     fn test_render_skill_files_user_invoked_in_agentic_root_copy() {
-        // dispatch 3dc4f5c2: same key in `<root>/skills/<id>/SKILL.md`.
+        // Same key in `<root>/skills/<id>/SKILL.md`.
         let mut skill = nexus_core::api::ExportedSkill {
             skill_id: "nx-grill-me".into(),
             name: "Grill me".into(),
@@ -4978,7 +4972,7 @@ mod tests {
 
     #[test]
     fn test_render_directives_short_rules_in_server_order() {
-        // ADR-0125 (dispatch 15497fa2): compact MUST/SHOULD list, grouped
+        // Compact MUST/SHOULD list, grouped
         // by category in the order the server sends (not alphabetical).
         let directives = vec![
             directive(
@@ -5165,8 +5159,7 @@ mod tests {
 
     // -- write_agent_file tests --
 
-    // -- validate_agent_file_target_path (NEXUS-APP ADR-0117 hardening,
-    // dispatch bb782869) --
+    // -- validate_agent_file_target_path (path hardening) --
 
     #[test]
     fn test_validate_target_path_accepts_plain_relative_path() {
@@ -5384,7 +5377,7 @@ mod tests {
         assert_eq!(resp.agent_files[0].target_path, "AGENTS.md");
         assert_eq!(resp.agent_files[0].version, 1);
         assert_eq!(resp.count, 1);
-        // agentic_root defaults to ".nexus" when not in JSON (ADR-0027)
+        // agentic_root defaults to ".nexus" when not in JSON
         assert_eq!(resp.agentic_root, ".nexus");
     }
 
@@ -5404,8 +5397,8 @@ mod tests {
 
     // ── Agentic conflict detection tests ───────────────────────────────────
 
-    /// Legacy helper kept for test coverage only (removed from production code
-    /// by ADR-0027). Scans .claude/ for non-Nexus files.
+    /// Legacy helper kept for test coverage only (removed from production
+    /// code). Scans .claude/ for non-Nexus files.
     fn detect_agentic_conflicts(workspace: &Path) -> Vec<String> {
         let candidates = [
             ".claude/CLAUDE.md",
@@ -5508,7 +5501,7 @@ mod tests {
 
     #[test]
     fn test_render_claude_md_rules_file_makes_directives_md_a_readable_copy() {
-        // dispatch 15497fa2: Claude Code loads the rules file itself.
+        // Claude Code loads the rules file itself.
         let md = render_claude_md("MyProject", true, ".nexus", true);
         assert!(!md.contains("Load project directives from"));
         assert!(md.contains(
@@ -5568,7 +5561,7 @@ mod tests {
         )
         .unwrap();
 
-        // One runtime per call (NEXUS-APP dispatch 442f0e97): render the
+        // One runtime per call: render the
         // Claude Code projection separately for its .mcp.json.
         write_mcp_configs(
             &dir,
@@ -5598,7 +5591,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // export_warnings gate (dispatch e0ee68d5)
+    // export_warnings gate
     // -----------------------------------------------------------------------
 
     #[test]
@@ -5660,7 +5653,7 @@ mod tests {
 
     #[test]
     fn test_write_mcp_configs_includes_nexus_project_id() {
-        // Dispatch ef9b0b0e: NEXUS_PROJECT_ID must reach the nexus MCP server's
+        // NEXUS_PROJECT_ID must reach the nexus MCP server's
         // environment block so agents can bind to the correct project without
         // guessing via a project-listing tool.
         let dir = temp_pull_dir("mcp-project-id");
@@ -5695,7 +5688,7 @@ mod tests {
 
     #[test]
     fn test_write_mcp_configs_merges_opencode_instructions() {
-        // Dispatch d15aa6f5: opencode_instructions from af_export must merge
+        // opencode_instructions from af_export must merge
         // into the top-level "instructions" array so OpenCode deterministically
         // loads <agentic_root>/AGENTS.md instead of relying on its own upward
         // auto-discovery (which has no awareness of the agentic_root convention).
@@ -5920,7 +5913,7 @@ mod tests {
         // so the {env:} fallback must be used.
         assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
 
-        // One runtime per call (NEXUS-APP dispatch 442f0e97): render the
+        // One runtime per call: render the
         // Claude Code projection separately for its .mcp.json.
         write_mcp_configs(
             &dir,
@@ -5944,7 +5937,7 @@ mod tests {
         let cm = fs::read_to_string(dir.join(".mcp.json")).unwrap();
         assert!(cm.contains("\"mcpServers\""));
         assert!(cm.contains("nxs_pat_pull-test-token"));
-        // Local MCP server (dispatch af407643) must be registered alongside
+        // Local MCP server must be registered alongside
         // the bootstrap "nexus" entry.
         assert!(cm.contains("\"nexus-local-tools\""));
         assert!(cm.contains("\"mcp-local\""));
@@ -5954,7 +5947,7 @@ mod tests {
 
     #[test]
     fn test_write_mcp_configs_claude_includes_nexus_project_id() {
-        // Dispatch dc24bbae: the Claude Code path gets NEXUS_PROJECT_ID too.
+        // The Claude Code path gets NEXUS_PROJECT_ID too.
         let dir = temp_pull_dir("mcp-claude-project-id");
         write_mcp_configs(
             &dir,
@@ -6165,7 +6158,7 @@ mod tests {
         assert!(oc.contains("tools/nexus-mcp/dist/server.js"));
         assert!(!oc.contains("npx"));
 
-        // One runtime per call (NEXUS-APP dispatch 442f0e97): render the
+        // One runtime per call: render the
 
         // Claude Code projection separately for its .mcp.json.
 
@@ -7050,7 +7043,7 @@ mod tests {
 
     #[test]
     fn test_claude_workspace_parses_zellij_config() {
-        // Additive field (dispatch bb1ee3a0): older payloads parse as None.
+        // Additive field: older payloads parse as None.
         let old: nexus_core::api::ClaudeWorkspace =
             serde_json::from_str(r#"{"path":"a.kdl","body":"layout {}"}"#).unwrap();
         assert_eq!(old.zellij_config, None);

@@ -61,7 +61,7 @@ pub fn with_single_trailing_newline(content: &str) -> String {
 /// Whether two text files differ at most in their trailing newlines, or
 /// are the same JSON document. The backend stores `devbox.json` as JSON and
 /// returns it with its own key order, so a byte comparison reported every
-/// freshly pushed `devbox.json` as changed (NEXUS-APP dispatch 95d81511).
+/// freshly pushed `devbox.json` as changed.
 pub fn text_equivalent(a: &str, b: &str) -> bool {
     let (a, b) = (trim_trailing_newlines(a), trim_trailing_newlines(b));
     a == b || json_equivalent(a, b)

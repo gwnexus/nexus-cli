@@ -343,7 +343,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Sync { ref action } => {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
-            // Deprecated aliases (NEXUS-APP dispatch b5f7bfb0): file keys map
+            // Deprecated aliases: file keys map
             // to their paths via the sync manifest.
             let path_of = |file_key: &str| -> anyhow::Result<String> {
                 let manifest = sync::load_manifest_pub(&std::env::current_dir()?);
@@ -544,8 +544,7 @@ fn exit_with(code: i32) {
     }
 }
 
-/// Deprecation notice for the one-release aliases (NEXUS-APP dispatch
-/// b5f7bfb0).
+/// Deprecation notice for the one-release aliases.
 fn deprecated(old: &str, new: &str) {
     eprintln!(
         "{} `{old}` is deprecated and will be removed; use `{new}`.",
@@ -559,7 +558,7 @@ fn deprecated(old: &str, new: &str) {
 /// `--force` only skips the interactive "N checks failed, continue anyway?"
 /// confirmation prompt after checks have been shown (documented as
 /// "non-interactive/CI mode"); it must NOT imply `--skip-checks`. Some
-/// checks (e.g. Billing Auth, NEXUS-APP dispatch 8de19c71) are deliberately
+/// checks (e.g. Billing Auth) are deliberately
 /// not bypassable by `--force` and rely on `run_prelaunch_checks` actually
 /// running to enforce that. A prior version of this call site computed
 /// `skip_checks || force`, which skipped the whole check function --

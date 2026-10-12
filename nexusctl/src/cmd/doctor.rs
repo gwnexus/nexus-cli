@@ -1,5 +1,4 @@
 //! `nexus doctor claude [--fix]`: host tools the Claude Code workspace needs
-//! (NEXUS-APP ADR-0117 §7/§12, ADR-0120 §6, dispatch c4f507b5).
 //!
 //! Detects `claude`, `zellij`, `lazygit`, `ccusage` and `delta`. Which ones
 //! are required comes from `af_export.claude_workspace.requires` (best
@@ -34,7 +33,7 @@ fn purpose(tool: &str) -> &'static str {
 }
 
 /// Upstream install instructions for third-party tools Nexus does not
-/// support or install (ADR-0120 §4). Printed only, never run.
+/// support or install. Printed only, never run.
 fn third_party_instructions(tool: &str) -> Option<&'static str> {
     match tool {
         "agenthud" => Some("npm i -g agenthud (see https://github.com/neochoon/agenthud)"),
@@ -216,7 +215,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
     }
     let zellij_workspace =
         run_target.as_ref().and_then(|t| t.workspace.as_deref()) == Some("zellij");
-    // Which Zellij config `nexus run` uses (NEXUS-APP dispatch bb1ee3a0).
+    // Which Zellij config `nexus run` uses.
     let zellij_config = zellij_workspace.then(|| {
         super::run::zellij_config_source(
             run_target.as_ref(),

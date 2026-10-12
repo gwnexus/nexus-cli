@@ -224,7 +224,7 @@ pub async fn run(
 
             // Cache the flavor in .nexus/config.toml so launch-time commands
             // (`nexus run`, `nexus preflight`) can pick the right artifacts and
-            // binary offline (NEXUS-APP dispatch dfd4e655).
+            // binary offline.
             let _ = config::update_agent_owner(Some(&target), tool_flavor.as_deref());
             let is_claude = config::is_claude_owner(tool_flavor.as_deref());
             create_runtime_dir(&target, is_claude)?;
@@ -279,8 +279,7 @@ pub async fn run(
                     }
                     super::pull::sync_generated_files(&target, &agentic_root, &generated, true)?;
 
-                    // Render the native Claude Code projection (Track B1,
-                    // ADR-C04/C06): CLAUDE.md, .claude/settings.json,
+                    // Render the native Claude Code projection: CLAUDE.md, .claude/settings.json,
                     // .claude/skills/, .claude/agents/. Additive only;
                     // skipped for the opencode-only flavor.
                     if config::is_claude_owner(tool_flavor.as_deref()) {
@@ -970,7 +969,7 @@ You are expected to:
 /// to avoid polluting the repository with tool-specific ignore rules.
 ///
 /// Always writes a unified block of entries regardless of agentic_root
-/// configuration (ADR-0029).
+/// configuration.
 fn append_gitignore(target: &Path) -> anyhow::Result<()> {
     let git_dir = target.join(".git");
     if !git_dir.is_dir() {
@@ -994,7 +993,7 @@ fn append_gitignore(target: &Path) -> anyhow::Result<()> {
     migrate_gitignore_entries(target);
 
     let ignores = r#"
-# Nexus CLI — local workspace (ADR-0029)
+# Nexus CLI — local workspace
 .nexus/
 .opencode/
 opencode.json
@@ -1125,8 +1124,8 @@ fn write_agent_file(
     target: &Path,
     af: &nexus_core::api::ExportedAgentFile,
 ) -> anyhow::Result<bool> {
-    // Path traversal / absolute-path escape protection, checked first
-    // (NEXUS-APP ADR-0117 hardening item, dispatch bb782869). This IS a
+    // Path traversal / absolute-path escape protection, checked first.
+    // This IS a
     // hard error -- it indicates a malformed or malicious response.
     super::pull::validate_agent_file_target_path(target, &af.target_path)?;
 
@@ -2088,8 +2087,8 @@ mod tests {
             ".env.local must be in .git/info/exclude"
         );
         assert!(
-            exclude.contains("ADR-0029"),
-            "ADR-0029 marker must be in .git/info/exclude"
+            exclude.contains("# Nexus CLI — local workspace"),
+            "Nexus CLI marker must be in .git/info/exclude"
         );
 
         // Cleanup
@@ -2156,7 +2155,7 @@ mod tests {
         assert!(content.contains("skill_id: nx-test-skill"));
         assert!(content.contains("Do the thing."));
         assert!(content.contains("version: 1"));
-        // NEXUS-APP dispatch 5ddd6355: description/command_slug were
+        // description/command_slug were once
         // silently dropped by the hardcoded local template.
         assert!(content.contains(r#"description: "A test skill""#));
         assert!(content.contains("command_slug: nexus-test-skill"));
@@ -2167,7 +2166,7 @@ mod tests {
 
     #[test]
     fn test_write_skill_strips_duplicate_backend_frontmatter() {
-        // NEXUS-APP dispatch 5ddd6355: ExportedSkill.body already embeds
+        // ExportedSkill.body already embeds
         // its own frontmatter block from the backend; the local template
         // must not duplicate it underneath its own.
         let dir = temp_project_dir("write-skill-dup-frontmatter");
@@ -2305,14 +2304,14 @@ mod tests {
         // NEXUS_PRIVATE_TOKEN must be a literal value, never an {env:} reference
         assert!(!oc.contains("{env:NEXUS_PRIVATE_TOKEN}"));
         assert!(!oc.contains("{env:NEXUS_API_URL}"));
-        // Dispatch ef9b0b0e: NEXUS_PROJECT_ID must be present so agents can
+        // NEXUS_PROJECT_ID must be present so agents can
         // bind to the correct project without guessing.
         assert!(oc.contains("\"NEXUS_PROJECT_ID\": \"test-project-id\""));
         // NEXUS_SEC_OPENAI_API_KEY is intentionally an {env:} reference —
         // it is not a Nexus credential and should be resolved from the shell at runtime
         assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
 
-        // One runtime per call (NEXUS-APP dispatch 442f0e97): render the
+        // One runtime per call: render the
         // Claude Code projection separately for its .mcp.json.
         write_mcp_configs(
             &dir,
@@ -2331,7 +2330,7 @@ mod tests {
         assert!(cm.contains("\"mcpServers\""));
         assert!(cm.contains("@gwdn/nexus-mcp"));
         assert!(cm.contains("nxs_pat_test-token-1234567890"));
-        // Dispatch dc24bbae: same NEXUS_PROJECT_ID literal as opencode.json.
+        // Same NEXUS_PROJECT_ID literal as opencode.json.
         let parsed: serde_json::Value = serde_json::from_str(&cm).unwrap();
         assert_eq!(
             parsed["mcpServers"]["nexus"]["env"]["NEXUS_PROJECT_ID"],
@@ -2340,7 +2339,7 @@ mod tests {
         // Claude uses "command" + "args" format, not "command": [array]
         assert!(cm.contains("\"command\": \"npx\""));
         assert!(cm.contains("\"args\""));
-        // Local MCP server (dispatch af407643) must be registered alongside
+        // Local MCP server must be registered alongside
         // the bootstrap "nexus" entry.
         assert!(cm.contains("\"nexus-local-tools\""));
         assert!(cm.contains("\"mcp-local\""));
@@ -2371,7 +2370,7 @@ mod tests {
         assert!(!oc.contains("npx"));
         assert!(!oc.contains("@gwdn/nexus-mcp"));
 
-        // One runtime per call (NEXUS-APP dispatch 442f0e97): render the
+        // One runtime per call: render the
         // Claude Code projection separately for its .mcp.json.
         write_mcp_configs(
             &dir,

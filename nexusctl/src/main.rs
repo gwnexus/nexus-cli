@@ -255,8 +255,8 @@ pub enum Command {
     /// Run a small local MCP server (stdio) exposing Nexus tools that need
     /// filesystem/session-local access and have no Claude Code custom-tool
     /// equivalent: `nexus_headroom_intercept_retrieve`, `nexus_cost_summary`.
-    /// Registered automatically in `.mcp.json` for Claude Code projects
-    /// (NEXUS-APP dispatch af407643); not intended for direct interactive use.
+    /// Registered automatically in `.mcp.json` for Claude Code projects;
+    /// not intended for direct interactive use.
     #[command(hide = true)]
     McpLocal,
 
@@ -406,7 +406,7 @@ pub enum Command {
     },
 }
 
-/// Backend settings subcommands (NEXUS-APP dispatch b5f7bfb0). Keys and
+/// Backend settings subcommands. Keys and
 /// values come from the backend schema (`nexus env keys`).
 #[derive(Debug, Subcommand)]
 pub enum EnvAction {
@@ -454,7 +454,7 @@ pub enum DoctorTarget {
     },
 }
 
-/// Deprecated `nexus claude` subcommands (NEXUS-APP ADR-0117).
+/// Deprecated `nexus claude` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ClaudeAction {
     /// Show the CCX bundle state (per-file state, managed settings, Claude
@@ -1740,7 +1740,7 @@ mod tests {
 
     #[test]
     fn test_parse_shadow_levels() {
-        // ADR-0125: nexus shadow maps to policy.shadow.
+        // nexus shadow maps to policy.shadow.
         for (arg, expected) in [("ai", "ai"), ("nexus", "nexus")] {
             let cli = Cli::try_parse_from(["nexus", "shadow", arg]).unwrap();
             match cli.command {

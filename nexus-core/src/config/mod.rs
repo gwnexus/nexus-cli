@@ -510,8 +510,8 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<LocalConfigOverrides>,
 
-    /// Personal `nexus run` preferences (`[run] workspace = "none"|"zellij"`,
-    /// NEXUS-APP dispatch be6be18e). Never written by `nexus pull`.
+    /// Personal `nexus run` preferences (`[run] workspace = "none"|"zellij"`).
+    /// Never written by `nexus pull`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<ProjectRunConfig>,
 }
@@ -672,8 +672,8 @@ pub fn load_agent_owner(from: Option<&std::path::Path>) -> Option<String> {
 }
 
 /// Whether a project's `agent_owner` selects Claude Code. `agent_owner` is
-/// exactly `opencode` (default) or `claude-cli` (NEXUS-APP dispatch
-/// 442f0e97); absent, unknown, and the retired `both` value all count as
+/// exactly `opencode` (default) or `claude-cli`; absent, unknown, and the retired `both` value all
+/// count as
 /// OpenCode, so exactly one runtime projection is ever rendered.
 pub fn is_claude_owner(agent_owner: Option<&str>) -> bool {
     agent_owner == Some("claude-cli")

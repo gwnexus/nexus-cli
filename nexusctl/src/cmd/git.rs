@@ -38,7 +38,7 @@ pub fn apply_git_config(dir: &Path, cfg: &GitConfig) -> Result<u32> {
 }
 
 /// Run `nexus git verify` — show local vs expected git identity, plus the
-/// effective `gh` CLI profile (NEXUS-APP ADR-0116) if one is configured.
+/// effective `gh` CLI profile if one is configured.
 pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>) {
     println!("{}", style("Git Identity Verification").bold());
     println!();
@@ -111,7 +111,7 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
         }
     }
 
-    // Effective per-project gh CLI profile (NEXUS-APP ADR-0116).
+    // Effective per-project gh CLI profile.
     let mut gh_error = None;
     if let Some(gh) = gh {
         match config::Config::dir() {
@@ -223,14 +223,14 @@ pub fn run_apply(dir: &Path, cfg: Option<&GitConfig>) {
         ),
         Err(e) => eprintln!("{} {}", style("Failed to apply git config:").red(), e),
     }
-    // Nothing to apply for `gh`: login is interactive by design (NEXUS-APP
-    // ADR-0116 / dispatch 8776d208). `nexus run`'s pre-launch check and
+    // Nothing to apply for `gh`: login is interactive by design.
+    // `nexus run`'s pre-launch check and
     // `nexus git verify` above tell the operator the exact one-time
     // command to run, and `nexus run` itself can seed an empty profile
     // (see `resolve_gh_seed_token`/`gh_auth_login_with_token`).
 }
 
-// ── gh profile helpers (NEXUS-APP ADR-0116, dispatch 0350aee7 / 8776d208) ───
+// ── gh profile helpers ───
 
 /// Directory holding the local `gh` CLI profile for `profile`:
 /// `<config_dir>/gh-profiles/<profile>`. The GitHub token itself lives only
@@ -335,8 +335,8 @@ fn classify_gh_verify_output(
     }
 }
 
-/// Attempt to obtain a GitHub token to seed an empty gh profile
-/// (NEXUS-APP ADR-0116), per `GhEffective.source`:
+/// Attempt to obtain a GitHub token to seed an empty gh profile,
+/// per `GhEffective.source`:
 /// - `"keyring"`: only the OS keyring, via the *default* (unmodified)
 ///   `gh` config -- i.e. without any `GH_CONFIG_DIR` override, since the
 ///   profile being seeded has no login yet.
@@ -622,7 +622,7 @@ mod tests {
     }
 
     // ── resolve_gh_seed_token_with (pure core of resolve_gh_seed_token) ────
-    // NEXUS-APP ADR-0116 test requirement: "seeding per source".
+    // Test requirement: "seeding per source".
 
     #[test]
     fn test_resolve_seed_token_keyring_source_uses_only_keyring() {

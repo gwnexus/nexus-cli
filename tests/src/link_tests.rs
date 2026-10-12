@@ -423,7 +423,7 @@ fn test_save_overwrites_existing_config() {
 }
 
 // ---------------------------------------------------------------------------
-// Cached agent_owner tool flavor (NEXUS-APP dispatch dfd4e655)
+// Cached agent_owner tool flavor
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -506,7 +506,7 @@ fn test_run_target_roundtrip() {
 #[test]
 fn test_pull_cache_updates_preserve_local_run_workspace() {
     // `nexus pull` rewrites agent_owner / run_target in config.toml; the
-    // personal `[run] workspace` preference must survive (dispatch be6be18e).
+    // personal `[run] workspace` preference must survive.
     use nexus_core::api::RunTarget;
     use nexus_core::config::{load_run_workspace, update_agent_owner, update_run_target};
     let dir = temp_dir("run-workspace-preserved");

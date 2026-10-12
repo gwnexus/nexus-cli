@@ -31,8 +31,8 @@ use super::git;
 use super::preflight::{cmd_version, print_check, CheckResult};
 
 /// Environment variables carrying a GitHub token that must be stripped from
-/// the child process when a per-project `gh` profile is active (NEXUS-APP
-/// ADR-0116), so an ambient shell credential cannot silently authenticate
+/// the child process when a per-project `gh` profile is active, so an ambient shell credential
+/// cannot silently authenticate
 /// `gh`/tools that shell out to it as the wrong account underneath the
 /// selected profile.
 const GH_TOKEN_ENV_VARS: &[&str] = &[
@@ -63,7 +63,7 @@ fn gh_host_override(host: &str) -> Option<String> {
 }
 
 /// Final resolved outcome of per-project `gh` handling for this
-/// invocation (NEXUS-APP ADR-0116, dispatch 0350aee7).
+/// invocation.
 enum GhOutcome {
     /// No `gh_effective` configured for this project: the environment is
     /// left completely untouched -- no panel entry, no warning, no status
@@ -115,7 +115,7 @@ fn gh_login_hint(gh: &nexus_core::api::GhEffective, profile_dir: &Path, reason: 
     )
 }
 
-/// Attempt to seed an empty gh profile (NEXUS-APP ADR-0116 Phase B).
+/// Attempt to seed an empty gh profile.
 ///
 /// Has real side effects (a keyring lookup, an interactive Y/n prompt
 /// unless `assume_yes`, and a `gh auth login --with-token` call) and must
@@ -211,7 +211,7 @@ pub async fn run(
     // Cached in .nexus/config.toml by link/init/pull, refreshed below from
     // af_export when we talk to the backend anyway.
     let mut agent_owner = config::load_agent_owner(Some(&workspace));
-    // What to start (NEXUS-APP dispatch 442f0e97): cached by `nexus pull`,
+    // What to start: cached by `nexus pull`,
     // refreshed below from af_export.
     let mut run_target = config::load_run_target(Some(&workspace));
 
@@ -221,7 +221,7 @@ pub async fn run(
 
     // ── 2. If !--no-db, refresh from af_export (fresher than file) ─────────
     // Also fetch the effective gh profile (af_export does not carry it) so
-    // per-project `gh` handling (NEXUS-APP ADR-0116) can be applied below.
+    // per-project `gh` handling can be applied below.
     let mut gh_effective: Option<nexus_core::api::GhEffective> = None;
     if !no_db {
         if let Some(token) = resolve_token() {
@@ -275,7 +275,7 @@ pub async fn run(
     }
 
     // Workspace: flag, then the local `[run] workspace`, then the project
-    // default (NEXUS-APP dispatch be6be18e).
+    // default.
     let local_workspace = config::load_run_workspace(Some(&workspace));
     let workspace_choice = match workspace_flag {
         Some((name, source)) => {
@@ -307,7 +307,7 @@ pub async fn run(
     let effective_tool = launch.tool.as_str();
     let args: &[String] = &[launch.leading_args.as_slice(), args].concat();
 
-    // ── 4.5. Named Claude account (`--account`, NEXUS-APP dispatch ad6e0176)
+    // ── 4.5. Named Claude account (`--account`)
     // ──────────────────────────────────────────────────────────────────────
     //
     // Explicit only, never automatic: a single name per invocation, or the
@@ -336,7 +336,7 @@ pub async fn run(
             }
         };
 
-    // ── 4.6. Per-project gh CLI profile (NEXUS-APP ADR-0116) — Phase A ─────
+    // ── 4.6. Per-project gh CLI profile — Phase A ─────
     // ──────────────────────────────────────────────────────────────────────
     //
     // Side-effect-limited preview: ensure the isolated profile directory
@@ -387,7 +387,7 @@ pub async fn run(
         println!();
     }
 
-    // ── 5.6. Per-project gh CLI profile — Phase B (NEXUS-APP ADR-0116) ─────
+    // ── 5.6. Per-project gh CLI profile — Phase B ─────
     // ──────────────────────────────────────────────────────────────────────
     //
     // Attempt to seed an empty profile now that we know this is a real
@@ -418,7 +418,7 @@ pub async fn run(
     // config is self-sufficient even when the tool is launched without
     // 'nexus run' (e.g. directly from an IDE). That's a deliberate,
     // tested design (see nexus_core pull tests) — not a bug. The actual gap
-    // (Task a3bf595b, NEXUS-APP) is that the baked copy silently drifts from
+    // is that the baked copy silently drifts from
     // the global login token whenever 'nexus login' rotates it, with nothing
     // to notice or fix it short of re-running 'nexus init'/'nexus pull'.
     // Since 'nexus run' already resolves the current, live-verified token on
@@ -534,7 +534,7 @@ pub async fn run(
         }
     }
 
-    // ── 7.5. Managed Claude Code plugins (NEXUS-APP dispatch ff608ed4) ──────
+    // ── 7.5. Managed Claude Code plugins ──────
     // After the env injection so a named account (CLAUDE_CONFIG_DIR) gets
     // the plugins. Uses the settings the last pull recorded in the CCX
     // lock; failures are printed and never block the launch.
@@ -581,8 +581,8 @@ pub async fn run(
         // noticing ctrl_c() completed until the git call itself returns --
         // silently defeating the "Press Ctrl+C to skip" promise above for
         // as long as that git call takes (including if a pager or a slow
-        // repo makes it take much longer than expected; see dispatch
-        // 479a4ab5). Running them via spawn_blocking moves the blocking
+        // repo makes it take much longer than expected).
+        // Running them via spawn_blocking moves the blocking
         // work onto tokio's dedicated blocking thread pool, so ctrl_c() can
         // actually win the race at any time.
         let workspace_for_git = workspace.clone();
@@ -633,7 +633,7 @@ pub async fn run(
 
 // ---------------------------------------------------------------------------
 // Credential sync — keep baked opencode.json / .mcp.json Nexus MCP
-// credentials in sync with the current global login (Task a3bf595b, NEXUS-APP)
+// credentials in sync with the current global login
 // ---------------------------------------------------------------------------
 
 /// Patch the `mcp.nexus.environment` block of `opencode.json` (and, if
@@ -755,7 +755,7 @@ fn print_env_table(
 }
 
 /// Print the resolved per-project `gh` profile plan for `--dry-run`/
-/// `--show-env` (NEXUS-APP dispatch 8776d208): the `GH_CONFIG_DIR` (and
+/// `--show-env`: the `GH_CONFIG_DIR` (and
 /// `GH_HOST`, if overridden) that will be set, and the *names* of any
 /// ambient token env vars that will be removed from the child (never the
 /// values). No-op when no `gh` profile is configured for this project.
@@ -793,7 +793,7 @@ fn print_gh_env_plan(outcome: &GhOutcome) {
 
 /// Decide which binary `nexus run` launches.
 ///
-/// Priority (highest first), per NEXUS-APP dispatch dfd4e655:
+/// Priority (highest first):
 /// 1. `--tool <bin>` on the command line
 /// 2. an explicit `run.default_tool` in `~/.config/nexus/config.toml`
 /// 3. the linked project's `agent_owner` (`claude-cli` -> `claude`)
@@ -817,7 +817,7 @@ fn resolve_effective_tool(
 pub(crate) const SUPPORTED_WORKSPACES: &[&str] = &["none", "zellij"];
 
 /// Where the workspace choice came from (shown in the preflight row and
-/// the session summary, NEXUS-APP dispatch be6be18e).
+/// the session summary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceSource {
     /// `--plain` (shorthand for `--workspace none`).
@@ -913,8 +913,8 @@ impl ZellijHost {
     }
 }
 
-/// Which Zellij config a `nexus run` session uses (NEXUS-APP dispatch
-/// bb1ee3a0). `zellij --config` replaces the global config completely, so
+/// Which Zellij config a `nexus run` session uses. `zellij --config` replaces the global config
+/// completely, so
 /// the project file is a full config rendered by the backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ZellijConfigSource {
@@ -971,7 +971,7 @@ pub(crate) fn zellij_config_source(
     }
 }
 
-/// Resolve the start (NEXUS-APP dispatches 442f0e97, be6be18e).
+/// Resolve the start.
 ///
 /// Tool: `--tool`, else `run_target.tool`, else [`resolve_effective_tool`]
 /// (older backends).
@@ -1031,7 +1031,7 @@ fn resolve_launch(
         .and_then(|t| t.layout.as_deref())
         .unwrap_or(TEAM_LAYOUT);
     let mut layout = workspace.join(layout_rel);
-    // The personal layout (ADR-0119) is written by `nexus pull`; until then
+    // The personal layout is written by `nexus pull`; until then
     // the committed team default still starts the workspace.
     let mut fallback_note = String::new();
     if !layout.is_file() && layout_rel != TEAM_LAYOUT && workspace.join(TEAM_LAYOUT).is_file() {
@@ -1102,13 +1102,13 @@ fn wants_claude(agent_owner: Option<&str>) -> bool {
 }
 
 /// Does this project run OpenCode? Unknown/absent flavors (and the retired
-/// `both`) count as OpenCode (NEXUS-APP dispatch 442f0e97).
+/// `both`) count as OpenCode.
 fn wants_opencode(agent_owner: Option<&str>) -> bool {
     !wants_claude(agent_owner)
 }
 
 // ---------------------------------------------------------------------------
-// Named Claude account switching (`--account`, NEXUS-APP dispatch ad6e0176)
+// Named Claude account switching (`--account`)
 // ---------------------------------------------------------------------------
 //
 // Claude Code derives its Keychain credential storage key from
@@ -1128,7 +1128,7 @@ fn wants_opencode(agent_owner: Option<&str>) -> bool {
 ///
 /// Functionally identical to omitting `--account` entirely, so a caller can
 /// always write `--account <name>` in scripts/aliases regardless of how many
-/// real named accounts currently exist (NEXUS-APP dispatch c0523ebe). Never
+/// real named accounts currently exist. Never
 /// treated as a creatable directory name: this alias is matched before
 /// [`validate_account_name`]/[`claude_account_dir`] are ever consulted for
 /// it, so a literal directory named `default` under `claude-accounts/` is
@@ -1182,8 +1182,7 @@ enum AccountResolution {
     Selected(std::path::PathBuf),
 }
 
-/// Pure decision core for `--account` resolution (NEXUS-APP dispatches
-/// ad6e0176, c0523ebe). See [`AccountResolution`] for what each outcome
+/// Pure decision core for `--account` resolution. See [`AccountResolution`] for what each outcome
 /// means.
 fn resolve_account(
     config_dir: &Path,
@@ -1228,7 +1227,7 @@ fn account_check(agent_owner: Option<&str>, account: Option<&str>) -> Option<Che
 /// Check the MCP config artifact(s) that actually matter for this project's
 /// tool flavor.
 ///
-/// Before dispatch dfd4e655 this unconditionally inspected `opencode.json` and
+/// This once unconditionally inspected `opencode.json` and
 /// told `claude-cli` projects to "run 'nexus init'" for a file they are never
 /// supposed to have. The authoritative artifact is `opencode.json` for
 /// OpenCode and the root `.mcp.json` for Claude Code.
@@ -1275,7 +1274,7 @@ fn mcp_config_check(workspace: &Path, agent_owner: Option<&str>) -> CheckResult 
 }
 
 /// Check whether an inherited API-key credential would silently defeat a
-/// Claude Max subscription (NEXUS-APP dispatch 8de19c71).
+/// Claude Max subscription.
 ///
 /// Claude Code's auth precedence puts `ANTHROPIC_API_KEY` /
 /// `ANTHROPIC_AUTH_TOKEN` ahead of the Keychain OAuth subscription login: if
@@ -1399,7 +1398,7 @@ async fn run_prelaunch_checks(
     checks.push(("Auth", auth_check));
 
     // MCP Config — which artifact is authoritative depends on the project's
-    // tool flavor (NEXUS-APP dispatch dfd4e655): OpenCode reads opencode.json,
+    // tool flavor: OpenCode reads opencode.json,
     // Claude Code reads the root .mcp.json written by `claude_render`.
     checks.push(("MCP Config", mcp_config_check(workspace, agent_owner)));
 
@@ -1413,7 +1412,7 @@ async fn run_prelaunch_checks(
     }
 
     // gh Auth — reflects the final, post-seeding-attempt outcome from
-    // steps 4.6/5.6 (NEXUS-APP ADR-0116). Never a hard Fail: a session
+    // steps 4.6/5.6. Never a hard Fail: a session
     // without an isolated gh identity still launches, just with the
     // environment left untouched (see `GhOutcome::Fallback`).
     match gh_outcome {
@@ -1456,7 +1455,7 @@ async fn run_prelaunch_checks(
 
     // Headroom — live-verified, not just env-var presence.
     //
-    // Fix (Task a3bf595b, NEXUS-APP): this check previously only inspected
+    // Fix: this check previously only inspected
     // whether HEADROOM_MODE=transform was set locally, which kept reporting
     // PASS for weeks while the `nexus-headroom-intercept` OpenCode plugin was
     // silently downgraded to observe mode by a stale/invalid token. We now
@@ -1719,8 +1718,8 @@ fn exec_tool(tool: &str, args: &[String]) -> anyhow::Result<()> {
 /// Is a headroom adapter installed in this workspace for the project's flavor?
 ///
 /// OpenCode ships it as `.opencode/plugins/nexus-headroom-intercept.ts`.
-/// Claude Code ships it as a hook adapter under `.claude/hooks/` (v0.19.0,
-/// Track B3) whose file name is server-supplied, so match on the plugin name
+/// Claude Code ships it as a hook adapter under `.claude/hooks/` (v0.19.0)
+/// whose file name is server-supplied, so match on the plugin name
 /// rather than a fixed path.
 fn headroom_adapter_installed(workspace: &Path, agent_owner: Option<&str>) -> bool {
     if wants_opencode(agent_owner)
@@ -1962,8 +1961,8 @@ fn print_session_summary(
 /// pager reads keypresses from the controlling terminal (`/dev/tty`), not
 /// from this process's stdin, so even though `Command::output()` does not
 /// inherit stdin, the pager still blocks waiting for a keypress -- which
-/// looked like `nexus run`'s post-session summary hanging indefinitely
-/// (dispatch 479a4ab5). `--no-pager` is a git global flag that overrides
+/// looked like `nexus run`'s post-session summary hanging indefinitely.
+/// `--no-pager` is a git global flag that overrides
 /// both `GIT_PAGER` and `core.pager` unconditionally, unlike setting
 /// `GIT_PAGER=cat` alone, which a `core.pager` override could still bypass.
 fn git_command() -> std::process::Command {
@@ -2210,8 +2209,8 @@ pub(crate) struct HeadroomSummary {
 
 /// Read the last `session_summary` event from `.nexus/headroom-intercept.jsonl`
 /// written at or after `run_start_epoch` (Unix seconds). Older summaries
-/// belong to other sessions and are never used (NEXUS-APP dispatch
-/// 3334d664): the adapter writes none for a session without activity.
+/// belong to other sessions and are never used: the adapter writes none for a session without
+/// activity.
 /// Pass `0` for "the most recent summary".
 pub(crate) fn read_headroom_stats(
     workspace: &Path,
@@ -2404,7 +2403,7 @@ mod tests {
     use std::path::PathBuf;
 
     // -------------------------------------------------------------------
-    // Per-project gh CLI profile (NEXUS-APP dispatch 8776d208)
+    // Per-project gh CLI profile
     // -------------------------------------------------------------------
 
     #[test]
@@ -2424,8 +2423,8 @@ mod tests {
 
     #[test]
     fn test_gh_token_env_vars_are_exactly_the_expected_four() {
-        // Regression pin: these are the exact variables the dispatch
-        // requires stripped from the child when a gh profile is active.
+        // Regression pin: these are the exact variables that must be
+        // stripped from the child when a gh profile is active.
         assert_eq!(
             GH_TOKEN_ENV_VARS,
             &[
@@ -2498,7 +2497,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // sync_mcp_credentials (Task a3bf595b, NEXUS-APP)
+    // sync_mcp_credentials
     // -------------------------------------------------------------------
 
     #[test]
@@ -2622,7 +2621,7 @@ mod tests {
         assert!(!updated.contains("nxs_pat_OLD"));
     }
 
-    // NEXUS-APP dispatch dc24bbae: `.mcp.json` written before 0.28.6 has no
+    // `.mcp.json` written before 0.28.6 has no
     // NEXUS_PROJECT_ID; `nexus run` adds it (and repairs a stale one).
     #[test]
     fn test_sync_mcp_credentials_heals_claude_project_id() {
@@ -2737,7 +2736,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Git pager hang regression (dispatch 479a4ab5)
+    // Git pager hang regression
     //
     // A single git repo is configured with `pager.<cmd>=true` for diff,
     // log, and tag (force paging unconditionally, regardless of isatty)
@@ -2819,7 +2818,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // spawn_blocking mechanism (dispatch 479a4ab5)
+    // spawn_blocking mechanism
     //
     // The post-session summary races stats collection against
     // tokio::signal::ctrl_c() via tokio::select!. Proves the core
@@ -3098,7 +3097,7 @@ mod tests {
         assert_eq!(s.cache_integrity_failures, 0);
     }
 
-    // ── stale summaries (NEXUS-APP dispatch 3334d664) ──────────────────────
+    // ── stale summaries ──────────────────────
 
     fn write_headroom(dir: &Path, jsonl: &str, gate: Option<&str>) {
         let nexus_dir = dir.join(".nexus");
@@ -3207,10 +3206,10 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // agent_owner-aware launch behaviour (NEXUS-APP dispatch dfd4e655)
+    // agent_owner-aware launch behaviour
     // -------------------------------------------------------------------
 
-    // ── resolve_launch (NEXUS-APP dispatches 442f0e97, be6be18e) ───────────
+    // ── resolve_launch ───────────
 
     fn target(
         tool: &str,
@@ -3438,7 +3437,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ── Zellij config (NEXUS-APP dispatch bb1ee3a0) ────────────────────────
+    // ── Zellij config ────────────────────────
 
     const ZCFG: &str = ".nexus/claude/zellij.local.kdl";
 
@@ -3646,7 +3645,7 @@ mod tests {
 
     #[test]
     fn test_mcp_config_check_legacy_both_flavor_needs_only_opencode_json() {
-        // The retired "both" flavor counts as OpenCode (NEXUS-APP 442f0e97).
+        // The retired "both" flavor counts as OpenCode.
         let dir = tmp_dir("mcp_check_both");
         fs::write(dir.join("opencode.json"), r#"{"mcp":{"nexus":{}}}"#).unwrap();
         assert!(matches!(
@@ -3665,7 +3664,7 @@ mod tests {
         }
     }
 
-    // ── Named Claude account switching (NEXUS-APP dispatch ad6e0176) ───────
+    // ── Named Claude account switching ───────
 
     #[test]
     fn test_validate_account_name_accepts_plain_identifiers() {
@@ -3737,8 +3736,8 @@ mod tests {
         }
     }
 
-    // ── "default" alias for the implicit identity (NEXUS-APP dispatch
-    // c0523ebe): --account default must behave exactly like omitting
+    // ── "default" alias for the implicit identity:
+    // --account default must behave exactly like omitting
     // --account, so scripts can always pass an explicit name. ─────────────
 
     #[test]
@@ -3838,7 +3837,7 @@ mod tests {
     }
 
     // ── billing_auth_check: hard-stop on inherited API-key auth for
-    // claude-cli projects (NEXUS-APP dispatch 8de19c71) ────────────────────
+    // claude-cli projects ────────────────────
 
     #[test]
     fn test_billing_auth_check_non_claude_project_is_na_regardless_of_env() {
@@ -3887,7 +3886,7 @@ mod tests {
 
     #[test]
     fn test_billing_auth_check_legacy_both_flavor_is_opencode() {
-        // The retired "both" flavor counts as OpenCode (NEXUS-APP 442f0e97).
+        // The retired "both" flavor counts as OpenCode.
         assert!(matches!(
             billing_auth_check_with(Some("both"), true, false),
             CheckResult::Pass(_)
@@ -3935,11 +3934,11 @@ mod tests {
         let dir = tmp_dir("headroom_claude");
         let hooks = dir.join(".claude").join("hooks");
         fs::create_dir_all(&hooks).unwrap();
-        // File name is server-supplied (Track B3), so match on plugin name.
+        // File name is server-supplied, so match on plugin name.
         fs::write(hooks.join("nexus-headroom-intercept.mjs"), "// adapter").unwrap();
 
         assert!(headroom_adapter_installed(&dir, Some("claude-cli")));
-        // The retired "both" flavor counts as OpenCode (NEXUS-APP 442f0e97).
+        // The retired "both" flavor counts as OpenCode.
         assert!(!headroom_adapter_installed(&dir, Some("both")));
         // An opencode-only project must not be credited with a Claude adapter.
         assert!(!headroom_adapter_installed(&dir, Some("opencode")));

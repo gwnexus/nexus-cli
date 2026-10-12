@@ -438,7 +438,7 @@ fn test_config_source_display() {
 }
 
 // ---------------------------------------------------------------------------
-// agent_owner-driven run.default_tool (NEXUS-APP dispatch dfd4e655)
+// agent_owner-driven run.default_tool
 // ---------------------------------------------------------------------------
 
 #[test]

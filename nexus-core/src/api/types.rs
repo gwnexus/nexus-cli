@@ -139,8 +139,7 @@ pub struct ExportedSkill {
     #[serde(default)]
     pub resources: Vec<SkillResource>,
     /// `model` (default; the model may load the skill on its own) or
-    /// `user` (only invoked explicitly). Absent on older servers
-    /// (NEXUS-APP dispatch 3dc4f5c2, ADR-0124).
+    /// `user` (only invoked explicitly). Absent on older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation: Option<String>,
 }
@@ -175,7 +174,7 @@ pub struct ExportedDirective {
     pub body: Option<String>,
     pub category: String,
     pub priority: String,
-    /// `must` | `should` (ADR-0125, NEXUS-APP dispatch 15497fa2). Absent on
+    /// `must` | `should`. Absent on
     /// older servers: derived from `priority` (high/urgent = must).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
@@ -357,14 +356,14 @@ pub struct AgentFileExportResponse {
     /// Delivered by the backend when actors have opencode-compatible agent definitions.
     #[serde(default)]
     pub opencode_agents: Option<serde_json::Value>,
-    /// Global default model for opencode.json (ADR-0057: local-first, DGX Spark).
+    /// Global default model for opencode.json (local-first).
     /// Written as top-level `"model"` key in opencode.json when present.
     #[serde(default)]
     pub opencode_default_model: Option<String>,
-    /// Default agent for opencode.json (ADR-0058: "nexus-plan" for actor-based projects).
+    /// Default agent for opencode.json ("nexus-plan" for actor-based projects).
     #[serde(default)]
     pub opencode_default_agent: Option<String>,
-    /// Model routes map for .nexus/generated/model-routes.json (ADR-0057).
+    /// Model routes map for .nexus/generated/model-routes.json.
     /// Key is route alias, value is route metadata.
     #[serde(default)]
     pub model_routes: Option<serde_json::Value>,
@@ -385,7 +384,7 @@ pub struct AgentFileExportResponse {
     /// availability).
     #[serde(default)]
     pub export_warnings: Option<Vec<ExportWarning>>,
-    /// Runtime-neutral project spec (ADR-C04/F1, nexus-app commit db5d053).
+    /// Runtime-neutral project spec.
     /// Additive field: a `schema_version`-tagged JSON object projecting the
     /// same underlying data (`model_routes`, `actors`, `primary_agents`,
     /// `terminal_runtime`, etc.) into a shape shared by all terminal
@@ -394,8 +393,7 @@ pub struct AgentFileExportResponse {
     /// sub-keys they need rather than assuming an exhaustive shape.
     #[serde(default)]
     pub runtime_spec: Option<serde_json::Value>,
-    /// Claude Code hook adapter scripts (Track B3, NEXUS-APP dispatch
-    /// 2d5017f7). Additive field: mirrors how OpenCode plugin sources are
+    /// Claude Code hook adapter scripts. Additive field: mirrors how OpenCode plugin sources are
     /// already embedded server-side (`headroom-intercept-plugin.ts` etc.)
     /// and written out to `.opencode/plugins/*.ts` -- nexus-app/
     /// nexus-oc-plugins own the bundled script content and versioning;
@@ -403,36 +401,34 @@ pub struct AgentFileExportResponse {
     /// `target_path` and wires `hook_events` into `.claude/settings.json`.
     #[serde(default)]
     pub claude_hook_adapters: Option<Vec<ClaudeHookAdapter>>,
-    /// Generic `.claude/settings.json` merge spec (NEXUS-APP ADR-0117
-    /// "CCX"). Additive field; `None` for backends that don't send it yet.
+    /// Generic `.claude/settings.json` merge spec (Claude Code Experience,
+    /// CCX). Additive field; `None` for backends that don't send it yet.
     #[serde(default)]
     pub claude_settings: Option<ClaudeSettingsSpec>,
     /// Markdown to maintain inside the root `CLAUDE.md` between
-    /// `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers
-    /// (NEXUS-APP ADR-0117). Everything outside the markers is user-owned
+    /// `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers.
+    /// Everything outside the markers is user-owned
     /// and never rewritten by the CLI.
     #[serde(default)]
     pub claude_md_managed_block: Option<String>,
-    /// Claude Code Experience bundle metadata (NEXUS-APP ADR-0117, dispatch
-    /// 99f335e8). `None` when CCX is disabled or this is not a Claude
+    /// Claude Code Experience bundle metadata. `None` when CCX is disabled or this is not a Claude
     /// project; then nothing CCX-specific happens and any existing lock is
     /// left untouched. When present, `agent_files` entries with category
     /// `"claude_experience"` are reconciled against the CCX lock instead of
     /// being written unconditionally.
     #[serde(default)]
     pub ccx: Option<CcxBundleInfo>,
-    /// What `nexus run` starts for this project (NEXUS-APP dispatch
-    /// 442f0e97). `None` on older backends; then `agent_owner` decides.
+    /// What `nexus run` starts for this project. `None` on older backends; then `agent_owner`
+    /// decides.
     #[serde(default)]
     pub run_target: Option<RunTarget>,
-    /// Per-caller workspace layout (NEXUS-APP ADR-0119, dispatch
-    /// c4f507b5). Rendered for the calling user, so it is written to a
+    /// Per-caller workspace layout. Rendered for the calling user, so it is written to a
     /// git-excluded path and never committed. When present,
     /// `run_target.layout` points to `claude_workspace.path`.
     #[serde(default)]
     pub claude_workspace: Option<ClaudeWorkspace>,
-    /// Paths the server wants in `.git/info/exclude` (ADR-0125, dispatch
-    /// 15497fa2): always the personal files; for `shadow` `ai`/`nexus`
+    /// Paths the server wants in `.git/info/exclude`: always the personal files; for `shadow`
+    /// `ai`/`nexus`
     /// also the agentic paths (`.claude/`, `<agentic_root>/`, `AGENTS.md`,
     /// `CLAUDE.md`, `opencode.json`, `.opencode/`).
     #[serde(default)]
@@ -471,7 +467,7 @@ pub struct ClaudeWorkspace {
     /// only displays it.
     #[serde(default)]
     pub observer_provider: Option<String>,
-    /// Per-caller Zellij config (NEXUS-APP dispatch bb1ee3a0), present only
+    /// Per-caller Zellij config, present only
     /// when the caller has Zellij settings. `nexus run` passes it to
     /// `zellij --config`; it replaces the global config for that session.
     #[serde(default)]
@@ -500,7 +496,7 @@ impl ClaudeWorkspace {
 }
 
 /// `GET /api/mcp/projects/{id}/settings` (and the 200 body of `PATCH`):
-/// backend project settings for `nexus env` (NEXUS-APP dispatch b5f7bfb0).
+/// backend project settings for `nexus env`.
 /// Keys, types and allowed values come from `schema`; the CLI hardcodes none.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectSettingsResponse {
@@ -522,7 +518,7 @@ pub struct ProjectSettingsResponse {
     #[serde(default)]
     pub dry_run: bool,
     /// PATCH only: agent files the change assigns / unassigns (e.g. an
-    /// executioner switch, NEXUS-APP 0.14.1). `None` on older backends.
+    /// executioner switch). `None` on older backends.
     #[serde(default)]
     pub agent_files: Option<AgentFilesDelta>,
 }
@@ -587,7 +583,7 @@ pub struct RunTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
     /// Workspace-relative Zellij config file (`claude_workspace.zellij_config`),
-    /// set only together with `workspace: "zellij"` (dispatch bb1ee3a0).
+    /// set only together with `workspace: "zellij"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
 }
@@ -610,8 +606,8 @@ pub struct CcxBundleCompatibility {
     pub claude_code: Option<String>,
 }
 
-/// Generic, forward-compatible `.claude/settings.json` merge spec
-/// (NEXUS-APP ADR-0117 "CCX"). `managed_keys` lists dot-paths into
+/// Generic, forward-compatible `.claude/settings.json` merge spec.
+/// `managed_keys` lists dot-paths into
 /// `settings.json` that Nexus owns (e.g. `"permissions.deny"`); `values`
 /// carries the JSON value to set at each path. Kept untyped per key
 /// (`serde_json::Value`) since the Claude Code settings schema is
@@ -626,8 +622,7 @@ impl ClaudeSettingsSpec {
     /// The value for a managed dot-path. The backend sends `values` nested
     /// (`{"permissions": {"deny": [...]}}` for `"permissions.deny"`); a
     /// literal dotted key is accepted as well. Looking up only the dotted
-    /// key silently dropped every nested managed setting
-    /// (NEXUS-APP dispatch 95d81511).
+    /// key silently dropped every nested managed setting.
     pub fn value(&self, path: &str) -> Option<&serde_json::Value> {
         if let Some(v) = self.values.get(path) {
             return Some(v);
@@ -641,8 +636,7 @@ impl ClaudeSettingsSpec {
     }
 }
 
-/// A single Claude Code hook adapter script to materialize on disk
-/// (Track B3, NEXUS-APP dispatch 2d5017f7).
+/// A single Claude Code hook adapter script to materialize on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeHookAdapter {
     /// Canonical plugin name (e.g. "session-guard", "headroom-intercept",
@@ -729,7 +723,7 @@ pub struct ProjectSummary {
     /// Per-project git identity config.
     pub git_config: Option<GitConfig>,
     /// Effective per-project `gh` CLI profile, superseding
-    /// `git_config.gh` (NEXUS-APP ADR-0116, dispatch 0350aee7). `None`
+    /// `git_config.gh`. `None`
     /// (or the field missing entirely) means: do not touch `gh` or its
     /// environment at all.
     #[serde(default)]
@@ -747,11 +741,10 @@ pub struct GitConfig {
     /// trailer to commits (uninverted, Claude Code's own semantics: `true`
     /// means the trailer is added). `None` for projects created before this
     /// field existed on the backend; rendered as suppressed (`false`) by
-    /// the Claude Code renderer, not left to Claude Code's own default
-    /// (NEXUS-APP dispatch 84e38bd7).
+    /// the Claude Code renderer, not left to Claude Code's own default.
     #[serde(default)]
     pub include_co_authored_by: Option<bool>,
-    /// Per-project GitHub CLI (`gh`) profile (NEXUS-APP dispatch 8776d208).
+    /// Per-project GitHub CLI (`gh`) profile.
     /// `None` for projects that have not configured one.
     #[serde(default)]
     pub gh: Option<GhConfig>,
@@ -763,7 +756,7 @@ pub struct GitConfig {
 /// passes through the Nexus backend: this only records which local `gh`
 /// profile (a dedicated `GH_CONFIG_DIR`) a project should use, so multiple
 /// projects can cleanly use different GitHub identities on the same
-/// machine (NEXUS-APP dispatch 8776d208).
+/// machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GhConfig {
     /// Lower-cased hostname; `github.com` unless this is a GitHub
@@ -784,9 +777,9 @@ fn default_gh_host() -> String {
     "github.com".to_string()
 }
 
-/// Effective per-project `gh` CLI profile (NEXUS-APP ADR-0116), the
+/// Effective per-project `gh` CLI profile, the
 /// canonical input for `nexus run`'s gh handling and `nexus git verify`,
-/// superseding `git_config.gh` (ADR-0115, kept for backward
+/// superseding `git_config.gh` (kept for backward
 /// deserialization compatibility but no longer read).
 ///
 /// `source` describes where the seeding token should come from if the
@@ -830,7 +823,7 @@ pub struct ProjectDetailResponse {
 /// calls at load time to gate transform-mode compression. Reusing it here lets
 /// `nexus run`'s pre-launch "Headroom" check live-verify reachability +
 /// project enablement instead of only checking whether HEADROOM_MODE=transform
-/// is set locally (see Task a3bf595b, NEXUS-APP: a stale/invalid token caused
+/// is set locally (a stale/invalid token caused
 /// the plugin to silently downgrade to observe mode while this env-var-only
 /// check kept reporting PASS).
 #[derive(Debug, Clone, Deserialize)]
@@ -973,7 +966,7 @@ pub struct WorkspaceExportResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace v2 – Blueprint + Fork architecture (ADR-0034)
+// Workspace v2 – Blueprint + Fork architecture
 // ---------------------------------------------------------------------------
 
 /// A workspace fork summary from `GET /api/projects/:id/workspace-forks`.
@@ -1214,13 +1207,13 @@ pub struct ExportedActorFile {
     pub body: String,
     #[serde(default)]
     pub avatar: Option<ActorAvatar>,
-    /// Model route alias used by this actor (ADR-0055).
+    /// Model route alias used by this actor.
     #[serde(default)]
     pub route_alias: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
-// Model Routes (ADR-0055)
+// Model Routes
 // ---------------------------------------------------------------------------
 
 /// A model route entry from the route catalog.
@@ -1375,7 +1368,7 @@ pub struct SyncResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Project inference tokens (nxs_proj_*) — gateway ADR-0005
+// Project inference tokens (nxs_proj_*)
 // ---------------------------------------------------------------------------
 
 /// Optional profile ceiling for an issued project inference token.

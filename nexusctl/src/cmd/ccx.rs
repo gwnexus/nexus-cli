@@ -1,6 +1,5 @@
 //! CCX (Claude Code Experience Bundles) lock file and reconciliation
-//! foundation (NEXUS-APP ADR-0117, dispatch 99f335e8, follow-up to
-//! bb782869/v0.24.0).
+//! foundation (follow-up to the generic settings merge of v0.24.0).
 //!
 //! This module provides:
 //! - The lock file format (`<agentic_root>/claude/manifest.lock.json`)
@@ -35,7 +34,7 @@ pub const CCX_CATEGORY: &str = "claude_experience";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CcxLock {
     pub schema: u32,
-    /// `None` until full CCX file-bundle metadata (dispatch 99f335e8's
+    /// `None` until full CCX file-bundle metadata (the
     /// `ccx: { bundle, version, revision }` af_export field) is wired up;
     /// the lock can already track settings-merge history on its own in
     /// the meantime (see [`reconcile_settings_removed_keys`]).
@@ -55,13 +54,13 @@ pub struct CcxLock {
     #[serde(default)]
     pub claude_md_block_sha256: Option<String>,
     /// Nexus-managed Claude Code hook adapters recorded on the last pull
-    /// (NEXUS-APP dispatch 99f335e8 follow-up: hook adapter removal when
+    /// (for hook adapter removal when
     /// e.g. the `nexus-core` Claude plugin takes over the same hooks),
     /// keyed by `target_path`.
     #[serde(default)]
     pub hooks: std::collections::BTreeMap<String, CcxLockHookEntry>,
     /// Claude Code plugins `nexus pull --force` / `nexus run` installed at
-    /// project scope (NEXUS-APP dispatch ff608ed4), keyed by plugin id
+    /// project scope, keyed by plugin id
     /// (`name@marketplace`). Provenance only: a plugin that was already
     /// present (user scope, or installed by hand) is never recorded here.
     #[serde(default)]
@@ -165,8 +164,7 @@ pub fn record_settings_in_lock(
 }
 
 /// Record the current set of Nexus-managed Claude Code hook adapters as
-/// the new "previously managed" state in the CCX lock (NEXUS-APP dispatch
-/// 99f335e8 follow-up), so a later pull can tell which entries in
+/// the new "previously managed" state in the CCX lock, so a later pull can tell which entries in
 /// `.claude/settings.json`'s `hooks` block, and which files under
 /// `.claude/hooks/`, Nexus itself put there and is safe to remove once it
 /// stops sending them (e.g. when the `nexus-core` Claude plugin takes
@@ -295,7 +293,7 @@ pub fn record_claude_md_block_in_lock(
     save_lock(workspace, agentic_root, &lock)
 }
 
-/// Per-file CCX reconciliation state (dispatch 99f335e8's state table).
+/// Per-file CCX reconciliation state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileState {
     /// No local file yet: write it.
@@ -325,8 +323,8 @@ pub enum FileState {
     Orphaned,
 }
 
-/// Classify a single CCX-governed file's reconciliation state
-/// (dispatch 99f335e8's state table), given the SHA-256 hex hashes of:
+/// Classify a single CCX-governed file's reconciliation state,
+/// given the SHA-256 hex hashes of:
 /// - `desired`: the content Nexus wants this file to have (`None` if this
 ///   file is no longer part of the desired set at all -- i.e. orphaned).
 /// - `local`: the file currently on disk (`None` if it doesn't exist).
@@ -681,8 +679,7 @@ pub fn describe_settings_changes(
 /// Remove a `.claude/settings.json` key (or array entries) that Nexus
 /// used to manage (per `previous`, the CCX lock's recorded settings
 /// state) but no longer sends (per `current`, this run's `af_export`
-/// spec) -- the "removed-key cleanup" flagged as missing in v0.24.0
-/// (NEXUS-APP dispatch 99f335e8).
+/// spec) -- the "removed-key cleanup" flagged as missing in v0.24.0.
 ///
 /// For an array key that is still managed, entries present in the lock's
 /// recorded value but no longer in the new desired value are removed.
@@ -798,7 +795,7 @@ pub fn reconcile_settings_removed_keys(
 /// `.claude/settings.json` keys whose value is a map of independent
 /// entries (plugin id -> enabled, marketplace name -> source). Nexus sets
 /// and removes these per entry, so entries the operator added at project
-/// scope survive a pull (NEXUS-APP dispatch ff608ed4).
+/// scope survive a pull.
 pub const KEYED_MAP_KEYS: &[&str] = &["enabledPlugins", "extraKnownMarketplaces"];
 
 pub(crate) fn is_keyed_map(key_path: &str) -> bool {
@@ -947,7 +944,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── classify_file_state: every row of the dispatch 99f335e8 table ──────
+    // ── classify_file_state: every row of the CCX state table ──────────────
 
     #[test]
     fn test_state_create_when_no_local_file() {
@@ -1558,7 +1555,7 @@ mod tests {
 
     #[test]
     fn test_reconcile_keyed_map_drops_only_nexus_entries_no_longer_sent() {
-        // dispatch ff608ed4: a plugin dropped from the managed list is only
+        // A plugin dropped from the managed list is only
         // disabled when Nexus enabled it; operator entries stay.
         let mut settings = serde_json::json!({"enabledPlugins": {
             "a@m": true, "dropped@m": true, "edited@m": false, "mine@m": true

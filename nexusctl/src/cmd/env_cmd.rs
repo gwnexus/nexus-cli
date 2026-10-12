@@ -1,5 +1,5 @@
-//! `nexus env get | keys | set`: the project's backend settings
-//! (NEXUS-APP dispatch b5f7bfb0), via `GET`/`PATCH
+//! `nexus env get | keys | set`: the project's backend settings,
+//! via `GET`/`PATCH
 //! /api/mcp/projects/{id}/settings`. Keys, types and allowed values come
 //! from the backend `schema`; nothing is hardcoded. `nexus env` never writes
 //! local files except through `--pull`.
@@ -79,8 +79,8 @@ pub async fn get(api_url: &str, key: Option<&str>, json: bool) -> anyhow::Result
     Ok(())
 }
 
-/// Whether the backend's settings schema has `key` (e.g. `policy.shadow`,
-/// ADR-0125). Errors when the workspace is not linked or the backend is
+/// Whether the backend's settings schema has `key` (e.g.
+/// `policy.shadow`). Errors when the workspace is not linked or the backend is
 /// unreachable.
 pub(crate) async fn has_setting(api_url: &str, key: &str) -> anyhow::Result<bool> {
     let (project_id, client) = connect(api_url)?;

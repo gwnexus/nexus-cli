@@ -1,7 +1,6 @@
 //! Claude Code runtime details for `nexus status` (version vs. the CCX
 //! compatibility range, enabled plugins, last headroom summary) and the
-//! deprecated `nexus claude` aliases (NEXUS-APP dispatches 99f335e8,
-//! 442f0e97, b5f7bfb0).
+//! deprecated `nexus claude` aliases.
 
 use std::path::Path;
 
@@ -176,7 +175,7 @@ fn enabled_plugins(settings: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `nexus claude launch`: deprecated alias (NEXUS-APP dispatch 442f0e97).
+/// `nexus claude launch`: deprecated alias.
 /// `nexus run` is the only start command; it follows the backend's
 /// `run_target` (including the CCX zellij workspace).
 pub async fn launch(

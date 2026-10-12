@@ -1,4 +1,4 @@
-//! `nexus env` backend contract (NEXUS-APP dispatch b5f7bfb0):
+//! `nexus env` backend contract:
 //! `GET`/`PATCH /api/mcp/projects/{id}/settings` against a local stub.
 
 use nexus_core::api::{NexusClient, SettingsPatchOutcome};

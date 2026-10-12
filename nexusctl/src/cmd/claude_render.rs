@@ -1,4 +1,4 @@
-//! Claude Code renderer (Track B1, ADR-C04 / ADR-C06).
+//! Claude Code renderer.
 //!
 //! Generates native Claude Code project artifacts from the same canonical
 //! skill and actor data the OpenCode renderer already consumes:
@@ -9,8 +9,8 @@
 //! - `.claude/agents/<slug>.md` (one file per assigned actor)
 //!
 //! `.mcp.json` (project root) is written separately by the shared MCP
-//! writer (`write_mcp_configs` in `init.rs` / `pull.rs`) per the path
-//! decision in ADR-C04 (2026-09-20 amendment, Dispatch b8e001e3).
+//! writer (`write_mcp_configs` in `init.rs` / `pull.rs`) per the
+//! agreed path layout.
 //!
 //! This module is purely additive: it never touches the OpenCode
 //! projection (`opencode.json`, `.opencode/`) or the `agentic_root`-relative
@@ -29,7 +29,7 @@ use super::ccx;
 
 /// Map a canonical Nexus skill ID to the public Claude Code command
 /// namespace. Legacy `nx-*` skill IDs are migrated to `nexus-*`
-/// (ADR-C06 "Canonical command identity"); IDs already in the `nexus-*`
+/// (canonical command identity); IDs already in the `nexus-*`
 /// namespace pass through unchanged.
 pub fn canonical_claude_skill_id(skill_id: &str) -> String {
     match skill_id.strip_prefix("nx-") {
@@ -49,7 +49,7 @@ pub fn canonical_claude_skill_id(skill_id: &str) -> String {
 /// this side's canonicalized `skill_id` for Claude Code, plus fields the
 /// backend's copy may not carry — so the backend's block must be removed
 /// first, or it is duplicated verbatim underneath the local one
-/// (NEXUS-APP dispatch 5ddd6355, confirmed live: a `.nexus/skills/nx-init/
+/// (confirmed live: a `.nexus/skills/nx-init/
 /// SKILL.md` in this very repo carried two stacked frontmatter blocks
 /// before this fix).
 ///
@@ -140,7 +140,7 @@ command_slug: {command_slug}
 }
 
 /// `disable-model-invocation: true` (plus newline) for a user-invoked skill
-/// (`invocation == "user"`, NEXUS-APP dispatch 3dc4f5c2, ADR-0124): Claude
+/// (`invocation == "user"`): Claude
 /// Code then only runs it when the user calls `/<skill>`. Empty otherwise.
 /// The server's own body frontmatter is stripped, so the key has to be
 /// rendered here.
@@ -179,8 +179,8 @@ pub(crate) fn yaml_escape(value: &str) -> String {
 /// through the generic `agent_files` list (with `target_path` already
 /// pointing at `<agentic_root>/actors/<slug>.md`) rather than through the
 /// dedicated `actors` field on the af_export response — the dedicated field
-/// can be empty even when actors are assigned (NEXUS-APP dispatch c7701485
-/// follow-up: actor_based + claude-cli projects reported empty
+/// can be empty even when actors are assigned (seen with
+/// actor_based + claude-cli projects reported empty
 /// `.claude/agents/` despite `.nexus/actors/*.md` rendering correctly via
 /// this exact `agent_files` path). Both sources must be considered.
 pub fn actor_slug_from_agent_file(target_path: &str) -> Option<String> {
@@ -253,9 +253,8 @@ pub fn claude_agent_files(
 }
 
 /// Write the provider/model routing catalog consumed by the Claude Code
-/// `routing-guard` plugin adapter (env var `NEXUS_ROUTING_GUARD_CATALOG_PATH`,
-/// NEXUS-APP dispatch 7a2d2adb, ADR-C05 Track B2). Sourced from
-/// `runtime_spec.model_routes` (ADR-C04/F1, af_export commit db5d053) —
+/// `routing-guard` plugin adapter (env var `NEXUS_ROUTING_GUARD_CATALOG_PATH`).
+/// Sourced from `runtime_spec.model_routes` —
 /// OpenCode's equivalent adapter reads the same data live from the SDK
 /// (`client.config.providers()`), so Claude Code needs it materialized to
 /// disk instead. Returns the workspace-relative path if written, `None` if
@@ -279,8 +278,8 @@ pub fn write_routing_catalog(
 }
 
 /// Write the agent-routing table consumed by the Claude Code `routing-guard`
-/// plugin adapter (env var `NEXUS_ROUTING_GUARD_AGENTS_PATH`, NEXUS-APP
-/// dispatch 7a2d2adb). Sourced from `runtime_spec.actors` and
+/// plugin adapter (env var `NEXUS_ROUTING_GUARD_AGENTS_PATH`).
+/// Sourced from `runtime_spec.actors` and
 /// `runtime_spec.primary_agents` — OpenCode's equivalent reads the live
 /// agent-routing table from `client.app.agents()`. Returns the
 /// workspace-relative path if written, `None` if `runtime_spec` had neither
@@ -314,7 +313,7 @@ pub fn write_agent_routing(
 
 /// Convert a Claude Code hook event name from PascalCase to kebab-case,
 /// matching the adapters' own `process.argv[2]` subcommand contract
-/// (confirmed against adapter source, NEXUS-APP dispatch 2d5017f7:
+/// (confirmed against the adapter source:
 /// `PostToolUse` -> `post-tool-use`, `PreCompact` -> `pre-compact`).
 fn kebab_case_event(event: &str) -> String {
     let mut out = String::with_capacity(event.len() + 4);
@@ -332,7 +331,7 @@ fn kebab_case_event(event: &str) -> String {
 }
 
 /// Write each Claude Code hook adapter's bundled script to its
-/// `target_path` (NEXUS-APP dispatch 2d5017f7, Track B3). Platform-managed
+/// `target_path`. Platform-managed
 /// generated code: always (re)written, matching how `.opencode/plugins/*.ts`
 /// is kept in sync on every `nexus pull`. Returns the number of scripts
 /// written.
@@ -353,7 +352,7 @@ pub fn write_claude_hook_adapters(
 }
 
 /// Merge hook registrations for each adapter into `.claude/settings.json`'s
-/// `hooks` block (NEXUS-APP dispatch 2d5017f7, Track B3).
+/// `hooks` block.
 ///
 /// Idempotent per plugin, and safe to run against an already-existing,
 /// operator-customized `settings.json` (unlike the `env` block, which is
@@ -369,8 +368,7 @@ pub fn write_claude_hook_adapters(
 /// entries appended, and the plugin names of any adapters that were
 /// previously Nexus-managed (per `previous_hooks`, from the CCX lock) but
 /// are no longer in `adapters` -- e.g. because the `nexus-core` Claude
-/// plugin now provides the same hooks (NEXUS-APP dispatch 99f335e8
-/// follow-up). For each such adapter, only the exact settings.json hook
+/// plugin now provides the same hooks. For each such adapter, only the exact settings.json hook
 /// entries Nexus itself wrote (matched on event/matcher/command) are
 /// removed -- anything an operator added is left alone -- and the hook
 /// script file under `.claude/hooks/` is deleted only if its content on
@@ -568,8 +566,8 @@ pub(crate) fn remove_hook_registrations(
 }
 
 /// Merge `includeCoAuthoredBy` into `.claude/settings.json` from the
-/// project's `git_config.include_co_authored_by` (NEXUS-APP dispatch
-/// 84e38bd7). Stored uninverted in Claude Code's own semantics: `true`
+/// project's `git_config.include_co_authored_by`. Stored uninverted in Claude Code's own semantics:
+/// `true`
 /// means the `Co-Authored-By: Claude ...` trailer is added.
 ///
 /// A hard operator requirement ("must never appear"), not a cosmetic
@@ -622,7 +620,7 @@ pub fn merge_claude_co_authored_by(target: &Path, include: Option<bool>) -> anyh
 }
 
 /// Merge a generic, forward-compatible set of Nexus-managed keys into
-/// `.claude/settings.json` (NEXUS-APP ADR-0117 "CCX", dispatch bb782869).
+/// `.claude/settings.json`.
 ///
 /// Runs on every init/pull, not create-once (same pattern as
 /// [`merge_claude_hooks`]/[`merge_claude_co_authored_by`]): for each dot
@@ -725,8 +723,8 @@ pub fn apply_generic_settings(
         }
     }
 
-    // Remove a key/array-entries Nexus used to manage but no longer sends
-    // (NEXUS-APP ADR-0117 follow-up, dispatch 99f335e8): never clobbers a
+    // Remove a key/array-entries Nexus used to manage but no longer sends:
+    // never clobbers a
     // value the operator changed since it was last recorded.
     changed += super::ccx::reconcile_settings_removed_keys(settings, spec, previous);
 
@@ -796,8 +794,8 @@ pub fn claude_md_desired_block_text(block: &str) -> String {
 }
 
 /// Maintain a Nexus-managed block inside the root `CLAUDE.md` between
-/// `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers
-/// (NEXUS-APP ADR-0117 "CCX", dispatch bb782869). Everything outside the
+/// `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers.
+/// Everything outside the
 /// markers is user-owned and never rewritten.
 ///
 /// Runs on every init/pull (unlike [`write_claude_root_md`], which is
@@ -810,8 +808,8 @@ pub fn claude_md_desired_block_text(block: &str) -> String {
 /// created containing only the managed block (the create-once bootstrap
 /// template itself is [`write_claude_root_md`]'s job, called separately).
 ///
-/// `locked_sha256` is the block hash recorded in the CCX lock (dispatch
-/// 99f335e8): if the text between the markers no longer matches it (edited
+/// `locked_sha256` is the block hash recorded in the CCX lock: if the text between the markers no
+/// longer matches it (edited
 /// locally) and a different block arrives, the block is kept and
 /// [`ClaudeMdOutcome::Conflict`] returned, unless `force` is set.
 pub fn merge_claude_md_managed_block(
@@ -909,8 +907,7 @@ pub(crate) const BASELINE_MCP_PERMISSIONS: &[&str] = &[
 ];
 
 /// Merge the baseline read-only MCP permission allowlist into
-/// `.claude/settings.json`'s `permissions.allow` array (NEXUS-APP dispatch
-/// TBD, follow-up to run-1 claude-cli diagnostic pass).
+/// `.claude/settings.json`'s `permissions.allow` array.
 ///
 /// Safe to run against an already-existing, operator-customized
 /// `settings.json`, exactly like [`merge_claude_hooks`] and
@@ -975,10 +972,10 @@ pub fn merge_claude_baseline_permissions(target: &Path) -> anyhow::Result<usize>
 
 /// Write `.claude/settings.json` if it does not already exist (user-managed
 /// once created, never overwritten). Contains Claude runtime behavior only —
-/// no secrets, no OpenCode-specific statements (ADR-C04 "CLAUDE.md design").
+/// no secrets, no OpenCode-specific statements.
 /// When `routing_catalog_path` / `agent_routing_path` are provided, an `env`
 /// block is included pointing the `routing-guard` plugin adapter at the
-/// generated catalog/routing files (NEXUS-APP dispatch 7a2d2adb). Returns
+/// generated catalog/routing files. Returns
 /// `true` if the file was created.
 pub fn write_claude_settings(
     target: &Path,
@@ -1081,7 +1078,7 @@ pub fn merge_claude_routing_env(
 
 /// Write the root `CLAUDE.md` as a thin wrapper importing Nexus-owned
 /// instructions, if it does not already exist (user-managed, never
-/// overwritten). Per ADR-C04, runtime-neutral policy stays in
+/// overwritten). Runtime-neutral policy stays in
 /// `<agentic_root>/AGENTS.md` and `<agentic_root>/directives.md`; this file
 /// only bootstraps Claude Code into reading them. Returns `true` if the
 /// file was created.
@@ -1154,15 +1151,15 @@ servers are configured in `.mcp.json`.
 ///
 /// Additive only — never touches the OpenCode projection or the
 /// `agentic_root`-relative canonical paths. `.mcp.json` is written
-/// separately by the shared MCP writer (root path, per ADR-C04).
+/// separately by the shared MCP writer (root path).
 ///
-/// `.claude/hooks/` is intentionally omitted in this pass (Track B1):
-/// hook *behavior* is Track B2 (Nexus plugin Claude adapter, ADR-C05) and
+/// `.claude/hooks/` is intentionally omitted here:
+/// hook *behavior* comes from the Nexus plugin's Claude adapter, and
 /// Claude Code does not require the directory to exist for a hookless
 /// project to function.
 ///
 /// `force` lets a locally edited `CLAUDE.md` managed block be replaced
-/// (CCX conflict rule, dispatch 99f335e8).
+/// (CCX conflict rule).
 #[allow(clippy::too_many_arguments)]
 pub fn render_claude_projection(
     target: &Path,
@@ -1209,8 +1206,7 @@ pub fn render_claude_projection(
     rendered.extend(claude_agent_files(actors, agent_files));
     super::pull::record_generated_many(target, agentic_root, &rendered)?;
 
-    // Routing-guard adapter inputs (NEXUS-APP dispatch 7a2d2adb, ADR-C05
-    // Track B2): only written when the backend supplies runtime_spec.
+    // Routing-guard adapter inputs: only written when the backend supplies runtime_spec.
     let routing_catalog_path = write_routing_catalog(target, agentic_root, runtime_spec)?;
     if let Some(ref p) = routing_catalog_path {
         println!("   {} {}", style("+").bold().green(), p);
@@ -1247,8 +1243,8 @@ pub fn render_claude_projection(
         println!("   {} CLAUDE.md", style("+").bold().green());
     }
 
-    // Claude Code hook adapter scripts (NEXUS-APP dispatch 2d5017f7, Track
-    // B3): only present when the backend supplies claude_hook_adapters.
+    // Claude Code hook adapter scripts: only present when the backend supplies
+    // claude_hook_adapters.
     let scripts_written = write_claude_hook_adapters(target, hook_adapters)?;
     if scripts_written > 0 {
         println!(
@@ -1269,7 +1265,7 @@ pub fn render_claude_projection(
             hooks_appended
         );
     }
-    // Hook adapter removal (NEXUS-APP dispatch 99f335e8 follow-up): an
+    // Hook adapter removal: an
     // adapter previously managed by Nexus that is no longer sent, e.g.
     // because the nexus-core Claude plugin now provides the same hooks.
     for plugin_name in &removed_hook_plugins {
@@ -1307,7 +1303,7 @@ pub fn render_claude_projection(
         .collect();
     ccx::record_hooks_in_lock(target, agentic_root, new_hooks)?;
 
-    // Co-authored-by trailer suppression (NEXUS-APP dispatch 84e38bd7):
+    // Co-authored-by trailer suppression:
     // hard operator requirement, absent-means-suppress, merges alongside
     // the hooks block above rather than replacing the file.
     if merge_claude_co_authored_by(target, include_co_authored_by)? {
@@ -1332,12 +1328,12 @@ pub fn render_claude_projection(
         );
     }
 
-    // Generic Nexus-managed settings.json keys (NEXUS-APP ADR-0117 "CCX"):
+    // Generic Nexus-managed settings.json keys:
     // statusline, attribution, permissions.deny, plugin enablement, known
     // marketplaces. Merges alongside everything above; only present keys
     // change, nothing else in the file is touched. The CCX lock's
     // previously-recorded settings state (if any) drives removal of a key
-    // Nexus no longer manages (dispatch 99f335e8 follow-up); the lock is
+    // Nexus no longer manages; the lock is
     // updated afterward to reflect what is now managed.
     let previous_settings = super::ccx::load_lock(target, agentic_root).and_then(|l| l.settings);
     let settings_before = read_claude_settings(target);
@@ -1358,10 +1354,10 @@ pub fn render_claude_projection(
     }
     super::ccx::record_settings_in_lock(target, agentic_root, claude_settings)?;
 
-    // Root CLAUDE.md managed block (NEXUS-APP ADR-0117 "CCX"): everything
+    // Root CLAUDE.md managed block: everything
     // outside the markers is user-owned and never rewritten. A block edited
-    // locally since the last write is kept unless `force` (dispatch
-    // 99f335e8); its lock hash then stays as is, so it keeps reporting.
+    // locally since the last write is kept unless `force`; its lock hash then stays as is, so it
+    // keeps reporting.
     let locked_block_sha =
         super::ccx::load_lock(target, agentic_root).and_then(|l| l.claude_md_block_sha256);
     let claude_md = merge_claude_md_managed_block(
@@ -1447,7 +1443,7 @@ mod tests {
         }
     }
 
-    // ── strip_frontmatter / yaml_escape (NEXUS-APP dispatch 5ddd6355) ──────
+    // ── strip_frontmatter / yaml_escape ──────
 
     #[test]
     fn test_strip_frontmatter_removes_leading_block() {
@@ -1525,7 +1521,7 @@ mod tests {
 
     #[test]
     fn test_write_claude_skill_includes_description_and_command_slug() {
-        // NEXUS-APP dispatch 5ddd6355: these were silently dropped in
+        // These were once silently dropped in
         // favor of a hardcoded local template.
         let dir = temp_dir("skill-desc-slug");
         let skill = sample_skill("nexus-init");
@@ -1608,7 +1604,7 @@ mod tests {
 
     #[test]
     fn test_write_claude_skill_user_invoked_disables_model_invocation() {
-        // dispatch 3dc4f5c2: invocation=user -> disable-model-invocation in
+        // invocation=user -> disable-model-invocation in
         // the frontmatter, even when the server body brings its own.
         let dir = temp_dir("skill-user-invoked");
         let mut skill = sample_skill("nx-grill-me");
@@ -1721,7 +1717,7 @@ mod tests {
         assert_eq!(actor_slug_from_agent_file(".nexus/actors/notes.txt"), None);
     }
 
-    /// Regression test for NEXUS-APP dispatch c7701485 follow-up:
+    /// Regression test:
     /// actor-based + claude-cli projects delivered actor profiles
     /// exclusively through `agent_files` (generic export list), with an
     /// empty dedicated `actors` field. `.claude/agents/` must still be
@@ -2036,7 +2032,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Parity check (ADR-C04 acceptance criteria: "A compatibility test
+    /// Parity check (acceptance criterion: "A compatibility test
     /// validates the same skill set ... in both projections"). The set of
     /// canonical Claude skill directory names must be derivable 1:1 from
     /// the same skill list the OpenCode command writer consumes, with no
@@ -2060,7 +2056,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Track B3 (NEXUS-APP dispatch 2d5017f7): hook adapter distribution
+    // Hook adapter distribution
     // -------------------------------------------------------------------
 
     fn sample_adapter(plugin_name: &str, target_path: &str) -> ClaudeHookAdapter {
@@ -2117,7 +2113,7 @@ mod tests {
     }
 
     // ── merge_claude_co_authored_by: hard suppression of the
-    // Co-Authored-By trailer (NEXUS-APP dispatch 84e38bd7) ─────────────────
+    // Co-Authored-By trailer ─────────────────
 
     #[test]
     fn test_merge_co_authored_by_absent_means_suppress() {
@@ -2218,8 +2214,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ── merge_claude_generic_settings (NEXUS-APP ADR-0117 "CCX",
-    // dispatch bb782869) ────────────────────────────────────────────────
+    // ── merge_claude_generic_settings (CCX) ─────────────────────────────
 
     fn sample_ccx_spec(keys: &[&str], values: &[(&str, serde_json::Value)]) -> ClaudeSettingsSpec {
         let mut map = serde_json::Map::new();
@@ -2315,8 +2310,8 @@ mod tests {
 
     #[test]
     fn test_merge_generic_settings_applies_nested_values() {
-        // The backend sends `values` nested, not under the dotted key
-        // (NEXUS-APP dispatch 95d81511): the deny list must still land.
+        // The backend sends `values` nested, not under the dotted key:
+        // the deny list must still land.
         let dir = temp_dir("ccx-nested-values");
         let spec = sample_ccx_spec(
             &["permissions.deny", "statusLine"],
@@ -2422,7 +2417,7 @@ mod tests {
 
     #[test]
     fn test_merge_generic_settings_keeps_operator_plugins() {
-        // dispatch ff608ed4: enabledPlugins is merged per entry, a plugin
+        // enabledPlugins is merged per entry, a plugin
         // the operator enabled at project scope survives a pull.
         let dir = temp_dir("ccx-keep-operator-plugins");
         fs::create_dir_all(dir.join(".claude")).unwrap();
@@ -2570,7 +2565,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ── merge_claude_md_managed_block (NEXUS-APP ADR-0117 "CCX") ───────────
+    // ── merge_claude_md_managed_block ───────────
 
     #[test]
     fn test_merge_claude_md_none_block_is_noop() {
@@ -2760,7 +2755,7 @@ mod tests {
     #[test]
     fn test_merge_claude_hooks_updates_matcher_of_own_entry_only() {
         // The backend widened the matcher; an earlier pull wrote the old
-        // one (NEXUS-APP dispatch 95d81511 E2E finding).
+        // one (found in an end-to-end test).
         let dir = temp_dir("hooks-matcher-update");
         let cmd =
             "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/nexus-session-guard.mjs\" post-tool-use";
@@ -2835,8 +2830,8 @@ mod tests {
 
     #[test]
     fn test_merge_claude_hooks_two_plugins_same_event_both_kept() {
-        // Confirmed live against a real Claude Code session (dispatch
-        // 2d5017f7): multiple plugins may register independent array
+        // Confirmed live against a real Claude Code session: multiple plugins may register
+        // independent array
         // entries under the same event key.
         let dir = temp_dir("hooks-merge-multi");
         let headroom = ClaudeHookAdapter {
@@ -2970,8 +2965,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ── merge_claude_hooks removal (NEXUS-APP dispatch 99f335e8
-    // follow-up: hook adapter removal e.g. when nexus-core takes over) ────
+    // ── merge_claude_hooks removal (e.g. when nexus-core takes over) ────
 
     fn hook_lock_entry(
         plugin_name: &str,

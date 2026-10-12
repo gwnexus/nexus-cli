@@ -1,5 +1,5 @@
 //! `nexus status | diff | push | reset` over the shared workspace
-//! classification (NEXUS-APP dispatch b5f7bfb0). `nexus pull` stays the only
+//! classification. `nexus pull` stays the only
 //! command that materializes the workspace; `reset` only restores the named
 //! (or listed) files to what the backend / next pull wants.
 
