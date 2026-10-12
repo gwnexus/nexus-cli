@@ -20,6 +20,7 @@ reqwest.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 console.workspace = true
+dialoguer.workspace = true
 anyhow.workspace = true
 regex.workspace = true
 indicatif.workspace = true

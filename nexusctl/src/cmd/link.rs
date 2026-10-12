@@ -56,27 +56,37 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
         }
 
         println!();
-        println!("   Available projects:");
-        println!();
-        for (i, p) in resp.projects.iter().enumerate() {
-            let slug_display = p.slug.as_deref().unwrap_or("-");
-            let flavor = match p.agent_owner.as_deref() {
-                Some("opencode") => " [opencode]",
-                Some("claude-cli") => " [claude-cli]",
-                _ => "",
-            };
-            println!(
-                "   {}  {} ({}){}",
-                style(format!("[{}]", i + 1)).bold(),
-                style(&p.name).bold(),
-                style(slug_display).dim(),
-                style(flavor).cyan()
-            );
-        }
-        println!();
+        let items: Vec<String> = resp.projects.iter().map(project_label).collect();
+        // The currently linked project, if any, is preselected.
+        let linked = config::load_linked_project(None).ok().flatten();
+        let current = linked
+            .and_then(|l| resp.projects.iter().position(|p| p.id == l.id))
+            .unwrap_or(0);
 
-        // Read selection from stdin
-        let selection = read_selection(resp.projects.len())?;
+        let selection = if console::Term::stderr().is_term() && console::user_attended() {
+            match dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt("Select project (↑/↓, Enter; Esc to cancel)")
+                .items(&items)
+                .default(current)
+                .max_length(15)
+                .interact_opt()?
+            {
+                Some(i) => i,
+                None => {
+                    println!("   {} Cancelled, nothing linked.", style("--").yellow());
+                    return Ok(());
+                }
+            }
+        } else {
+            // No terminal (piped input, scripts): numbered list.
+            println!("   Available projects:");
+            println!();
+            for (i, item) in items.iter().enumerate() {
+                println!("   {}  {}", style(format!("[{}]", i + 1)).bold(), item);
+            }
+            println!();
+            read_selection(items.len())?
+        };
         resp.projects[selection].clone()
     };
 
@@ -137,7 +147,20 @@ pub fn unlink() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolve a token from env var or stored credentials.
+/// One line of the project list: `name (slug) [executioner]`.
+fn project_label(p: &nexus_core::api::ProjectSummary) -> String {
+    let flavor = match p.agent_owner.as_deref() {
+        Some(owner @ ("opencode" | "claude-cli")) => format!(" [{owner}]"),
+        _ => String::new(),
+    };
+    format!(
+        "{} ({}){}",
+        p.name,
+        p.slug.as_deref().unwrap_or("-"),
+        flavor
+    )
+}
+
 /// Read a numeric selection from stdin (1-indexed).
 fn read_selection(max: usize) -> anyhow::Result<usize> {
     use std::io::{self, BufRead, Write};
