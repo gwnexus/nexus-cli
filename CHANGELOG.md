@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.12] - 2026-10-12
+
+Devbox shell state in `nexus status`, `key=value` for `nexus env set`, and an arrow-key project picker for `nexus link`.
+
+### Added
+- **`nexus status` shows the devbox shell state** at the end of the `Workspace:` line: `[devbox shell: active]` inside this workspace's devbox shell (also in a subdirectory), `[devbox shell: active for <root>]` inside another project's devbox shell, and `[devbox shell: inactive, start with devbox shell]` when the workspace has a `devbox.json` but no shell is active. Nothing is shown when devbox is not used. Detection uses `DEVBOX_SHELL_ENABLED` and `DEVBOX_PROJECT_ROOT`. The JSON output (`nexus --output json status`) carries the same state as `devbox_shell` (`active`, `other_project`, `inactive`, `none`).
+- **`nexus env set <KEY>=<VALUE>`** as an alternative to `nexus env set <KEY> <VALUE>`. The argument is split at the first `=`, so values may contain `=`. Missing values and mixing both forms are reported with a clear error.
+- **`nexus link` project picker.** Projects are chosen with the arrow keys (Enter links, Esc cancels without changes), 15 per page, with the currently linked project preselected. Without a terminal (piped input, scripts) the numbered list with numeric input remains.
+
+### Documentation
+- README covers the new options above, plus the removal of dropped workspace files, `nexus pull --dry-run` and `.nexus/plugin.env` from 0.28.11.
+
 ## [0.28.11] - 2026-10-11
 
 `nexus pull` cleans up workspace files the fork dropped, and the plugin env is available to devbox as a dotenv file.

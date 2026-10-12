@@ -51,17 +51,18 @@ nexus pull               # Sync skills and agent files from the platform
 nexus init [path]                       Initialize a Nexus project workspace
 nexus login                             Authenticate with the Nexus platform
 nexus logout                            Remove stored credentials
-nexus status                            Auth, project, environment, and every non-clean file with its next action
+nexus status                            Auth, project, devbox shell, environment, and every non-clean file with its next action
 nexus status --agents [--watch] [--json] Local agent fleet view (main agent, subagents, background, state, tool, runtime)
 nexus doctor claude [--fix]             Check the host tools of the Claude Code workspace, offer install commands
 nexus diff [path]                       Unified diffs for non-clean files (content and projection)
-nexus link [--project-id <id>]          Bind a project to the current workspace
+nexus link [--project-id <id>]          Bind a project to the current workspace (arrow-key picker)
 nexus unlink                            Remove project binding from the workspace
 nexus project link [--runtime-id <n>]   Issue a project inference token (nxs_proj_*) for gateway auth
 nexus project rotate [--finalize]       Rotate the project inference token (zero-downtime overlap)
 nexus project unlink                    Revoke the project inference token and clear local state
 nexus project status                    List issued project inference tokens
 nexus pull [--project-id <id>]          Pull skills and config from the Nexus platform
+nexus pull --dry-run                    Preview devbox workspace changes (incl. removals) without writing
 nexus push [path] [--name "..."]        Push content changes (agent files; devbox changes as a new fork)
 nexus reset [path]                      Discard local changes (content: backend version; projection: desired)
 nexus stash save                        Save modified content files to a stash
@@ -70,6 +71,7 @@ nexus stash list                        List all available stashes
 nexus env [get [key]]                   Show the project's backend settings
 nexus env keys                          List settable keys, types and allowed values
 nexus env set <key> <value> [--pull]    Change a backend setting (admin), optionally pull afterwards
+nexus env set <key>=<value> [--pull]    Same, as one argument
 nexus run [-- <args>]                   Start the agent environment the backend selects
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
@@ -98,11 +100,13 @@ nexus upgrade                           Upgrade CLI to latest release version
 | `nexus deinit`  | `--force`        | Skip confirmation prompt                       |
 | `nexus deinit`  | `--yes`          | Auto-confirm removal                           |
 | `nexus link`    | `--project-id`   | Specify project UUID directly (skip picker)    |
+| `nexus link`    | (none)           | Pick with ↑/↓ and Enter, Esc cancels; numbered list without a terminal |
 | `nexus project link` | `--runtime-id` | Logical runtime name for the token (default: hostname) |
 | `nexus project link` | `--expires`  | Token lifetime: 30d, 12h, 2w, or an ISO 8601 timestamp |
 | `nexus project link` | `--restrict-profiles` | Restrict the token to profile slugs (comma-separated) |
 | `nexus project rotate` | `--finalize` | Revoke the previously superseded token after overlap |
 | `nexus pull`    | `--project-id`   | Pull from a specific project (skip picker)     |
+| `nexus pull`    | `--dry-run`      | Show devbox workspace changes (create, update, keep, remove) without writing |
 | `nexus push`    | `--name`         | Custom fork name (default: auto-generated)     |
 | `nexus push`    | `--dry-run`      | Show what would be pushed without sending      |
 | `nexus push`    | `--workspace`    | Only push workspace files (default for now)    |
@@ -173,6 +177,16 @@ instead. Devbox changes become a new workspace fork:
 nexus push --name "v3.1 ansible"    # push with custom fork name
 nexus push --dry-run                # show what would be pushed
 ```
+
+`nexus pull` removes devbox workspace files it wrote earlier that the fork
+no longer contains, if they are unchanged locally (`REMOVE`); locally
+modified ones are kept and reported (`KEEP`), and files Nexus never wrote are
+not touched. `nexus status` lists them as `ORPHANED` or `DROPPED`, and
+`nexus pull --dry-run` previews all workspace changes.
+
+The project's plugin variables (e.g. `HEADROOM_*`) are written to
+`.nexus/env` (used by `nexus run`) and, as a dotenv file, to
+`.nexus/plugin.env`, which devbox loads with `"env_from": ".nexus/plugin.env"`.
 
 Each push **archives the current active fork** and creates a new one. The
 fork name is either auto-generated (`push-2026-08-23T10-30-00`) or set
@@ -276,7 +290,11 @@ server-side validation, not just a local echo), then the agent environment
 (what `nexus run` starts), the Claude Code runtime (version vs. the CCX
 compatibility range, enabled plugins with `[managed]` marker and install
 scope, last headroom summary), git identity, and the
-workspace file list described above. `--output json` is supported; the exit
+workspace file list described above. The `Workspace:` line ends with the
+devbox shell state: `[devbox shell: active]` inside this workspace's devbox
+shell, `[devbox shell: active for <root>]` inside another project's shell,
+or `[devbox shell: inactive, start with devbox shell]` when the workspace
+has a `devbox.json` but no shell is active (JSON: `devbox_shell`). `--output json` is supported; the exit
 code is 1 when changes are pending.
 
 ```bash
@@ -289,7 +307,7 @@ nexus status
 General
 
   API URL:         https://nexus.gatewarden.eu (global)
-  Workspace:       /path/to/project
+  Workspace:       /path/to/project  [devbox shell: active]
 
   Auth:            OK you@example.com (member)
                    Token: nxs_pat_****... (global)
