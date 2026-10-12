@@ -420,10 +420,11 @@ pub enum EnvAction {
     Keys,
 
     /// Change a setting in the backend (requires project admin rights).
-    /// Takes `<KEY> <VALUE>` or `<KEY>=<VALUE>`.
+    /// Takes `<KEY> <VALUE>` or `<KEY>=<VALUE>`; without arguments, pick
+    /// the key and value interactively.
     Set {
         /// Setting key, e.g. claude.hud, or `key=value`.
-        key: String,
+        key: Option<String>,
 
         /// New value (`true`/`false` for booleans, `unset` clears nullable
         /// keys). Omit it when the key is given as `key=value`.
@@ -1571,8 +1572,8 @@ mod tests {
                     }),
             } => {
                 assert_eq!(
-                    (key.as_str(), value.as_deref(), pull, dry_run),
-                    ("claude.hud", Some("minimal"), true, false)
+                    (key.as_deref(), value.as_deref(), pull, dry_run),
+                    (Some("claude.hud"), Some("minimal"), true, false)
                 );
             }
             _ => panic!("expected env set"),
@@ -1585,7 +1586,10 @@ mod tests {
         match cli.command {
             Command::Env {
                 action: Some(EnvAction::Set { key, value, .. }),
-            } => assert_eq!((key.as_str(), value), ("executioner=opencode", None)),
+            } => assert_eq!(
+                (key.as_deref(), value),
+                (Some("executioner=opencode"), None)
+            ),
             _ => panic!("expected env set"),
         }
     }

@@ -306,6 +306,89 @@ fn agent_file_lines(resp: &ProjectSettingsResponse, dry_run: bool) -> Vec<String
     lines
 }
 
+/// `nexus env set` without arguments: pick the key, then the value, from
+/// the backend schema (current values preselected). Returns `None` when
+/// cancelled.
+pub async fn pick(api_url: &str) -> anyhow::Result<Option<(String, String)>> {
+    if !(console::Term::stderr().is_term() && console::user_attended()) {
+        anyhow::bail!(
+            "missing key: use `nexus env set <KEY> <VALUE>` or `nexus env set <KEY>=<VALUE>`"
+        );
+    }
+    let (project_id, client) = connect(api_url)?;
+    let resp = fetch(&client, &project_id).await?;
+    if !resp.can_write {
+        anyhow::bail!("read-only: changing settings requires project admin rights");
+    }
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    let current = |key: &str| resp.settings.get(key).map(display).unwrap_or_default();
+    let width = resp.schema.iter().map(|s| s.key.len()).max().unwrap_or(0);
+    let keys: Vec<String> = resp
+        .schema
+        .iter()
+        .map(|s| format!("{:<width$}  {}", s.key, current(&s.key)))
+        .collect();
+    let Some(i) = dialoguer::FuzzySelect::with_theme(&theme)
+        .with_prompt("Setting (type to filter, ↑/↓, Enter; Esc to cancel)")
+        .items(&keys)
+        .max_length(15)
+        .interact_opt()?
+    else {
+        println!("   {} Cancelled, nothing changed.", style("--").yellow());
+        return Ok(None);
+    };
+    let schema = &resp.schema[i];
+    if let Some(ref d) = schema.description {
+        println!("   {}", style(d).dim());
+    }
+
+    let choices = value_choices(schema);
+    let value = if choices.is_empty() {
+        dialoguer::Input::<String>::with_theme(&theme)
+            .with_prompt(format!("{} (unset clears it)", schema.key))
+            .with_initial_text(
+                resp.settings
+                    .get(&schema.key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+            )
+            .allow_empty(true)
+            .interact_text()?
+    } else {
+        let now = current(&schema.key);
+        let now = if now == "(unset)" {
+            "unset".into()
+        } else {
+            now
+        };
+        let Some(j) = dialoguer::Select::with_theme(&theme)
+            .with_prompt(format!("{} (↑/↓, Enter; Esc to cancel)", schema.key))
+            .items(&choices)
+            .default(choices.iter().position(|c| *c == now).unwrap_or(0))
+            .interact_opt()?
+        else {
+            println!("   {} Cancelled, nothing changed.", style("--").yellow());
+            return Ok(None);
+        };
+        choices[j].clone()
+    };
+    Ok(Some((schema.key.clone(), value)))
+}
+
+/// The values to offer for a setting: enum values or true/false, plus
+/// `unset` for nullable keys. Empty for free-text settings.
+fn value_choices(schema: &SettingSchema) -> Vec<String> {
+    let mut choices: Vec<String> = match schema.kind.as_str() {
+        "bool" => vec!["true".into(), "false".into()],
+        "enum" => schema.values.iter().map(display).collect(),
+        _ => return Vec::new(),
+    };
+    if schema.nullable {
+        choices.push("unset".into());
+    }
+    choices
+}
+
 fn confirm(question: &str) -> anyhow::Result<bool> {
     use std::io::Write as _;
     print!("   {} {} [y/N] ", style("?").bold().cyan(), question);
@@ -318,6 +401,19 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_value_choices() {
+        assert_eq!(
+            value_choices(&schema("enum", &["a", "b"], true)),
+            vec!["a", "b", "unset"]
+        );
+        assert_eq!(
+            value_choices(&schema("bool", &[], false)),
+            vec!["true", "false"]
+        );
+        assert!(value_choices(&schema("string", &[], true)).is_empty());
+    }
 
     #[test]
     fn test_set_args_accepts_both_forms() {
