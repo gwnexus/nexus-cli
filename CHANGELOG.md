@@ -75,7 +75,7 @@ Readable `nexus status`, a gitleaks config that actually scans, and two wording 
 
 ## [0.28.9] - 2026-10-08
 
-Directives as short rules and the server shadow level (NEXUS-APP ADR-0125, dispatch 15497fa2); user-invoked skills (ADR-0124, dispatch 3dc4f5c2).
+Directives as short rules and the server shadow level; user-invoked skills.
 
 ### Changed
 - **`.nexus/directives.md` is a compact rule list.** One `- MUST: <rule>` / `- SHOULD: <rule>` line per directive, grouped by category in the order the server sends (no longer alphabetical, no heading per directive). MUST/SHOULD comes from the new `level` field, falling back to `priority` (high/urgent = MUST) for older servers; a legacy `body` is kept as an indented continuation. The `nexus-platform` marker stays.
@@ -95,7 +95,7 @@ Directives as short rules and the server shadow level (NEXUS-APP ADR-0125, dispa
 
 ## [0.28.8] - 2026-10-05
 
-Install the Claude Code plugins a project selects in Nexus (NEXUS-APP dispatch ff608ed4, ADR-0117 Tier A).
+Install the Claude Code plugins a project selects in Nexus.
 
 ### Added
 - **Managed plugins are installed, not only enabled.** `nexus pull --force` and `nexus run` (before every launch) install each `enabledPlugins` entry from `af_export.claude_settings` that Claude Code does not have yet: `claude plugin install <id> --scope project --json`. A plugin counts as present at user scope, or at project/local scope for this workspace (`projectPath`). A marketplace a missing plugin needs is added first from `extraKnownMarketplaces` (`claude plugin marketplace add <repo>#<ref> --scope project`, e.g. `gatewarden-nexus`) or refreshed if already registered. Never with `--yes` / `--accept-command`; each plugin is reported as `INSTALLED` / `PRESENT` / `FAILED` (with reason), and a failure never blocks the pull or the launch. Nothing is printed when everything is present. `nexus run` installs into the selected `--account`. `NEXUS_SKIP_PLUGIN_SYNC=1` skips the step.
@@ -110,7 +110,7 @@ Until now `nexus-core@gatewarden-nexus` was only enabled in `.claude/settings.js
 
 ## [0.28.7] - 2026-09-28
 
-Project-local Zellij config per user (NEXUS-APP dispatch bb1ee3a0).
+Project-local Zellij config per user.
 
 ### Added
 - **Personal Zellij config.** `af_export.claude_workspace.zellij_config` (`{ path, body, sha256 }`, normally `.nexus/claude/zellij.local.kdl`) is written by `nexus pull` and now also by `nexus init` (which also writes the personal workspace layout now). It is handled like the layout: `sha256` and path checked, added to `.git/info/exclude`, recorded in the pull manifest (a local edit is kept unless `--force`; `nexus status` / `diff` / `reset` show it as a projection). When the backend stops sending the field, a file written by an earlier pull is removed (a locally edited one is kept and no longer managed).
@@ -121,10 +121,10 @@ Older backends without the fields behave as before. The backend fields are not l
 
 ## [0.28.6] - 2026-09-28
 
-`.mcp.json` project binding (NEXUS-APP dispatch dc24bbae) and the staging follow-up to the per-user workspace and agent observer (dispatch c4f507b5, staging 4083959c).
+`.mcp.json` project binding and the staging follow-up to the per-user workspace and agent observer.
 
 ### Fixed
-- **The Claude Code `nexus` MCP server got no `NEXUS_PROJECT_ID`.** `nexus init` and `nexus pull` now write it into `mcpServers.nexus.env` of `.mcp.json` as a literal (from `.nexus/config.toml`), like `opencode.json` since dispatch ef9b0b0e, so project-scoped MCP tools work without an explicit `project_id`. A plain pull also rewrites an existing `.mcp.json` whose id is missing or stale (operator servers are kept), and `nexus run` adds or repairs it in place alongside the token refresh, so existing workspaces heal without a pull.
+- **The Claude Code `nexus` MCP server got no `NEXUS_PROJECT_ID`.** `nexus init` and `nexus pull` now write it into `mcpServers.nexus.env` of `.mcp.json` as a literal (from `.nexus/config.toml`), like `opencode.json` already did, so project-scoped MCP tools work without an explicit `project_id`. A plain pull also rewrites an existing `.mcp.json` whose id is missing or stale (operator servers are kept), and `nexus run` adds or repairs it in place alongside the token refresh, so existing workspaces heal without a pull.
 - **`export_warnings` were never shown in Claude Code projects.** They were only printed inside the `opencode.json` confirmation gate. Claude Code projects now print them too (no prompt, nothing is gated), e.g. the new `actors_not_exported`; the heading says "export warning(s)" instead of "model-routing warning(s)".
 
 ### Added
@@ -134,11 +134,11 @@ Older backends without the fields behave as before. The backend fields are not l
 ### Changed
 - `nexus status --agents` shows compact model names (`haiku-4-5` instead of a cut-off `claude-hai`); `--json` keeps the full model id.
 
-7 new tests; 739/739 passing, clippy/fmt clean. Verified against staging (`ade9d446`); see the dispatch reply for details.
+7 new tests; 739/739 passing, clippy/fmt clean. Verified against staging.
 
 ## [0.28.5] - 2026-09-26
 
-Claude Code workspace per user (ADR-0119) and the native Agent Observability renderer (ADR-0120), CLI side for NEXUS-APP 0.15 (dispatch c4f507b5).
+Claude Code workspace per user and the native Agent Observability renderer, CLI side of the matching backend release.
 
 ### Added
 - **Personal workspace layout.** `af_export.claude_workspace` (`nexus.claude-workspace.v1`) is written by `nexus pull` to its `path` (normally `.nexus/claude/workspace.local.kdl`) after checking `sha256` and the path. The file and `.nexus/claude/observer/` are added to `.git/info/exclude`. It is recorded in the pull manifest: regenerated on every pull, a local edit is reported and kept unless `--force` (not `-y`), and `nexus status` / `diff` / `reset` show it as a projection (`nexus push` refuses it). `nexus run` keeps using `run_target.layout` with the existing precedence (`--plain`/`--workspace`, then `[run] workspace`, then the run target); while the personal layout has not been pulled yet it falls back to the committed `.nexus/claude/nexus-claude.kdl` with a WARN row.
@@ -150,7 +150,7 @@ The backend `claude_workspace` field is not live yet (staging first); the layout
 
 ## [0.28.4] - 2026-09-26
 
-Runtime switch without leftovers, plus workspace, git-hook and CCX safety (NEXUS-APP dispatch 95d81511).
+Runtime switch without leftovers, plus workspace, git-hook and CCX safety.
 
 ### Added
 - **`nexus pull` removes the projection of the runtime a project no longer uses.** `agent_owner` (`opencode` | `claude-cli`) can be switched at any time: after writing the selected projection, pull removes what Nexus had put on disk for the other runtime (new `projection_cleanup` module). It runs when the cached owner changed and whenever leftovers are still on disk (e.g. repos switched with an earlier CLI). This supersedes the 0.27.0 behaviour ("the stale-projection warning stays, nothing is deleted").
@@ -180,7 +180,7 @@ Verified end to end on a copy of test repo 701 (staging): `claude-cli` pull remo
 ## [0.28.3] - 2026-09-25
 
 ### Added
-- **`nexus run --plain` / `--workspace <none|zellij>`** and a local preference `[run] workspace` in `.nexus/config.toml` (NEXUS-APP dispatch be6be18e). Precedence: flag, then the local preference, then the project's `run_target.workspace`. `--plain` equals `--workspace none` and starts the tool directly; everything else `nexus run` does (preflight, env injection, gh profile, `--account`, headroom env, session summary) stays active. Unsupported values fail with the list of supported ones. Both flags work for Claude Code and OpenCode and combine with `--tool` (with `--tool` alone the project's workspace default does not apply). `nexus pull` never touches `[run] workspace`.
+- **`nexus run --plain` / `--workspace <none|zellij>`** and a local preference `[run] workspace` in `.nexus/config.toml`. Precedence: flag, then the local preference, then the project's `run_target.workspace`. `--plain` equals `--workspace none` and starts the tool directly; everything else `nexus run` does (preflight, env injection, gh profile, `--account`, headroom env, session summary) stays active. Unsupported values fail with the list of supported ones. Both flags work for Claude Code and OpenCode and combine with `--tool` (with `--tool` alone the project's workspace default does not apply). `nexus pull` never touches `[run] workspace`.
 - The pre-launch check has a `Workspace` row naming the workspace and its source (`INFO` for a flag or local override, `PASS` for a working project default, `WARN` when zellij or the layout is missing; it replaces the former separate hint line). The former `Workspace` row (linked project) is now labelled `Project`. `nexus status` shows a local override in the Environment line, and the session summary prints the workspace used.
 
 9 new tests (precedence and rows per source, `--plain` equals `--workspace none`, unsupported value, zellij/layout missing, OpenCode target without workspace, `--tool` combinations, CLI parsing, `nexus pull` preserving `[run] workspace`). 672/672 tests passing, clippy/fmt clean.
@@ -188,13 +188,13 @@ Verified end to end on a copy of test repo 701 (staging): `claude-cli` pull remo
 ## [0.28.2] - 2026-09-25
 
 ### Fixed
-- **`nexus run` session summary no longer shows another session's headroom numbers** (NEXUS-APP dispatch 3334d664). The headroom-intercept adapter writes `session_summary` only for sessions with activity; for a session without one the CLI used to fall back to the most recent older summary (e.g. yesterday's, from an adapter that did not log `mode`, hence "unknown mode"). Only summaries written at or after the run start are used now. Without one, the summary prints `Headroom: <mode> mode, no activity this session`, with the mode taken from `.nexus/headroom-gate-state.json` (`mode`, then `requestedMode`), falling back to `HEADROOM_MODE`; "unknown" only when neither exists. A summary without `mode` also uses this fallback.
+- **`nexus run` session summary no longer shows another session's headroom numbers**. The headroom-intercept adapter writes `session_summary` only for sessions with activity; for a session without one the CLI used to fall back to the most recent older summary (e.g. yesterday's, from an adapter that did not log `mode`, hence "unknown mode"). Only summaries written at or after the run start are used now. Without one, the summary prints `Headroom: <mode> mode, no activity this session`, with the mode taken from `.nexus/headroom-gate-state.json` (`mode`, then `requestedMode`), falling back to `HEADROOM_MODE`; "unknown" only when neither exists. A summary without `mode` also uses this fallback.
 
 4 new tests (stale summary ignored, current summary used, missing mode falls back to gate state, env fallback / unknown). 667/667 tests passing, clippy/fmt clean.
 
 ## [0.28.1] - 2026-09-25
 
-Staging acceptance findings for v0.28.0 (NEXUS-APP dispatch b5f7bfb0).
+Staging acceptance findings for v0.28.0.
 
 ### Fixed
 - `AGENTS.md` and `CLAUDE.md` agent files are classified as **projection** (the backend regenerates them on every export and `af_sync` push rejects them): a local edit is DRIFTED with a `nexus reset` hint, `nexus push` refuses them, and `nexus stash` no longer stashes them.
@@ -208,7 +208,7 @@ Confirmed (no change needed): the UPDATE check ignores `generated_at`, so a time
 
 ## [0.28.0] - 2026-09-25
 
-One command per function group (NEXUS-APP dispatch b5f7bfb0, revised specification).
+One command per function group (revised specification).
 
 ### Added
 - **Shared workspace classification** (`workspace_state`): every managed file is *content* (assigned agent files, `devbox.json`, `scripts/devbox/**`) or *projection* (CCX files, generated agent files such as `ccx-*`, `actor-profile-*`, `actors-json`, `env-nexus-local`, `rtk-filters*` and the headroom plugin, skills and OpenCode commands rendered by pull, the `CLAUDE.md` managed block, managed `.claude/settings.json` keys), with the same rules `nexus pull` applies. Unmanaged files are never listed; the non-selected runtime's projection is reported as STALE and never deleted.
@@ -231,7 +231,7 @@ One command per function group (NEXUS-APP dispatch b5f7bfb0, revised specificati
 
 ## [0.27.0] - 2026-09-25
 
-v0.26.0 acceptance findings (NEXUS-APP dispatch 4820e584) and a single start command (dispatch 442f0e97).
+v0.26.0 acceptance findings and a single start command.
 
 ### Changed
 - **`nexus run` follows the backend's `run_target`** (new `af_export.run_target: { tool, workspace, layout? }`, cached in `.nexus/config.toml` by `nexus pull` so `--no-db` resolves the same start). `workspace: "zellij"` starts zellij with the CCX layout through the full `nexus run` path (pre-launch checks, env injection, gh profile, `--account`, session summary); if zellij or the layout is missing, Claude Code starts directly with a one-line hint. Otherwise `run_target.tool` starts. `--tool` stays an explicit override; backends without `run_target` keep the previous `run.default_tool` / `agent_owner` resolution.
@@ -251,10 +251,10 @@ v0.26.0 acceptance findings (NEXUS-APP dispatch 4820e584) and a single start com
 
 ## [0.26.0] - 2026-09-24
 
-Completes the CCX (Claude Code Experience) CLI scope of NEXUS-APP ADR-0117 (dispatch 99f335e8).
+Completes the CCX (Claude Code Experience) CLI scope.
 
 ### Added
-- **Per-file CCX reconciliation in `nexus pull`.** New `af_export.ccx: { bundle, version, revision, compatibility.claudeCode }` field. When present, `agent_files` with category `claude_experience` are no longer written unconditionally: each is classified against the CCX lock (`<agentic_root>/claude/manifest.lock.json`) as create/clean/updated/drifted/conflict/unmanaged/adopt/orphaned and handled per the dispatch's state table. Local edits and never-managed files are kept and reported. Orphaned files (still locked, no longer sent) are deleted only if unmodified. The lock records bundle metadata and the sha256 of the exact bytes written, and is rewritten once, only after every CCX file was reconciled. When `ccx` is absent, nothing CCX-specific happens and an existing lock is left untouched.
+- **Per-file CCX reconciliation in `nexus pull`.** New `af_export.ccx: { bundle, version, revision, compatibility.claudeCode }` field. When present, `agent_files` with category `claude_experience` are no longer written unconditionally: each is classified against the CCX lock (`<agentic_root>/claude/manifest.lock.json`) as create/clean/updated/drifted/conflict/unmanaged/adopt/orphaned and handled per the CCX state table. Local edits and never-managed files are kept and reported. Orphaned files (still locked, no longer sent) are deleted only if unmodified. The lock records bundle metadata and the sha256 of the exact bytes written, and is rewritten once, only after every CCX file was reconciled. When `ccx` is absent, nothing CCX-specific happens and an existing lock is left untouched.
 - **Migration rule:** on the first CCX-aware pull (no lock, or a v0.25.x lock without a revision), hashes from `.nexus/sync-manifest.json` stand in for lock hashes, so files written by earlier CLIs are recognised as managed.
 - **`nexus pull --force` / `--force-unmanaged` for CCX files.** `--force` overwrites drifted/conflicting files, deletes modified orphans, and replaces a locally edited `CLAUDE.md` block; `--force-unmanaged` additionally replaces files never managed by Nexus. `-y/--yes` deliberately does not imply either, so accepting prompts never discards local edits.
 - **`CLAUDE.md` managed block conflict handling.** The sha256 of the block text is recorded in the lock; if the block was edited locally and a different block arrives, it is kept and reported as CONFLICT unless `--force`.
@@ -264,7 +264,7 @@ Completes the CCX (Claude Code Experience) CLI scope of NEXUS-APP ADR-0117 (disp
 - **`nexus claude launch`**: runs `<agentic_root>/claude/nexus-claude.kdl` through the regular `nexus run --tool zellij -- --layout <file>` path (all pre-launch checks and env injection) when the layout exists and zellij is on PATH; otherwise falls back to `nexus run --tool claude` with a hint. Supports `--account`, `--force`, `--skip-checks`.
 
 ### Fixed
-- `classify_file_state()` classified a locked file whose local content already equals the desired content as CONFLICT when the lock hash was stale (e.g. after a pull that wrote files but failed before saving the lock). It is now CLEAN, per the dispatch's table (`clean: L == D`).
+- `classify_file_state()` classified a locked file whose local content already equals the desired content as CONFLICT when the lock hash was stale (e.g. after a pull that wrote files but failed before saving the lock). It is now CLEAN, per the state table (`clean: L == D`).
 - Settings reconciliation now also drops array entries of a **still-managed** key that Nexus previously added but no longer sends (e.g. one entry removed from `permissions.deny`), keeping operator-added entries.
 - The CCX lock's `applied_at` is now an ISO 8601 UTC timestamp (was epoch seconds).
 
@@ -277,15 +277,15 @@ Completes the CCX (Claude Code Experience) CLI scope of NEXUS-APP ADR-0117 (disp
 ## [0.25.1] - 2026-09-24
 
 ### Added
-- **Hook adapter removal when Nexus stops managing one** (NEXUS-APP ADR-0117 follow-up, dispatch 99f335e8, the same "stopped sending" problem as the v0.25.0 settings-key removal), e.g. when a project enables the `nexus-core` Claude Code plugin which carries the same five hooks and `claude_hook_adapters` becomes empty as a result. `merge_claude_hooks()` now records each adapter's registrations (event/matcher/command) and hook-file SHA-256 in the CCX lock (`<agentic_root>/claude/manifest.lock.json`), and on a later pull removes only the exact `.claude/settings.json` hook entries Nexus itself wrote (matched on event, matcher, and command) plus the corresponding file under `.claude/hooks/` -- but only if that file's content on disk still matches what Nexus last wrote there. An operator's own hook entries and any locally-modified hook script are left untouched.
+- **Hook adapter removal when Nexus stops managing one** (the same "stopped sending" problem as the v0.25.0 settings-key removal), e.g. when a project enables the `nexus-core` Claude Code plugin which carries the same five hooks and `claude_hook_adapters` becomes empty as a result. `merge_claude_hooks()` now records each adapter's registrations (event/matcher/command) and hook-file SHA-256 in the CCX lock (`<agentic_root>/claude/manifest.lock.json`), and on a later pull removes only the exact `.claude/settings.json` hook entries Nexus itself wrote (matched on event, matcher, and command) plus the corresponding file under `.claude/hooks/` -- but only if that file's content on disk still matches what Nexus last wrote there. An operator's own hook entries and any locally-modified hook script are left untouched.
 
 4 new unit tests (removal of an entry no longer present, preservation of an operator-customized hook file, preservation of an operator's own settings entry for the same event, and confirmation a still-managed adapter is never reported as removed). 589/589 tests passing, clippy/fmt clean.
 
 ## [0.25.0] - 2026-09-24
 
 ### Added
-- **CCX lock foundation and settings-key removal** (NEXUS-APP ADR-0117 follow-up, dispatch 99f335e8), closing the gap explicitly flagged as missing in v0.24.0: `merge_claude_generic_settings()` now removes a `.claude/settings.json` key (or array entries) that Nexus used to manage but no longer sends, without ever touching a value the operator changed themselves. New `<agentic_root>/claude/manifest.lock.json` (CLI-owned, atomic write via temp file + rename) records the settings state from the last pull; on the next pull, any key present in the lock but absent from the new `claude_settings.managed_keys` is removed if (and only if) its current value still matches what the lock recorded, and for array values only the lock's own entries are removed, leaving operator additions untouched.
-- New `nexusctl::cmd::ccx` module also includes `classify_file_state()`, the full per-file reconciliation state machine (create/clean/updated/drifted/conflict/unmanaged/adopt/orphaned) specified in dispatch 99f335e8, built and unit tested against every row of the state table now so the next phase is pure wiring rather than new design. Not yet consumed by `nexus pull`.
+- **CCX lock foundation and settings-key removal**, closing the gap explicitly flagged as missing in v0.24.0: `merge_claude_generic_settings()` now removes a `.claude/settings.json` key (or array entries) that Nexus used to manage but no longer sends, without ever touching a value the operator changed themselves. New `<agentic_root>/claude/manifest.lock.json` (CLI-owned, atomic write via temp file + rename) records the settings state from the last pull; on the next pull, any key present in the lock but absent from the new `claude_settings.managed_keys` is removed if (and only if) its current value still matches what the lock recorded, and for array values only the lock's own entries are removed, leaving operator additions untouched.
+- New `nexusctl::cmd::ccx` module also includes `classify_file_state()`, the full per-file reconciliation state machine (create/clean/updated/drifted/conflict/unmanaged/adopt/orphaned) from the CCX specification, built and unit tested against every row of the state table now so the next phase is pure wiring rather than new design. Not yet consumed by `nexus pull`.
 
 ### Deferred
 - Per-file CCX pull wiring (writing CCX-governed files with lock-tracked hashes, the migration-adoption rule, `--force`/`--force-unmanaged` semantics, orphan deletion), the CLAUDE.md-block conflict path, the CCX pull output section, and the three new `nexus claude status`/`diff`/`launch` commands remain open, tracked against the same follow-up dispatch. The lock format's `bundle`/`version`/`revision` fields are `Option`al for now (populated once that wiring lands) so the lock can already track settings-merge history on its own in the meantime.
@@ -295,19 +295,19 @@ Completes the CCX (Claude Code Experience) CLI scope of NEXUS-APP ADR-0117 (disp
 ## [0.24.0] - 2026-09-24
 
 ### Added
-- **Generic `.claude/settings.json` merge from `af_export.claude_settings`** (NEXUS-APP ADR-0117 "CCX", dispatch bb782869). New `claude_settings: { managed_keys, values }` af_export field; new `merge_claude_generic_settings()` sets/replaces each managed dot-path (e.g. `permissions.deny`, `statusLine`, `attribution`, `enabledPlugins`, `extraKnownMarketplaces`) on every init/pull. Array values under a managed path are unioned with any existing entries rather than replaced, so an operator's own `permissions.deny` rules are preserved alongside Nexus's. `attribution` (Claude Code 2.1.281+) is delivered through this generic mechanism; the existing `includeCoAuthoredBy` write (v0.21.2) is unchanged for older CLIs.
+- **Generic `.claude/settings.json` merge from `af_export.claude_settings`**. New `claude_settings: { managed_keys, values }` af_export field; new `merge_claude_generic_settings()` sets/replaces each managed dot-path (e.g. `permissions.deny`, `statusLine`, `attribution`, `enabledPlugins`, `extraKnownMarketplaces`) on every init/pull. Array values under a managed path are unioned with any existing entries rather than replaced, so an operator's own `permissions.deny` rules are preserved alongside Nexus's. `attribution` (Claude Code 2.1.281+) is delivered through this generic mechanism; the existing `includeCoAuthoredBy` write (v0.21.2) is unchanged for older CLIs.
 - **Root `CLAUDE.md` managed block.** New `claude_md_managed_block` af_export field (markdown); new `merge_claude_md_managed_block()` maintains it between `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers on every init/pull. Everything outside the markers is user-owned and never rewritten; if no markers exist yet, the block is inserted at the top once, preserving the rest of the file (including other tools' own managed blocks, e.g. a Next.js `nextjs-agent-rules` block) untouched below it.
 - **Path traversal hardening for `write_agent_file`.** The existing guard only rejected `..` components; a `target_path` that was merely *absolute* (e.g. `/etc/passwd`) previously slipped past it, since `Path::join` on an absolute path replaces the base entirely rather than nesting under it. New `validate_agent_file_target_path()` rejects any absolute path component in addition to `..`, then confirms in depth that the joined, lexically-normalized result still starts with the workspace root. Used by both `nexus init` and `nexus pull`.
 
 ### Deferred
-- The CCX lock/manifest (`.nexus/claude/manifest.lock.json`, per-file clean/updated/conflict/create/unmanaged state, `--force-unmanaged`) and the new `nexus claude status`/`nexus claude diff`/`nexus claude launch` commands from the same ADR-0117 dispatch are a substantially larger, separate subsystem and are not part of this release. `merge_claude_generic_settings()` does not yet remove a managed key that a project stops sending (needs the lock to track prior state) -- every call is purely additive/replacing for whatever `managed_keys` the current `af_export` lists. Tracked as nexus-cli follow-up work.
+- The CCX lock/manifest (`.nexus/claude/manifest.lock.json`, per-file clean/updated/conflict/create/unmanaged state, `--force-unmanaged`) and the new `nexus claude status`/`nexus claude diff`/`nexus claude launch` commands from the same specification are a substantially larger, separate subsystem and are not part of this release. `merge_claude_generic_settings()` does not yet remove a managed key that a project stops sending (needs the lock to track prior state) -- every call is purely additive/replacing for whatever `managed_keys` the current `af_export` lists. Tracked as nexus-cli follow-up work.
 
 25 new unit tests (path hardening, generic settings merge across top-level/nested/array-union/idempotency/preservation cases, CLAUDE.md managed-block creation/replacement/coexistence). 572/572 tests passing, clippy/fmt clean.
 
 ## [0.23.0] - 2026-09-24
 
 ### Changed
-- **Per-project `gh` CLI profile handling now implements the accepted ADR-0116 contract**, superseding the ADR-0115 behaviour shipped hours earlier in v0.22.0 (NEXUS-APP dispatch 0350aee7: that dispatch was resolved one minute before the ADR-0116 amendment was accepted, so v0.22.0 shipped the superseded design). The bug in v0.22.0: an empty profile directory caused `nexus run` to strip `GH_TOKEN`/`GITHUB_TOKEN` and launch with an unauthenticated `GH_CONFIG_DIR`, silently defeating `gh` for the whole session.
+- **Per-project `gh` CLI profile handling now implements the accepted design**, superseding the behaviour shipped hours earlier in v0.22.0 (the design was amended right after that release, so v0.22.0 shipped the superseded variant). The bug in v0.22.0: an empty profile directory caused `nexus run` to strip `GH_TOKEN`/`GITHUB_TOKEN` and launch with an unauthenticated `GH_CONFIG_DIR`, silently defeating `gh` for the whole session.
 - **Input source switched** from `git_config.gh` to `project.gh_effective` (`{ host, user, profile, source, origin }`). A `null`/absent `gh_effective` leaves the environment completely untouched, exactly as before.
 - **Empty profile is now seeded, not silently broken.** When the profile has no cached login, `nexus run` resolves a token per `source` (`keyring` via `gh auth token`, `env:<VAR>`, or `auto` trying keyring then `GH_TOKEN` then `GITHUB_TOKEN`), verifies it via `gh api user` against the expected user, prompts `Import GitHub login <user> from <source> into profile <profile>? [Y/n]` (auto-accepted by the global `-y`/`--yes` flag), and writes it into the isolated profile via `gh auth login --with-token` on stdin. The token is never logged, printed, or passed as a command argument at any point.
 - **Hard safety rule: if seeding is impossible, the resolved token belongs to the wrong user, or the operator declines, the environment is left *completely* untouched** (no `GH_CONFIG_DIR`, no token stripped) and a warning with the exact one-time login command is printed instead. A session must never end up less authenticated than it would have been without Nexus.
@@ -320,7 +320,7 @@ Completes the CCX (Claude Code Experience) CLI scope of NEXUS-APP ADR-0117 (disp
 ## [0.22.0] - 2026-09-24
 
 ### Added
-- **Per-project `gh` CLI profile support** (NEXUS-APP dispatch 8776d208, targeting the nexus-app 0.14.0 release). Projects can now declare `git_config.gh = { host, user, profile }`; the GitHub token itself never leaves the operator's machine and never passes through the Nexus backend, only the local profile name is recorded.
+- **Per-project `gh` CLI profile support** (targeting the nexus-app 0.14.0 release). Projects can now declare `git_config.gh = { host, user, profile }`; the GitHub token itself never leaves the operator's machine and never passes through the Nexus backend, only the local profile name is recorded.
   - `nexus run` (all tools, not just Claude Code): when `git_config.gh` is set, launches the child process with `GH_CONFIG_DIR=~/.config/nexus/gh-profiles/<profile>` (created with `0700` permissions if missing) and strips `GH_TOKEN`/`GITHUB_TOKEN`/`GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` from the child environment, printing a one-line notice naming which variables were removed. Sets `GH_HOST` for a non-`github.com` host. Never modifies the parent shell, never runs `gh auth switch`, never writes a token to disk. `--show-env`/`--dry-run` show `GH_CONFIG_DIR`/`GH_HOST` and the names (not values) of any removed token variables.
   - New "gh Auth" pre-launch check: warns (never blocks) if the profile has no cached login for its host yet, printing the exact one-time command to run (`GH_CONFIG_DIR=... gh auth login --hostname <host>`).
   - `nexus git verify` gained a `gh` check: resolves the active login via `gh api user --jq .login --hostname <host>` under the profile's isolated `GH_CONFIG_DIR` and reports ok / mismatch (active vs. expected) / not logged in / `gh` not installed. `nexus git apply` is unchanged for `gh` (login is interactive by design; nothing to apply).
@@ -340,59 +340,59 @@ Both are follow-ups to a live `claude-cli` diagnostic pass against Nexus Showcas
 ## [0.21.3] - 2026-09-23
 
 ### Fixed
-- **Skill `SKILL.md` writers no longer discard the backend's `description` and `command_slug`, and no longer duplicate frontmatter** (NEXUS-APP dispatch 5ddd6355). All three local skill writers (`write_claude_skill` in the Claude Code renderer, and `write_skill` in both `nexus init` and `nexus pull`) rebuild their own frontmatter block around `ExportedSkill.body` using a hardcoded local template that only carried `skill_id`/`name`/`version`/`source` (plus `command_slug` in the OpenCode writers only). `description` was dropped everywhere, which meant Claude Code's `/` command palette fell back to a raw slug or a blank summary instead of the platform-configured one-line description.
+- **Skill `SKILL.md` writers no longer discard the backend's `description` and `command_slug`, and no longer duplicate frontmatter**. All three local skill writers (`write_claude_skill` in the Claude Code renderer, and `write_skill` in both `nexus init` and `nexus pull`) rebuild their own frontmatter block around `ExportedSkill.body` using a hardcoded local template that only carried `skill_id`/`name`/`version`/`source` (plus `command_slug` in the OpenCode writers only). `description` was dropped everywhere, which meant Claude Code's `/` command palette fell back to a raw slug or a blank summary instead of the platform-configured one-line description.
 - Investigating this surfaced a second, more serious defect confirmed live in this repo's own `.nexus/skills/` workspace state: `ExportedSkill.body` already carries its own frontmatter block from the backend, which the local template was duplicating verbatim underneath its own, producing two stacked frontmatter blocks in the same file. New `claude_render::strip_frontmatter()` removes the backend's block before the local template rebuilds its own; used by all three writers.
 - `description` is now written as a quoted, escaped YAML string (new `claude_render::yaml_escape()`) since free-text descriptions may contain `:` or other characters that break an unquoted YAML scalar; absent means an empty string is written, not the field being omitted, so the frontmatter shape stays uniform across skills.
 
 ## [0.21.2] - 2026-09-23
 
 ### Fixed
-- **Claude Code no longer silently adds a `Co-Authored-By: Claude ...` trailer to commits** (NEXUS-APP dispatch 84e38bd7, escalated to a hard blocking requirement). Previously this depended entirely on an agent remembering the project directive against AI self-references on every single commit, which kept being missed. `includeCoAuthoredBy` (Claude Code's own runtime setting for this, verified against the shipped `cli.js`) is now written into `.claude/settings.json` from the project's `git_config.include_co_authored_by`, uninverted in Claude Code's own semantics (`true` means the trailer is added). Absent means suppress: a project with no value configured (created before this shipped) gets `includeCoAuthoredBy: false` written, not Claude Code's own default, since the whole point is that operators must not have to remember to configure this per project.
-- The merge runs on every `nexus init`/`nexus pull`, not just at first creation, and is safe against an already-existing, operator-customized `settings.json`: only the `includeCoAuthoredBy` key is touched, every other key (including the `hooks` block from Track B3) is preserved verbatim. New `nexus_core::api::GitConfig::include_co_authored_by` field (additive, `serde(default)`, no schema change on the wire since `git_config` already reaches the CLI through the existing project-detail endpoint).
+- **Claude Code no longer silently adds a `Co-Authored-By: Claude ...` trailer to commits** (escalated to a hard blocking requirement). Previously this depended entirely on an agent remembering the project directive against AI self-references on every single commit, which kept being missed. `includeCoAuthoredBy` (Claude Code's own runtime setting for this, verified against the shipped `cli.js`) is now written into `.claude/settings.json` from the project's `git_config.include_co_authored_by`, uninverted in Claude Code's own semantics (`true` means the trailer is added). Absent means suppress: a project with no value configured (created before this shipped) gets `includeCoAuthoredBy: false` written, not Claude Code's own default, since the whole point is that operators must not have to remember to configure this per project.
+- The merge runs on every `nexus init`/`nexus pull`, not just at first creation, and is safe against an already-existing, operator-customized `settings.json`: only the `includeCoAuthoredBy` key is touched, every other key (including the `hooks` block of the hook adapters) is preserved verbatim. New `nexus_core::api::GitConfig::include_co_authored_by` field (additive, `serde(default)`, no schema change on the wire since `git_config` already reaches the CLI through the existing project-detail endpoint).
 
 ## [0.21.1] - 2026-09-22
 
 ### Added
-- **`nexus run --account default`: reserved alias for the implicit `~/.claude` identity** (NEXUS-APP dispatch c0523ebe, follow-up to `--account` in v0.21.0). Previously the only way to use the already-logged-in default Claude identity was to omit `--account` entirely; every literal name unconditionally created a new, unauthenticated directory. `--account default` now behaves identically to omitting the flag (no `CLAUDE_CONFIG_DIR` override, no directory created), so scripts and aliases can always pass an explicit `--account <name>` regardless of how many real named accounts currently exist. Never warned about on non-`claude-cli` projects (unlike a real name), and never treated as a creatable/reservable slot: a literal `default` directory under `claude-accounts/` can never be created via `--account`. The pre-launch check panel shows `default (~/.claude, explicit)` to confirm the explicit choice was honored, distinct from the implicit `default (~/.claude)` shown when `--account` is omitted.
+- **`nexus run --account default`: reserved alias for the implicit `~/.claude` identity** (follow-up to `--account` in v0.21.0). Previously the only way to use the already-logged-in default Claude identity was to omit `--account` entirely; every literal name unconditionally created a new, unauthenticated directory. `--account default` now behaves identically to omitting the flag (no `CLAUDE_CONFIG_DIR` override, no directory created), so scripts and aliases can always pass an explicit `--account <name>` regardless of how many real named accounts currently exist. Never warned about on non-`claude-cli` projects (unlike a real name), and never treated as a creatable/reservable slot: a literal `default` directory under `claude-accounts/` can never be created via `--account`. The pre-launch check panel shows `default (~/.claude, explicit)` to confirm the explicit choice was honored, distinct from the implicit `default (~/.claude)` shown when `--account` is omitted.
 - The `--account` resolution logic was split into a pure decision core (`resolve_account`) separate from directory creation, so the `default`-alias behavior, the non-claude-project warning, and the real-account-name path are each independently unit tested without filesystem or network I/O.
 
 ## [0.21.0] - 2026-09-21
 
 ### Added
-- **`nexus run --account <name>`: named Claude Code account switching for multiple Claude Max subscriptions** (NEXUS-APP dispatch ad6e0176, queued behind and built after the 8de19c71/v0.20.2 billing-auth fixes). Claude Code derives its Keychain credential storage key from `CLAUDE_CONFIG_DIR`; pointing an invocation at a Nexus-managed directory under `~/.config/nexus/claude-accounts/<name>/` gives that name its own isolated login and OAuth refresh cycle, entirely client-side. Nexus never stores or is aware of which account is selected; this is a pure local runtime convenience, scoped strictly to `claude-cli`/`both` projects (`agent_owner` gate via `wants_claude()`), and has no effect (with a warning) elsewhere. Without `--account`, behavior is unchanged (default `~/.claude`). A new "Account" entry in the `nexus run` pre-launch check panel shows which account name (or the default) is active, so the operator is not guessing.
+- **`nexus run --account <name>`: named Claude Code account switching for multiple Claude Max subscriptions** (built after the v0.20.2 billing-auth fixes). Claude Code derives its Keychain credential storage key from `CLAUDE_CONFIG_DIR`; pointing an invocation at a Nexus-managed directory under `~/.config/nexus/claude-accounts/<name>/` gives that name its own isolated login and OAuth refresh cycle, entirely client-side. Nexus never stores or is aware of which account is selected; this is a pure local runtime convenience, scoped strictly to `claude-cli`/`both` projects (`agent_owner` gate via `wants_claude()`), and has no effect (with a warning) elsewhere. Without `--account`, behavior is unchanged (default `~/.claude`). A new "Account" entry in the `nexus run` pre-launch check panel shows which account name (or the default) is active, so the operator is not guessing.
 - **Explicit only, by design**: a single named account per invocation, never automatic. There is no quota/rate-limit detection, no rotation list, and no fallback-on-failure logic, matching the operator's own posture of manually switching between their own subscriptions rather than tooling silently deciding for them. An already-set `CLAUDE_CONFIG_DIR` in the shell is never overwritten.
 - Account names are validated before use (`validate_account_name`): plain alphanumeric/`-`/`_` identifiers only, rejecting empty names, `.`/`..`, and path separators, so a name cannot escape `~/.config/nexus/claude-accounts/`.
 
 ## [0.20.2] - 2026-09-21
 
 ### Fixed
-- **`nexus run --force` no longer skips pre-launch checks entirely** (regression follow-up to NEXUS-APP dispatch 8de19c71, found and reproduced live by NEXUS-APP within minutes of the v0.20.1 release). The `Command::Run` dispatch in `mod.rs` computed `skip_checks || force`, so passing `--force` alone (without `--skip-checks`) skipped the whole `run_prelaunch_checks` panel, including the just-shipped Billing Auth check that is deliberately not supposed to be bypassable by `--force`. `--force` is documented as "skip pre-launch confirmation prompt (non-interactive/CI mode)" and must not imply skipping the checks themselves. Extracted the call-site mapping into `should_skip_prelaunch_checks(skip_checks, force)` (now `skip_checks` alone) with 3 dedicated regression tests pinning the exact bug shape, since the previous fix's unit tests exercised `run_prelaunch_checks`'s internal logic in isolation and could not see this call-site wiring bug.
+- **`nexus run --force` no longer skips pre-launch checks entirely** (regression found and reproduced live within minutes of the v0.20.1 release). The `Command::Run` dispatch in `mod.rs` computed `skip_checks || force`, so passing `--force` alone (without `--skip-checks`) skipped the whole `run_prelaunch_checks` panel, including the just-shipped Billing Auth check that is deliberately not supposed to be bypassable by `--force`. `--force` is documented as "skip pre-launch confirmation prompt (non-interactive/CI mode)" and must not imply skipping the checks themselves. Extracted the call-site mapping into `should_skip_prelaunch_checks(skip_checks, force)` (now `skip_checks` alone) with 3 dedicated regression tests pinning the exact bug shape, since the previous fix's unit tests exercised `run_prelaunch_checks`'s internal logic in isolation and could not see this call-site wiring bug.
 
 ## [0.20.1] - 2026-09-21
 
 ### Fixed
-- **`nexus run` now hard-fails when an inherited `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` would silently defeat a Claude Max subscription** (NEXUS-APP dispatch 8de19c71). Claude Code's auth precedence puts these credentials ahead of the Keychain OAuth subscription login: if either is present and non-empty, `claude` authenticates via metered API-key billing instead of the Max subscription, with no warning or error in the common case. Nexus workspaces commonly carry `ANTHROPIC_API_KEY` in `.env.nexus.local` for unrelated reasons (BYOK provider keys, other tooling), and `nexus run` already injects those vars into the process environment before spawning the tool, so this was the default shape of such a workspace, not a contrived edge case. This new "Billing Auth" pre-launch check is scoped strictly to `claude-cli`/`both` projects (`direct_provider`/`nexus_gateway` projects rely on `ANTHROPIC_API_KEY` and are unaffected), and unlike every other pre-launch check it is deliberately NOT bypassable via `--force`: this is a billing-correctness bug, not a UX rough edge.
+- **`nexus run` now hard-fails when an inherited `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` would silently defeat a Claude Max subscription**. Claude Code's auth precedence puts these credentials ahead of the Keychain OAuth subscription login: if either is present and non-empty, `claude` authenticates via metered API-key billing instead of the Max subscription, with no warning or error in the common case. Nexus workspaces commonly carry `ANTHROPIC_API_KEY` in `.env.nexus.local` for unrelated reasons (BYOK provider keys, other tooling), and `nexus run` already injects those vars into the process environment before spawning the tool, so this was the default shape of such a workspace, not a contrived edge case. This new "Billing Auth" pre-launch check is scoped strictly to `claude-cli`/`both` projects (`direct_provider`/`nexus_gateway` projects rely on `ANTHROPIC_API_KEY` and are unaffected), and unlike every other pre-launch check it is deliberately NOT bypassable via `--force`: this is a billing-correctness bug, not a UX rough edge.
 
 ## [0.20.0] - 2026-09-21
 
 ### Added
-- **`nexus run` and `nexus preflight` now respect the project's `agent_owner`** instead of assuming OpenCode (NEXUS-APP dispatch dfd4e655). `nexus run --tool claude` already worked mechanically, but every surrounding check was OpenCode-specific, so a `claude-cli` project got actively misleading output.
+- **`nexus run` and `nexus preflight` now respect the project's `agent_owner`** instead of assuming OpenCode. `nexus run --tool claude` already worked mechanically, but every surrounding check was OpenCode-specific, so a `claude-cli` project got actively misleading output.
 - `[project].agent_owner` is cached in `.nexus/config.toml` by `nexus link`, `nexus init`, and `nexus pull`, so launch-time commands resolve the tool flavor without a network round-trip. `nexus run` additionally refreshes it from `af_export` when it is talking to the backend anyway (no extra request). New `nexus_core::config` helpers: `load_agent_owner`, `update_agent_owner`, `tool_for_agent_owner`.
 - `nexus preflight` checks for the `claude` binary, gated on `agent_owner` being `claude-cli` or `both`. OpenCode-only projects are never told to install a binary they do not launch.
 
 ### Changed
 - The `nexus run` pre-launch MCP config check inspects the artifact that actually applies to the flavor: root `.mcp.json` for `claude-cli`, `opencode.json` for `opencode`, both for `both`. Previously a `claude-cli` project was warned "No opencode.json - run 'nexus init'" about a file it is never supposed to have.
-- The post-session Headroom section detects the Claude Code hook adapter under `.claude/hooks/` (shipped in 0.19.0, Track B3) in addition to the OpenCode plugin at `.opencode/plugins/nexus-headroom-intercept.ts`. The adapter file name is server-supplied, so detection matches on the plugin name rather than a fixed path.
+- The post-session Headroom section detects the Claude Code hook adapter under `.claude/hooks/` (shipped in 0.19.0) in addition to the OpenCode plugin at `.opencode/plugins/nexus-headroom-intercept.ts`. The adapter file name is server-supplied, so detection matches on the plugin name rather than a fixed path.
 - `run.default_tool` is now optional (`Option<String>`), so "not configured" is distinguishable from an explicit `"opencode"`. Resolution order for `nexus run`: `--tool` > explicit `run.default_tool` > `agent_owner` (`claude-cli` -> `claude`) > `opencode`. Existing config files with an explicit `default_tool` are unaffected; an unset value is no longer written back to `~/.config/nexus/config.toml`.
 - `both` and unknown/absent flavors continue to resolve to `opencode`. Workspaces linked before `agent_owner` was cached behave exactly as before until the next `nexus link` / `nexus init` / `nexus pull`.
 
 ### Notes
-- Out of scope per the dispatch: no job/queue/daemon semantics, no headless plumbing or result write-back (those belong to ADR-0107 delegation work), and no changes to `claude_render.rs` or `.mcp.json` generation.
+- Out of scope: no job/queue/daemon semantics, no headless plumbing or result write-back (those belong to separate delegation work), and no changes to `claude_render.rs` or `.mcp.json` generation.
 
 ## [0.19.0] - 2026-09-21
 
 ### Added
-- **Distribution for Claude Code plugin hook adapters** (Track B3, NEXUS-APP dispatch 2d5017f7). Previously `nexus pull`/`nexus init` had no way to get the actual `session-guard`/`headroom-intercept`/`compaction-plus`/`routing-guard`/`cost-control` adapter scripts onto a Claude Code project's disk, or to wire them into `.claude/settings.json`'s `hooks` block -- verified live end-to-end only via a manual, machine-specific workaround. Mirrors the existing OpenCode plugin distribution pattern (`.opencode/plugins/*.ts`, embedded server-side and written out by the CLI):
+- **Distribution for Claude Code plugin hook adapters**. Previously `nexus pull`/`nexus init` had no way to get the actual `session-guard`/`headroom-intercept`/`compaction-plus`/`routing-guard`/`cost-control` adapter scripts onto a Claude Code project's disk, or to wire them into `.claude/settings.json`'s `hooks` block -- verified live end-to-end only via a manual, machine-specific workaround. Mirrors the existing OpenCode plugin distribution pattern (`.opencode/plugins/*.ts`, embedded server-side and written out by the CLI):
   - New additive `af_export` field `claude_hook_adapters: Option<Vec<ClaudeHookAdapter>>` (`nexus_core::api`): each entry carries a `plugin_name`, `target_path` (e.g. `.claude/hooks/nexus-session-guard.mjs`), the bundled single-file `body`, and a list of `hook_events` (`event`, optional `matcher`, optional `timeout`). nexus-cli is a thin consumer -- nexus-app/nexus-oc-plugins own the bundled script content and versioning.
   - `nexus init`/`nexus pull` now write each adapter's `body` to its `target_path` under `.claude/hooks/` (platform-managed generated code, always re-synced on every pull, like `.opencode/plugins/*.ts`).
   - `.claude/settings.json`'s `hooks` block is merged idempotently, keyed by plugin: a new `{matcher, hooks: [...]}` entry is appended per `(event, adapter)` pair only if no existing entry's command already references that adapter's `target_path`; existing entries (including operator-hand-written ones) are never touched or removed. Unlike the `env` block (routing-guard follow-up, create-once-only), this merge runs on every `nexus pull`/`nexus init`, including against an already-existing `settings.json` -- confirmed multiple plugins can validly share the same event key as independent array entries (e.g. `headroom-intercept` and `cost-control` both on `Stop`).
@@ -403,21 +403,21 @@ Both are follow-ups to a live `claude-cli` diagnostic pass against Nexus Showcas
 ## [0.18.1] - 2026-09-21
 
 ### Added
-- **`nexus_cost_summary` (local MCP server) now implements real Helicone-backed cost/spend queries** (NEXUS-APP dispatch af407643 follow-up). Per the exact spec supplied (`core/cost-control/helicone.ts`): queries `POST https://api.helicone.ai/v1/request/query` filtered by `Helicone-Session-Id`, aggregates `prompt_tokens`/`completion_tokens`/`prompt_cache_read_tokens`/`prompt_cache_write_tokens`/`helicone_cost` per model, and renders a markdown table plus grand totals. Reads `HELICONE_API_KEY` and `HELICONE_SESSION_ID`/`NEXUS_SESSION_ID` from the process environment; degrades gracefully with an honest, non-error message (not a crash, not fabricated numbers) when either is absent, matching the existing plugin's documented graceful-degradation behavior for an optional prerequisite. 6 new unit tests (credential-injected, no env-var mutation to keep parallel test execution safe): both graceful-degradation paths and markdown aggregation across multiple models. Full workspace suite: 293/293 green, no clippy warnings, cargo fmt clean.
+- **`nexus_cost_summary` (local MCP server) now implements real Helicone-backed cost/spend queries**. Per the exact spec supplied (`core/cost-control/helicone.ts`): queries `POST https://api.helicone.ai/v1/request/query` filtered by `Helicone-Session-Id`, aggregates `prompt_tokens`/`completion_tokens`/`prompt_cache_read_tokens`/`prompt_cache_write_tokens`/`helicone_cost` per model, and renders a markdown table plus grand totals. Reads `HELICONE_API_KEY` and `HELICONE_SESSION_ID`/`NEXUS_SESSION_ID` from the process environment; degrades gracefully with an honest, non-error message (not a crash, not fabricated numbers) when either is absent, matching the existing plugin's documented graceful-degradation behavior for an optional prerequisite. 6 new unit tests (credential-injected, no env-var mutation to keep parallel test execution safe): both graceful-degradation paths and markdown aggregation across multiple models. Full workspace suite: 293/293 green, no clippy warnings, cargo fmt clean.
 
 ## [0.18.0] - 2026-09-20
 
 ### Added
-- **`nexus mcp-local`: a local stdio MCP server exposing tools with no Claude Code custom-tool equivalent** (NEXUS-APP dispatch af407643). Claude Code has no custom-tool-registration hook, so MCP is the only path to a new agent-callable tool; nexus-mcp (the hosted server) correctly declined to own these since they need machine-local filesystem/session state a hosted server cannot have (nexus-mcp dispatch d22de820). `nexus mcp-local` is a hidden CLI subcommand speaking MCP's newline-delimited JSON-RPC 2.0 stdio transport, spawned automatically by Claude Code via a new `nexus-local-tools` entry generated in `.mcp.json` for Claude Code projects (alongside the existing `nexus`/`nexus-headroom` entries). Exposes:
+- **`nexus mcp-local`: a local stdio MCP server exposing tools with no Claude Code custom-tool equivalent**. Claude Code has no custom-tool-registration hook, so MCP is the only path to a new agent-callable tool; nexus-mcp (the hosted server) correctly declined to own these since they need machine-local filesystem/session state a hosted server cannot have. `nexus mcp-local` is a hidden CLI subcommand speaking MCP's newline-delimited JSON-RPC 2.0 stdio transport, spawned automatically by Claude Code via a new `nexus-local-tools` entry generated in `.mcp.json` for Claude Code projects (alongside the existing `nexus`/`nexus-headroom` entries). Exposes:
   - `nexus_headroom_intercept_retrieve` - reads the original uncompressed content behind a Headroom-compressed tool result, by content hash, from the project-local `.nexus/headroom-cache/<project_id>/<hash>.json` cache (nexus-oc-plugins' `OriginalStore` format). Supports an optional `query` argument to filter to matching lines, mirroring the equivalent OpenCode plugin tool. Hash input is validated (hex-only, bounded length) against path traversal.
-  - `nexus_cost_summary` - registered for tool discovery, but intentionally returns an honest "not yet available" message rather than fabricated numbers: the underlying cost/spend computation (Helicone-backed telemetry) lives in nexus-oc-plugins' `core/cost-control` (TypeScript) and nexus-cli has no local data source to read it from yet. Flagged back to NEXUS-APP as a follow-up (needs either a concrete local data file or an API endpoint).
+  - `nexus_cost_summary` - registered for tool discovery, but intentionally returns an honest "not yet available" message rather than fabricated numbers: the underlying cost/spend computation (Helicone-backed telemetry) lives in nexus-oc-plugins' `core/cost-control` (TypeScript) and nexus-cli has no local data source to read it from yet. Flagged back to the backend as a follow-up (needs either a concrete local data file or an API endpoint).
   - New `nexusctl::cmd::mcp_local` module, wired into both `.mcp.json` writers (`nexus init` and `nexus pull`, added if missing, never overwritten if the operator has customized the file). Logging and the CLI's own update-check are both suppressed/redirected to stderr for this subcommand so nothing but the JSON-RPC protocol itself ever reaches stdout.
   - 11 new unit tests (protocol shape, hash validation incl. path-traversal rejection, cache-read and query-filter behavior, honest-unavailable cost summary). Full workspace suite: 290/290 green, no clippy warnings, cargo fmt clean.
 
 ## [0.17.2] - 2026-09-20
 
 ### Added
-- **`nexus init`/`nexus pull` now generate routing-guard adapter inputs for Claude Code projects** (NEXUS-APP dispatch 7a2d2adb, ADR-C05 Track B2). OpenCode's `routing-guard` plugin detects provider/model routing divergence live via the OpenCode SDK (`client.config.providers()`, `client.app.agents()`); Claude Code has no equivalent SDK surface, so its adapter instead reads two JSON files from disk. For `terminal_runtime=claude_code` / `claude-cli`-flavored projects where the backend supplies `runtime_spec` (ADR-C04/F1, additive af_export field, commit db5d053):
+- **`nexus init`/`nexus pull` now generate routing-guard adapter inputs for Claude Code projects**. OpenCode's `routing-guard` plugin detects provider/model routing divergence live via the OpenCode SDK (`client.config.providers()`, `client.app.agents()`); Claude Code has no equivalent SDK surface, so its adapter instead reads two JSON files from disk. For `terminal_runtime=claude_code` / `claude-cli`-flavored projects where the backend supplies `runtime_spec` (additive af_export field):
   - `<agentic_root>/generated/routing-catalog.json` - sourced from `runtime_spec.model_routes`.
   - `<agentic_root>/generated/agent-routing.json` - sourced from `runtime_spec.actors` and `runtime_spec.primary_agents`.
   - `.claude/settings.json` (on first creation only) now includes an `env` block with `NEXUS_ROUTING_GUARD_CATALOG_PATH` / `NEXUS_ROUTING_GUARD_AGENTS_PATH` pointing at the two files above, so the plugin adapter finds them without extra user configuration.
@@ -428,25 +428,25 @@ Both are follow-ups to a live `claude-cli` diagnostic pass against Nexus Showcas
 ## [0.17.1] - 2026-09-20
 
 ### Fixed
-- **`.claude/agents/` was not rendered at all for `agent_mode=actor_based` + `claude-cli`-flavored projects** (NEXUS-APP dispatch c7701485 follow-up, found during live staging verification of v0.17.0). Root cause: the Claude Code renderer's actor writer only read the dedicated `actors` field on the af_export response (`ExportedActorFile`), but some backend project configurations deliver actor profiles exclusively through the generic `agent_files` list instead, with `target_path` already pointing at `<agentic_root>/actors/<slug>.md` (the same mechanism used for `AGENTS.md`/`directives.md`). That field can be empty even when actors are assigned and `<agentic_root>/actors/*.md` renders correctly via `agent_files`, since the two are actually different af_export fields. `write_claude_agents()` now merges both sources: the dedicated `actors` field and any `agent_files` entry whose `target_path` lives directly under an `.../actors/` directory (`.md` files only, so `AGENTS.md`/`CLAUDE.md` are never mistaken for actor profiles), deduplicated by slug. Verified against the reported repro (6 actors, `agent_mode=actor_based`, `agent_owner=claude-cli`): `.mcp.json`, `.claude/skills/`, and the OpenCode-side `.nexus/actors/*.md` were already confirmed correct in v0.17.0 and are unaffected by this fix. 4 new unit tests (regression test reproduces the exact reported shape: `agent_files`-only delivery, `actors` field empty). Full workspace suite: 271/271 green, no clippy warnings.
+- **`.claude/agents/` was not rendered at all for `agent_mode=actor_based` + `claude-cli`-flavored projects** (found during live staging verification of v0.17.0). Root cause: the Claude Code renderer's actor writer only read the dedicated `actors` field on the af_export response (`ExportedActorFile`), but some backend project configurations deliver actor profiles exclusively through the generic `agent_files` list instead, with `target_path` already pointing at `<agentic_root>/actors/<slug>.md` (the same mechanism used for `AGENTS.md`/`directives.md`). That field can be empty even when actors are assigned and `<agentic_root>/actors/*.md` renders correctly via `agent_files`, since the two are actually different af_export fields. `write_claude_agents()` now merges both sources: the dedicated `actors` field and any `agent_files` entry whose `target_path` lives directly under an `.../actors/` directory (`.md` files only, so `AGENTS.md`/`CLAUDE.md` are never mistaken for actor profiles), deduplicated by slug. Verified against the reported repro (6 actors, `agent_mode=actor_based`, `agent_owner=claude-cli`): `.mcp.json`, `.claude/skills/`, and the OpenCode-side `.nexus/actors/*.md` were already confirmed correct in v0.17.0 and are unaffected by this fix. 4 new unit tests (regression test reproduces the exact reported shape: `agent_files`-only delivery, `actors` field empty). Full workspace suite: 271/271 green, no clippy warnings.
 
 ## [0.17.0] - 2026-09-20
 
 ### Added
-- **Native Claude Code terminal renderer** (Track B1, NEXUS-APP Dispatch c7701485, ADR-C04/ADR-C06). `nexus init` and `nexus pull` now additionally generate a first-class Claude Code project projection alongside the existing OpenCode output, so a project works natively with `claude` in the terminal, not just via `nexus run`:
+- **Native Claude Code terminal renderer**. `nexus init` and `nexus pull` now additionally generate a first-class Claude Code project projection alongside the existing OpenCode output, so a project works natively with `claude` in the terminal, not just via `nexus run`:
   - Root `CLAUDE.md` (thin wrapper, created only if absent, never overwritten): bootstraps Claude Code into `<agentic_root>/AGENTS.md`, `<agentic_root>/directives.md`, and `.mcp.json`.
   - `.claude/settings.json` (created only if absent): Claude runtime behavior only, contains no secrets and no OpenCode-specific statements.
   - `.claude/skills/<canonical-id>/SKILL.md`: one native Claude Code project skill per canonical Nexus skill, with resource files carried over. Skill directory names become Claude Code's `/<canonical-id>` slash-commands.
   - `.claude/agents/<slug>.md`: one native Claude Code sub-agent file per assigned project actor, reusing the same profile body already delivered for `<agentic_root>/actors/<slug>.md` (one canonical actor definition, two projections).
-  - `.claude/hooks/` is intentionally **not** generated in this pass: hook *behavior* (Headroom, Compaction Plus, Session Guard, Routing Guard, Cost Control adapters) is separate follow-up work (Track B2), and Claude Code does not require the directory to exist for a hookless project.
-  - New skill-naming migration: legacy `nx-*` canonical skill IDs are rendered under the `nexus-*` Claude Code command namespace (e.g. `nx-sec-scan` -> `.claude/skills/nexus-sec-scan/`), per ADR-C06 "Canonical command identity". `nexus-*` IDs pass through unchanged.
+  - `.claude/hooks/` is intentionally **not** generated in this pass: hook *behavior* (Headroom, Compaction Plus, Session Guard, Routing Guard, Cost Control adapters) is separate follow-up work, and Claude Code does not require the directory to exist for a hookless project.
+  - New skill-naming migration: legacy `nx-*` canonical skill IDs are rendered under the `nexus-*` Claude Code command namespace (e.g. `nx-sec-scan` -> `.claude/skills/nexus-sec-scan/`) for a canonical command identity. `nexus-*` IDs pass through unchanged.
   - Additive and opt-in by flavor: entirely skipped when a project's tool flavor is `opencode`-only; the existing OpenCode projection (`opencode.json`, `.opencode/commands/`) is completely unaffected in every flavor. `.mcp.json` at the project root (already fixed in v0.16.9) is the shared MCP config consumed by this renderer.
-  - New module `nexusctl::cmd::claude_render` with 12 new unit tests, including a skill-set parity check (no ID collisions from the `nx-*` -> `nexus-*` migration) per ADR-C04's acceptance criteria. Full workspace suite: 267/267 green, no clippy warnings.
+  - New module `nexusctl::cmd::claude_render` with 12 new unit tests, including a skill-set parity check (no ID collisions from the `nx-*` -> `nexus-*` migration) as required by the acceptance criteria. Full workspace suite: 267/267 green, no clippy warnings.
 
 ## [0.16.9] - 2026-09-20
 
 ### Fixed
-- **Claude Code project-scoped MCP config now renders to `.mcp.json` at the project root, not `<agentic_root>/mcp.json` (e.g. `.claude/mcp.json` or `.nexus/mcp.json`)** (NEXUS-APP dispatch b8e001e3, blocker for Track B1 "Claude Code renderer"). Per Claude Code's documented MCP installation scopes (code.claude.com/docs/en/mcp), a project-scoped, team-shared, git-committed MCP config must live at `.mcp.json` in the project root; the CLI previously wrote it under the configurable `agentic_root` instead, and a test in `init.rs` actively asserted that a root-level `.mcp.json` must NOT exist, treating the correct format as a "legacy" one. `nexus init`, `nexus pull`, and `nexus run`'s credential auto-sync now consistently read/write `.mcp.json` at the workspace root for the Claude Code projection; `nexus preflight`'s MCP config detection was updated to match. The OpenCode projection (`opencode.json`) and the `agentic_root`-relative convention for all other artifacts (skills, commands, directives, `CLAUDE.md`) are unaffected. `nexus deinit` already removed root `.mcp.json` correctly and required no change. Full workspace test suite (255/255) green, no clippy warnings.
+- **Claude Code project-scoped MCP config now renders to `.mcp.json` at the project root, not `<agentic_root>/mcp.json` (e.g. `.claude/mcp.json` or `.nexus/mcp.json`)** (blocker for the Claude Code renderer). Per Claude Code's documented MCP installation scopes (code.claude.com/docs/en/mcp), a project-scoped, team-shared, git-committed MCP config must live at `.mcp.json` in the project root; the CLI previously wrote it under the configurable `agentic_root` instead, and a test in `init.rs` actively asserted that a root-level `.mcp.json` must NOT exist, treating the correct format as a "legacy" one. `nexus init`, `nexus pull`, and `nexus run`'s credential auto-sync now consistently read/write `.mcp.json` at the workspace root for the Claude Code projection; `nexus preflight`'s MCP config detection was updated to match. The OpenCode projection (`opencode.json`) and the `agentic_root`-relative convention for all other artifacts (skills, commands, directives, `CLAUDE.md`) are unaffected. `nexus deinit` already removed root `.mcp.json` correctly and required no change. Full workspace test suite (255/255) green, no clippy warnings.
 
 
 ### Added
@@ -455,22 +455,22 @@ Both are follow-ups to a live `claude-cli` diagnostic pass against Nexus Showcas
 ## [0.16.7] - 2026-09-20
 
 ### Fixed
-- **`nexus login`/`nexus logout` no longer leak PAT scope across projects** (NEXUS-APP dispatch 51f7e592: "nexus login: PAT scope leaks globally, overrides other projects' prod tokens"). Previously `Credentials` had a single flat global store at `~/.config/nexus/credentials.toml`, so logging in to any project silently overwrote the token used by every other authenticated project on the machine. `nexus login`/`nexus logout` now default to a project-local `.nexus/credentials.toml` in the current workspace (already git-excluded via `nexus shadow`), scoped to that project only, mirroring the local/global provenance model already used by `nexus config set --local/--global`. Pass `--global` to opt in to the shared, machine-wide credential store explicitly. Token resolution order is now: `NEXUS_PRIVATE_TOKEN` env var, then project-local `.nexus/credentials.toml`, then global `~/.config/nexus/credentials.toml`. `nexus status` now reports which layer (`env`/`local`/`global`) supplied the active token. Added regression tests asserting that logging in/out of one project's local scope never mutates another project's local credentials.
+- **`nexus login`/`nexus logout` no longer leak PAT scope across projects** (a PAT scope leaked globally and overrode other projects' prod tokens). Previously `Credentials` had a single flat global store at `~/.config/nexus/credentials.toml`, so logging in to any project silently overwrote the token used by every other authenticated project on the machine. `nexus login`/`nexus logout` now default to a project-local `.nexus/credentials.toml` in the current workspace (already git-excluded via `nexus shadow`), scoped to that project only, mirroring the local/global provenance model already used by `nexus config set --local/--global`. Pass `--global` to opt in to the shared, machine-wide credential store explicitly. Token resolution order is now: `NEXUS_PRIVATE_TOKEN` env var, then project-local `.nexus/credentials.toml`, then global `~/.config/nexus/credentials.toml`. `nexus status` now reports which layer (`env`/`local`/`global`) supplied the active token. Added regression tests asserting that logging in/out of one project's local scope never mutates another project's local credentials.
 
 ## [0.16.6] - 2026-09-19
 
 ### Added
-- **`nexus run` now auto-syncs project-scoped Nexus MCP credentials with the current global login** (Task a3bf595b, NEXUS-APP — "single place to maintain the token"). `opencode.json` and `.claude/mcp.json` deliberately bake a literal `NEXUS_API_URL`/`NEXUS_PRIVATE_TOKEN` (not an `{env:}` reference) so the MCP config keeps working even when the tool is launched without `nexus run` — that's an intentional, tested design, not a bug. The actual gap was that this baked copy silently drifted from the global login token whenever `nexus login` rotated it, with nothing short of a manual `nexus init`/`nexus pull` to fix it. `nexus run` already resolves the current, live-verified token on every invocation, so it now also rewrites the baked copy in place whenever it differs — only the two credential fields, no other formatting/keys touched, silent no-op when already in sync. In practice this means the user only ever manages one thing (`nexus login`), and every subsequent `nexus run` self-heals both `opencode.json` and `.claude/mcp.json`. Verified end-to-end against a deliberately-staled `opencode.json`: printed `refreshed Nexus credentials in: opencode.json`, rewrote the token, and the (also-new, see 0.16.5) live Headroom preflight check then passed. 4 new unit tests + full workspace suite (250/250) green.
+- **`nexus run` now auto-syncs project-scoped Nexus MCP credentials with the current global login** (a single place to maintain the token). `opencode.json` and `.claude/mcp.json` deliberately bake a literal `NEXUS_API_URL`/`NEXUS_PRIVATE_TOKEN` (not an `{env:}` reference) so the MCP config keeps working even when the tool is launched without `nexus run` — that's an intentional, tested design, not a bug. The actual gap was that this baked copy silently drifted from the global login token whenever `nexus login` rotated it, with nothing short of a manual `nexus init`/`nexus pull` to fix it. `nexus run` already resolves the current, live-verified token on every invocation, so it now also rewrites the baked copy in place whenever it differs — only the two credential fields, no other formatting/keys touched, silent no-op when already in sync. In practice this means the user only ever manages one thing (`nexus login`), and every subsequent `nexus run` self-heals both `opencode.json` and `.claude/mcp.json`. Verified end-to-end against a deliberately-staled `opencode.json`: printed `refreshed Nexus credentials in: opencode.json`, rewrote the token, and the (also-new, see 0.16.5) live Headroom preflight check then passed. 4 new unit tests + full workspace suite (250/250) green.
 
 ## [0.16.5] - 2026-09-19
 
 ### Fixed
-- **`nexus run`'s "Headroom" pre-launch check was env-var-presence-only and could report PASS while the `nexus-headroom-intercept` OpenCode plugin was silently running in `observe` mode** (root-caused via NEXUS-APP Task `a3bf595b`: a stale/rotated global CLI token caused the plugin's own preflight call to fail, silently downgrading `transform` -> `observe` for weeks while this check kept showing `PASS  Headroom  HEADROOM_MODE=transform`). The check now live-verifies via the same `GET /api/mcp/projects/{id}/preflight` endpoint the plugin itself calls (new `NexusClient::mcp_preflight()` / `McpPreflightResponse`), using the already-resolved auth token and linked project id. It now distinguishes: no project linked, not authenticated, live preflight unreachable/unauthorized (`FAIL`, with a pointer to `nexus status` / `nexus login`), and headroom disabled server-side for the project (`FAIL`) from an actually-verified `transform` mode (`PASS ... (preflight verified)`).
+- **`nexus run`'s "Headroom" pre-launch check was env-var-presence-only and could report PASS while the `nexus-headroom-intercept` OpenCode plugin was silently running in `observe` mode** (root cause: a stale/rotated global CLI token caused the plugin's own preflight call to fail, silently downgrading `transform` -> `observe` for weeks while this check kept showing `PASS  Headroom  HEADROOM_MODE=transform`). The check now live-verifies via the same `GET /api/mcp/projects/{id}/preflight` endpoint the plugin itself calls (new `NexusClient::mcp_preflight()` / `McpPreflightResponse`), using the already-resolved auth token and linked project id. It now distinguishes: no project linked, not authenticated, live preflight unreachable/unauthorized (`FAIL`, with a pointer to `nexus status` / `nexus login`), and headroom disabled server-side for the project (`FAIL`) from an actually-verified `transform` mode (`PASS ... (preflight verified)`).
 
 ## [0.16.4] - 2026-09-11
 
 ### Fixed
-- **`nexus run` post-session summary could appear to hang, unblocked only by a keypress** (dispatch 479a4ab5) - two independent, compounding issues in the post-session stats collection:
+- **`nexus run` post-session summary could appear to hang, unblocked only by a keypress** - two independent, compounding issues in the post-session stats collection:
   - `git_head_sha`/`git_tags` (used to detect commit/tag activity during the session) are synchronous calls (`std::process::Command::output()` blocks the current OS thread until the subprocess exits). They were called directly inside the `async` block raced against `tokio::signal::ctrl_c()` via `tokio::select!`. Since a synchronous call runs to completion before the block's first real `.await` point, it silently defeated the "Press Ctrl+C to skip" promise shown to the operator for as long as the git call took -- Ctrl+C could not be observed until the blocking call returned, no matter how long that was. Both calls are now dispatched via `tokio::task::spawn_blocking`, so the race is genuine and Ctrl+C actually works regardless of how long the underlying git call takes.
   - All `git` subprocess invocations used for post-session stats (`git_head_sha`, `git_tags`, `git_count_commits`, `git_diff_stat`) and `nexus shadow`'s file-tracked-in-history check now pass `--no-pager`, so a `core.pager`/`GIT_PAGER` override that forces pagination can never make one of these calls wait on a keypress read from the controlling terminal.
 
@@ -532,7 +532,7 @@ Both are follow-ups to a live `claude-cli` diagnostic pass against Nexus Showcas
 ## [0.15.0] - 2026-09-03
 
 ### Added
-- **`nexus project link` — project inference tokens (`nxs_proj_*`)** - new command group that provisions project-scoped inference credentials for the Nexus Model Gateway (gateway ADR-0005), bootstrapped from the user PAT. Subcommands:
+- **`nexus project link` — project inference tokens (`nxs_proj_*`)** - new command group that provisions project-scoped inference credentials for the Nexus Model Gateway, bootstrapped from the user PAT. Subcommands:
   - `nexus project link` issues a token for the linked project (or `--project-id`), defaulting the logical `--runtime-id` to the hostname. Supports `--expires` (relative `30d`/`12h`/`2w` or ISO 8601) and `--restrict-profiles` (tighten-only profile ceiling). Shortcuts: `--rotate`, `--status`.
   - `nexus project rotate` performs a zero-downtime rotation (previous token stays valid); `--finalize` revokes the superseded token after the overlap window.
   - `nexus project unlink` revokes the token(s) server-side and clears local state.
@@ -752,7 +752,7 @@ Both are follow-ups to a live `claude-cli` diagnostic pass against Nexus Showcas
 
 - **Token usage hint** — post-session summary now shows `recorded in Nexus session
   (nexus pull to sync)` instead of a generic placeholder. Full cost readback from
-  session entries will follow in v0.12.0 (dispatch 9ae65f3a, approach A2).
+  session entries will follow in v0.12.0 (approach A2).
 
 ## [0.11.0] - 2026-07-09
 
@@ -766,7 +766,7 @@ Both are follow-ups to a live `claude-cli` diagnostic pass against Nexus Showcas
 - **`nexus run` — post-session summary** — after the tool exits, prints a summary
   including session duration, exit code, git activity (commits, file changes), and
   newly created release tags. Token usage and headroom stats sections are placeholders
-  pending nexus-app integration (dispatch 9ae65f3a).
+  pending nexus-app integration.
 
 - **`nexus run --exec` flag** — opt-in for the previous `exec()` behaviour (replaces
   the nexus process, no post-session summary). Default is now `spawn()+wait()` on all
@@ -903,7 +903,7 @@ Both are follow-ups to a live `claude-cli` diagnostic pass against Nexus Showcas
   where the workspace itself was set up correctly.
 
   Path traversal attempts (`..` in `target_path`) remain a hard error — that
-  indicates a malformed or malicious server response. (Dispatch 038595ee)
+  indicates a malformed or malicious server response.
 
 ## [0.9.2] - 2026-06-28
 
@@ -930,13 +930,13 @@ Total test count: 149 → 167 (+18 new tests).
 ### Added
 
 - **`nexus actors normalize <path>`** — normalize actor markdown files to
-  canonical YAML frontmatter format (ADR-0056). Extracts or infers slug, name,
+  canonical YAML frontmatter format. Extracts or infers slug, name,
   role, description, and route_alias fields, then rewrites the file with
   consistent frontmatter structure.
 
 - **`nexus actors validate <path>`** — validate actor profile(s) against the
   expected schema. Checks required frontmatter fields (slug, name, role), slug
-  format, and route_alias references against the model route catalog (ADR-0055).
+  format, and route_alias references against the model route catalog.
   Reports errors and warnings.
 
 - **`nexus actors import <path>`** — import validated actor profiles from local
@@ -952,7 +952,7 @@ Total test count: 149 → 167 (+18 new tests).
   `"agents"` top-level key alongside `"mcp"` and `"provider"`.
 
 - **Model route deprecation warnings** — `nexus pull` now checks if any
-  assigned actor references a deprecated model route (ADR-0055) and prints a
+  assigned actor references a deprecated model route and prints a
   warning with the deprecation message.
 
 - **`nexus pull --skip-actor-assets`** — explicit flag to skip avatar asset
@@ -973,7 +973,7 @@ Total test count: 149 → 167 (+18 new tests).
   data in the `af_export` response, the CLI now writes:
   - `.nexus/actors/<slug>.md` for each assigned actor (Markdown profile)
   - `.nexus/generated/actors.json` with full actor metadata (JSON export)
-  This aligns with ADR-0053/0054 (Nexus Actor System).
+  This aligns with the Nexus Actor System.
 
 - **`nexus pull --with-actor-assets`** — new flag to download cached actor
   avatar SVGs from the platform into `.nexus/actors/assets/<slug>.svg`.
@@ -1012,7 +1012,7 @@ Total test count: 149 → 167 (+18 new tests).
   The prompt is TTY-gated (non-interactive / CI contexts print the advisory
   and continue without prompting). The `--force` / `-y` flag bypasses the
   prompt entirely, consistent with all other advisory prompts in the CLI.
-  (ADR-0012)
+ 
 
 ### Fixed
 
@@ -1025,7 +1025,7 @@ Total test count: 149 → 167 (+18 new tests).
   `RUSTFLAGS` is removed from `devbox.json`; mold is now configured via
   per-target `[target.*]` entries in `.cargo/config.toml` (Linux targets only).
   macOS uses the system linker. `RUSTC_WRAPPER=sccache` is retained in
-  `devbox.json` (sccache is cross-platform). (ADR-0013)
+  `devbox.json` (sccache is cross-platform).
 
 ## [0.7.5] - 2026-06-25
 
