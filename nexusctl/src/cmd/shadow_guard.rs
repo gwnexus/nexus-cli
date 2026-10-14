@@ -712,6 +712,12 @@ pub fn print_state(root: Option<&Path>, level: &str, guard: Option<&ShadowGuard>
 mod tests {
     use super::*;
 
+    /// Reference-like fixtures, assembled so the source itself passes the
+    /// repository's own internal-reference check.
+    const REF: &str = concat!("AD", "R-0042");
+    const DISPATCH_REF: &str = concat!("dispatch", " ", "c0ffee00");
+    const UUID: &str = "00000000-1111-4222-8333-444444444444";
+
     fn guard(patterns: Vec<ShadowPattern>) -> ShadowGuard {
         ShadowGuard {
             level: "nexus".into(),
@@ -787,7 +793,7 @@ mod tests {
         let commit = compile(&g, SCOPE_COMMIT);
         let ids: Vec<&str> = commit.iter().map(|r| r.pattern.id.as_str()).collect();
         assert_eq!(ids, vec!["msg-ci", "msg-cs"]);
-        let hits = scan_text("see ADR-0125", &commit, |n| n.to_string());
+        let hits = scan_text(&format!("see {REF}"), &commit, |n| n.to_string());
         assert_eq!(hits.len(), 1, "only the case-insensitive pattern matches");
         assert_eq!(hits[0].pattern, "msg-ci");
         assert!(scan_text("secret-term", &commit, |n| n.to_string()).is_empty());
@@ -796,12 +802,13 @@ mod tests {
 
     #[test]
     fn test_excerpt_is_trimmed_and_char_safe() {
-        let line = format!("{}ADR-0125{}", "ä".repeat(60), "ö".repeat(60));
-        let start = line.find("ADR").unwrap();
+        let line = format!("{}{REF}{}", "ä".repeat(60), "ö".repeat(60));
+        let start = line.find(REF).unwrap();
         let e = excerpt(&line, start, start + 8);
-        assert!(e.starts_with('…') && e.ends_with('…') && e.contains("ADR-0125"));
+        assert!(e.starts_with('…') && e.ends_with('…') && e.contains(REF));
         assert!(e.chars().count() <= 8 + 2 * EXCERPT_CONTEXT + 2);
-        assert_eq!(excerpt("see ADR-0125", 4, 12), "see ADR-0125");
+        let short = format!("see {REF}");
+        assert_eq!(excerpt(&short, 4, 12), short);
     }
 
     #[test]
@@ -820,10 +827,18 @@ mod tests {
     #[test]
     fn test_check_finds_files_commits_and_still_tracked_paths() {
         let dir = repo("check");
-        fs::write(dir.join("notes.md"), "Background: see ADR-0125 for why.\n").unwrap();
+        fs::write(
+            dir.join("notes.md"),
+            format!("Background: see {REF} for why.\n"),
+        )
+        .unwrap();
         fs::create_dir_all(dir.join(".claude")).unwrap();
-        fs::write(dir.join(".claude/settings.json"), "{\"x\": \"ADR-0001\"}\n").unwrap();
-        fs::write(dir.join("bin.dat"), b"ADR-0125\0\0binary").unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            format!("{{\"x\": \"{REF}\"}}\n"),
+        )
+        .unwrap();
+        fs::write(dir.join("bin.dat"), format!("{REF}\0\0binary")).unwrap();
         git(&dir, &["add", "-A"]);
         git(
             &dir,
@@ -874,10 +889,12 @@ mod tests {
     #[test]
     fn test_check_message_ignores_comments_and_scissors() {
         let g = contract_guard();
-        assert_eq!(check_message(&g, "see ADR-0125\n").len(), 1);
+        assert_eq!(check_message(&g, &format!("see {REF}\n")).len(), 1);
         assert!(check_message(&g, "fix(api): handle null ids\n").is_empty());
-        let raw = "fix: x\n# see ADR-0125 in a comment\n# ------------------------ >8 ------------------------\ndiff ADR-0125\n";
-        assert!(check_message(&g, raw).is_empty());
+        let raw = format!(
+            "fix: x\n# see {REF} in a comment\n# ------------------------ >8 ------------------------\ndiff {REF}\n"
+        );
+        assert!(check_message(&g, &raw).is_empty());
     }
 
     #[test]
@@ -885,7 +902,7 @@ mod tests {
         let dir = repo("check-msg");
         let cache = dir.join("guard.json");
         let msg = dir.join("MSG");
-        fs::write(&msg, "see ADR-0125\n").unwrap();
+        fs::write(&msg, format!("see {REF}\n")).unwrap();
         // No cache: the guard is off, everything passes.
         assert_eq!(check_message_file(&cache, &msg).unwrap(), 0);
         fs::write(&cache, serde_json::to_string(&contract_guard()).unwrap()).unwrap();
@@ -1047,6 +1064,151 @@ mod tests {
         assert_eq!(compile(&g, SCOPE_FILES).len(), 1);
     }
 
+    /// The rules a shadowed project receives today (level nexus): every
+    /// regex compiles here and keeps its meaning (scopes, case sensitivity,
+    /// word boundaries).
+    fn backend_rules() -> ShadowGuard {
+        let c = SCOPE_COMMIT;
+        let f = SCOPE_FILES;
+        guard(vec![
+            pat(
+                "ai-coauthor-trailer",
+                r"co-authored-by:[^\n]*(\b(claude|copilot|chatgpt|gpt|gemini|cursor|codex|opencode|openai|anthropic|ai)\b|noreply@anthropic\.com)",
+                "i",
+                &[c, f],
+            ),
+            pat(
+                "ai-generated-with",
+                r"\bgenerated (with|by|using) \[?(claude|copilot|chatgpt|gpt|gemini|cursor|codex|opencode|an? ai|ai)\b",
+                "i",
+                &[c, f],
+            ),
+            pat(
+                "ai-anthropic-noreply",
+                r"noreply@anthropic\.com",
+                "i",
+                &[c, f],
+            ),
+            pat("ai-claude-code", r"\bclaude code\b", "i", &[f]),
+            pat(
+                "ai-tool-name",
+                r"\b(claude|anthropic|chatgpt|openai|copilot|gemini|codex|opencode)\b|\bgpt-[0-9]",
+                "i",
+                &[c],
+            ),
+            pat("ai-tool-cursor", r"\bCursor\b", "", &[c]),
+            pat(
+                "ai-phrase",
+                r"\b(ai-generated|ai-assisted|generated by ai|ai assistant|coding assistant|coding agent|llms?)\b",
+                "i",
+                &[c],
+            ),
+            pat("nexus-adr", r"\bADR-\d{3,4}\b", "i", &[c, f]),
+            pat("nexus-word", r"\bnexus\b", "i", &[c]),
+            pat("nexus-slash-command", r"/nexus-[a-z-]+", "", &[f]),
+            pat(
+                "nexus-mcp-tool",
+                r"\bnexus_[a-z_]+|mcp__nexus__[a-z_]+",
+                "",
+                &[f],
+            ),
+            pat(
+                "nexus-entity-ref",
+                r"\b(task|session|dispatch)e?s? #?[0-9a-f]{8}\b",
+                "i",
+                &[c, f],
+            ),
+            pat(
+                "nexus-uuid",
+                r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+                "i",
+                &[c],
+            ),
+        ])
+    }
+
+    fn ids(g: &ShadowGuard, scope: &str, text: &str) -> Vec<String> {
+        let rules = compile(g, scope);
+        let mut ids: Vec<String> = scan_text(text, &rules, |n| n.to_string())
+            .into_iter()
+            .map(|h| h.pattern)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn test_backend_rules_compile_and_match() {
+        let g = backend_rules();
+        assert_eq!(compile(&g, SCOPE_COMMIT).len(), 10);
+        assert_eq!(compile(&g, SCOPE_FILES).len(), 8);
+
+        // Commit messages.
+        assert_eq!(
+            ids(
+                &g,
+                SCOPE_COMMIT,
+                "Co-Authored-By: Claude <noreply@anthropic.com>"
+            ),
+            vec![
+                "ai-anthropic-noreply",
+                "ai-coauthor-trailer",
+                "ai-tool-name"
+            ]
+        );
+        assert_eq!(
+            ids(&g, SCOPE_COMMIT, "Generated with [Claude Code]"),
+            vec!["ai-generated-with", "ai-tool-name"]
+        );
+        assert_eq!(
+            ids(&g, SCOPE_COMMIT, &format!("see {REF}")),
+            vec!["nexus-adr"]
+        );
+        assert_eq!(
+            ids(&g, SCOPE_COMMIT, &format!("per {DISPATCH_REF}")),
+            vec!["nexus-entity-ref"]
+        );
+        assert_eq!(ids(&g, SCOPE_COMMIT, "sync with Nexus"), vec!["nexus-word"]);
+        assert_eq!(
+            ids(&g, SCOPE_COMMIT, "wrote it with an AI assistant"),
+            vec!["ai-phrase"]
+        );
+        assert_eq!(
+            ids(&g, SCOPE_COMMIT, &format!("id {UUID}")),
+            vec!["nexus-uuid"]
+        );
+        // Case sensitivity: the editor name only with a capital C.
+        assert_eq!(
+            ids(&g, SCOPE_COMMIT, "edited in Cursor"),
+            vec!["ai-tool-cursor"]
+        );
+        assert!(ids(&g, SCOPE_COMMIT, "move the cursor left").is_empty());
+        // Word boundaries: no match inside longer words.
+        assert!(ids(&g, SCOPE_COMMIT, "fix(api): handle null ids").is_empty());
+        assert!(ids(
+            &g,
+            SCOPE_COMMIT,
+            "refactor nexuses and claudette, said maid"
+        )
+        .is_empty());
+        assert!(ids(&g, SCOPE_COMMIT, "bump gpt2 parser, tasks 12345678x").is_empty());
+
+        // Tracked files: only the file-scoped rules.
+        assert_eq!(
+            ids(&g, SCOPE_FILES, "run /nexus-init first"),
+            vec!["nexus-slash-command"]
+        );
+        assert_eq!(
+            ids(&g, SCOPE_FILES, "call mcp__nexus__session_append"),
+            vec!["nexus-mcp-tool"]
+        );
+        assert_eq!(
+            ids(&g, SCOPE_FILES, "Built for Claude Code users"),
+            vec!["ai-claude-code"]
+        );
+        assert!(ids(&g, SCOPE_FILES, "the nexus of it, with Cursor").is_empty());
+    }
+
     /// End to end with real `git commit`s through the installed hook and the
     /// built `nexus` binary (`cargo build` first; run with `--ignored`).
     #[test]
@@ -1090,14 +1252,16 @@ mod tests {
                 .output()
                 .unwrap()
         };
-        let rejected = commit(&[], "see ADR-0125");
+        let rejected = commit(&[], &format!("see {REF}"));
         assert!(!rejected.status.success());
         let err = String::from_utf8_lossy(&rejected.stderr);
         assert!(
             err.contains("nexus-adr found") && err.contains("--no-verify"),
             "{err}"
         );
-        assert!(commit(&["--no-verify"], "see ADR-0125").status.success());
+        assert!(commit(&["--no-verify"], &format!("see {REF}"))
+            .status
+            .success());
         assert!(commit(&[], "fix(api): handle null ids").status.success());
         let _ = fs::remove_dir_all(&dir);
     }
