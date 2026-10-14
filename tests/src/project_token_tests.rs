@@ -19,7 +19,7 @@ fn sample_entry(token_id: &str) -> ProjectTokenEntry {
 #[test]
 fn test_store_set_get_remove() {
     let mut store = ProjectTokenStore::default();
-    let pid = "fdc7a78c-d0b9-46fd-8206-9fc57301de2d";
+    let pid = "11111111-2222-4333-8444-555555555555";
     assert!(store.get(pid).is_none());
 
     store.set(pid, sample_entry("tok-1"));

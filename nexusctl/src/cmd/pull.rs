@@ -5380,7 +5380,7 @@ mod tests {
     #[test]
     fn test_agent_file_export_response_deserialize() {
         let json = r##"{
-            "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "project_id": "11111111-2222-4333-8444-555555555555",
             "project_name": "NEXUS-APP",
             "agent_files": [
                 {
@@ -5410,7 +5410,7 @@ mod tests {
     #[test]
     fn test_agent_file_export_response_with_agentic_root() {
         let json = r##"{
-            "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "project_id": "11111111-2222-4333-8444-555555555555",
             "project_name": "NEXUS-APP",
             "agent_files": [],
             "count": 0,

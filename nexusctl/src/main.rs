@@ -1027,7 +1027,7 @@ mod tests {
             "init",
             ".",
             "--project-id",
-            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "11111111-2222-4333-8444-555555555555",
             "--force",
         ])
         .unwrap();
@@ -1039,7 +1039,7 @@ mod tests {
             } => {
                 assert_eq!(
                     project_id.as_deref(),
-                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                    Some("11111111-2222-4333-8444-555555555555")
                 );
                 assert!(force);
             }
@@ -1064,14 +1064,14 @@ mod tests {
             "nexus",
             "link",
             "--project-id",
-            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "11111111-2222-4333-8444-555555555555",
         ])
         .unwrap();
         match cli.command {
             Command::Link { ref project_id } => {
                 assert_eq!(
                     project_id.as_deref(),
-                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                    Some("11111111-2222-4333-8444-555555555555")
                 );
             }
             _ => panic!("expected Link command"),
@@ -1117,7 +1117,7 @@ mod tests {
             "project",
             "link",
             "--project-id",
-            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "11111111-2222-4333-8444-555555555555",
             "--runtime-id",
             "ci-production",
             "--restrict-profiles",
@@ -1139,7 +1139,7 @@ mod tests {
             } => {
                 assert_eq!(
                     project_id.as_deref(),
-                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                    Some("11111111-2222-4333-8444-555555555555")
                 );
                 assert_eq!(runtime_id.as_deref(), Some("ci-production"));
                 assert_eq!(restrict_profiles, vec!["coding", "reasoning"]);
@@ -1488,7 +1488,7 @@ mod tests {
             "nexus",
             "pull",
             "--project-id",
-            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "11111111-2222-4333-8444-555555555555",
         ])
         .unwrap();
         match cli.command {
@@ -1499,7 +1499,7 @@ mod tests {
             } => {
                 assert_eq!(
                     project_id.as_deref(),
-                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                    Some("11111111-2222-4333-8444-555555555555")
                 );
                 assert!(!force);
             }
@@ -1678,7 +1678,7 @@ mod tests {
             "skills",
             "export",
             "--project-id",
-            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "11111111-2222-4333-8444-555555555555",
         ])
         .unwrap();
         match cli.command {
@@ -1687,7 +1687,7 @@ mod tests {
             } => {
                 assert_eq!(
                     project_id.as_deref(),
-                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                    Some("11111111-2222-4333-8444-555555555555")
                 );
             }
             _ => panic!("expected Skills Export command"),
@@ -1943,7 +1943,7 @@ mod tests {
             "validate",
             "/tmp/actor.md",
             "--project-id",
-            "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "11111111-2222-4333-8444-555555555555",
         ])
         .unwrap();
         match cli.command {
@@ -1957,7 +1957,7 @@ mod tests {
                 assert_eq!(path, "/tmp/actor.md");
                 assert_eq!(
                     project_id.as_deref(),
-                    Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")
+                    Some("11111111-2222-4333-8444-555555555555")
                 );
             }
             _ => panic!("expected Actors Validate command"),

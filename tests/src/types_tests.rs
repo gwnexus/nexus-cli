@@ -5,14 +5,14 @@ use nexus_core::api::*;
 #[test]
 fn test_auth_status_deserialize() {
     let json = r#"{
-        "user_id": "83a37012-8add-428f-8bc3-d56c84291671",
+        "user_id": "99999999-8888-4777-8666-555555555555",
         "email": "test@example.com",
         "display_name": "Test User",
         "platform_role": "platform_admin"
     }"#;
 
     let status: AuthStatus = serde_json::from_str(json).unwrap();
-    assert_eq!(status.user_id, "83a37012-8add-428f-8bc3-d56c84291671");
+    assert_eq!(status.user_id, "99999999-8888-4777-8666-555555555555");
     assert_eq!(status.email, "test@example.com");
     assert_eq!(status.display_name.as_deref(), Some("Test User"));
     assert_eq!(status.platform_role, "platform_admin");
@@ -161,22 +161,22 @@ fn test_auth_status_serialize_roundtrip() {
 #[test]
 fn test_identity_response_deserialize() {
     let json = r#"{
-        "userId": "83a37012-8add-428f-8bc3-d56c84291671",
+        "userId": "99999999-8888-4777-8666-555555555555",
         "email": "patrick@example.com",
         "displayName": "Patrick",
         "isPlatformAdmin": true,
         "isPlatformOwner": true,
         "tenantId": "20c72e35-d4d8-4e40-a7be-efff14d8eaff",
         "memberships": [
-            {"project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d", "role": "owner"}
+            {"project_id": "11111111-2222-4333-8444-555555555555", "role": "owner"}
         ],
         "agentAssignments": [
-            {"project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d", "agent_id": "nexus-app-agent", "agent_owner": null}
+            {"project_id": "11111111-2222-4333-8444-555555555555", "agent_id": "nexus-app-agent", "agent_owner": null}
         ]
     }"#;
 
     let identity: IdentityResponse = serde_json::from_str(json).unwrap();
-    assert_eq!(identity.user_id, "83a37012-8add-428f-8bc3-d56c84291671");
+    assert_eq!(identity.user_id, "99999999-8888-4777-8666-555555555555");
     assert_eq!(identity.email, "patrick@example.com");
     assert_eq!(identity.display_name.as_deref(), Some("Patrick"));
     assert!(identity.is_platform_admin);
@@ -267,7 +267,7 @@ fn test_skill_export_response_deserialize() {
     let json = r#"{
         "action": "sk_export",
         "project": {
-            "id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "id": "11111111-2222-4333-8444-555555555555",
             "slug": "nexus-app",
             "name": "NEXUS-APP"
         },
@@ -415,7 +415,7 @@ fn test_directive_export_response_deserialize() {
     let json = r#"{
         "action": "directive_export",
         "project": {
-            "id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+            "id": "11111111-2222-4333-8444-555555555555",
             "slug": "nexus-app",
             "name": "NEXUS-APP"
         },
@@ -541,7 +541,7 @@ fn test_exported_agent_file_null_description() {
 #[test]
 fn test_agent_file_export_response_deserialize() {
     let json = r##"{
-        "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        "project_id": "11111111-2222-4333-8444-555555555555",
         "project_name": "NEXUS-APP",
         "agent_files": [
             {
@@ -567,7 +567,7 @@ fn test_agent_file_export_response_deserialize() {
     }"##;
 
     let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
-    assert_eq!(resp.project_id, "fdc7a78c-d0b9-46fd-8206-9fc57301de2d");
+    assert_eq!(resp.project_id, "11111111-2222-4333-8444-555555555555");
     assert_eq!(resp.project_name, "NEXUS-APP");
     assert_eq!(resp.count, 2);
     assert_eq!(resp.agent_files.len(), 2);
@@ -666,7 +666,7 @@ fn test_provider_config_serialize_roundtrip() {
 #[test]
 fn test_agent_file_export_response_with_provider() {
     let json = r##"{
-        "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        "project_id": "11111111-2222-4333-8444-555555555555",
         "project_name": "NEXUS-APP",
         "agent_files": [],
         "count": 0,
@@ -832,7 +832,7 @@ fn test_prerequisite_serialize_roundtrip() {
 fn test_workspace_push_response_deserialize() {
     let json = r#"{
         "action": "ws_push",
-        "project_id": "fdc7a78c-d0b9-46fd-8206-9fc57301de2d",
+        "project_id": "11111111-2222-4333-8444-555555555555",
         "fork_id": "aaaa-bbbb-cccc",
         "fork_name": "push-2026-08-23T10:30:00Z",
         "version": 1,
@@ -843,7 +843,7 @@ fn test_workspace_push_response_deserialize() {
 
     let resp: WorkspacePushResponse = serde_json::from_str(json).unwrap();
     assert_eq!(resp.action, "ws_push");
-    assert_eq!(resp.project_id, "fdc7a78c-d0b9-46fd-8206-9fc57301de2d");
+    assert_eq!(resp.project_id, "11111111-2222-4333-8444-555555555555");
     assert_eq!(resp.fork_name, "push-2026-08-23T10:30:00Z");
     assert_eq!(resp.version, 1);
     assert_eq!(resp.previous_fork_name, "default");

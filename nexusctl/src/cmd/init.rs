@@ -1882,7 +1882,7 @@ mod tests {
         run(
             dir.to_str().unwrap(),
             Some("test-project"),
-            Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"),
+            Some("11111111-2222-4333-8444-555555555555"),
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
@@ -1891,7 +1891,7 @@ mod tests {
         .unwrap();
 
         let config = fs::read_to_string(dir.join(".nexus/config.toml")).unwrap();
-        assert!(config.contains("fdc7a78c-d0b9-46fd-8206-9fc57301de2d"));
+        assert!(config.contains("11111111-2222-4333-8444-555555555555"));
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
@@ -2733,7 +2733,7 @@ mod tests {
         // Write a config with mcp_extra and plugins
         let config_content = r#"[project]
 name = "test"
-id = "fdc7a78c-d0b9-46fd-8206-9fc57301de2d"
+id = "11111111-2222-4333-8444-555555555555"
 
 [mcp_extra.taskmaster-ai]
 command = ["npx", "-y", "task-master-ai@latest"]
@@ -2745,7 +2745,7 @@ url = "https://example.com/plugin.ts"
         fs::write(nexus_dir.join("config.toml"), config_content).unwrap();
 
         // Run create_nexus_dir — it should NOT overwrite the config
-        create_nexus_dir(&dir, "test", Some("fdc7a78c-d0b9-46fd-8206-9fc57301de2d")).unwrap();
+        create_nexus_dir(&dir, "test", Some("11111111-2222-4333-8444-555555555555")).unwrap();
 
         let result = fs::read_to_string(nexus_dir.join("config.toml")).unwrap();
         assert!(

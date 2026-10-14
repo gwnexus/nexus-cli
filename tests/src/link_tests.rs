@@ -30,7 +30,7 @@ fn test_save_and_load_project_config() {
 
     let config = ProjectConfig {
         project: Some(ProjectInfo {
-            id: "fdc7a78c-d0b9-46fd-8206-9fc57301de2d".to_string(),
+            id: "11111111-2222-4333-8444-555555555555".to_string(),
             name: "My Nexus Project".to_string(),
             slug: "my-nexus-project".to_string(),
             agent_owner: None,
@@ -56,7 +56,7 @@ fn test_save_and_load_project_config() {
         .expect("config should be Some");
 
     let project = loaded.project.expect("project section should be present");
-    assert_eq!(project.id, "fdc7a78c-d0b9-46fd-8206-9fc57301de2d");
+    assert_eq!(project.id, "11111111-2222-4333-8444-555555555555");
     assert_eq!(project.name, "My Nexus Project");
     assert_eq!(project.slug, "my-nexus-project");
 
@@ -201,7 +201,7 @@ fn test_resolve_project_id_from_config() {
     // Write a project config
     let config = ProjectConfig {
         project: Some(ProjectInfo {
-            id: "fdc7a78c-d0b9-46fd-8206-9fc57301de2d".to_string(),
+            id: "11111111-2222-4333-8444-555555555555".to_string(),
             name: "Test Project".to_string(),
             slug: "test-project".to_string(),
             agent_owner: None,
@@ -217,7 +217,7 @@ fn test_resolve_project_id_from_config() {
 
     // Resolve without CLI override — should read from config
     let resolved = resolve_project_id(None, Some(&dir)).unwrap();
-    assert_eq!(resolved, "fdc7a78c-d0b9-46fd-8206-9fc57301de2d");
+    assert_eq!(resolved, "11111111-2222-4333-8444-555555555555");
 
     // Cleanup
     let _ = fs::remove_dir_all(&dir);
@@ -433,7 +433,7 @@ fn test_agent_owner_roundtrip() {
 
     let config = ProjectConfig {
         project: Some(ProjectInfo {
-            id: "fdc7a78c-d0b9-46fd-8206-9fc57301de2d".to_string(),
+            id: "11111111-2222-4333-8444-555555555555".to_string(),
             name: "Claude Project".to_string(),
             slug: "claude-project".to_string(),
             agent_owner: None,
@@ -469,7 +469,7 @@ fn test_run_target_roundtrip() {
     let dir = temp_dir("run-target-roundtrip");
     let config = ProjectConfig {
         project: Some(ProjectInfo {
-            id: "fdc7a78c-d0b9-46fd-8206-9fc57301de2d".to_string(),
+            id: "11111111-2222-4333-8444-555555555555".to_string(),
             name: "Claude Project".to_string(),
             slug: "claude-project".to_string(),
             agent_owner: Some("claude-cli".to_string()),
@@ -513,7 +513,7 @@ fn test_pull_cache_updates_preserve_local_run_workspace() {
     fs::create_dir_all(dir.join(".nexus")).unwrap();
     fs::write(
         dir.join(".nexus").join("config.toml"),
-        "[project]\nid = \"fdc7a78c-d0b9-46fd-8206-9fc57301de2d\"\nname = \"P\"\n\n[run]\nworkspace = \"none\"\n",
+        "[project]\nid = \"11111111-2222-4333-8444-555555555555\"\nname = \"P\"\n\n[run]\nworkspace = \"none\"\n",
     )
     .unwrap();
     assert_eq!(load_run_workspace(Some(&dir)).as_deref(), Some("none"));
@@ -540,7 +540,7 @@ fn test_agent_owner_absent_in_legacy_config() {
     // A config.toml written before the field existed must still parse.
     fs::write(
         dir.join(".nexus").join("config.toml"),
-        "[project]\nid = \"fdc7a78c-d0b9-46fd-8206-9fc57301de2d\"\nname = \"Legacy\"\n",
+        "[project]\nid = \"11111111-2222-4333-8444-555555555555\"\nname = \"Legacy\"\n",
     )
     .unwrap();
 
