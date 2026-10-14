@@ -296,8 +296,20 @@ pub(crate) fn write_plugin_env_file(
          # Secrets go in .env.nexus.local (never committed, never here)\n\n",
     );
 
-    // Sort keys for deterministic output
-    let mut sorted: Vec<(&String, &String)> = plugin_env.iter().collect();
+    // Sort keys for deterministic output; only valid variable names are
+    // written (a key like `A=B` or `X;Y` would break both files).
+    let mut sorted: Vec<(&String, &String)> = Vec::new();
+    for (k, v) in plugin_env {
+        if is_env_key(k) {
+            sorted.push((k, v));
+        } else {
+            println!(
+                "   {} plugin env key {:?} skipped (not a valid variable name)",
+                style("!").bold().yellow(),
+                k
+            );
+        }
+    }
     sorted.sort_by_key(|(k, _)| k.as_str());
     for (k, v) in &sorted {
         content.push_str(&format!("{k}={v}\n"));
@@ -357,37 +369,48 @@ pub(crate) fn write_plugin_env_file(
     Ok(())
 }
 
-/// File name of the dotenv copy of the plugin env (devbox `env_from`).
+/// File name of the shell-sourceable copy of the plugin env (the devbox
+/// init hook runs `set -a; . .nexus/plugin.env; set +a`).
 pub(crate) const PLUGIN_DOTENV: &str = "plugin.env";
 
-/// `KEY=value` lines for a dotenv parser: no `export`, a value is quoted
-/// only when it would otherwise be misread (whitespace, quotes, `#`, `$`,
-/// backslashes). The content carries no timestamp, so it only changes when
-/// a variable does.
+/// `KEY=value` lines that are safe to source with a POSIX shell: no
+/// `export`, keys are valid variable names (see [`is_env_key`]) and values
+/// go through [`shell_value`], so sourcing never executes anything and
+/// yields the literal value. The content carries no timestamp, so it only
+/// changes when a variable does.
 fn render_plugin_dotenv(sorted: &[(&String, &String)]) -> String {
     let mut out = String::from(
         "# Platform-managed plugin environment variables (nexus pull).\n\
-         # Loaded by devbox via \"env_from\". Do not edit.\n",
+         # Sourced by the devbox init hook. Do not edit.\n",
     );
     for (k, v) in sorted {
-        out.push_str(&format!("{k}={}\n", dotenv_value(v)));
+        out.push_str(&format!("{k}={}\n", shell_value(v)));
     }
     out
 }
 
-fn dotenv_value(v: &str) -> String {
-    let needs_quotes = v
-        .chars()
-        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '#' | '$' | '\\' | '`'));
-    if !needs_quotes {
+/// A valid shell variable name: `^[A-Za-z_][A-Za-z0-9_]*$`.
+fn is_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A value as a POSIX shell word that expands to exactly `v`: left bare
+/// when it only has characters without any shell meaning, otherwise in
+/// single quotes (nothing is interpreted inside them; an embedded `'` is
+/// written as `'\''`). Newlines stay inside the quotes, so they never
+/// start a new command.
+fn shell_value(v: &str) -> String {
+    let plain = !v.is_empty()
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./:@%+,=-".contains(c));
+    if plain {
         return v.to_string();
     }
-    let escaped = v
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('\n', "\\n");
-    format!("\"{escaped}\"")
+    format!("'{}'", v.replace('\'', "'\\''"))
 }
 
 /// What `nexus run` will start, for the post-pull/init tip: the backend's `run_target` when known,
@@ -7273,9 +7296,9 @@ mod tests {
         assert_eq!(
             vars,
             vec![
-                "HEADROOM_EMPTY=",
+                "HEADROOM_EMPTY=''",
                 "HEADROOM_MODE=optimize",
-                "HEADROOM_NOTE=\"a b #c\""
+                "HEADROOM_NOTE='a b #c'"
             ]
         );
         assert!(!dotenv.contains("export "));
@@ -7314,13 +7337,85 @@ mod tests {
     }
 
     #[test]
-    fn test_dotenv_value_quotes_only_when_needed() {
-        assert_eq!(dotenv_value("plain-value_1.2:/x"), "plain-value_1.2:/x");
-        assert_eq!(dotenv_value("a=b"), "a=b");
-        assert_eq!(dotenv_value("two words"), "\"two words\"");
-        assert_eq!(dotenv_value("say \"hi\""), "\"say \\\"hi\\\"\"");
-        assert_eq!(dotenv_value("$HOME"), "\"\\$HOME\"");
-        assert_eq!(dotenv_value("a\\b"), "\"a\\\\b\"");
+    fn test_shell_value_quotes_everything_with_shell_meaning() {
+        assert_eq!(shell_value("plain-value_1.2:/x"), "plain-value_1.2:/x");
+        assert_eq!(shell_value("a=b"), "a=b");
+        assert_eq!(shell_value(""), "''");
+        assert_eq!(shell_value("two words"), "'two words'");
+        assert_eq!(shell_value("x;id"), "'x;id'");
+        assert_eq!(shell_value("$(id)"), "'$(id)'");
+        assert_eq!(shell_value("`id`"), "'`id`'");
+        assert_eq!(shell_value("~"), "'~'");
+        assert_eq!(shell_value("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_is_env_key() {
+        for ok in ["HEADROOM_MODE", "_X", "a1"] {
+            assert!(is_env_key(ok), "{ok}");
+        }
+        for bad in ["", "1A", "A-B", "A=B", "X;Y", "A B", "A$B", "Ä"] {
+            assert!(!is_env_key(bad), "{bad}");
+        }
+    }
+
+    /// Source the generated plugin.env with `sh` (as the devbox init hook
+    /// does): nothing may execute, every value must come back literally.
+    #[cfg(unix)]
+    #[test]
+    fn test_plugin_env_sources_literally_without_executing() {
+        let dir = temp_pull_dir("plugin-env-shell");
+        let marker = dir.join("pwned");
+        let m = marker.display().to_string();
+        let hostile = [
+            ("Q_QUOTE", "it's \"quoted\"".to_string()),
+            ("Q_SUBST", format!("$(touch {m})")),
+            ("Q_BACKTICK", format!("`touch {m}`")),
+            ("Q_SEMI", format!("x; touch {m}")),
+            ("Q_NEWLINE", format!("line1\ntouch {m}")),
+            (
+                "Q_MIXED",
+                format!("a'b$(touch {m})`touch {m}`;\n|& <>~ #c\\d"),
+            ),
+            ("Q_EMPTY", String::new()),
+        ];
+        let mut env: std::collections::HashMap<String, String> = hostile
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        env.insert(format!("BAD;touch {m}"), "x".into());
+        env.insert("A=B".into(), "x".into());
+        write_plugin_env_file(&dir, &env, "p", ".nexus").unwrap();
+
+        let file = dir.join(".nexus/plugin.env");
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(!content.contains("BAD;"));
+        assert!(!content.contains("A=B="));
+        let mut script = format!("set -a; . '{}'; set +a\n", file.display());
+        for (k, _) in &hostile {
+            script.push_str(&format!("printf '%s\\0' \"${k}\"\n"));
+        }
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!marker.exists(), "sourcing plugin.env executed a command");
+        let values: Vec<&str> = std::str::from_utf8(&out.stdout)
+            .unwrap()
+            .split_terminator('\0')
+            .collect();
+        let expected: Vec<&str> = hostile.iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(values, expected);
+        // .nexus/env skips the invalid keys too.
+        let env_file = fs::read_to_string(dir.join(".nexus/env")).unwrap();
+        assert!(!env_file.contains("BAD;") && !env_file.contains("A=B="));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn export_skill(
