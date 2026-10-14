@@ -197,8 +197,10 @@ directories are pruned (`<agentic_root>/skills/`, plus `.claude/skills/` or
 skill directory id (e.g. `nexus-code-review`).
 
 The project's plugin variables (e.g. `HEADROOM_*`) are written to
-`.nexus/env` (used by `nexus run`) and, as a dotenv file, to
-`.nexus/plugin.env`, which devbox loads with `"env_from": ".nexus/plugin.env"`.
+`.nexus/env` (used by `nexus run`) and, as a shell-sourceable file, to
+`.nexus/plugin.env`, which the devbox init hook sources (`set -a; . .nexus/plugin.env`).
+Values there are single-quoted shell words and keys are valid variable names, so sourcing
+the file never runs anything.
 
 Each push **archives the current active fork** and creates a new one. The
 fork name is either auto-generated (`push-2026-08-23T10-30-00`) or set

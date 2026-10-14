@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.15] - 2026-10-14
+
+Shell-safe `.nexus/plugin.env`, plus a changelog and docs cleanup.
+
+### Security
+- **`.nexus/plugin.env` values could run shell commands when the file was sourced.** The file is loaded with a POSIX shell (`set -a; . .nexus/plugin.env`), but 0.28.11 to 0.28.14 quoted values for dotenv parsers only: characters such as `;`, `|`, `&` or `(` stayed unquoted, and a backtick inside a double-quoted value was not escaped. A plugin variable set in the project settings could therefore execute commands on every machine that entered the devbox shell. Values are now written as single-quoted shell words (an embedded `'` as `'\''`), so sourcing never interprets `$(...)`, backticks, `;` or newlines and yields the literal value; values made only of letters, digits and `_./:@%+,=-` stay bare. Keys must match `^[A-Za-z_][A-Za-z0-9_]*$`; other keys are skipped with a warning, in `.nexus/plugin.env` and `.nexus/env` alike. Run `nexus pull` to rewrite the file.
+
+### Changed
+- Changelog and docs cleanup.
+- CI checks that tracked files stay free of internal references.
+
+2 net new tests (one sources a generated file with hostile values through `sh`); 796/796 passing, clippy/fmt clean.
+
 ## [0.28.14] - 2026-10-12
 
 `nexus pull` removes skills that are no longer exported, and skills carry their directory id as `name`.
