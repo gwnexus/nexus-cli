@@ -671,10 +671,9 @@ pub fn load_agent_owner(from: Option<&std::path::Path>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Whether a project's `agent_owner` selects Claude Code. `agent_owner` is
-/// exactly `opencode` (default) or `claude-cli`; absent, unknown, and the retired `both` value all
-/// count as
-/// OpenCode, so exactly one runtime projection is ever rendered.
+/// Whether a project's `agent_owner` selects Claude Code. `agent_owner` is exactly `opencode`
+/// (default) or `claude-cli`; absent, unknown, and the retired `both` value all count as OpenCode,
+/// so exactly one runtime projection is ever rendered.
 pub fn is_claude_owner(agent_owner: Option<&str>) -> bool {
     agent_owner == Some("claude-cli")
 }

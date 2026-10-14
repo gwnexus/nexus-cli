@@ -428,8 +428,7 @@ pub struct AgentFileExportResponse {
     #[serde(default)]
     pub claude_workspace: Option<ClaudeWorkspace>,
     /// Paths the server wants in `.git/info/exclude`: always the personal files; for `shadow`
-    /// `ai`/`nexus`
-    /// also the agentic paths (`.claude/`, `<agentic_root>/`, `AGENTS.md`,
+    /// `ai`/`nexus` also the agentic paths (`.claude/`, `<agentic_root>/`, `AGENTS.md`,
     /// `CLAUDE.md`, `opencode.json`, `.opencode/`).
     #[serde(default)]
     pub git_exclude: Vec<String>,

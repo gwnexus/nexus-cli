@@ -565,9 +565,8 @@ pub(crate) fn remove_hook_registrations(
     removed
 }
 
-/// Merge `includeCoAuthoredBy` into `.claude/settings.json` from the
-/// project's `git_config.include_co_authored_by`. Stored uninverted in Claude Code's own semantics:
-/// `true`
+/// Merge `includeCoAuthoredBy` into `.claude/settings.json` from the project's
+/// `git_config.include_co_authored_by`. Stored uninverted in Claude Code's own semantics: `true`
 /// means the `Co-Authored-By: Claude ...` trailer is added.
 ///
 /// A hard operator requirement ("must never appear"), not a cosmetic
@@ -809,8 +808,7 @@ pub fn claude_md_desired_block_text(block: &str) -> String {
 /// template itself is [`write_claude_root_md`]'s job, called separately).
 ///
 /// `locked_sha256` is the block hash recorded in the CCX lock: if the text between the markers no
-/// longer matches it (edited
-/// locally) and a different block arrives, the block is kept and
+/// longer matches it (edited locally) and a different block arrives, the block is kept and
 /// [`ClaudeMdOutcome::Conflict`] returned, unless `force` is set.
 pub fn merge_claude_md_managed_block(
     target: &Path,
@@ -1354,10 +1352,9 @@ pub fn render_claude_projection(
     }
     super::ccx::record_settings_in_lock(target, agentic_root, claude_settings)?;
 
-    // Root CLAUDE.md managed block: everything
-    // outside the markers is user-owned and never rewritten. A block edited
-    // locally since the last write is kept unless `force`; its lock hash then stays as is, so it
-    // keeps reporting.
+    // Root CLAUDE.md managed block: everything outside the markers is user-owned and never
+    // rewritten. A block edited locally since the last write is kept unless `force`; its lock hash
+    // then stays as is, so it keeps reporting.
     let locked_block_sha =
         super::ccx::load_lock(target, agentic_root).and_then(|l| l.claude_md_block_sha256);
     let claude_md = merge_claude_md_managed_block(
@@ -2831,8 +2828,7 @@ mod tests {
     #[test]
     fn test_merge_claude_hooks_two_plugins_same_event_both_kept() {
         // Confirmed live against a real Claude Code session: multiple plugins may register
-        // independent array
-        // entries under the same event key.
+        // independent array entries under the same event key.
         let dir = temp_dir("hooks-merge-multi");
         let headroom = ClaudeHookAdapter {
             plugin_name: "headroom-intercept".to_string(),

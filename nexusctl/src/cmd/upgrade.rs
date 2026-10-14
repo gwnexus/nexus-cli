@@ -5,13 +5,11 @@
 //!
 //! # Security note
 //!
-//! The install script is taken from the latest GitHub release together with
-//! its `install.sh.sha256` asset and verified in-process before it runs; a
-//! missing or mismatching checksum aborts the upgrade. Only when the latest release predates these
-//! assets does the
-//! command fall back to `nexus.gatewarden.eu`, where a checksum is verified
-//! if published. The script itself verifies the SHA-256 of the binary
-//! tarball it downloads.
+//! The install script is taken from the latest GitHub release together with its `install.sh.sha256`
+//! asset and verified in-process before it runs; a missing or mismatching checksum aborts the
+//! upgrade. Only when the latest release predates these assets does the command fall back to
+//! `nexus.gatewarden.eu`, where a checksum is verified if published. The script itself verifies the
+//! SHA-256 of the binary tarball it downloads.
 
 use console::style;
 use nexus_core::update_check::mark_as_current;

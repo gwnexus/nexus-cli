@@ -391,8 +391,7 @@ fn dotenv_value(v: &str) -> String {
 }
 
 /// What `nexus run` will start, for the post-pull/init tip: the backend's `run_target` when known,
-/// else the
-/// project's runtime.
+/// else the project's runtime.
 pub(crate) fn run_start_label(
     run_target: Option<&nexus_core::api::RunTarget>,
     is_claude: bool,
@@ -2446,12 +2445,10 @@ pub fn is_managed_file(path: &Path) -> bool {
 /// the Nexus project. This is a purely informational notice — no files are
 /// modified, no confirmation is required.
 ///
-/// Replaces the old `detect_agentic_conflicts` + `warn_agentic_conflicts` flow
-/// it replaced. Only files Nexus did not generate are listed: files carrying the `source:
-/// nexus-platform` marker or
-/// the `CLAUDE.md` nexus-managed block, files tracked in the sync manifest,
-/// and `.claude/settings.json` of a Claude Code project (the projection's own
-/// settings file) are skipped.
+/// Replaces the old `detect_agentic_conflicts` + `warn_agentic_conflicts` flow. Only files Nexus
+/// did not generate are listed: files carrying the `source: nexus-platform` marker or the
+/// `CLAUDE.md` nexus-managed block, files tracked in the sync manifest, and `.claude/settings.json`
+/// of a Claude Code project (the projection's own settings file) are skipped.
 pub fn detect_importable_files(
     workspace: &Path,
     is_claude: bool,

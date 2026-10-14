@@ -30,11 +30,10 @@ use nexus_core::config;
 use super::git;
 use super::preflight::{cmd_version, print_check, CheckResult};
 
-/// Environment variables carrying a GitHub token that must be stripped from
-/// the child process when a per-project `gh` profile is active, so an ambient shell credential
-/// cannot silently authenticate
-/// `gh`/tools that shell out to it as the wrong account underneath the
-/// selected profile.
+/// Environment variables carrying a GitHub token that must be stripped from the child process when
+/// a per-project `gh` profile is active, so an ambient shell credential cannot silently
+/// authenticate `gh`/tools that shell out to it as the wrong account underneath the selected
+/// profile.
 const GH_TOKEN_ENV_VARS: &[&str] = &[
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -914,8 +913,7 @@ impl ZellijHost {
 }
 
 /// Which Zellij config a `nexus run` session uses. `zellij --config` replaces the global config
-/// completely, so
-/// the project file is a full config rendered by the backend.
+/// completely, so the project file is a full config rendered by the backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ZellijConfigSource {
     /// `ZELLIJ_CONFIG_FILE` set by the user: it wins, no `--config`.
@@ -2207,11 +2205,9 @@ pub(crate) struct HeadroomSummary {
     pub(crate) cache_integrity_failures: u64,
 }
 
-/// Read the last `session_summary` event from `.nexus/headroom-intercept.jsonl`
-/// written at or after `run_start_epoch` (Unix seconds). Older summaries
-/// belong to other sessions and are never used: the adapter writes none for a session without
-/// activity.
-/// Pass `0` for "the most recent summary".
+/// Read the last `session_summary` event from `.nexus/headroom-intercept.jsonl` written at or after
+/// `run_start_epoch` (Unix seconds). Older summaries belong to other sessions and are never used:
+/// the adapter writes none for a session without activity. Pass `0` for "the most recent summary".
 pub(crate) fn read_headroom_stats(
     workspace: &Path,
     run_start_epoch: u64,
