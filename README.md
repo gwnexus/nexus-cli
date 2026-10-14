@@ -78,6 +78,7 @@ nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
 nexus deinit [--force]                  Remove all AI scaffold files from the workspace
 nexus shadow on|ai|nexus|off|status    Set the project shadow level (policy.shadow) and apply its Git excludes
+nexus shadow check [--commits N]        Scan tracked files and recent commit messages with the shadow rules
 nexus config show                       Display effective configuration (with provenance)
 nexus config set K=V [--local|--global] Update a configuration value
 nexus config path [--local|--global]    Show a config file path
@@ -484,7 +485,8 @@ The shadow level is a project setting on the server, `policy.shadow`:
 
 ```bash
 nexus shadow ai        # or: on (= ai), nexus, off; same as nexus env set policy.shadow ai
-nexus shadow status    # server level, the server exclude block, local blocks
+nexus shadow status    # effective state, check summary, exclude blocks
+nexus shadow check     # full report; exit 1 when anything is found
 ```
 
 When the server sets a level, `nexus shadow status` labels the old local
@@ -506,6 +508,29 @@ and prints a hint per path instead:
 
 Workspaces not linked to a project, or backends without `policy.shadow`,
 keep the old local mode (`on` adds a fixed pattern block, `off` removes it).
+
+**Shadow guard.** For a level other than `off` the backend sends content
+rules (portable regexes, each for commit messages and/or tracked files);
+the CLI applies them as sent:
+
+- `nexus shadow check [--commits N] [--json]` scans tracked files (excluded
+  paths and binaries skipped) and the last N commit messages of the current
+  branch (default 50), and lists excluded paths git still tracks with the
+  one-time fix (`git rm --cached -r -- <path>`, never run for you). Read-only;
+  exit code 1 when anything is found, so it works in CI.
+- `nexus pull` caches the rules in `<agentic_root>/generated/shadow-guard.json`
+  and installs a `commit-msg` hook that checks each message offline
+  (`nexus shadow check-msg`). A rejected message names the rule; `git commit
+  --no-verify` bypasses the check once. An existing untracked hook is kept
+  and run first; a hook tracked in the repository or owned by a hook manager
+  (husky, lefthook, pre-commit) is left alone, and pull prints the one line to
+  add to it. The hook is removed again when the level is `off` or the project
+  switches the check off; a hook inside the work tree (`core.hooksPath`) is
+  git-excluded.
+- `nexus shadow status` and `nexus shadow <level>` always print the effective
+  state (level, excluded paths and how many are still tracked, hook) and a
+  check summary, also when the level did not change. Switching shadow on does
+  not clean content that is already committed.
 
 ### User-Invoked Skills
 

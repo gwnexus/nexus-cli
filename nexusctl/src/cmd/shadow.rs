@@ -577,7 +577,9 @@ pub async fn set_level(api_url: &str, action: &str, assume_yes: bool) -> anyhow:
 
     // The old local block would keep hiding the agentic files.
     if level == "off" {
-        let exclude_path = find_git_dir_from(workspace)?.join("info").join("exclude");
+        let exclude_path = find_git_dir_from(workspace.clone())?
+            .join("info")
+            .join("exclude");
         if is_block_active(&exclude_path, MARKER_START) {
             let content = fs::read_to_string(&exclude_path)?;
             fs::write(
@@ -595,7 +597,72 @@ pub async fn set_level(api_url: &str, action: &str, assume_yes: bool) -> anyhow:
         style("●").green().bold(),
         style(level).bold()
     );
+    // The guard follows the level right away (cache and commit-msg hook),
+    // then the effective state, also when the level did not change.
+    let agentic_root = agentic_root_of(&export);
+    super::shadow_guard::sync(&workspace, &agentic_root, export.shadow_guard.as_ref());
+    super::shadow_guard::print_state(
+        super::shadow_guard::repo_root(&workspace).as_deref(),
+        export.shadow.as_deref().unwrap_or(level),
+        export.shadow_guard.as_ref(),
+    );
     Ok(())
+}
+
+fn agentic_root_of(export: &nexus_core::api::AgentFileExportResponse) -> String {
+    if export.agentic_root.is_empty() {
+        ".nexus".to_string()
+    } else {
+        export.agentic_root.clone()
+    }
+}
+
+/// `nexus shadow check`: scan with the project's shadow guard (from the
+/// backend, or the copy cached by the last pull when it is unreachable).
+/// Returns the exit code: 0 clean or no guard, 1 findings.
+pub async fn check(api_url: &str, commits: usize, json: bool) -> anyhow::Result<i32> {
+    let workspace = std::env::current_dir()?;
+    let root = super::shadow_guard::repo_root(&workspace)
+        .ok_or_else(|| anyhow::anyhow!("Not inside a Git repository."))?;
+    let export = match super::env_cmd::connect(api_url) {
+        Ok((project_id, client)) => client.export_agent_files(&project_id).await.ok(),
+        Err(_) => None,
+    };
+    let guard = match &export {
+        Some(e) => e.shadow_guard.clone(),
+        None => {
+            let cached = super::shadow_guard::load_cache(
+                &workspace.join(super::shadow_guard::cache_rel_path(".nexus")),
+            );
+            if cached.is_some() && !json {
+                println!(
+                    "   {} no linked project or backend unreachable; using the rules cached by the last nexus pull",
+                    style("i").bold().blue()
+                );
+            }
+            cached
+        }
+    };
+    let Some(guard) = guard else {
+        if json {
+            println!("{}", serde_json::json!({ "guard": null, "clean": true }));
+        } else {
+            println!(
+                "{} No shadow guard for this project (shadow level off, or a backend without it).",
+                style("OK").bold().green()
+            );
+        }
+        return Ok(0);
+    };
+    let report = super::shadow_guard::run_check(&root, &guard, commits);
+    if json {
+        let mut value = serde_json::to_value(&report)?;
+        value["clean"] = serde_json::Value::Bool(report.is_clean());
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        super::shadow_guard::print_report(&report);
+    }
+    Ok(i32::from(!report.is_clean()))
 }
 
 /// `nexus shadow status`: the server level and its exclude block, then the
@@ -616,6 +683,12 @@ pub async fn status_with_server(api_url: &str) -> anyhow::Result<()> {
                     style("●").cyan().bold(),
                     style(level).bold()
                 );
+                super::shadow_guard::print_state(
+                    super::shadow_guard::repo_root(&workspace).as_deref(),
+                    level,
+                    export.shadow_guard.as_ref(),
+                );
+                println!();
                 let entries = server_exclude_entries(&workspace);
                 if entries.is_empty() {
                     println!(

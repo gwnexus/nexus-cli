@@ -435,6 +435,46 @@ pub struct AgentFileExportResponse {
     /// Project shadow level `off` | `ai` | `nexus` (`policy.shadow`).
     #[serde(default)]
     pub shadow: Option<String>,
+    /// What `nexus shadow check` and the commit-msg hook enforce. Present
+    /// only when the shadow level is not `off`; older backends omit it.
+    #[serde(default)]
+    pub shadow_guard: Option<ShadowGuard>,
+}
+
+/// `af_export.shadow_guard`: content rules for a shadowed project. The
+/// backend owns the patterns; the CLI applies them as sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowGuard {
+    /// `ai` or `nexus`.
+    pub level: String,
+    /// Install the commit-msg hook (on unless the project switched it off).
+    #[serde(default = "default_true")]
+    pub commit_msg_hook: bool,
+    /// The agentic paths of the shadow exclude list.
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
+    #[serde(default)]
+    pub patterns: Vec<ShadowPattern>,
+}
+
+/// One content rule: a portable regex (RE2 subset), applied only in the
+/// listed scopes (`commit_message`, `tracked_files`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowPattern {
+    pub id: String,
+    pub regex: String,
+    /// `"i"` for case-insensitive, otherwise empty.
+    #[serde(default)]
+    pub flags: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Human-readable name of what the pattern finds.
+    #[serde(default)]
+    pub message: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// `af_export.claude_workspace` (schema `nexus.claude-workspace.v1`).

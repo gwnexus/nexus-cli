@@ -1205,6 +1205,12 @@ pub async fn run(
         }
     }
 
+    // Shadow guard: cache the rules for the commit-msg hook and install or
+    // remove the hook (only when the export was read).
+    if let Ok(ref af_export) = af_export_result {
+        super::shadow_guard::sync(&workspace, &agentic_root, af_export.shadow_guard.as_ref());
+    }
+
     // Personal, git-excluded workspace files: the layout and
     // the Zellij config.
     if let Ok(ref af_export) = af_export_result {

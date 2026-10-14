@@ -505,8 +505,30 @@ pub enum ShadowAction {
     Nexus,
     /// Set policy.shadow to `off` and drop the agentic excludes.
     Off,
-    /// Show the server shadow level and the local exclude blocks.
+    /// Show the effective shadow state (level, excluded paths, commit-msg
+    /// hook) with a check summary, and the local exclude blocks.
     Status,
+    /// Scan tracked files and recent commit messages with the project's
+    /// shadow rules and list excluded paths git still tracks (read-only;
+    /// exit 1 when anything is found). Supports --json / --output json.
+    Check {
+        /// Number of recent commits on the current branch to scan.
+        #[arg(long, default_value_t = 50)]
+        commits: usize,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a commit message file against the cached rules (used by the
+    /// commit-msg hook that nexus pull installs).
+    #[command(hide = true)]
+    CheckMsg {
+        /// Cached shadow guard (written by nexus pull).
+        #[arg(long)]
+        guard: String,
+        /// The commit message file git passes to the hook.
+        file: String,
+    },
 }
 
 /// Workspace shadow subcommands.

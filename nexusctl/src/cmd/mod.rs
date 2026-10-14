@@ -25,6 +25,7 @@ pub(crate) mod pull;
 pub(crate) mod push;
 pub(crate) mod run;
 pub(crate) mod shadow;
+mod shadow_guard;
 mod skills_cmd;
 pub(crate) mod stash;
 mod state_cmd;
@@ -326,6 +327,20 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 ShadowAction::Nexus => shadow::set_level(&api_url, "nexus", cli.yes).await?,
                 ShadowAction::Off => shadow::set_level(&api_url, "off", cli.yes).await?,
                 ShadowAction::Status => shadow::status_with_server(&api_url).await?,
+                ShadowAction::Check { commits, json } => {
+                    let json = *json
+                        || matches!(
+                            cli.resolve_output(&config),
+                            nexus_core::OutputPreference::Json
+                        );
+                    exit_with(shadow::check(&api_url, *commits, json).await?);
+                }
+                ShadowAction::CheckMsg { guard, file } => {
+                    exit_with(shadow_guard::check_message_file(
+                        std::path::Path::new(guard),
+                        std::path::Path::new(file),
+                    )?);
+                }
             }
         }
         Command::Workspace { ref action } => match action {
