@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.16] - 2026-10-14
+
+Shadow guard: a content check, a commit-msg hook and clearer shadow status.
+
+### Added
+- **`nexus shadow check [--commits N] [--json]`.** Applies the shadow rules the backend sends for levels other than `off` (portable regexes, each limited to commit messages and/or tracked files; the CLI adds none of its own). Scans tracked files (excluded paths, binaries and files over 2 MB skipped) and the last N commit messages of the current branch (default 50), printing location, rule and a short excerpt, never the whole line. Lists excluded paths that git still tracks with the one-time fix `git rm --cached -r -- <path>`, which it never runs. Read-only; exit code 1 when anything is found. Without a linked project or an unreachable backend it uses the rules cached by the last pull.
+- **commit-msg hook.** `nexus pull` caches the rules in `<agentic_root>/generated/shadow-guard.json` and, unless the project switched the check off, installs a `commit-msg` hook that checks each message offline through `nexus shadow check-msg`. A rejected message names the rule and the bypass `git commit --no-verify`. An existing untracked hook is moved aside and run first (restored when the guard goes away); a hook tracked in the repository or written by husky, lefthook or the pre-commit framework is not touched, and pull prints the line to add to it instead. The hook is removed when the level is `off`, the backend no longer sends rules, or the check is switched off. A hook placed inside the work tree via `core.hooksPath` is git-excluded. If `nexus` is not on `PATH` the hook lets the commit through with a warning.
+
+### Changed
+- **`nexus shadow status` and `nexus shadow <level>` print the effective state**: level, number of excluded paths and how many are still tracked, whether the hook is installed, a note that switching shadow on does not clean committed content, and a check summary. `nexus shadow <level>` does this also when the level was already set, and applies the cache and hook right away.
+
+13 net new tests (one end-to-end test, run with `--ignored`, commits through the installed hook with the built binary); 808/808 passing, clippy/fmt clean.
+
 ## [0.28.15] - 2026-10-14
 
 Shell-safe `.nexus/plugin.env`, plus a changelog and docs cleanup.
