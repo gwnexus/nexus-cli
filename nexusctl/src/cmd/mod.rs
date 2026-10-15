@@ -322,10 +322,52 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             match action {
-                ShadowAction::On => shadow::set_level(&api_url, "on", cli.yes).await?,
-                ShadowAction::Ai => shadow::set_level(&api_url, "ai", cli.yes).await?,
-                ShadowAction::Nexus => shadow::set_level(&api_url, "nexus", cli.yes).await?,
-                ShadowAction::Off => shadow::set_level(&api_url, "off", cli.yes).await?,
+                ShadowAction::On(args) => {
+                    shadow::switch(
+                        &api_url,
+                        true,
+                        &args.target,
+                        args.all,
+                        args.dry_run,
+                        cli.yes,
+                    )
+                    .await?
+                }
+                ShadowAction::Off(args) => {
+                    shadow::switch(
+                        &api_url,
+                        false,
+                        &args.target,
+                        args.all,
+                        args.dry_run,
+                        cli.yes,
+                    )
+                    .await?
+                }
+                ShadowAction::Ai => {
+                    shadow::deprecated("nexus shadow ai", "nexus shadow on --target agentic");
+                    shadow::switch(
+                        &api_url,
+                        true,
+                        &[shadow::ShadowTarget::Agentic],
+                        false,
+                        false,
+                        cli.yes,
+                    )
+                    .await?
+                }
+                ShadowAction::Nexus => {
+                    shadow::deprecated("nexus shadow nexus", "nexus shadow on --target nexus");
+                    shadow::switch(
+                        &api_url,
+                        true,
+                        &[shadow::ShadowTarget::Nexus],
+                        false,
+                        false,
+                        cli.yes,
+                    )
+                    .await?
+                }
                 ShadowAction::Status => shadow::status_with_server(&api_url).await?,
                 ShadowAction::Check { commits, json } => {
                     let json = *json
@@ -344,11 +386,28 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Workspace { ref action } => match action {
-            WorkspaceAction::Shadow { ref action } => match action {
-                WorkspaceShadowAction::On => shadow::workspace_on()?,
-                WorkspaceShadowAction::Off => shadow::workspace_off()?,
-                WorkspaceShadowAction::Status => shadow::status()?,
-            },
+            WorkspaceAction::Shadow { ref action } => {
+                let config = nexus_core::config::Config::load_effective(None)?;
+                let api_url = cli.resolve_api_url(&config);
+                let workspace = [shadow::ShadowTarget::Workspace];
+                match action {
+                    WorkspaceShadowAction::On => {
+                        shadow::deprecated(
+                            "nexus workspace shadow on",
+                            "nexus shadow on --target workspace",
+                        );
+                        shadow::switch(&api_url, true, &workspace, false, false, cli.yes).await?
+                    }
+                    WorkspaceShadowAction::Off => {
+                        shadow::deprecated(
+                            "nexus workspace shadow off",
+                            "nexus shadow off --target workspace",
+                        );
+                        shadow::switch(&api_url, false, &workspace, false, false, cli.yes).await?
+                    }
+                    WorkspaceShadowAction::Status => shadow::status_with_server(&api_url).await?,
+                }
+            }
         },
         Command::Import { dry_run } => {
             let config = nexus_core::config::Config::load_effective(None)?;

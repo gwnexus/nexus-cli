@@ -1,4 +1,14 @@
-//! `nexus shadow on|ai|nexus|off|status` — hide agentic scaffold files from Git.
+//! `nexus shadow on|off [--target ...]|status|check`: hide what Nexus and
+//! agentic tooling put into a repository.
+//!
+//! Three targets, switched together (default) or one by one with
+//! `--target`:
+//! - `agentic`: agentic files, git-excluded (`policy.shadow` `ai`);
+//! - `nexus`: also Nexus internals in commit messages and tracked files
+//!   (`policy.shadow` `nexus`, enforced by the shadow guard); it includes
+//!   `agentic`;
+//! - `workspace`: the devbox files (`devbox.json`, `devbox.lock`,
+//!   `.devbox/`, `scripts/devbox/`), a local exclude block.
 //!
 //! The shadow level is a
 //! project setting on the server (`policy.shadow`: `off` | `ai` | `nexus`)
@@ -135,7 +145,6 @@ pub fn off() -> anyhow::Result<()> {
     fs::write(&exclude_path, &cleaned)?;
 
     // Re-track files that exist on disk (best effort)
-    let re_added = retrack_patterns(AGENTIC_PATTERNS)?;
 
     println!(
         "{} Shadow mode {}.",
@@ -143,16 +152,9 @@ pub fn off() -> anyhow::Result<()> {
         style("disabled").yellow().bold()
     );
     println!("  Agentic patterns removed from .git/info/exclude");
-    if re_added > 0 {
-        println!("  {} file(s) re-added to Git tracking", re_added);
-    }
+    print_add_hints(&untracked_patterns(AGENTIC_PATTERNS));
 
     Ok(())
-}
-
-/// Show current shadow mode status (agentic files).
-pub fn status() -> anyhow::Result<()> {
-    local_status(false)
 }
 
 /// The local blocks. With `server_level` the server decides the agentic
@@ -296,17 +298,13 @@ pub fn workspace_off() -> anyhow::Result<()> {
     let cleaned = remove_block(&content, WS_MARKER_START, WS_MARKER_END);
     fs::write(&exclude_path, &cleaned)?;
 
-    let re_added = retrack_patterns(WORKSPACE_PATTERNS)?;
-
     println!(
         "{} Workspace shadow {}.",
         style("○").yellow().bold(),
         style("disabled").yellow().bold()
     );
     println!("  Workspace patterns removed from .git/info/exclude");
-    if re_added > 0 {
-        println!("  {} file(s) re-added to Git tracking", re_added);
-    }
+    print_add_hints(&untracked_patterns(WORKSPACE_PATTERNS));
 
     Ok(())
 }
@@ -609,6 +607,269 @@ pub async fn set_level(api_url: &str, action: &str, assume_yes: bool) -> anyhow:
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Targets: nexus shadow on|off [--target ...]
+// ---------------------------------------------------------------------------
+
+/// What `nexus shadow on|off` hides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ShadowTarget {
+    /// Agentic files (.claude/, .nexus/, AGENTS.md, CLAUDE.md, ...).
+    #[value(alias = "ai", alias = "agentic-files")]
+    Agentic,
+    /// Devbox workspace files (devbox.json, devbox.lock, .devbox/, scripts/devbox/).
+    Workspace,
+    /// Nexus internals in commit messages and tracked files (includes agentic).
+    Nexus,
+}
+
+impl ShadowTarget {
+    const ALL: [ShadowTarget; 3] = [Self::Agentic, Self::Workspace, Self::Nexus];
+}
+
+/// Project setting for the workspace target, used once the backend offers it.
+const WORKSPACE_SETTING: &str = "policy.shadow_workspace";
+
+/// Line in `.git/info/exclude` recording that workspace shadow was switched
+/// off locally, so `nexus pull` does not switch it on again for a fork in
+/// shadow mode.
+const WS_OPT_OUT: &str = "# nexus workspace shadow: off";
+
+/// Print a deprecation note for an old shadow command.
+pub fn deprecated(old: &str, new: &str) {
+    println!(
+        "   {} {old} is deprecated; use {new}",
+        style("i").bold().blue()
+    );
+}
+
+/// The `policy.shadow` level after switching targets on or off. `nexus`
+/// includes `agentic`: switching `nexus` on raises the level to `nexus`,
+/// switching `agentic` off drops it to `off`, switching `nexus` off keeps
+/// `agentic`.
+pub fn next_level(current: &str, on: bool, agentic: bool, nexus: bool) -> &'static str {
+    let current = match current {
+        "nexus" => "nexus",
+        "ai" => "ai",
+        _ => "off",
+    };
+    match (on, agentic, nexus) {
+        (true, _, true) => "nexus",
+        (true, true, false) if current == "nexus" => "nexus",
+        (true, true, false) => "ai",
+        (false, true, _) => "off",
+        (false, false, true) if current == "nexus" => "ai",
+        _ => current,
+    }
+}
+
+/// `nexus shadow on|off [--target ...] [--all] [--dry-run]`. Without
+/// targets (or with `--all`) every target is switched.
+pub async fn switch(
+    api_url: &str,
+    on: bool,
+    targets: &[ShadowTarget],
+    all: bool,
+    dry_run: bool,
+    assume_yes: bool,
+) -> anyhow::Result<()> {
+    let targets: &[ShadowTarget] = if targets.is_empty() || all {
+        if on && !all {
+            println!(
+                "   {} nexus shadow on switches all targets (agentic, workspace, nexus); nexus shadow on --target agentic only hides the agentic files",
+                style("i").bold().blue()
+            );
+        }
+        &ShadowTarget::ALL
+    } else {
+        targets
+    };
+    let has = |t| targets.contains(&t);
+    let (agentic, nexus) = (has(ShadowTarget::Agentic), has(ShadowTarget::Nexus));
+    let settings = super::env_cmd::snapshot(api_url).await;
+    let has_setting = |key: &str| {
+        settings
+            .as_ref()
+            .is_some_and(|s| s.schema.iter().any(|x| x.key == key))
+    };
+    if dry_run {
+        println!("{} Dry run, nothing is changed:", style(">>").bold().cyan());
+    }
+
+    if agentic || nexus {
+        if has_setting("policy.shadow") {
+            let current = settings
+                .as_ref()
+                .and_then(|s| s.settings.get("policy.shadow"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("off");
+            let level = next_level(current, on, agentic, nexus);
+            if on && nexus && !agentic {
+                println!(
+                    "   {} nexus includes agentic: the agentic files are hidden too",
+                    style("i").bold().blue()
+                );
+            }
+            if !on && agentic && !nexus && current == "nexus" {
+                println!(
+                    "   {} switching agentic off also switches nexus off (nexus includes agentic)",
+                    style("i").bold().blue()
+                );
+            }
+            if dry_run {
+                if level == current {
+                    println!("   policy.shadow: {level} (unchanged)");
+                } else {
+                    println!("   policy.shadow: {current} -> {level}");
+                }
+            } else {
+                set_level(api_url, level, assume_yes).await?;
+            }
+        } else {
+            if nexus {
+                println!(
+                    "   {} nexus: needs a linked project on a backend with policy.shadow; skipped",
+                    style("!").yellow()
+                );
+            }
+            if agentic {
+                if dry_run {
+                    println!(
+                        "   agentic: {} the local shadow block in .git/info/exclude",
+                        if on { "add" } else { "remove" }
+                    );
+                } else {
+                    println!(
+                        "   {} No server shadow setting (workspace not linked or backend without policy.shadow); using local shadow mode.",
+                        style("i").bold().blue()
+                    );
+                    if on {
+                        self::on()?;
+                    } else {
+                        off()?;
+                    }
+                }
+            }
+        }
+    }
+
+    if has(ShadowTarget::Workspace) {
+        let server = has_setting(WORKSPACE_SETTING);
+        if dry_run {
+            if server {
+                println!("   {WORKSPACE_SETTING}: -> {on}");
+            }
+            println!(
+                "   workspace: {} the exclude block for {}",
+                if on { "add" } else { "remove" },
+                WORKSPACE_PATTERNS.join(", ")
+            );
+            return Ok(());
+        }
+        if server {
+            super::env_cmd::set(
+                api_url,
+                WORKSPACE_SETTING,
+                if on { "true" } else { "false" },
+                false,
+                assume_yes,
+            )
+            .await?;
+        }
+        let exclude_path = find_git_dir()?.join("info").join("exclude");
+        // With the server setting, pull follows the project; a local
+        // opt-out is only needed without it.
+        set_workspace_opt_out(&exclude_path, !on && !server)?;
+        if on {
+            workspace_on()?;
+        } else {
+            workspace_off()?;
+            if !server {
+                println!(
+                    "  {}",
+                    style("nexus pull keeps it off, also for a workspace fork in shadow mode.")
+                        .dim()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether workspace shadow was switched off locally (`nexus shadow off
+/// --target workspace`); `nexus pull` then does not switch it on.
+pub fn workspace_opted_out() -> bool {
+    find_git_dir()
+        .ok()
+        .and_then(|g| fs::read_to_string(g.join("info").join("exclude")).ok())
+        .is_some_and(|c| has_opt_out(&c))
+}
+
+fn has_opt_out(content: &str) -> bool {
+    content.lines().any(|l| l.trim() == WS_OPT_OUT)
+}
+
+/// Add or remove the workspace opt-out line.
+fn set_workspace_opt_out(exclude_path: &Path, opt_out: bool) -> anyhow::Result<()> {
+    let content = fs::read_to_string(exclude_path).unwrap_or_default();
+    if has_opt_out(&content) == opt_out {
+        return Ok(());
+    }
+    let mut lines: Vec<&str> = content.lines().filter(|l| l.trim() != WS_OPT_OUT).collect();
+    if opt_out {
+        lines.push(WS_OPT_OUT);
+    }
+    if let Some(parent) = exclude_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    fs::write(exclude_path, out)?;
+    Ok(())
+}
+
+/// One line per target for `nexus shadow status`.
+fn print_targets(level: Option<&str>, exclude_path: &Path) {
+    let content = fs::read_to_string(exclude_path).unwrap_or_default();
+    let legacy = content.contains(MARKER_START);
+    let workspace = content.contains(WS_MARKER_START);
+    let row = |name: &str, on: bool, source: &str| {
+        let state = if on {
+            style("on ").green().bold()
+        } else {
+            style("off").dim()
+        };
+        println!("  {name:<10} {state}  {}", style(source).dim());
+    };
+    println!("{} Shadow targets:", style("●").cyan().bold());
+    match level {
+        Some(level) => {
+            row(
+                "agentic",
+                matches!(level, "ai" | "nexus"),
+                &format!("policy.shadow={level}"),
+            );
+        }
+        None => row("agentic", legacy, "local shadow block"),
+    }
+    row(
+        "workspace",
+        workspace,
+        if has_opt_out(&content) {
+            "local exclude block (switched off locally)"
+        } else {
+            "local exclude block"
+        },
+    );
+    match level {
+        Some(level) => row("nexus", level == "nexus", &format!("policy.shadow={level}")),
+        None => row("nexus", false, "needs policy.shadow on the backend"),
+    }
+    println!();
+}
+
 fn agentic_root_of(export: &nexus_core::api::AgentFileExportResponse) -> String {
     if export.agentic_root.is_empty() {
         ".nexus".to_string()
@@ -669,9 +930,21 @@ pub async fn check(api_url: &str, commits: usize, json: bool) -> anyhow::Result<
 /// local blocks.
 pub async fn status_with_server(api_url: &str) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
+    let exclude_path = find_git_dir()?.join("info").join("exclude");
     let mut server_level = false;
-    if let Ok((project_id, client)) = super::env_cmd::connect(api_url) {
-        match client.export_agent_files(&project_id).await {
+    let export = match super::env_cmd::connect(api_url) {
+        Ok((project_id, client)) => Some(client.export_agent_files(&project_id).await),
+        Err(_) => None,
+    };
+    print_targets(
+        export
+            .as_ref()
+            .and_then(|e| e.as_ref().ok())
+            .and_then(|e| e.shadow.as_deref()),
+        &exclude_path,
+    );
+    if let Some(export) = export {
+        match export {
             Ok(export) => {
                 server_level = export.shadow.is_some();
                 let level = export
@@ -900,22 +1173,31 @@ fn is_file_tracked_in_history_in(path: &str, workdir: Option<&Path>) -> bool {
         .unwrap_or(false)
 }
 
-/// Run `git add` for each pattern that exists on disk.
-fn retrack_patterns(patterns: &[&str]) -> anyhow::Result<usize> {
-    let mut count = 0;
-    for pat in patterns {
-        let clean = pat.trim_end_matches('/');
-        let path = Path::new(clean);
-        if path.exists() {
-            let output = Command::new("git").args(["add", clean]).output();
-            if let Ok(o) = output {
-                if o.status.success() {
-                    count += 1;
-                }
-            }
-        }
+/// Paths of `patterns` that exist on disk but are not tracked by git, now
+/// that they are no longer excluded. Nexus never stages them itself; the
+/// caller prints a `git add` hint per path instead.
+fn untracked_patterns(patterns: &[&str]) -> Vec<String> {
+    untracked_patterns_in(patterns, None)
+}
+
+fn untracked_patterns_in(patterns: &[&str], workdir: Option<&Path>) -> Vec<String> {
+    patterns
+        .iter()
+        .map(|p| p.trim_end_matches('/'))
+        .filter(|p| workdir.map_or_else(|| Path::new(p).exists(), |w| w.join(p).exists()))
+        .filter(|p| resolve_tracked_paths_in(p, workdir).is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Print the `git add` hint for paths that are no longer excluded.
+fn print_add_hints(paths: &[String]) {
+    for p in paths {
+        println!(
+            "   {} {p} is no longer excluded and not tracked by git; add it if wanted: git add {p}",
+            style("!").yellow()
+        );
     }
-    Ok(count)
 }
 
 #[cfg(test)]
@@ -1079,6 +1361,27 @@ mod tests {
         assert_eq!(paths, vec!["agentic.txt"]);
     }
 
+    /// After `off`, only existing untracked paths get a `git add` hint;
+    /// nothing is staged.
+    #[test]
+    fn test_untracked_patterns_in_lists_without_staging() {
+        use std::process::Command;
+
+        let dir = make_temp_repo_with_commit("devbox.json", "{}");
+        let path = dir.path();
+        std::fs::create_dir_all(path.join("scripts/devbox")).unwrap();
+        std::fs::write(path.join("scripts/devbox/a.sh"), "a").unwrap();
+
+        let paths = untracked_patterns_in(WORKSPACE_PATTERNS, Some(path));
+        assert_eq!(paths, vec!["scripts/devbox"]);
+        let staged = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(staged.stdout.is_empty());
+    }
+
     /// `untrack_patterns` skips a committed file — tested via the `_in` helpers
     /// to avoid set_current_dir (which is process-global and unsafe in parallel tests).
     #[test]
@@ -1173,6 +1476,41 @@ mod tests {
         ] {
             assert!(!valid_exclude_path(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn test_next_level_targets() {
+        // on
+        assert_eq!(next_level("off", true, true, true), "nexus");
+        assert_eq!(next_level("off", true, true, false), "ai");
+        assert_eq!(next_level("off", true, false, true), "nexus");
+        assert_eq!(next_level("nexus", true, true, false), "nexus");
+        assert_eq!(next_level("ai", true, false, false), "ai");
+        // off: the reverse step
+        assert_eq!(next_level("nexus", false, true, true), "off");
+        assert_eq!(next_level("nexus", false, true, false), "off");
+        assert_eq!(next_level("nexus", false, false, true), "ai");
+        assert_eq!(next_level("ai", false, false, true), "ai");
+        assert_eq!(next_level("off", false, false, true), "off");
+        // unknown values count as off
+        assert_eq!(next_level("", false, false, true), "off");
+    }
+
+    #[test]
+    fn test_workspace_opt_out_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("info/exclude");
+        set_workspace_opt_out(&path, true).unwrap();
+        assert!(has_opt_out(&fs::read_to_string(&path).unwrap()));
+        // Idempotent, own lines kept.
+        fs::write(&path, format!("mine.txt\n{WS_OPT_OUT}\n")).unwrap();
+        set_workspace_opt_out(&path, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("mine.txt\n{WS_OPT_OUT}\n")
+        );
+        set_workspace_opt_out(&path, false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine.txt\n");
     }
 
     #[test]

@@ -77,7 +77,8 @@ nexus run [-- <args>]                   Start the agent environment the backend 
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
 nexus deinit [--force]                  Remove all AI scaffold files from the workspace
-nexus shadow on|ai|nexus|off|status    Set the project shadow level (policy.shadow) and apply its Git excludes
+nexus shadow on|off [--target T,...]    Hide (or stop hiding) agentic files, the workspace and Nexus internals from Git
+nexus shadow status                     Effective state per target, excluded paths, hook and check summary
 nexus shadow check [--commits N]        Scan tracked files and recent commit messages with the shadow rules
 nexus config show                       Display effective configuration (with provenance)
 nexus config set K=V [--local|--global] Update a configuration value
@@ -482,19 +483,43 @@ always loads; `.nexus/directives.md` is then the readable copy.
 
 ### Shadow Mode (`nexus shadow`)
 
-The shadow level is a project setting on the server, `policy.shadow`:
+`nexus shadow on` hides three targets from Git; `nexus shadow off` is the
+reverse step. Without `--target` (or with `--all`) both switch every target:
+
+| Target | Hides | Stored in |
+| ------ | ----- | --------- |
+| `agentic` (aliases `ai`, `agentic-files`) | Agentic files: `.claude/`, `.nexus/`, `AGENTS.md`, `CLAUDE.md`, `opencode.json`, `.opencode/`, ... | `policy.shadow` `ai` |
+| `nexus` | Nexus internals in commit messages and tracked files (shadow guard); includes `agentic` | `policy.shadow` `nexus` |
+| `workspace` | Devbox files: `devbox.json`, `devbox.lock`, `.devbox/`, `scripts/devbox/` | local exclude block |
+
+```bash
+nexus shadow on                                # all targets (same as --all)
+nexus shadow on --target agentic               # only the agentic files
+nexus shadow on --target agentic,workspace     # repeat --target or separate with commas
+nexus shadow off --target nexus                # keep agentic, drop the Nexus content rules
+nexus shadow off --target workspace --dry-run  # show what would change
+nexus shadow status                            # one line per target, then the details
+nexus shadow check                             # full report; exit 1 when anything is found
+```
+
+`nexus` includes `agentic`: switching `nexus` on also hides the agentic
+files, switching `agentic` off also switches `nexus` off, and switching
+`nexus` off keeps `agentic`. `nexus shadow off --target workspace` is
+recorded locally (`# nexus workspace shadow: off` in `.git/info/exclude`),
+so `nexus pull` does not switch it on again for a workspace fork in shadow
+mode; `nexus shadow on --target workspace` removes the line. Like `on`
+never untracks files, `off` never stages them: it prints `git add <path>`
+for each previously excluded path that exists but is not tracked. `nexus shadow
+ai|nexus` and `nexus workspace shadow on|off|status` still work and print
+the new command.
+
+The agentic and nexus targets are the project setting `policy.shadow`:
 
 | Level   | Effect |
 | ------- | ------ |
 | `off`   | Only personal files are git-excluded. |
 | `ai`    | Agentic files stay out of git: `.claude/`, `.nexus/`, `AGENTS.md`, `CLAUDE.md`, `opencode.json`, `.opencode/`. |
 | `nexus` | As `ai`, plus no Nexus references in repository content and no AI attribution (enforced by the directives). |
-
-```bash
-nexus shadow ai        # or: on (= ai), nexus, off; same as nexus env set policy.shadow ai
-nexus shadow status    # effective state, check summary, exclude blocks
-nexus shadow check     # full report; exit 1 when anything is found
-```
 
 When the server sets a level, `nexus shadow status` labels the old local
 agentic block as `Local shadow block (legacy)` and the devbox block as

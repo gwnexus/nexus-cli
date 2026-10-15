@@ -1487,8 +1487,9 @@ pub async fn run(
                         }
                     );
 
-                    // Auto-apply workspace git-exclude when shadow_mode is active
-                    if export.meta.shadow_mode {
+                    // Auto-apply workspace git-exclude when shadow_mode is active,
+                    // unless it was switched off locally.
+                    if export.meta.shadow_mode && !shadow::workspace_opted_out() {
                         match shadow::workspace_on() {
                             Ok(()) => {}
                             Err(e) => {
@@ -1588,8 +1589,9 @@ pub async fn run(
                                 }
                             );
 
-                            // Auto-apply workspace git-exclude when shadow_mode is active
-                            if ws_export.shadow_mode {
+                            // Auto-apply workspace git-exclude when shadow_mode is active,
+                            // unless it was switched off locally.
+                            if ws_export.shadow_mode && !shadow::workspace_opted_out() {
                                 match shadow::workspace_on() {
                                     Ok(()) => {}
                                     Err(e) => {

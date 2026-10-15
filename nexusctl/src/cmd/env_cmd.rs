@@ -88,6 +88,13 @@ pub(crate) async fn has_setting(api_url: &str, key: &str) -> anyhow::Result<bool
     Ok(resp.schema.iter().any(|s| s.key == key))
 }
 
+/// The project's settings with their schema; `None` when the workspace is
+/// not linked or the backend does not offer settings.
+pub(crate) async fn snapshot(api_url: &str) -> Option<ProjectSettingsResponse> {
+    let (project_id, client) = connect(api_url).ok()?;
+    fetch(&client, &project_id).await.ok()
+}
+
 /// `nexus env keys`: the settings schema.
 pub async fn keys(api_url: &str, json: bool) -> anyhow::Result<()> {
     let (project_id, client) = connect(api_url)?;

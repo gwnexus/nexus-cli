@@ -260,7 +260,7 @@ pub enum Command {
     #[command(hide = true)]
     McpLocal,
 
-    /// Shadow (hide) AI/agentic scaffold files from Git tracking.
+    /// Hide agentic files, the devbox workspace and Nexus internals from Git.
     Shadow {
         #[command(subcommand)]
         action: ShadowAction,
@@ -496,15 +496,19 @@ pub enum ClaudeAction {
 /// Shadow mode subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ShadowAction {
-    /// Hide agentic files from Git: sets the project's policy.shadow to
-    /// `ai` and applies the server's exclude list (same as `ai`).
-    On,
-    /// Set policy.shadow to `ai` (agentic files git-excluded).
+    /// Hide the selected targets from Git (all of them without --target):
+    /// agentic files, the devbox workspace and Nexus internals in commit
+    /// messages and tracked files.
+    On(ShadowSwitchArgs),
+    /// Reverse of `on`: stop hiding the selected targets (all of them
+    /// without --target).
+    Off(ShadowSwitchArgs),
+    /// Deprecated: use `nexus shadow on --target agentic`.
+    #[command(hide = true)]
     Ai,
-    /// Set policy.shadow to `nexus`.
+    /// Deprecated: use `nexus shadow on --target nexus`.
+    #[command(hide = true)]
     Nexus,
-    /// Set policy.shadow to `off` and drop the agentic excludes.
-    Off,
     /// Show the effective shadow state (level, excluded paths, commit-msg
     /// hook) with a check summary, and the local exclude blocks.
     Status,
@@ -531,6 +535,21 @@ pub enum ShadowAction {
     },
 }
 
+/// Targets of `nexus shadow on|off`.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct ShadowSwitchArgs {
+    /// What to switch: agentic (alias: ai, agentic-files), workspace,
+    /// nexus. Repeat or separate with commas; nexus includes agentic.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub target: Vec<cmd::shadow::ShadowTarget>,
+    /// All targets (the default without --target).
+    #[arg(long, conflicts_with = "target")]
+    pub all: bool,
+    /// Show what would change without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 /// Workspace shadow subcommands.
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceAction {
@@ -542,12 +561,13 @@ pub enum WorkspaceAction {
     },
 }
 
-/// Workspace shadow on/off/status.
+/// Workspace shadow on/off/status (deprecated: `nexus shadow on|off
+/// --target workspace`).
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceShadowAction {
-    /// Enable workspace shadow mode.
+    /// Enable workspace shadow mode (same as nexus shadow on --target workspace).
     On,
-    /// Disable workspace shadow mode.
+    /// Disable workspace shadow mode (same as nexus shadow off --target workspace).
     Off,
     /// Show workspace shadow status.
     Status,
@@ -1732,8 +1752,8 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "shadow", "on"]).unwrap();
         match cli.command {
             Command::Shadow {
-                action: ShadowAction::On,
-            } => {}
+                action: ShadowAction::On(args),
+            } => assert!(args.target.is_empty() && !args.all && !args.dry_run),
             _ => panic!("expected Shadow On"),
         }
     }
@@ -1743,10 +1763,56 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "shadow", "off"]).unwrap();
         match cli.command {
             Command::Shadow {
-                action: ShadowAction::Off,
-            } => {}
+                action: ShadowAction::Off(args),
+            } => assert!(args.target.is_empty()),
             _ => panic!("expected Shadow Off"),
         }
+    }
+
+    #[test]
+    fn test_parse_shadow_targets() {
+        use cmd::shadow::ShadowTarget;
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "shadow",
+            "on",
+            "--target=ai,workspace",
+            "--target",
+            "nexus",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Shadow {
+                action: ShadowAction::On(args),
+            } => {
+                assert_eq!(
+                    args.target,
+                    vec![
+                        ShadowTarget::Agentic,
+                        ShadowTarget::Workspace,
+                        ShadowTarget::Nexus
+                    ]
+                );
+                assert!(args.dry_run);
+            }
+            _ => panic!("expected Shadow On"),
+        }
+        let cli =
+            Cli::try_parse_from(["nexus", "shadow", "off", "--target", "agentic-files"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Shadow { action: ShadowAction::Off(ref a) } if a.target == vec![ShadowTarget::Agentic]
+        ));
+        let cli = Cli::try_parse_from(["nexus", "shadow", "on", "--all"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Shadow { action: ShadowAction::On(ref a) } if a.all
+        ));
+        assert!(
+            Cli::try_parse_from(["nexus", "shadow", "on", "--all", "--target", "nexus"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["nexus", "shadow", "on", "--target", "docs"]).is_err());
     }
 
     #[test]
