@@ -150,12 +150,16 @@ One command per activity; each classifies every file itself:
 
 - **content**: authored files that may go back to the backend: assigned
   agent files (e.g. `.nexus/AGENTS.md`) and the devbox workspace
-  (`devbox.json`, `scripts/devbox/**`). States: MODIFIED, NEW, DELETED,
-  UPDATE (backend changed), CONFLICT.
+  (`devbox.json`, `scripts/devbox/**` except the generated scripts below).
+  States: MODIFIED, NEW, DELETED, UPDATE (backend changed), CONFLICT.
 - **projection**: generated from backend settings; a local edit is drift:
   Claude Code Experience files, generated agent files, skills and OpenCode
-  commands, the `CLAUDE.md` managed block and managed `.claude/settings.json`
-  keys. States: DRIFTED, CONFLICT, UPDATE, CREATE, ORPHANED, UNMANAGED.
+  commands, the `CLAUDE.md` managed block, managed `.claude/settings.json`
+  keys and the devbox scripts the backend generates for every workspace
+  (`scripts/devbox/dbx_init.sh`, `dbx_post_init.sh`, `lib/common.sh`,
+  `ops/*.sh`; put local changes into `scripts/devbox/init/os_<os>/override.sh`
+  or an own script). States: DRIFTED, CONFLICT, UPDATE, CREATE, ORPHANED,
+  UNMANAGED.
 - Leftovers of the runtime the project does not use are reported as STALE
   with "run nexus pull to remove it" (see below); unmanaged files are never
   touched.
@@ -174,7 +178,10 @@ nexus env set                             # or pick the setting and value intera
 ```
 
 `nexus push` refuses projection files and names the setting to change
-instead. Devbox changes become a new workspace fork:
+instead. Devbox changes become a new workspace fork; push compares the local
+files with the same fork export `nexus status` uses, so a freshly pulled
+workspace has nothing to push. New local scripts are pushed when named
+(`nexus push scripts/devbox/<file>`):
 
 ```bash
 nexus push --name "v3.1 ansible"    # push with custom fork name

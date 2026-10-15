@@ -3,12 +3,13 @@
 //! Detects local workspace changes and pushes them as a new workspace fork
 //! to the linked Nexus project.
 
+use crate::cmd::workspace_state::is_generated_script;
 use console::style;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::resolve_token;
 use nexus_core::config;
 use nexus_core::hash::sha256_hex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use tracing::warn;
@@ -129,17 +130,41 @@ fn is_manifest_tracked(key: &str, manifest: &serde_json::Value) -> bool {
     })
 }
 
-/// The hash to report for a tracked workspace file: the recorded hash of
-/// the last pulled backend version when the local file differs from it only
-/// in trailing newlines (e.g. an end-of-file fixer added one), so such a
-/// file is not reported as modified; otherwise the local hash.
-fn baseline_hash(
-    workspace: &Path,
-    key: &str,
-    local_hash: String,
-    manifest: &serde_json::Value,
-) -> String {
-    let recorded = manifest
+/// How a local workspace file differs from what the fork delivers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change {
+    Modified,
+    Added,
+}
+
+/// Compare one local workspace file with the baseline `nexus status` uses:
+/// the fork export when it is available (`exported`), otherwise the hash
+/// recorded at the last pull. `desired` is the file's body in the export.
+/// Differences only in trailing newlines are not changes.
+fn workspace_change(
+    local: &str,
+    recorded: Option<&str>,
+    desired: Option<&str>,
+    exported: bool,
+) -> Option<Change> {
+    use crate::cmd::workspace_state::{classify_workspace_file, State};
+    match desired {
+        Some(body) => match classify_workspace_file(Some(local.as_bytes()), recorded, body)? {
+            State::Modified | State::Conflict | State::Unmanaged => Some(Change::Modified),
+            _ => None,
+        },
+        None if exported => Some(Change::Added),
+        None => match recorded {
+            Some(r) if nexus_core::hash::hash_matches_text(r, local) => None,
+            Some(_) => Some(Change::Modified),
+            None => Some(Change::Added),
+        },
+    }
+}
+
+/// Hash recorded in the sync manifest for a workspace path.
+fn recorded_hash<'a>(key: &str, manifest: &'a serde_json::Value) -> Option<&'a str> {
+    manifest
         .get(key)
         .and_then(|e| e.get("hash"))
         .and_then(|h| h.as_str())
@@ -149,15 +174,7 @@ fn baseline_hash(
                     .then(|| e.get("hash")?.as_str())
                     .flatten()
             })
-        });
-    match (recorded, fs::read_to_string(workspace.join(key))) {
-        (Some(r), Ok(content))
-            if r != local_hash && nexus_core::hash::hash_matches_text(r, &content) =>
-        {
-            r.to_string()
-        }
-        _ => local_hash,
-    }
+        })
 }
 
 /// Verify the target project exists and is reachable on the configured backend.
@@ -198,7 +215,8 @@ async fn adopt_local_push(
     fork_name: Option<&str>,
     dry_run: bool,
 ) -> anyhow::Result<()> {
-    let all_hashes = collect_workspace_hashes(workspace);
+    let mut all_hashes = collect_workspace_hashes(workspace);
+    all_hashes.retain(|k, _| !is_generated_script(k));
     if all_hashes.is_empty() {
         anyhow::bail!(
             "No local workspace files found (expected devbox.json and/or scripts/devbox/**). \
@@ -227,6 +245,14 @@ async fn adopt_local_push(
     }
 
     let (devbox_json, script_files) = read_workspace_files(workspace);
+    let script_files = script_files
+        .map(|files| {
+            files
+                .into_iter()
+                .filter(|(rel, _)| !is_generated_script(&format!("{SCRIPTS_DIR}/{rel}")))
+                .collect::<HashMap<_, _>>()
+        })
+        .filter(|files| !files.is_empty());
 
     let name_display = fork_name.unwrap_or("(auto-generated)");
     println!(
@@ -262,15 +288,16 @@ fn print_push_result(result: &nexus_core::api::WorkspacePushResponse) {
 
 /// `nexus push` — push local workspace changes to the platform.
 ///
-/// Tracked files the current fork no longer contains are skipped unless
-/// listed in `include_dropped` (named explicitly, e.g. `nexus push <path>`).
+/// Tracked files the current fork no longer contains, and untracked local
+/// scripts, are skipped unless listed in `include_named` (named explicitly,
+/// e.g. `nexus push <path>`). Generated scripts are never pushed.
 pub async fn run(
     api_url: &str,
     cli_project_id: Option<&str>,
     fork_name: Option<&str>,
     dry_run: bool,
     adopt_local: bool,
-    include_dropped: &[String],
+    include_named: &[String],
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -327,41 +354,72 @@ pub async fn run(
         return Ok(());
     }
 
-    // Files of the current fork; `None` when there is none or it cannot be
-    // read, then nothing is treated as dropped.
-    let exported = client
-        .export_workspace_mcp(&project_id)
-        .await
-        .ok()
-        .map(|e| exported_paths(&e));
+    // The current fork, the same baseline `nexus status` compares with;
+    // `None` when there is none or it cannot be read, then local files are
+    // compared with the sync manifest and nothing is treated as dropped.
+    let export = client.export_workspace_mcp(&project_id).await.ok();
+    let exported = export.as_ref().map(exported_paths);
+    let desired: HashMap<String, String> = export
+        .map(|e| {
+            std::iter::once(("devbox.json".to_string(), e.devbox_json))
+                .chain(e.scripts.into_iter().map(|s| (s.path, s.body)))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    // Filter to only manifest-tracked files (origin guard)
-    let mut local_hashes = HashMap::new();
-    let mut sorted: Vec<_> = all_hashes.into_iter().collect();
+    // Files to push (manifest-tracked or named explicitly) and their changes.
+    let mut tracked = HashSet::new();
+    let mut changes = Vec::new();
+    let mut sorted: Vec<_> = all_hashes.into_keys().collect();
     sorted.sort();
-    for (key, hash) in sorted {
-        if is_manifest_tracked(&key, &manifest) {
-            if is_dropped(&key, exported.as_deref(), include_dropped) {
+    for key in sorted {
+        let local = fs::read_to_string(workspace.join(&key)).unwrap_or_default();
+        if is_generated_script(&key) {
+            // The backend generates these and strips them from a push.
+            if desired
+                .get(&key)
+                .is_some_and(|d| !nexus_core::hash::text_equivalent(&local, d))
+            {
                 println!(
-                    "     {} {} (no longer in the workspace fork, skipped; nexus push {} adds it back)",
-                    style("D").dim(),
+                    "     {} {} (generated by Nexus, not pushed; put local changes into {SCRIPTS_DIR}/init/os_<os>/override.sh or an own script, or nexus reset {})",
+                    style("G").dim(),
                     key,
                     key
                 );
-                continue;
             }
-            let hash = baseline_hash(&workspace, &key, hash, &manifest);
-            local_hashes.insert(key, hash);
-        } else {
+            continue;
+        }
+        let named = include_named.iter().any(|p| p == &key);
+        if !is_manifest_tracked(&key, &manifest) && !named {
             println!(
-                "     {} {} (not tracked by Nexus, skipped)",
+                "     {} {} (not tracked by Nexus, skipped; nexus push {} adds it)",
                 style("S").dim(),
+                key,
                 key
             );
+            continue;
         }
+        if is_dropped(&key, exported.as_deref(), include_named) {
+            println!(
+                "     {} {} (no longer in the workspace fork, skipped; nexus push {} adds it back)",
+                style("D").dim(),
+                key,
+                key
+            );
+            continue;
+        }
+        if let Some(change) = workspace_change(
+            &local,
+            recorded_hash(&key, &manifest),
+            desired.get(&key).map(String::as_str),
+            exported.is_some(),
+        ) {
+            changes.push((change, key.clone()));
+        }
+        tracked.insert(key);
     }
 
-    if local_hashes.is_empty() {
+    if tracked.is_empty() {
         anyhow::bail!(
             "No workspace files are tracked in the sync manifest (only agent files were pulled).\n\
              Run 'nexus pull --scope workspace' to track the workspace files, or\n\
@@ -370,18 +428,7 @@ pub async fn run(
         );
     }
 
-    // Compare with server
-    let status = client
-        .file_status(&project_id, local_hashes.clone())
-        .await?;
-
-    let workspace_modified: Vec<_> = status
-        .modified
-        .iter()
-        .filter(|m| m.category == "workspace")
-        .collect();
-
-    if workspace_modified.is_empty() && status.new_local.is_empty() {
+    if changes.is_empty() {
         println!(
             "   {} All workspace files are in sync. Nothing to push.",
             style("✓").green()
@@ -391,11 +438,11 @@ pub async fn run(
 
     // Show what would be pushed
     println!("   {} files to push:", style("Files").bold());
-    for m in &workspace_modified {
-        println!("     {} {}", style("M").yellow().bold(), m.path);
-    }
-    for n in &status.new_local {
-        println!("     {} {}", style("A").green().bold(), n.path);
+    for (change, path) in &changes {
+        match change {
+            Change::Modified => println!("     {} {}", style("M").yellow().bold(), path),
+            Change::Added => println!("     {} {}", style("A").green().bold(), path),
+        }
     }
     println!();
 
@@ -411,12 +458,12 @@ pub async fn run(
     // comparison above used (untracked local scripts were reported as
     // skipped but still uploaded into the fork).
     let (devbox_json, script_files) = read_workspace_files(&workspace);
-    let devbox_json = devbox_json.filter(|_| local_hashes.contains_key("devbox.json"));
+    let devbox_json = devbox_json.filter(|_| tracked.contains("devbox.json"));
     let script_files = script_files
         .map(|files| {
             files
                 .into_iter()
-                .filter(|(rel, _)| local_hashes.contains_key(&format!("{SCRIPTS_DIR}/{rel}")))
+                .filter(|(rel, _)| tracked.contains(&format!("{SCRIPTS_DIR}/{rel}")))
                 .collect::<HashMap<_, _>>()
         })
         .filter(|files| !files.is_empty());
@@ -446,9 +493,9 @@ fn exported_paths(export: &nexus_core::api::WorkspaceForkExportResponse) -> Vec<
 
 /// A tracked file the fork no longer contains and that was not named
 /// explicitly: a new fork must not bring it back by accident.
-fn is_dropped(key: &str, exported: Option<&[String]>, include_dropped: &[String]) -> bool {
+fn is_dropped(key: &str, exported: Option<&[String]>, include_named: &[String]) -> bool {
     exported.is_some_and(|ex| !ex.iter().any(|p| p == key))
-        && !include_dropped.iter().any(|p| p == key)
+        && !include_named.iter().any(|p| p == key)
 }
 
 #[cfg(test)]
@@ -524,27 +571,84 @@ mod tests {
     }
 
     #[test]
-    fn test_baseline_hash_ignores_trailing_newline_only_difference() {
-        let dir = TempDir::new().unwrap();
+    fn test_workspace_change_against_export() {
+        let server = "#!/usr/bin/env bash\necho fork";
+        let recorded = sha256_hex(server);
+        // Freshly pulled (pull adds the final newline): nothing to push.
+        assert_eq!(
+            workspace_change(&format!("{server}\n"), Some(&recorded), Some(server), true),
+            None
+        );
+        // Same with no recorded hash at all: the export is the baseline.
+        assert_eq!(
+            workspace_change(&format!("{server}\n"), None, Some(server), true),
+            None
+        );
+        // A real local edit.
+        assert_eq!(
+            workspace_change("echo mine\n", Some(&recorded), Some(server), true),
+            Some(Change::Modified)
+        );
+        // Unchanged local, the fork moved on: an update, not a push.
+        assert_eq!(
+            workspace_change(
+                &format!("{server}\n"),
+                Some(&recorded),
+                Some("echo new"),
+                true
+            ),
+            None
+        );
+        // Named file the fork does not contain.
+        assert_eq!(
+            workspace_change("echo mine\n", None, None, true),
+            Some(Change::Added)
+        );
+    }
+
+    #[test]
+    fn test_workspace_change_without_export() {
         let server = r#"{"packages":[]}"#;
+        let recorded = sha256_hex(server);
+        assert_eq!(
+            workspace_change(&format!("{server}\n"), Some(&recorded), None, false),
+            None
+        );
+        assert_eq!(
+            workspace_change("{\"packages\":[1]}\n", Some(&recorded), None, false),
+            Some(Change::Modified)
+        );
+        assert_eq!(
+            workspace_change("echo mine\n", None, None, false),
+            Some(Change::Added)
+        );
+    }
+
+    #[test]
+    fn test_recorded_hash_by_key_and_target_path() {
         let manifest = serde_json::json!({
-            "devbox.json": { "hash": sha256_hex(server), "target_path": "devbox.json" }
+            "devbox.json": { "hash": "a", "target_path": "devbox.json" },
+            "workspace-x": { "hash": "b", "target_path": "scripts/devbox/x.sh" }
         });
-        // End-of-file fixer added a newline: report the recorded hash.
-        fs::write(dir.path().join("devbox.json"), format!("{server}\n")).unwrap();
-        let local = collect_workspace_hashes(dir.path())["devbox.json"].clone();
-        assert_ne!(local, sha256_hex(server));
-        assert_eq!(
-            baseline_hash(dir.path(), "devbox.json", local, &manifest),
-            sha256_hex(server)
-        );
-        // A real edit keeps the local hash.
-        fs::write(dir.path().join("devbox.json"), "{\"packages\":[1]}\n").unwrap();
-        let local = collect_workspace_hashes(dir.path())["devbox.json"].clone();
-        assert_eq!(
-            baseline_hash(dir.path(), "devbox.json", local.clone(), &manifest),
-            local
-        );
+        assert_eq!(recorded_hash("devbox.json", &manifest), Some("a"));
+        assert_eq!(recorded_hash("scripts/devbox/x.sh", &manifest), Some("b"));
+        assert_eq!(recorded_hash("scripts/devbox/y.sh", &manifest), None);
+    }
+
+    #[test]
+    fn test_generated_scripts_are_not_pushed() {
+        for path in [
+            "scripts/devbox/dbx_init.sh",
+            "scripts/devbox/dbx_post_init.sh",
+            "scripts/devbox/lib/common.sh",
+            "scripts/devbox/ops/validate.sh",
+        ] {
+            assert!(is_generated_script(path), "{path}");
+        }
+        assert!(!is_generated_script(
+            "scripts/devbox/init/os_darwin/override.sh"
+        ));
+        assert!(!is_generated_script("devbox.json"));
     }
 
     #[test]

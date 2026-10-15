@@ -294,6 +294,8 @@ fn refuse_projection(e: &Entry) -> Option<String> {
                 " (skills are managed in the Nexus dashboard)"
             } else if e.path.ends_with(".local.kdl") {
                 " (the workspace layout is your personal preference in the Nexus dashboard)"
+            } else if e.kind == Kind::Workspace {
+                " (put local changes into scripts/devbox/init/os_<os>/override.sh or an own script)"
             } else {
                 ""
             }
@@ -341,17 +343,18 @@ pub async fn push(
             _ => None,
         })
         .collect();
-    // Workspace files the fork no longer contains are only pushed back
-    // when named explicitly.
-    let include_dropped: Vec<String> = selected
+    // Workspace files the fork no longer contains, and new local scripts,
+    // are only pushed when named explicitly.
+    let include_named: Vec<String> = selected
         .iter()
         .filter(|_| path.is_some())
         .filter(|e| {
-            e.kind == Kind::Workspace && matches!(e.state, State::Dropped | State::Orphaned)
+            e.kind == Kind::Workspace
+                && matches!(e.state, State::Dropped | State::Orphaned | State::New)
         })
         .map(|e| e.path.clone())
         .collect();
-    let workspace_changes = !include_dropped.is_empty()
+    let workspace_changes = !include_named.is_empty()
         || selected
             .iter()
             .any(|e| e.kind == Kind::Workspace && matches!(e.state, State::Modified | State::New));
@@ -388,7 +391,7 @@ pub async fn push(
             fork_name,
             dry_run,
             false,
-            &include_dropped,
+            &include_named,
         )
         .await?;
     }
@@ -625,6 +628,14 @@ mod tests {
             Kind::Generated,
         );
         assert!(refuse_projection(&e).unwrap().contains("nexus reset"));
+        let e = entry(
+            "scripts/devbox/dbx_init.sh",
+            FileClass::Projection,
+            State::Drifted,
+            Kind::Workspace,
+        );
+        let msg = refuse_projection(&e).unwrap();
+        assert!(msg.contains("init/os_<os>/override.sh"), "{msg}");
         let e = entry(
             ".nexus/AGENTS.md",
             FileClass::Content,

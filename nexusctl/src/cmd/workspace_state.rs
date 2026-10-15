@@ -194,6 +194,25 @@ pub fn is_projection_agent_file(
         || target_path.starts_with(".opencode/plugins/")
 }
 
+/// Devbox scripts the backend generates for every workspace (plus
+/// `dbx_post_init.sh`, rendered from the fork's post-init setting). The
+/// backend strips them from a pushed fork, so they are projections: local
+/// changes belong in `scripts/devbox/init/os_<os>/override.sh` or an own
+/// script.
+pub const GENERATED_SCRIPTS: &[&str] = &[
+    "scripts/devbox/dbx_init.sh",
+    "scripts/devbox/dbx_post_init.sh",
+    "scripts/devbox/lib/common.sh",
+    "scripts/devbox/ops/check-local.sh",
+    "scripts/devbox/ops/sec-scan.sh",
+    "scripts/devbox/ops/validate.sh",
+];
+
+/// Whether a workspace path is a generated devbox script.
+pub fn is_generated_script(path: &str) -> bool {
+    GENERATED_SCRIPTS.contains(&path)
+}
+
 /// Classify one file from its local bytes, the hash recorded when Nexus
 /// last wrote it, and the desired content.
 pub fn classify(
@@ -630,6 +649,16 @@ pub async fn load(
     })
 }
 
+/// Generated devbox scripts are projections, every other workspace file is
+/// content.
+fn workspace_class(path: &str) -> FileClass {
+    if is_generated_script(path) {
+        FileClass::Projection
+    } else {
+        FileClass::Content
+    }
+}
+
 /// Devbox workspace files: compared with the backend's workspace export when
 /// available, otherwise local vs. the sync manifest only. Untracked local
 /// scripts are NEW.
@@ -658,16 +687,20 @@ async fn workspace_entries(
             sync_manifest_hash(manifest, &path).as_deref(),
             &body,
         ) {
-            // An untracked local file where the backend has one is a
-            // conflict for content, never silently "unmanaged".
-            let state = if state == State::Unmanaged {
-                State::Conflict
-            } else {
-                state
+            let class = workspace_class(&path);
+            let state = match (class, state) {
+                // An untracked local file where the backend has one is a
+                // conflict for content, never silently "unmanaged".
+                (FileClass::Content, State::Unmanaged) => State::Conflict,
+                (FileClass::Projection, State::Modified) => State::Drifted,
+                (FileClass::Projection, State::Deleted | State::Update) if local.is_none() => {
+                    State::Create
+                }
+                (_, state) => state,
             };
             entries.push(Entry {
                 path,
-                class: FileClass::Content,
+                class,
                 state,
                 kind: Kind::Workspace,
                 local: local.map(|l| String::from_utf8_lossy(&l).into_owned()),
@@ -690,17 +723,21 @@ async fn workspace_entries(
                 || std::fs::read_to_string(workspace.join(&path))
                     .is_ok_and(|c| nexus_core::hash::hash_matches_text(r, &c))
         };
+        let class = workspace_class(&path);
         let state = match recorded {
+            // A generated script the fork does not deliver is not ours.
+            None if class == FileClass::Projection => continue,
             None => State::New,
             Some(r) if exported && unchanged(&r) => State::Orphaned,
             Some(_) if exported => State::Dropped,
+            Some(r) if !unchanged(&r) && class == FileClass::Projection => State::Drifted,
             Some(r) if !unchanged(&r) => State::Modified,
             Some(_) => continue,
         };
         entries.push(Entry {
             local: std::fs::read_to_string(workspace.join(&path)).ok(),
             path,
-            class: FileClass::Content,
+            class,
             state,
             kind: Kind::Workspace,
             desired: None,
