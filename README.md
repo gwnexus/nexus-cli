@@ -19,8 +19,11 @@ curl -fsSL https://nexus.gatewarden.eu/install.sh | bash
 ```
 
 The installer detects your platform (macOS/Linux, x86_64/aarch64), downloads
-the pre-built binary from GitHub Releases, and verifies its SHA-256 checksum.
-If no binary exists for your platform it falls back to `cargo install --git`.
+the pre-built binary from GitHub Releases, and verifies its SHA-256 checksum
+(mandatory: without a published checksum or a `sha256sum`/`shasum` tool it
+does not install the binary). If no binary exists for your platform it falls
+back to `cargo install --git`. `nexus upgrade` verifies the install script's
+checksum before it runs it, from both sources.
 
 ### From source
 
@@ -470,6 +473,19 @@ the server sends them:
 ## Security
 
 - MUST: Never put secrets, credentials, tokens or private keys into output, logs, commits ...
+
+**What `nexus pull` and `nexus init` accept from the backend.** Every path the
+server sends (agent files, skills and their resources, OpenCode commands,
+actor profiles and avatars, Claude hook adapters, devbox scripts) must be
+relative, stay inside the workspace, not point into a `.git` directory and
+not resolve outside the workspace through a symlink; anything else is skipped
+with a warning. Skill ids, command slugs, actor slugs and hook event names
+are single segments (`[A-Za-z0-9._-]`), and an unsafe `agentic_root` falls
+back to `.nexus`. Prerequisite checks never run through a shell: only
+`<tool>`, `<tool> --version`, `-v`, `-V` or `version` is executed, otherwise
+the tool is looked up on `PATH`. The token-bearing `.mcp.json` and
+`opencode.json` are written owner-only (`0600`), listed in `.git/info/exclude`,
+and reported when git already tracks them.
 
 ## Workflow
 

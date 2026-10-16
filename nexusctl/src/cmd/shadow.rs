@@ -319,20 +319,30 @@ pub fn is_workspace_shadow_active() -> anyhow::Result<bool> {
     Ok(is_block_active(&exclude_path, WS_MARKER_START))
 }
 
-/// Ensure that the given file paths are listed in `.git/info/exclude`.
-///
-/// This is a best-effort operation: if no `.git` directory is found or the
-/// exclude file cannot be written, errors are silently ignored. The function
-/// is intended to protect token-bearing config files from accidental commit.
-pub fn ensure_git_excluded(paths: &[&str]) {
-    let Ok(cwd) = std::env::current_dir() else {
-        return;
-    };
-    ensure_git_excluded_in(&cwd, paths, "token-bearing files");
+/// Protect a file that carries the API token (`.mcp.json`, `opencode.json`):
+/// owner-only permissions, listed in `.git/info/exclude` of the repository
+/// containing `workspace`, and a warning when git already tracks it (an
+/// exclude does not untrack).
+pub fn protect_token_file(workspace: &Path, rel: &str, excludes: &[&str]) {
+    let path = workspace.join(rel);
+    #[cfg(unix)]
+    if path.is_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    ensure_git_excluded_in(workspace, excludes, "token-bearing files");
+    if path.is_file() && !resolve_tracked_paths_in(rel, Some(workspace)).is_empty() {
+        println!(
+            "   {} {rel} contains the API token and is tracked by git; untrack it: git rm --cached {rel}",
+            style("!").bold().red()
+        );
+    }
 }
 
-/// [`ensure_git_excluded`] for the repository containing `start`, with the
-/// reason shown in the comment line above the added entries.
+/// Ensure that the given file paths are listed in `.git/info/exclude` of the
+/// repository containing `start`, with the reason shown in the comment line
+/// above the added entries. Best effort: outside a git repository, or when
+/// the exclude file cannot be written, nothing happens.
 pub fn ensure_git_excluded_in(start: &Path, paths: &[&str], reason: &str) {
     let git_dir = match find_git_dir_from(start.to_path_buf()) {
         Ok(d) => d,
@@ -1627,6 +1637,23 @@ mod tests {
         v["shadow_workspace"] = serde_json::json!(false);
         let new: nexus_core::api::AgentFileExportResponse = serde_json::from_value(v).unwrap();
         assert_eq!(new.shadow_workspace, Some(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_protect_token_file_sets_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = make_temp_repo_with_commit("README.md", "x");
+        let path = dir.path().join(".mcp.json");
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        protect_token_file(dir.path(), ".mcp.json", &[".mcp.json"]);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let exclude = fs::read_to_string(dir.path().join(".git/info/exclude")).unwrap();
+        assert!(exclude.lines().any(|l| l.trim() == ".mcp.json"));
     }
 
     #[test]

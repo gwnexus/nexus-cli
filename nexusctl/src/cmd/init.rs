@@ -238,6 +238,7 @@ pub async fn run(
                         .map(|af| af.agentic_root.clone())
                         .filter(|r| !r.is_empty())
                 })
+                .map(|r| super::pull::safe_agentic_root(&target, &r))
                 .unwrap_or_else(|| ".nexus".to_string());
 
             // Detect existing .claude/ files and hint at import (v0.7.0)
@@ -485,6 +486,9 @@ pub async fn run(
 
                     // Write scripts
                     for script in &export.scripts {
+                        if !super::pull::safe_target(&target, &script.path) {
+                            continue;
+                        }
                         let script_target = target.join(&script.path);
                         if let Some(parent) = script_target.parent() {
                             fs::create_dir_all(parent)?;
@@ -1244,7 +1248,11 @@ fn write_mcp_configs(
 
             fs::write(&opencode_path, opencode_json)?;
             // SEC-002: ensure token-bearing config files are git-excluded
-            shadow::ensure_git_excluded(&["opencode.json", "opencode.jsonc"]);
+            shadow::protect_token_file(
+                target,
+                "opencode.json",
+                &["opencode.json", "opencode.jsonc"],
+            );
             println!(
                 "   {} opencode.json (MCP source: {})",
                 style("+").bold().green(),
@@ -1296,7 +1304,7 @@ fn write_mcp_configs(
 
             fs::write(&claude_mcp_path, claude_mcp_json)?;
             // SEC-002: ensure token-bearing config files are git-excluded
-            shadow::ensure_git_excluded(&[".mcp.json"]);
+            shadow::protect_token_file(target, ".mcp.json", &[".mcp.json"]);
             println!(
                 "   {} .mcp.json (MCP source: {})",
                 style("+").bold().green(),

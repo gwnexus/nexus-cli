@@ -686,6 +686,7 @@ fn sync_mcp_credentials(
         if dirty {
             let out = serde_json::to_string_pretty(&root)?;
             fs::write(&path, out + "\n")?;
+            super::shadow::protect_token_file(workspace, rel, &[rel]);
             changed.push(rel.to_string());
         }
     }

@@ -142,10 +142,24 @@ pub fn is_protected_path(target_path: &str) -> bool {
 /// the result (no filesystem access -- the target may not exist yet, so
 /// this cannot use `fs::canonicalize`), and confirms it still starts
 /// with the normalized workspace root.
+///
+/// Two more checks apply to every server-supplied path: nothing is written
+/// into a `.git` directory (hooks there are executable), and the deepest
+/// existing ancestor must not resolve outside the workspace through a
+/// symlink, since `fs::write` follows symlinks.
 pub fn validate_agent_file_target_path(workspace: &Path, target_path: &str) -> anyhow::Result<()> {
     let normalized = std::path::Path::new(target_path);
+    if target_path.trim().is_empty() || target_path.contains(['\0', '\n', '\r']) {
+        anyhow::bail!("refusing to write: target_path {target_path:?} is empty or malformed");
+    }
     for component in normalized.components() {
         match component {
+            std::path::Component::Normal(seg) if seg == ".git" => {
+                anyhow::bail!(
+                    "refusing to write: target_path '{}' points into .git",
+                    target_path
+                );
+            }
             std::path::Component::ParentDir => {
                 anyhow::bail!(
                     "refusing to write: target_path '{}' contains '..' traversal",
@@ -171,8 +185,111 @@ pub fn validate_agent_file_target_path(workspace: &Path, target_path: &str) -> a
             target_path
         );
     }
+    if escapes_via_symlink(workspace, &normalized_joined) {
+        anyhow::bail!(
+            "refusing to write: target_path '{}' resolves outside the workspace through a symlink",
+            target_path
+        );
+    }
 
     Ok(())
+}
+
+/// Whether the deepest existing ancestor of `joined` (or `joined` itself)
+/// resolves outside `workspace`. A workspace that cannot be resolved is not
+/// checked (nothing to compare against).
+fn escapes_via_symlink(workspace: &Path, joined: &Path) -> bool {
+    let Ok(root) = fs::canonicalize(workspace) else {
+        return false;
+    };
+    let mut probe = Some(joined);
+    while let Some(p) = probe {
+        if fs::symlink_metadata(p).is_ok() {
+            return match fs::canonicalize(p) {
+                Ok(real) => !real.starts_with(&root),
+                // A dangling symlink: refuse, its target is unknown.
+                Err(_) => true,
+            };
+        }
+        probe = p.parent();
+    }
+    false
+}
+
+/// [`validate_agent_file_target_path`] for a write site that skips the file
+/// instead of failing: prints why and returns `false`.
+pub(crate) fn safe_target(workspace: &Path, rel: &str) -> bool {
+    match validate_agent_file_target_path(workspace, rel) {
+        Ok(()) => true,
+        Err(e) => {
+            println!("   {} skipped: {e}", style("!").bold().yellow());
+            false
+        }
+    }
+}
+
+/// The argv for a prerequisite check, or `None` when the server's
+/// `check_command` is not of the form `<tool> [--version|-v|-V|version]`
+/// with a bare command name. Never run through a shell.
+pub(crate) fn prereq_argv(check_command: &str) -> Option<Vec<&str>> {
+    let argv: Vec<&str> = check_command.split_whitespace().collect();
+    match argv.as_slice() {
+        [tool] if valid_path_segment(tool) && !tool.starts_with('-') => Some(argv),
+        [tool, flag]
+            if valid_path_segment(tool)
+                && !tool.starts_with('-')
+                && matches!(*flag, "--version" | "-v" | "-V" | "version") =>
+        {
+            Some(argv)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a prerequisite is installed: runs the check as argv when it has
+/// the allowed shape, otherwise only looks the tool up on `PATH`.
+fn prerequisite_present(check_command: &str, tool: &str) -> bool {
+    match prereq_argv(check_command) {
+        Some(argv) => std::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        None => valid_path_segment(tool) && super::run::on_path(tool),
+    }
+}
+
+/// A server-supplied single path segment (skill id, command slug, actor
+/// slug, event name): non-empty, only `[A-Za-z0-9._-]`, not `.` or `..`.
+pub(crate) fn valid_path_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg != "."
+        && seg != ".."
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// The server's `agentic_root` if it is a safe relative directory inside
+/// `workspace`, otherwise `.nexus` (with a warning).
+pub(crate) fn safe_agentic_root(workspace: &Path, root: &str) -> String {
+    let trimmed = root.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return ".nexus".to_string();
+    }
+    match validate_agent_file_target_path(workspace, trimmed) {
+        Ok(()) => trimmed.to_string(),
+        Err(e) => {
+            println!(
+                "   {} agentic_root from the server ignored, using .nexus: {e}",
+                style("!").bold().yellow()
+            );
+            ".nexus".to_string()
+        }
+    }
 }
 
 /// Lexically normalize a path (resolve `.`/`..` components without
@@ -619,7 +736,7 @@ pub async fn run(
     let af_export_result = client.export_agent_files(&project_id).await;
     if let Ok(ref af_export) = af_export_result {
         if !af_export.agentic_root.is_empty() {
-            agentic_root = af_export.agentic_root.clone();
+            agentic_root = safe_agentic_root(&workspace, &af_export.agentic_root);
         }
     }
 
@@ -923,8 +1040,19 @@ pub async fn run(
 
             let mut actors_written = 0;
             for actor in &af_export.actors {
-                let actor_path = actors_dir.join(format!("{}.md", actor.slug));
-                fs::write(&actor_path, &actor.body)?;
+                if !valid_path_segment(&actor.slug) {
+                    println!(
+                        "   {} actor {:?} skipped: invalid slug",
+                        style("!").bold().yellow(),
+                        actor.slug
+                    );
+                    continue;
+                }
+                let rel = format!("{agentic_root}/actors/{}.md", actor.slug);
+                if !safe_target(&workspace, &rel) {
+                    continue;
+                }
+                fs::write(workspace.join(&rel), &actor.body)?;
                 actors_written += 1;
             }
 
@@ -946,7 +1074,11 @@ pub async fn run(
                 fs::create_dir_all(&assets_dir)?;
 
                 let mut assets_downloaded = 0;
-                for actor in &af_export.actors {
+                for actor in af_export
+                    .actors
+                    .iter()
+                    .filter(|a| valid_path_segment(&a.slug))
+                {
                     if let Some(ref avatar) = actor.avatar {
                         if let Some(ref url) = avatar.url {
                             // SEC-003: validate URL against trusted allowlist
@@ -961,8 +1093,12 @@ pub async fn run(
                             }
                             match client.download_actor_avatar(url).await {
                                 Ok(svg_bytes) => {
-                                    let dest = assets_dir.join(format!("{}.svg", actor.slug));
-                                    fs::write(&dest, &svg_bytes)?;
+                                    let rel =
+                                        format!("{agentic_root}/actors/assets/{}.svg", actor.slug);
+                                    if !safe_target(&workspace, &rel) {
+                                        continue;
+                                    }
+                                    fs::write(workspace.join(&rel), &svg_bytes)?;
                                     assets_downloaded += 1;
                                 }
                                 Err(e) => {
@@ -1377,23 +1513,7 @@ pub async fn run(
         if !af_export.prerequisites.is_empty() {
             let mut missing: Vec<String> = Vec::new();
             for prereq in &af_export.prerequisites {
-                // SEC-004: validate check_command against shell injection.
-                // Only allow simple commands: alphanumeric, hyphens, underscores,
-                // dots, forward slashes, spaces, and common flags (--version).
-                let is_safe = prereq.check_command.chars().all(|c| {
-                    c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ' ' | '=' | ':')
-                });
-                let found = if !is_safe {
-                    false
-                } else {
-                    std::process::Command::new("sh")
-                        .args(["-c", &prereq.check_command])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
-                        .map(|s| s.success())
-                        .unwrap_or(false)
-                };
+                let found = prerequisite_present(&prereq.check_command, &prereq.tool);
                 if !found {
                     missing.push(prereq.tool.clone());
                     println!(
@@ -2032,6 +2152,9 @@ pub(crate) fn sync_workspace_file(
     manifest: &serde_json::Value,
     report: &mut WorkspaceSyncReport,
 ) -> anyhow::Result<bool> {
+    if !safe_target(workspace, rel) {
+        return Ok(false);
+    }
     let target = workspace.join(rel);
     let local = fs::read(&target)
         .ok()
@@ -3213,7 +3336,11 @@ fn write_mcp_configs(
             }
 
             // SEC-002: ensure token-bearing config files are git-excluded
-            shadow::ensure_git_excluded(&["opencode.json", "opencode.jsonc"]);
+            shadow::protect_token_file(
+                workspace,
+                "opencode.json",
+                &["opencode.json", "opencode.jsonc"],
+            );
 
             let verb = if exists { "updated" } else { "created" };
             let mut extras = Vec::new();
@@ -3356,7 +3483,7 @@ fn write_mcp_configs(
             }
 
             // SEC-002: ensure token-bearing config files are git-excluded
-            shadow::ensure_git_excluded(&[".mcp.json"]);
+            shadow::protect_token_file(workspace, ".mcp.json", &[".mcp.json"]);
 
             let verb = if exists { "updated" } else { "created" };
             if !unchanged {
@@ -3597,6 +3724,9 @@ fn sync_generated_files_with(
                 continue;
             }
             _ => {
+                if !safe_target(workspace, path) {
+                    continue;
+                }
                 let target = workspace.join(path);
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)?;
@@ -5353,6 +5483,107 @@ mod tests {
     fn test_validate_target_path_accepts_dot_slash_prefix() {
         let ws = Path::new("/home/user/project");
         assert!(validate_agent_file_target_path(ws, "./AGENTS.md").is_ok());
+    }
+
+    #[test]
+    fn test_validate_target_path_rejects_git_dir_and_malformed() {
+        let ws = Path::new("/home/user/project");
+        assert!(validate_agent_file_target_path(ws, ".git/hooks/pre-commit").is_err());
+        assert!(validate_agent_file_target_path(ws, "sub/.git/config").is_err());
+        assert!(validate_agent_file_target_path(ws, ".github/workflows/ci.yml").is_ok());
+        assert!(validate_agent_file_target_path(ws, "").is_err());
+        assert!(validate_agent_file_target_path(ws, "a\nb").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_target_path_rejects_symlink_escape() {
+        let ws = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.path().join(".nexus")).unwrap();
+        std::fs::create_dir_all(ws.path().join("inner")).unwrap();
+        std::os::unix::fs::symlink(ws.path().join("inner"), ws.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(ws.path().join("missing"), ws.path().join("dangling")).unwrap();
+        assert!(validate_agent_file_target_path(ws.path(), ".nexus/skills/a/SKILL.md").is_err());
+        assert!(validate_agent_file_target_path(ws.path(), ".nexus").is_err());
+        // A symlink that stays inside the workspace is fine.
+        assert!(validate_agent_file_target_path(ws.path(), "link/file.md").is_ok());
+        assert!(validate_agent_file_target_path(ws.path(), "dangling").is_err());
+        assert!(validate_agent_file_target_path(ws.path(), "new/dir/file.md").is_ok());
+    }
+
+    #[test]
+    fn test_valid_path_segment() {
+        for ok in ["nx-init", "planner", "a.b_c-1", "PostToolUse"] {
+            assert!(valid_path_segment(ok), "{ok}");
+        }
+        for bad in ["", ".", "..", "a/b", "/etc", "a b", "x;y", "a\"b", "ä"] {
+            assert!(!valid_path_segment(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_safe_agentic_root_falls_back() {
+        let ws = Path::new("/home/user/project");
+        assert_eq!(safe_agentic_root(ws, ".nexus"), ".nexus");
+        assert_eq!(safe_agentic_root(ws, ".agentic/"), ".agentic");
+        assert_eq!(safe_agentic_root(ws, ""), ".nexus");
+        assert_eq!(safe_agentic_root(ws, "/etc"), ".nexus");
+        assert_eq!(safe_agentic_root(ws, "../up"), ".nexus");
+        assert_eq!(safe_agentic_root(ws, ".git"), ".nexus");
+    }
+
+    #[test]
+    fn test_prereq_argv_allows_only_version_checks() {
+        assert_eq!(prereq_argv("rtk --version"), Some(vec!["rtk", "--version"]));
+        assert_eq!(prereq_argv("git version"), Some(vec!["git", "version"]));
+        assert_eq!(prereq_argv("jq"), Some(vec!["jq"]));
+        for bad in [
+            "rm -rf /Users/x",
+            "sh /tmp/p",
+            "/usr/bin/rtk --version",
+            "rtk --version; id",
+            "rtk --config=/x",
+            "--version",
+            "",
+        ] {
+            assert_eq!(prereq_argv(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_sync_workspace_file_skips_unsafe_paths() {
+        let ws = tempfile::TempDir::new().unwrap();
+        let manifest = serde_json::json!({});
+        let mut report = WorkspaceSyncReport::default();
+        for rel in ["../escape.sh", "/tmp/abs.sh", ".git/hooks/post-checkout"] {
+            let written = sync_workspace_file(
+                ws.path(),
+                rel,
+                "echo x\n",
+                true,
+                true,
+                true,
+                &manifest,
+                &mut report,
+            )
+            .unwrap();
+            assert!(!written, "{rel}");
+        }
+        assert!(!ws.path().join(".git/hooks/post-checkout").exists());
+        assert!(!ws.path().parent().unwrap().join("escape.sh").exists());
+    }
+
+    #[test]
+    fn test_sync_generated_files_skips_unsafe_paths() {
+        let ws = tempfile::TempDir::new().unwrap();
+        let files = vec![
+            ("../outside.md".to_string(), "x".to_string()),
+            (".nexus/skills/ok/SKILL.md".to_string(), "ok".to_string()),
+        ];
+        let (written, _) = sync_generated_files(ws.path(), ".nexus", &files, true).unwrap();
+        assert_eq!(written, 1);
+        assert!(ws.path().join(".nexus/skills/ok/SKILL.md").exists());
     }
 
     #[test]

@@ -82,6 +82,9 @@ pub(crate) fn strip_frontmatter(body: &str) -> &str {
 pub fn write_claude_skill(target: &Path, skill: &ExportedSkill) -> anyhow::Result<bool> {
     let mut written = false;
     for (rel, content) in render_claude_skill_files(skill) {
+        if !super::pull::safe_target(target, &rel) {
+            continue;
+        }
         let path = target.join(&rel);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -223,10 +226,15 @@ pub fn write_claude_agents(
     let agents_dir = target.join(".claude").join("agents");
     fs::create_dir_all(&agents_dir)?;
 
+    let mut written = 0;
     for (rel, body) in &files {
+        if !super::pull::safe_target(target, rel) {
+            continue;
+        }
         fs::write(target.join(rel), body)?;
+        written += 1;
     }
-    Ok(files.len())
+    Ok(written)
 }
 
 /// The files [`write_claude_agents`] writes, as `(workspace-relative path,
@@ -330,6 +338,15 @@ fn kebab_case_event(event: &str) -> String {
     out
 }
 
+/// Whether a hook adapter path is safe to write and to put into the hook
+/// command (which Claude Code runs through a shell): inside the workspace
+/// and only `[A-Za-z0-9._/-]`, so no quote or shell metacharacter.
+fn safe_adapter_path(target: &Path, path: &str) -> bool {
+    path.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        && super::pull::safe_target(target, path)
+}
+
 /// Write each Claude Code hook adapter's bundled script to its
 /// `target_path`. Platform-managed
 /// generated code: always (re)written, matching how `.opencode/plugins/*.ts`
@@ -341,6 +358,9 @@ pub fn write_claude_hook_adapters(
 ) -> anyhow::Result<usize> {
     let mut written = 0;
     for adapter in adapters {
+        if !safe_adapter_path(target, &adapter.target_path) {
+            continue;
+        }
         let path = target.join(&adapter.target_path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -420,6 +440,10 @@ pub fn merge_claude_hooks(
     for entry in &removable {
         remove_hook_registrations(hooks_obj, entry);
         let script_path = target.join(&entry.target_path);
+        if super::pull::validate_agent_file_target_path(target, &entry.target_path).is_err() {
+            removed_plugin_names.push(entry.plugin_name.clone());
+            continue;
+        }
         if let Ok(content) = fs::read_to_string(&script_path) {
             if nexus_core::hash::sha256_hex(&content) == entry.file_sha256 {
                 let _ = fs::remove_file(&script_path);
@@ -430,7 +454,19 @@ pub fn merge_claude_hooks(
 
     let mut appended = 0;
     for adapter in adapters {
+        // Same rule as the script write; the path ends up in a shell command.
+        if !adapter
+            .target_path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+            || super::pull::validate_agent_file_target_path(target, &adapter.target_path).is_err()
+        {
+            continue;
+        }
         for hook_event in &adapter.hook_events {
+            if !super::pull::valid_path_segment(&hook_event.event) {
+                continue;
+            }
             let event_array = hooks_obj
                 .entry(hook_event.event.clone())
                 .or_insert_with(|| serde_json::Value::Array(Vec::new()));
@@ -2087,6 +2123,35 @@ mod tests {
             fs::read_to_string(dir.join(".claude/hooks/nexus-session-guard.mjs")).unwrap();
         assert_eq!(content, "export default function() {}");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_hook_adapters_refuse_unsafe_paths_and_events() {
+        let dir = temp_dir("hook-adapters-unsafe");
+        let quoted = sample_adapter("evil", ".claude/hooks/x.mjs\"; touch pwned; \"");
+        let outside = sample_adapter("out", "../outside.mjs");
+        let git = sample_adapter("git", ".git/hooks/pre-commit");
+        let written = write_claude_hook_adapters(&dir, &[quoted.clone(), outside, git]).unwrap();
+        assert_eq!(written, 0);
+        assert!(!dir.join(".git/hooks/pre-commit").exists());
+
+        let mut bad_event = sample_adapter("ok", ".claude/hooks/ok.mjs");
+        bad_event.hook_events = vec![nexus_core::api::ClaudeHookEvent {
+            event: "Stop; rm -rf x".to_string(),
+            matcher: None,
+            timeout: None,
+        }];
+        let mut quoted = quoted;
+        quoted.hook_events = vec![nexus_core::api::ClaudeHookEvent {
+            event: "Stop".to_string(),
+            matcher: None,
+            timeout: None,
+        }];
+        let (appended, _) = merge_claude_hooks(&dir, &[bad_event, quoted], None).unwrap();
+        assert_eq!(appended, 0);
+        let settings = fs::read_to_string(dir.join(".claude/settings.json")).unwrap_or_default();
+        assert!(!settings.contains("pwned") && !settings.contains("rm -rf"));
         let _ = fs::remove_dir_all(&dir);
     }
 

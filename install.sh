@@ -114,18 +114,20 @@ try_binary_download() {
 
   info "Checking for pre-built binary (${version})..."
 
-  local release_json http_code
-  http_code="$(auth_curl -sL -w "%{http_code}" -o /tmp/nexus_release.json \
+  local release_json http_code release_file
+  release_file="$(mktemp)"
+  http_code="$(auth_curl -sL -w "%{http_code}" -o "$release_file" \
     -H "Accept: application/vnd.github+json" \
     "$api_url" 2>/dev/null || echo "000")"
 
   if [ "$http_code" != "200" ]; then
+    rm -f "$release_file"
     warn "No release found (HTTP ${http_code}) -- falling back to source build"
     return 1
   fi
 
-  release_json="$(cat /tmp/nexus_release.json)"
-  rm -f /tmp/nexus_release.json
+  release_json="$(cat "$release_file")"
+  rm -f "$release_file"
 
   # Expected asset name: nexus-<target>.tar.gz  (matches release.yml)
   local asset_name="nexus-${TARGET}.tar.gz"
@@ -158,7 +160,7 @@ for a in data.get('assets', []):
     -o "${tmp_dir}/${asset_name}" \
     "${api_base}/releases/assets/${asset_id}"
 
-  # Verify checksum if available
+  # Verify the checksum (mandatory: a release without it is not installed)
   local sha_id
   sha_id="$(echo "$release_json" \
     | python3 -c "
@@ -170,21 +172,25 @@ for a in data.get('assets', []):
         break
 " 2>/dev/null || echo "")"
 
-  if [ -n "$sha_id" ]; then
-    auth_curl -fsSL \
-      -H "Accept: application/octet-stream" \
-      -o "${tmp_dir}/${asset_name}.sha256" \
-      "${api_base}/releases/assets/${sha_id}"
-
-    info "Verifying SHA256 checksum..."
-    cd "$tmp_dir"
-    if command -v sha256sum &>/dev/null; then
-      sha256sum -c "${asset_name}.sha256"
-    elif command -v shasum &>/dev/null; then
-      shasum -a 256 -c "${asset_name}.sha256"
-    fi
-    cd - >/dev/null
+  if [ -z "$sha_id" ]; then
+    warn "No checksum '${asset_name}.sha256' in release -- falling back to source build"
+    return 1
   fi
+  auth_curl -fsSL \
+    -H "Accept: application/octet-stream" \
+    -o "${tmp_dir}/${asset_name}.sha256" \
+    "${api_base}/releases/assets/${sha_id}"
+
+  info "Verifying SHA256 checksum..."
+  cd "$tmp_dir"
+  if command -v sha256sum &>/dev/null; then
+    sha256sum -c "${asset_name}.sha256"
+  elif command -v shasum &>/dev/null; then
+    shasum -a 256 -c "${asset_name}.sha256"
+  else
+    die "Neither sha256sum nor shasum found; cannot verify the download"
+  fi
+  cd - >/dev/null
 
   # Extract: tar.gz contains nexus-<target>/nexus
   tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
@@ -228,12 +234,8 @@ build_from_source() {
 
   info "Building from source with cargo (Rust ${rust_ver})..."
 
-  local repo_url
-  if [ -n "${GITHUB_TOKEN:-}" ]; then
-    repo_url="https://${GITHUB_TOKEN}@github.com/${REPO}.git"
-  else
-    repo_url="https://github.com/${REPO}.git"
-  fi
+  # Public repository: no token in the URL (cargo may print it).
+  local repo_url="https://github.com/${REPO}.git"
   local version="${NEXUS_VERSION:-}"
   local version_args=()
   if [ -n "$version" ] && [ "$version" != "latest" ]; then

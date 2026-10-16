@@ -7,9 +7,10 @@
 //!
 //! The install script is taken from the latest GitHub release together with its `install.sh.sha256`
 //! asset and verified in-process before it runs; a missing or mismatching checksum aborts the
-//! upgrade. Only when the latest release predates these assets does the command fall back to
-//! `nexus.gatewarden.eu`, where a checksum is verified if published. The script itself verifies the
-//! SHA-256 of the binary tarball it downloads.
+//! upgrade. Only when the release asset cannot be fetched does the command fall back to
+//! `nexus.gatewarden.eu`, with the same mandatory checksum. The script is kept in a private,
+//! freshly created temp directory (mode 0700), so it cannot be swapped between the check and the
+//! run. The script itself verifies the SHA-256 of the binary tarball it downloads.
 
 use console::style;
 use nexus_core::update_check::mark_as_current;
@@ -37,19 +38,20 @@ pub fn run() -> anyhow::Result<()> {
         style(">>").bold().cyan(),
         current
     );
-    // Download the install script to a temp file and verify integrity
-    let tmp_dir = std::env::temp_dir();
+    // Download the install script into a private temp directory and verify integrity
+    let tmp_dir = private_temp_dir()?;
     let script_path = tmp_dir.join("nexus-install.sh");
     let script_path_str = script_path.display().to_string();
 
     // Prefer the script published with the latest GitHub release, where a
     // checksum is mandatory; fall back to the CDN for older releases.
     let from_release = curl_to_file(RELEASE_INSTALL_URL, &script_path_str);
-    let (source, sha_url, checksum_required) = if from_release {
-        ("GitHub release", RELEASE_INSTALL_SHA256_URL, true)
+    let (source, sha_url) = if from_release {
+        ("GitHub release", RELEASE_INSTALL_SHA256_URL)
     } else if curl_to_file(INSTALL_URL, &script_path_str) {
-        ("nexus.gatewarden.eu", INSTALL_SHA256_URL, false)
+        ("nexus.gatewarden.eu", INSTALL_SHA256_URL)
     } else {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
         anyhow::bail!(
             "Failed to download install script from {} or {}. Check your network connection.",
             RELEASE_INSTALL_URL,
@@ -75,26 +77,16 @@ pub fn run() -> anyhow::Result<()> {
                 "   {} Checksum mismatch — aborting upgrade for safety",
                 style("✗").bold().red()
             );
-            let _ = std::fs::remove_file(&script_path);
+            let _ = std::fs::remove_dir_all(&tmp_dir);
             anyhow::bail!(
                 "Install script integrity check failed. The file may have been tampered with."
             );
         }
-        _ if checksum_required => {
-            let _ = std::fs::remove_file(&script_path);
+        _ => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
             anyhow::bail!(
                 "No valid checksum published for the install script ({}); aborting upgrade.",
                 sha_url
-            );
-        }
-        _ => {
-            println!(
-                "   {} Checksum file unavailable — proceeding without verification",
-                style("!").bold().yellow()
-            );
-            println!(
-                "     {}",
-                style("For stronger supply-chain guarantees, download from GitHub Releases").dim()
             );
         }
     }
@@ -104,7 +96,7 @@ pub fn run() -> anyhow::Result<()> {
     let status = Command::new("bash").arg(&script_path_str).status()?;
 
     // Clean up
-    let _ = std::fs::remove_file(&script_path);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 
     if status.success() {
         println!(
@@ -132,6 +124,35 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// A new, owner-only directory under the system temp dir. `create_dir`
+/// fails when the name exists, so an attacker cannot pre-create or
+/// symlink it.
+fn private_temp_dir() -> anyhow::Result<std::path::PathBuf> {
+    let base = std::env::temp_dir();
+    for attempt in 0..16u32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let dir = base.join(format!(
+            "nexus-upgrade-{}-{nanos:08x}-{attempt}",
+            std::process::id()
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    anyhow::bail!("could not create a private temp directory for the upgrade")
 }
 
 /// Try to determine the version of the newly installed binary by running
@@ -182,6 +203,21 @@ fn checksum_matches(script: &[u8], checksum_file: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_private_temp_dir_is_owner_only_and_unique() {
+        use std::os::unix::fs::PermissionsExt;
+        let a = private_temp_dir().unwrap();
+        let b = private_temp_dir().unwrap();
+        assert_ne!(a, b);
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
 
     #[test]
     fn test_checksum_matches() {
