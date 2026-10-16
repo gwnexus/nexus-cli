@@ -8,7 +8,9 @@
 //!   (`policy.shadow` `nexus`, enforced by the shadow guard); it includes
 //!   `agentic`;
 //! - `workspace`: the devbox files (`devbox.json`, `devbox.lock`,
-//!   `.devbox/`, `scripts/devbox/`), a local exclude block.
+//!   `.devbox/`, `scripts/devbox/`): the project setting
+//!   `policy.shadow_workspace` on backends that have it (the server exclude
+//!   list then carries the paths), otherwise a local exclude block.
 //!
 //! The shadow level is a
 //! project setting on the server (`policy.shadow`: `off` | `ai` | `nexus`)
@@ -758,15 +760,22 @@ pub async fn switch(
         if dry_run {
             if server {
                 println!("   {WORKSPACE_SETTING}: -> {on}");
+                println!(
+                    "   workspace: the server exclude list {} the workspace paths",
+                    if on { "adds" } else { "drops" }
+                );
+            } else {
+                println!(
+                    "   workspace: {} the exclude block for {}",
+                    if on { "add" } else { "remove" },
+                    WORKSPACE_PATTERNS.join(", ")
+                );
             }
-            println!(
-                "   workspace: {} the exclude block for {}",
-                if on { "add" } else { "remove" },
-                WORKSPACE_PATTERNS.join(", ")
-            );
             return Ok(());
         }
         if server {
+            // The project setting decides; the server exclude list carries
+            // the workspace paths, so the local block and opt-out go.
             super::env_cmd::set(
                 api_url,
                 WORKSPACE_SETTING,
@@ -775,22 +784,32 @@ pub async fn switch(
                 assume_yes,
             )
             .await?;
+            let workspace = std::env::current_dir()?;
+            let (project_id, client) = super::env_cmd::connect(api_url)?;
+            let export = client.export_agent_files(&project_id).await?;
+            let report = apply_server_excludes(&workspace, &export.git_exclude);
+            print_server_exclude_report(&report, export.shadow.as_deref());
+            let effective = export.shadow_workspace.unwrap_or(on);
+            if !adopt_server_workspace(&workspace, effective) && !effective {
+                print_add_hints(&untracked_patterns(WORKSPACE_PATTERNS));
+            }
+            println!(
+                "{} Workspace shadow {}.",
+                style("●").magenta().bold(),
+                style(if effective { "enabled" } else { "disabled" }).bold()
+            );
+            return Ok(());
         }
         let exclude_path = find_git_dir()?.join("info").join("exclude");
-        // With the server setting, pull follows the project; a local
-        // opt-out is only needed without it.
-        set_workspace_opt_out(&exclude_path, !on && !server)?;
+        set_workspace_opt_out(&exclude_path, !on)?;
         if on {
             workspace_on()?;
         } else {
             workspace_off()?;
-            if !server {
-                println!(
-                    "  {}",
-                    style("nexus pull keeps it off, also for a workspace fork in shadow mode.")
-                        .dim()
-                );
-            }
+            println!(
+                "  {}",
+                style("nexus pull keeps it off, also for a workspace fork in shadow mode.").dim()
+            );
         }
     }
     Ok(())
@@ -803,6 +822,52 @@ pub fn workspace_opted_out() -> bool {
         .ok()
         .and_then(|g| fs::read_to_string(g.join("info").join("exclude")).ok())
         .is_some_and(|c| has_opt_out(&c))
+}
+
+/// Hand the workspace target over to the server. Once `af_export` reports
+/// `shadow_workspace`, its `git_exclude` list carries the workspace paths
+/// while the effective value is true, so the local block and the local
+/// opt-out line go. `effective` false prints a `git add` hint for paths that
+/// are no longer excluded. Returns whether anything was removed.
+pub fn adopt_server_workspace(workspace: &Path, effective: bool) -> bool {
+    let Ok(git_dir) = find_git_dir_from(workspace.to_path_buf()) else {
+        return false;
+    };
+    let exclude_path = git_dir.join("info").join("exclude");
+    let removed = drop_local_workspace(&exclude_path);
+    if removed {
+        println!(
+            "   {} workspace shadow follows the project setting now ({}); local block removed from .git/info/exclude",
+            style("~").bold().cyan(),
+            if effective { "on" } else { "off" }
+        );
+        if !effective {
+            let workdir = git_dir.parent().unwrap_or(workspace);
+            print_add_hints(&untracked_patterns_in(WORKSPACE_PATTERNS, Some(workdir)));
+        }
+    }
+    removed
+}
+
+/// Remove the local workspace block and the opt-out line; whether the
+/// file changed.
+fn drop_local_workspace(exclude_path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(exclude_path) else {
+        return false;
+    };
+    if !content.contains(WS_MARKER_START) && !has_opt_out(&content) {
+        return false;
+    }
+    let cleaned = remove_block(&content, WS_MARKER_START, WS_MARKER_END);
+    let mut lines: Vec<&str> = cleaned.lines().filter(|l| l.trim() != WS_OPT_OUT).collect();
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    fs::write(exclude_path, out).is_ok()
 }
 
 fn has_opt_out(content: &str) -> bool {
@@ -831,7 +896,7 @@ fn set_workspace_opt_out(exclude_path: &Path, opt_out: bool) -> anyhow::Result<(
 }
 
 /// One line per target for `nexus shadow status`.
-fn print_targets(level: Option<&str>, exclude_path: &Path) {
+fn print_targets(level: Option<&str>, server_workspace: Option<bool>, exclude_path: &Path) {
     let content = fs::read_to_string(exclude_path).unwrap_or_default();
     let legacy = content.contains(MARKER_START);
     let workspace = content.contains(WS_MARKER_START);
@@ -854,15 +919,22 @@ fn print_targets(level: Option<&str>, exclude_path: &Path) {
         }
         None => row("agentic", legacy, "local shadow block"),
     }
-    row(
-        "workspace",
-        workspace,
-        if has_opt_out(&content) {
-            "local exclude block (switched off locally)"
-        } else {
-            "local exclude block"
-        },
-    );
+    match server_workspace {
+        Some(on) => row(
+            "workspace",
+            on,
+            "policy.shadow_workspace, else the workspace fork",
+        ),
+        None => row(
+            "workspace",
+            workspace,
+            if has_opt_out(&content) {
+                "local exclude block (switched off locally)"
+            } else {
+                "local exclude block"
+            },
+        ),
+    }
     match level {
         Some(level) => row("nexus", level == "nexus", &format!("policy.shadow={level}")),
         None => row("nexus", false, "needs policy.shadow on the backend"),
@@ -936,11 +1008,10 @@ pub async fn status_with_server(api_url: &str) -> anyhow::Result<()> {
         Ok((project_id, client)) => Some(client.export_agent_files(&project_id).await),
         Err(_) => None,
     };
+    let ok = export.as_ref().and_then(|e| e.as_ref().ok());
     print_targets(
-        export
-            .as_ref()
-            .and_then(|e| e.as_ref().ok())
-            .and_then(|e| e.shadow.as_deref()),
+        ok.and_then(|e| e.shadow.as_deref()),
+        ok.and_then(|e| e.shadow_workspace),
         &exclude_path,
     );
     if let Some(export) = export {
@@ -1511,6 +1582,51 @@ mod tests {
         );
         set_workspace_opt_out(&path, false).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "mine.txt\n");
+    }
+
+    #[test]
+    fn test_drop_local_workspace_keeps_other_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("exclude");
+        let content = format!(
+            "mine.txt\n\n{WS_MARKER_START}\ndevbox.json\n{WS_MARKER_END}\n{WS_OPT_OUT}\n\n{SERVER_MARKER_START}\n.nexus/\n{SERVER_MARKER_END}\n"
+        );
+        fs::write(&path, &content).unwrap();
+        assert!(drop_local_workspace(&path));
+        let out = fs::read_to_string(&path).unwrap();
+        assert!(out.starts_with("mine.txt\n"));
+        assert!(!out.contains(WS_MARKER_START));
+        assert!(!out.contains("devbox.json"));
+        assert!(!has_opt_out(&out));
+        assert!(out.contains(SERVER_MARKER_START) && out.contains(".nexus/"));
+        // Nothing left to drop: unchanged.
+        assert!(!drop_local_workspace(&path));
+        assert_eq!(fs::read_to_string(&path).unwrap(), out);
+    }
+
+    #[test]
+    fn test_drop_local_workspace_opt_out_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("exclude");
+        fs::write(&path, format!("mine.txt\n{WS_OPT_OUT}\n")).unwrap();
+        assert!(drop_local_workspace(&path));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine.txt\n");
+        assert!(!drop_local_workspace(&dir.path().join("missing")));
+    }
+
+    #[test]
+    fn test_af_export_shadow_workspace_optional() {
+        let base = serde_json::json!({
+            "project_id": "p", "project_name": "Demo", "count": 0,
+            "agent_files": [], "mcp_servers": {}
+        });
+        let old: nexus_core::api::AgentFileExportResponse =
+            serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(old.shadow_workspace, None);
+        let mut v = base;
+        v["shadow_workspace"] = serde_json::json!(false);
+        let new: nexus_core::api::AgentFileExportResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(new.shadow_workspace, Some(false));
     }
 
     #[test]

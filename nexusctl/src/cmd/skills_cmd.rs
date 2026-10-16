@@ -73,13 +73,21 @@ pub async fn list(
                         skill.name.clone()
                     };
 
+                    // Switched off globally: left out of every export.
+                    let disabled = if skill.enabled == Some(false) {
+                        format!(" {}", style("disabled").red())
+                    } else {
+                        String::new()
+                    };
+
                     println!(
-                        "  {:<24} {:<30} {:<10} {:>4} {:<20}",
+                        "  {:<24} {:<30} {:<10} {:>4} {:<20}{}",
                         style(&skill.skill_id).cyan(),
                         name_display,
                         status_styled,
                         skill.version,
                         cmd,
+                        disabled,
                     );
                 }
             }

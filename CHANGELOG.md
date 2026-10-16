@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Workspace shadow follows the project setting.** On backends with `policy.shadow_workspace`, `nexus shadow on|off --target workspace` sets it and applies the server exclude list right away; while the setting is unset, the workspace fork's shadow mode decides. The server sends the workspace paths in its exclude list, so `nexus pull` adds them while the effective value is on and removes them when it is off (with a `git add <path>` hint for untracked files), for everyone on the project. The local workspace block and the local opt-out line are dropped once the server reports the value. Older backends keep the local block and opt-out.
+- **`nexus shadow status`** shows the workspace target from the server (`policy.shadow_workspace`, else the workspace fork) when available.
+- **Disabled skills.** `nexus skills list` marks skills that are switched off globally as `disabled`. When `nexus pull` removes or keeps the files of such a skill, the line says `disabled in Nexus` instead of `no longer exported`.
+
 ## [0.29.0] - 2026-10-15
 
 Shadow targets for `nexus shadow on|off`, and `nexus push` aligned with `nexus status`.

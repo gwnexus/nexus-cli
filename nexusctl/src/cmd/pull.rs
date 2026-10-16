@@ -681,10 +681,11 @@ pub async fn run(
         let desired = desired_skill_files(&export.skills, &agentic_root, is_claude);
         let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
         let skills = plan_dropped_skill_files(&workspace, &agentic_root, is_claude, &desired);
+        let disabled = DisabledSkills::for_plan(&client, &skills).await;
         skills
             .iter()
             .filter(|i| !matches!(i, DroppedFile::Gone(_)))
-            .for_each(print_dropped_skill_file);
+            .for_each(|i| print_dropped_skill_file(i, &disabled));
         return Ok(());
     }
 
@@ -724,7 +725,14 @@ pub async fn run(
     // (renamed or unassigned).
     let desired_skills = desired_skill_files(&export.skills, &agentic_root, is_claude);
     let desired_paths: Vec<&str> = desired_skills.iter().map(|(p, _)| p.as_str()).collect();
-    prune_dropped_skill_files(&workspace, &agentic_root, is_claude, &desired_paths);
+    prune_dropped_skill_files(
+        &client,
+        &workspace,
+        &agentic_root,
+        is_claude,
+        &desired_paths,
+    )
+    .await;
 
     // Export directives
     let has_directives = match client.export_directives(&project_id).await {
@@ -1203,7 +1211,16 @@ pub async fn run(
             let report = super::shadow::apply_server_excludes(&workspace, &af_export.git_exclude);
             super::shadow::print_server_exclude_report(&report, af_export.shadow.as_deref());
         }
+        // The server decides the workspace target too once it reports it.
+        if let Some(effective) = af_export.shadow_workspace {
+            super::shadow::adopt_server_workspace(&workspace, effective);
+        }
     }
+    let server_workspace_shadow = af_export_result
+        .as_ref()
+        .ok()
+        .and_then(|e| e.shadow_workspace)
+        .is_some();
 
     // Shadow guard: cache the rules for the commit-msg hook and install or
     // remove the hook (only when the export was read).
@@ -1488,8 +1505,12 @@ pub async fn run(
                     );
 
                     // Auto-apply workspace git-exclude when shadow_mode is active,
-                    // unless it was switched off locally.
-                    if export.meta.shadow_mode && !shadow::workspace_opted_out() {
+                    // unless it was switched off locally or the server exclude
+                    // list carries the workspace paths.
+                    if export.meta.shadow_mode
+                        && !server_workspace_shadow
+                        && !shadow::workspace_opted_out()
+                    {
                         match shadow::workspace_on() {
                             Ok(()) => {}
                             Err(e) => {
@@ -1590,8 +1611,12 @@ pub async fn run(
                             );
 
                             // Auto-apply workspace git-exclude when shadow_mode is active,
-                            // unless it was switched off locally.
-                            if ws_export.shadow_mode && !shadow::workspace_opted_out() {
+                            // unless it was switched off locally or the server
+                            // exclude list carries the workspace paths.
+                            if ws_export.shadow_mode
+                                && !server_workspace_shadow
+                                && !shadow::workspace_opted_out()
+                            {
                                 match shadow::workspace_on() {
                                     Ok(()) => {}
                                     Err(e) => {
@@ -2341,24 +2366,82 @@ pub(crate) fn apply_dropped_skill_files(
     Ok(())
 }
 
-fn print_dropped_skill_file(item: &DroppedFile) {
+fn print_dropped_skill_file(item: &DroppedFile, disabled: &DisabledSkills) {
     match item {
         DroppedFile::Remove(path) => println!(
-            "   {} {} (skill no longer exported)",
+            "   {} {} (skill {})",
             style("REMOVE").bold().red(),
-            path
+            path,
+            disabled.reason(path)
         ),
         DroppedFile::KeepModified(path) => println!(
-            "   {} {} (modified, skill no longer exported; delete it when no longer needed)",
+            "   {} {} (modified, skill {}; delete it when no longer needed)",
             style("KEEP").bold().yellow(),
-            path
+            path,
+            disabled.reason(path)
         ),
         DroppedFile::Gone(_) => {}
     }
 }
 
+/// Skills that still exist in Nexus but are switched off (`enabled: false`
+/// in `sk_list`), so a removal can say why. Empty on backends without the
+/// field or when the list cannot be read.
+#[derive(Debug, Default)]
+pub(crate) struct DisabledSkills {
+    /// Skill ids, plus their `.claude/skills/` directory names.
+    dirs: Vec<String>,
+    /// Command slugs (`.opencode/commands/<slug>.md`).
+    slugs: Vec<String>,
+}
+
+impl DisabledSkills {
+    /// Read the list only when `plan` removes or keeps something.
+    async fn for_plan(client: &NexusClient, plan: &[DroppedFile]) -> Self {
+        if plan.iter().all(|i| matches!(i, DroppedFile::Gone(_))) {
+            return Self::default();
+        }
+        match client.list_skills(None, None).await {
+            Ok(resp) => Self::from_skills(&resp.skills),
+            Err(_) => Self::default(),
+        }
+    }
+
+    fn from_skills(skills: &[nexus_core::api::SkillSummary]) -> Self {
+        let mut out = Self::default();
+        for skill in skills.iter().filter(|s| s.enabled == Some(false)) {
+            out.dirs.push(skill.skill_id.clone());
+            out.dirs
+                .push(claude_render::canonical_claude_skill_id(&skill.skill_id));
+            if let Some(slug) = &skill.command_slug {
+                out.slugs.push(slug.clone());
+            }
+        }
+        out
+    }
+
+    /// `disabled in Nexus` for a file of a disabled skill, otherwise the
+    /// generic wording.
+    fn reason(&self, path: &str) -> &'static str {
+        let dir = self
+            .dirs
+            .iter()
+            .any(|d| path.contains(&format!("/skills/{d}/")));
+        let command = self
+            .slugs
+            .iter()
+            .any(|s| path == format!(".opencode/commands/{s}.md"));
+        if dir || command {
+            "disabled in Nexus"
+        } else {
+            "no longer exported"
+        }
+    }
+}
+
 /// Remove (or report) the skill files the export no longer contains.
-fn prune_dropped_skill_files(
+async fn prune_dropped_skill_files(
+    client: &NexusClient,
     workspace: &Path,
     agentic_root: &str,
     is_claude: bool,
@@ -2368,8 +2451,11 @@ fn prune_dropped_skill_files(
     if plan.is_empty() {
         return;
     }
+    let disabled = DisabledSkills::for_plan(client, &plan).await;
     match apply_dropped_skill_files(workspace, agentic_root, is_claude, &plan) {
-        Ok(()) => plan.iter().for_each(print_dropped_skill_file),
+        Ok(()) => plan
+            .iter()
+            .for_each(|i| print_dropped_skill_file(i, &disabled)),
         Err(e) => println!(
             "   {} Could not remove skills that are no longer exported: {}",
             style("!").yellow(),
@@ -4197,6 +4283,55 @@ pub fn write_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_disabled_skills_reason() {
+        let skill = |id: &str, slug: &str, enabled: Option<bool>| {
+            let mut v = serde_json::json!({
+                "id": "00000000-0000-4000-8000-000000000001", "skill_id": id,
+                "name": id, "description": null, "status": "active",
+                "auto_generate_command": true, "command_slug": slug, "version": 1,
+                "created_at": "", "updated_at": ""
+            });
+            if let Some(e) = enabled {
+                v["enabled"] = serde_json::json!(e);
+            }
+            serde_json::from_value::<nexus_core::api::SkillSummary>(v).unwrap()
+        };
+        let disabled = DisabledSkills::from_skills(&[
+            skill("nx-off", "off", Some(false)),
+            skill("nx-on", "on", Some(true)),
+            skill("nx-old", "old", None),
+        ]);
+        assert_eq!(
+            disabled.reason(".nexus/skills/nx-off/SKILL.md"),
+            "disabled in Nexus"
+        );
+        assert_eq!(
+            disabled.reason(".claude/skills/nexus-off/SKILL.md"),
+            "disabled in Nexus"
+        );
+        assert_eq!(
+            disabled.reason(".opencode/commands/off.md"),
+            "disabled in Nexus"
+        );
+        assert_eq!(
+            disabled.reason(".claude/skills/nexus-on/SKILL.md"),
+            "no longer exported"
+        );
+        assert_eq!(
+            disabled.reason(".nexus/skills/nx-old/SKILL.md"),
+            "no longer exported"
+        );
+        assert_eq!(
+            disabled.reason(".nexus/skills/nx-offx/SKILL.md"),
+            "no longer exported"
+        );
+        assert_eq!(
+            DisabledSkills::default().reason(".opencode/commands/off.md"),
+            "no longer exported"
+        );
+    }
 
     /// Test shim: write a skill's files through the pull renderer.
     fn write_skill(

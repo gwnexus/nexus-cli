@@ -198,7 +198,8 @@ files the current fork no longer contains, so a new fork does not bring them
 back by accident; `nexus push <path>` pushes one back on purpose.
 
 Skills follow the same rules: files of a skill that is no longer exported
-(renamed or unassigned) are removed on `nexus pull` if unchanged
+(renamed, unassigned, or disabled in Nexus; the line then says
+`disabled in Nexus`) are removed on `nexus pull` if unchanged
 (`REMOVE`), kept and reported if edited (`KEEP`), listed by `nexus status`
 and previewed by `nexus pull --dry-run`. Only the selected runtime's
 directories are pruned (`<agentic_root>/skills/`, plus `.claude/skills/` or
@@ -490,7 +491,7 @@ reverse step. Without `--target` (or with `--all`) both switch every target:
 | ------ | ----- | --------- |
 | `agentic` (aliases `ai`, `agentic-files`) | Agentic files: `.claude/`, `.nexus/`, `AGENTS.md`, `CLAUDE.md`, `opencode.json`, `.opencode/`, ... | `policy.shadow` `ai` |
 | `nexus` | Nexus internals in commit messages and tracked files (shadow guard); includes `agentic` | `policy.shadow` `nexus` |
-| `workspace` | Devbox files: `devbox.json`, `devbox.lock`, `.devbox/`, `scripts/devbox/` | local exclude block |
+| `workspace` | Devbox files: `devbox.json`, `devbox.lock`, `.devbox/`, `scripts/devbox/` | `policy.shadow_workspace` (older backends: local exclude block) |
 
 ```bash
 nexus shadow on                                # all targets (same as --all)
@@ -504,10 +505,15 @@ nexus shadow check                             # full report; exit 1 when anythi
 
 `nexus` includes `agentic`: switching `nexus` on also hides the agentic
 files, switching `agentic` off also switches `nexus` off, and switching
-`nexus` off keeps `agentic`. `nexus shadow off --target workspace` is
-recorded locally (`# nexus workspace shadow: off` in `.git/info/exclude`),
-so `nexus pull` does not switch it on again for a workspace fork in shadow
-mode; `nexus shadow on --target workspace` removes the line. Like `on`
+`nexus` off keeps `agentic`. The workspace target sets the project setting
+`policy.shadow_workspace`; while it is unset, the workspace fork's shadow
+mode decides. The server then sends the workspace paths in its exclude list,
+so `nexus pull` adds or removes them for everyone on the project and drops an
+older local workspace block. On backends without the setting,
+`nexus shadow off --target workspace` is recorded locally
+(`# nexus workspace shadow: off` in `.git/info/exclude`), so `nexus pull`
+does not switch it on again for a workspace fork in shadow mode;
+`nexus shadow on --target workspace` removes the line. Like `on`
 never untracks files, `off` never stages them: it prints `git add <path>`
 for each previously excluded path that exists but is not tracked. `nexus shadow
 ai|nexus` and `nexus workspace shadow on|off|status` still work and print

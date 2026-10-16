@@ -96,6 +96,10 @@ pub struct SkillSummary {
     pub version: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Global switch, independent of `status`: a disabled skill is left out
+    /// of every export. `None` on older backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// Response from `sk_list` action.
@@ -429,12 +433,17 @@ pub struct AgentFileExportResponse {
     pub claude_workspace: Option<ClaudeWorkspace>,
     /// Paths the server wants in `.git/info/exclude`: always the personal files; for `shadow`
     /// `ai`/`nexus` also the agentic paths (`.claude/`, `<agentic_root>/`, `AGENTS.md`,
-    /// `CLAUDE.md`, `opencode.json`, `.opencode/`).
+    /// `CLAUDE.md`, `opencode.json`, `.opencode/`); while `shadow_workspace` is true also the
+    /// workspace paths (`devbox.json`, `devbox.lock`, `.devbox/`, the fork's scripts path).
     #[serde(default)]
     pub git_exclude: Vec<String>,
     /// Project shadow level `off` | `ai` | `nexus` (`policy.shadow`).
     #[serde(default)]
     pub shadow: Option<String>,
+    /// Effective workspace shadow: `policy.shadow_workspace` when set, else the workspace
+    /// fork's `shadow_mode`. `None` on older backends; then the CLI keeps its local block.
+    #[serde(default)]
+    pub shadow_workspace: Option<bool>,
     /// What `nexus shadow check` and the commit-msg hook enforce. Present
     /// only when the shadow level is not `off`; older backends omit it.
     #[serde(default)]
