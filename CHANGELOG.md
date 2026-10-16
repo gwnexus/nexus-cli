@@ -5,13 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.29.3] - 2026-10-16
+
+Shadow mode explains committed files that stay visible in `git status`, and can untrack them.
 
 ### Changed
 - **`nexus shadow on` explains why committed files stay visible.** An exclude only hides untracked files, so devbox or agentic files committed before kept showing in `git status` although shadow mode reported them as hidden. Instead of one warning per file, `on` now prints a single hint with the number of tracked files per pattern and two ways out: stop tracking them with `--untrack`, or hide their changes in this clone only with `git update-index --skip-worktree`. The hint also appears when the target was already on.
 
 ### Added
 - **`nexus shadow on --untrack`.** Also takes files with commit history out of the git index (`git rm -r --cached`; files stay on disk) for the switched targets, including tracked entries of the server exclude list. The removal reaches the repository with your next commit.
+
+1 net new test; 831/831 passing, clippy/fmt clean.
 
 ## [0.29.2] - 2026-10-16
 
