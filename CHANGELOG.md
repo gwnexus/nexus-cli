@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.29.2] - 2026-10-16
+
+Security hardening of what `nexus pull` and `nexus init` accept from the backend, plus a rustls update.
 
 ### Security
 - **Server-supplied paths are validated before every write.** `nexus pull` and `nexus init` used to write devbox scripts (with the executable bit), actor profiles and avatars, and Claude hook adapters to the path the backend sent, without checking it. Every server path (also for agent files, skills, skill resources and OpenCode commands) must now be relative, stay inside the workspace, not point into `.git/`, and not resolve outside the workspace through a symlink (a dangling symlink is refused too); otherwise the file is skipped with a warning. Actor slugs and hook event names must be single segments (`[A-Za-z0-9._-]`). An `agentic_root` that is absolute, contains `..` or points into `.git` falls back to `.nexus`.
@@ -15,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`nexus upgrade` keeps the install script in a private temp directory** (fresh, mode `0700`) instead of a fixed `$TMPDIR/nexus-install.sh`, and the checksum is mandatory for the fallback download too.
 - **`install.sh` requires the checksum.** A release without `<asset>.sha256`, or a system without `sha256sum`/`shasum`, no longer installs the binary unverified. The release metadata goes to a `mktemp` file instead of a fixed `/tmp` path, and the source-build fallback no longer puts `GITHUB_TOKEN` into the git URL.
 - **Dependencies:** rustls 0.23.38 -> 0.23.46 (RUSTSEC-2026-0285, -0346, -0348, -0349); quinn-proto 0.11.15 -> 0.11.19 in `Cargo.lock` (RUSTSEC-2026-0338 to -0342; not compiled into the binary).
+
+10 net new tests; 830/830 passing, clippy/fmt clean.
 
 ## [0.29.1] - 2026-10-16
 
