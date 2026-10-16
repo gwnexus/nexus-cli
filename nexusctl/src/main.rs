@@ -548,6 +548,11 @@ pub struct ShadowSwitchArgs {
     /// Show what would change without changing anything.
     #[arg(long)]
     pub dry_run: bool,
+    /// With on: also take files git already tracks (with commit history) out
+    /// of the index. They stay on disk; the next commit removes them from the
+    /// repository.
+    #[arg(long)]
+    pub untrack: bool,
 }
 
 /// Workspace shadow subcommands.
@@ -1780,6 +1785,7 @@ mod tests {
             "--target",
             "nexus",
             "--dry-run",
+            "--untrack",
         ])
         .unwrap();
         match cli.command {
@@ -1795,6 +1801,7 @@ mod tests {
                     ]
                 );
                 assert!(args.dry_run);
+                assert!(args.untrack);
             }
             _ => panic!("expected Shadow On"),
         }

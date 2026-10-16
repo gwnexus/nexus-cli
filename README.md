@@ -515,6 +515,7 @@ nexus shadow on --target agentic               # only the agentic files
 nexus shadow on --target agentic,workspace     # repeat --target or separate with commas
 nexus shadow off --target nexus                # keep agentic, drop the Nexus content rules
 nexus shadow off --target workspace --dry-run  # show what would change
+nexus shadow on --target workspace --untrack   # also stop tracking committed devbox files
 nexus shadow status                            # one line per target, then the details
 nexus shadow check                             # full report; exit 1 when anything is found
 ```
@@ -530,8 +531,29 @@ older local workspace block. On backends without the setting,
 (`# nexus workspace shadow: off` in `.git/info/exclude`), so `nexus pull`
 does not switch it on again for a workspace fork in shadow mode;
 `nexus shadow on --target workspace` removes the line. Like `on`
-never untracks files, `off` never stages them: it prints `git add <path>`
-for each previously excluded path that exists but is not tracked. `nexus shadow
+never untracks committed files on its own, `off` never stages them: it prints
+`git add <path>` for each previously excluded path that exists but is not
+tracked.
+
+An exclude only hides files git does not track. Files that were committed
+before (for example `devbox.json` and `scripts/devbox/` in an existing
+repository) keep showing up in `git status`; `nexus shadow on` lists them in
+one hint with both ways out:
+
+```
+  ! 14 file(s) are tracked by git (committed before), so git status keeps showing their changes; an exclude only hides untracked files:
+      devbox.json
+      devbox.lock
+      scripts/devbox/ (12 file(s))
+    Stop tracking them (they stay on disk; your next commit removes them from the repository, ...):
+      nexus shadow on --target workspace --untrack
+    Or hide their changes in this clone only:
+      git ls-files -z -- devbox.json devbox.lock scripts/devbox | xargs -0 git update-index --skip-worktree
+```
+
+`--untrack` takes them out of the git index (`git rm -r --cached`); review
+with `git status` and commit. A teammate's `git pull` then deletes their
+copies, and `nexus pull` writes them again. `nexus shadow
 ai|nexus` and `nexus workspace shadow on|off|status` still work and print
 the new command.
 

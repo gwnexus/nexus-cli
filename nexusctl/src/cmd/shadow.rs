@@ -85,49 +85,96 @@ const WS_MARKER_END: &str = "# <<< nexus workspace shadow";
 
 /// Enable shadow mode (agentic files).
 pub fn on() -> anyhow::Result<()> {
+    local_on(LocalTarget::Agentic, false, true)
+}
+
+/// The two local exclude blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalTarget {
+    Agentic,
+    Workspace,
+}
+
+impl LocalTarget {
+    fn patterns(self) -> &'static [&'static str] {
+        match self {
+            Self::Agentic => AGENTIC_PATTERNS,
+            Self::Workspace => WORKSPACE_PATTERNS,
+        }
+    }
+    fn markers(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Agentic => (MARKER_START, MARKER_END),
+            Self::Workspace => (WS_MARKER_START, WS_MARKER_END),
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Agentic => "Shadow mode",
+            Self::Workspace => "Workspace shadow",
+        }
+    }
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Agentic => "agentic",
+            Self::Workspace => "workspace",
+        }
+    }
+}
+
+/// Switch a local block on: write it if missing, take files without
+/// commit history out of the index (all matching files with `untrack`),
+/// and explain what git still tracks. With `hint_if_active` false an
+/// already active block is left alone silently (the `nexus pull` path).
+fn local_on(target: LocalTarget, untrack: bool, hint_if_active: bool) -> anyhow::Result<()> {
     let git_dir = find_git_dir()?;
     let exclude_path = git_dir.join("info").join("exclude");
-
-    // Ensure .git/info/ exists
     if let Some(parent) = exclude_path.parent() {
         fs::create_dir_all(parent)?;
     }
-
-    // Check if already active
-    if is_block_active(&exclude_path, MARKER_START) {
-        println!(
-            "{} Shadow mode is already enabled.",
-            style("●").green().bold()
-        );
+    let (start, end) = target.markers();
+    let patterns = target.patterns();
+    let active = is_block_active(&exclude_path, start);
+    if active && !hint_if_active {
         return Ok(());
     }
-
-    // Build and write the exclude block
-    write_exclude_block(&exclude_path, MARKER_START, MARKER_END, AGENTIC_PATTERNS)?;
-
-    // Remove already-tracked files from the index (best effort)
-    let removed = untrack_patterns(AGENTIC_PATTERNS)?;
-
-    println!(
-        "{} Shadow mode {}.",
-        style("●").green().bold(),
-        style("enabled").green().bold()
-    );
-    println!(
-        "  {} agentic patterns added to .git/info/exclude",
-        AGENTIC_PATTERNS.len()
-    );
-    if removed > 0 {
+    let bullet = match target {
+        LocalTarget::Agentic => style("●").green().bold(),
+        LocalTarget::Workspace => style("●").magenta().bold(),
+    };
+    if active {
+        println!("{bullet} {} is already enabled.", target.label());
+    } else {
+        write_exclude_block(&exclude_path, start, end, patterns)?;
+    }
+    let report = untrack_patterns(patterns, untrack)?;
+    if !active {
+        println!("{bullet} {} {}.", target.label(), style("enabled").bold());
         println!(
-            "  {} previously tracked file(s) removed from index (files kept on disk)",
-            removed
+            "  {} {} patterns added to .git/info/exclude",
+            patterns.len(),
+            target.flag()
         );
     }
-    println!(
-        "  {}",
-        style("Note: .git/info/exclude is local and will not be committed.").dim()
-    );
-
+    if report.removed > 0 {
+        println!(
+            "  {} file(s) removed from the git index (kept on disk; your next commit removes them from the repository)",
+            report.removed
+        );
+        if untrack {
+            println!(
+                "    {}",
+                style("Review with git status, then commit, e.g.: git commit -m \"chore: stop tracking local files\"").dim()
+            );
+        }
+    }
+    print_tracked_hint(&report, target.flag());
+    if !active {
+        println!(
+            "  {}",
+            style("Note: .git/info/exclude is local and will not be committed.").dim()
+        );
+    }
     Ok(())
 }
 
@@ -235,52 +282,10 @@ fn local_status(server_level: bool) -> anyhow::Result<()> {
 // Public entry points — workspace shadow
 // ---------------------------------------------------------------------------
 
-/// Enable workspace shadow mode (devbox files excluded from git).
+/// Enable workspace shadow mode (devbox files excluded from git), as
+/// `nexus pull` does for a fork in shadow mode: silent when already on.
 pub fn workspace_on() -> anyhow::Result<()> {
-    let git_dir = find_git_dir()?;
-    let exclude_path = git_dir.join("info").join("exclude");
-
-    if let Some(parent) = exclude_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    if is_block_active(&exclude_path, WS_MARKER_START) {
-        println!(
-            "{} Workspace shadow is already enabled.",
-            style("●").magenta().bold()
-        );
-        return Ok(());
-    }
-
-    write_exclude_block(
-        &exclude_path,
-        WS_MARKER_START,
-        WS_MARKER_END,
-        WORKSPACE_PATTERNS,
-    )?;
-    let removed = untrack_patterns(WORKSPACE_PATTERNS)?;
-
-    println!(
-        "{} Workspace shadow {}.",
-        style("●").magenta().bold(),
-        style("enabled").magenta().bold()
-    );
-    println!(
-        "  {} workspace patterns added to .git/info/exclude",
-        WORKSPACE_PATTERNS.len()
-    );
-    if removed > 0 {
-        println!(
-            "  {} previously tracked file(s) removed from index (files kept on disk)",
-            removed
-        );
-    }
-    println!(
-        "  {}",
-        style("Note: .git/info/exclude is local and will not be committed.").dim()
-    );
-
-    Ok(())
+    local_on(LocalTarget::Workspace, false, false)
 }
 
 /// Disable workspace shadow mode.
@@ -683,6 +688,7 @@ pub async fn switch(
     targets: &[ShadowTarget],
     all: bool,
     dry_run: bool,
+    untrack: bool,
     assume_yes: bool,
 ) -> anyhow::Result<()> {
     let targets: &[ShadowTarget] = if targets.is_empty() || all {
@@ -706,6 +712,9 @@ pub async fn switch(
     };
     if dry_run {
         println!("{} Dry run, nothing is changed:", style(">>").bold().cyan());
+        if on && untrack {
+            println!("   --untrack: tracked files of the switched targets are taken out of the git index");
+        }
     }
 
     if agentic || nexus {
@@ -736,6 +745,9 @@ pub async fn switch(
                 }
             } else {
                 set_level(api_url, level, assume_yes).await?;
+                if on && untrack {
+                    untrack_server_entries();
+                }
             }
         } else {
             if nexus {
@@ -756,7 +768,7 @@ pub async fn switch(
                         style("i").bold().blue()
                     );
                     if on {
-                        self::on()?;
+                        local_on(LocalTarget::Agentic, untrack, true)?;
                     } else {
                         off()?;
                     }
@@ -799,6 +811,9 @@ pub async fn switch(
             let export = client.export_agent_files(&project_id).await?;
             let report = apply_server_excludes(&workspace, &export.git_exclude);
             print_server_exclude_report(&report, export.shadow.as_deref());
+            if on && untrack {
+                untrack_server_entries();
+            }
             let effective = export.shadow_workspace.unwrap_or(on);
             if !adopt_server_workspace(&workspace, effective) && !effective {
                 print_add_hints(&untracked_patterns(WORKSPACE_PATTERNS));
@@ -813,7 +828,7 @@ pub async fn switch(
         let exclude_path = find_git_dir()?.join("info").join("exclude");
         set_workspace_opt_out(&exclude_path, !on)?;
         if on {
-            workspace_on()?;
+            local_on(LocalTarget::Workspace, untrack, true)?;
         } else {
             workspace_off()?;
             println!(
@@ -1155,68 +1170,138 @@ fn write_exclude_block(
     Ok(())
 }
 
-/// Run `git rm --cached` for each pattern that is currently tracked.
-///
-/// Skips any file that has a commit history on the current branch
-/// (`git log -1 -- <file>` returns output). Removing such a file from the
-/// index would stage a deletion that could be accidentally committed.
-///
-/// Skipped files are reported as warnings so the user can act manually
-/// with `git rm --cached` if that is truly their intent.
-fn untrack_patterns(patterns: &[&str]) -> anyhow::Result<usize> {
-    let mut count = 0;
+/// What [`untrack_patterns`] did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct UntrackReport {
+    /// Index entries removed (files stay on disk).
+    removed: usize,
+    /// Files still tracked because they have commit history.
+    kept: Vec<String>,
+    /// The patterns those files belong to, for the hint.
+    kept_roots: Vec<String>,
+}
+
+/// Take files matching `patterns` out of the git index (files stay on
+/// disk). Files with commit history on this branch are only untracked with
+/// `all`: removing them changes the repository with the next commit, which
+/// is the user's call; otherwise they are reported in `kept`.
+fn untrack_patterns(patterns: &[&str], all: bool) -> anyhow::Result<UntrackReport> {
+    untrack_patterns_in_dir(patterns, all, None)
+}
+
+fn untrack_patterns_in_dir(
+    patterns: &[&str],
+    all: bool,
+    workdir: Option<&Path>,
+) -> anyhow::Result<UntrackReport> {
+    let mut report = UntrackReport::default();
     for pat in patterns {
         let clean = pat.trim_end_matches('/');
-
-        // Collect concrete paths matched by this pattern (handles dirs and globs).
-        let matched_paths = resolve_tracked_paths(clean);
-
-        for path in &matched_paths {
-            if is_file_tracked_in_history(path) {
-                eprintln!(
-                    "  {} skipping '{}' — file has commit history on this branch (use 'git rm --cached {}' manually if intended)",
-                    console::style("warning:").yellow().bold(),
-                    path,
-                    path,
-                );
-                continue;
-            }
-
-            let output = Command::new("git")
-                .args(["rm", "-r", "--cached", "--ignore-unmatch", path])
-                .output();
-            if let Ok(o) = output {
-                if o.status.success() {
-                    let stdout = String::from_utf8_lossy(&o.stdout);
-                    count += stdout.lines().filter(|l| !l.is_empty()).count();
+        let mut remove: Vec<String> = Vec::new();
+        for path in resolve_tracked_paths_in(clean, workdir) {
+            if !all && is_file_tracked_in_history_in(&path, workdir) {
+                if !report.kept_roots.iter().any(|r| r.as_str() == *pat) {
+                    report.kept_roots.push((*pat).to_string());
                 }
+                report.kept.push(path);
+            } else {
+                remove.push(path);
             }
         }
-
-        // Also attempt the pattern itself for any unmatched cases (directories, etc.)
-        // that resolve_tracked_paths may have missed — but only if no specific paths
-        // were found (avoids double-processing).
-        if matched_paths.is_empty() {
-            let output = Command::new("git")
-                .args(["rm", "-r", "--cached", "--ignore-unmatch", clean])
-                .output();
-            if let Ok(o) = output {
-                if o.status.success() {
-                    let stdout = String::from_utf8_lossy(&o.stdout);
-                    count += stdout.lines().filter(|l| !l.is_empty()).count();
-                }
+        if remove.is_empty() {
+            continue;
+        }
+        let mut cmd = Command::new("git");
+        cmd.args(["rm", "-r", "--cached", "--ignore-unmatch", "--"])
+            .args(&remove);
+        if let Some(dir) = workdir {
+            cmd.current_dir(dir);
+        }
+        if let Ok(o) = cmd.output() {
+            if o.status.success() {
+                report.removed += String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .count();
             }
         }
     }
-    Ok(count)
+    Ok(report)
 }
 
-/// Return all paths under `pattern` that git currently tracks in the index.
-fn resolve_tracked_paths(pattern: &str) -> Vec<String> {
-    resolve_tracked_paths_in(pattern, None)
+/// `--untrack` with the server exclude list: take every entry git still
+/// tracks out of the index (files stay on disk).
+fn untrack_server_entries() {
+    let Ok(workspace) = std::env::current_dir() else {
+        return;
+    };
+    let entries = server_exclude_entries(&workspace);
+    let patterns: Vec<&str> = entries.iter().map(String::as_str).collect();
+    if let Ok(report) = untrack_patterns(&patterns, true) {
+        if report.removed > 0 {
+            println!(
+                "  {} file(s) removed from the git index (kept on disk; your next commit removes them from the repository)",
+                report.removed
+            );
+        }
+    }
 }
 
-/// Inner implementation — `workdir` overrides CWD for testability.
+/// One hint for the files an exclude cannot hide because git tracks them.
+fn print_tracked_hint(report: &UntrackReport, target: &str) {
+    if report.kept.is_empty() {
+        return;
+    }
+    println!(
+        "  {} {} file(s) are tracked by git (committed before), so git status keeps showing their changes; an exclude only hides untracked files:",
+        style("!").bold().yellow(),
+        report.kept.len()
+    );
+    for root in &report.kept_roots {
+        let clean = root.trim_end_matches('/');
+        let n = report
+            .kept
+            .iter()
+            .filter(|p| *p == clean || p.starts_with(&format!("{clean}/")))
+            .count();
+        if root.ends_with('/') {
+            println!("      {root} ({n} file(s))");
+        } else {
+            println!("      {root}");
+        }
+    }
+    let roots: Vec<&str> = report
+        .kept_roots
+        .iter()
+        .map(|r| r.trim_end_matches('/'))
+        .collect();
+    println!("    Stop tracking them (they stay on disk; your next commit removes them from the repository, and a teammate's git pull deletes their copies until nexus pull restores them):");
+    println!(
+        "      {}",
+        style(format!("nexus shadow on --target {target} --untrack")).bold()
+    );
+    println!(
+        "      {}",
+        style(format!(
+            "(same as: git rm -r --cached -- {})",
+            roots.join(" ")
+        ))
+        .dim()
+    );
+    println!("    Or hide their changes in this clone only:");
+    println!(
+        "      {}",
+        style(
+            "git ls-files -z -- ".to_string()
+                + &roots.join(" ")
+                + " | xargs -0 git update-index --skip-worktree"
+        )
+        .dim()
+    );
+}
+
+/// Return all paths under `pattern` that git currently tracks in the index;
+/// `workdir` overrides CWD for testability.
 fn resolve_tracked_paths_in(pattern: &str, workdir: Option<&Path>) -> Vec<String> {
     let mut cmd = Command::new("git");
     cmd.args(["ls-files", "--", pattern]);
@@ -1234,11 +1319,6 @@ fn resolve_tracked_paths_in(pattern: &str, workdir: Option<&Path>) -> Vec<String
 }
 
 /// Returns `true` if `path` appears in the commit history of the current branch.
-fn is_file_tracked_in_history(path: &str) -> bool {
-    is_file_tracked_in_history_in(path, None)
-}
-
-/// Inner implementation — `workdir` overrides CWD for testability.
 fn is_file_tracked_in_history_in(path: &str, workdir: Option<&Path>) -> bool {
     let mut cmd = Command::new("git");
     // --no-pager: `git log` can invoke a pager when core.pager/GIT_PAGER
@@ -1339,7 +1419,7 @@ mod tests {
     /// exist as a committed file).
     #[test]
     fn test_is_file_tracked_in_history_unknown_path() {
-        let result = is_file_tracked_in_history("__nexus_test_nonexistent_file_xyz__.txt");
+        let result = is_file_tracked_in_history_in("__nexus_test_nonexistent_file_xyz__.txt", None);
         assert!(!result, "non-existent path must not appear in git history");
     }
 
@@ -1347,7 +1427,7 @@ mod tests {
     /// nothing in the index.
     #[test]
     fn test_resolve_tracked_paths_no_match() {
-        let paths = resolve_tracked_paths("__nexus_test_nonexistent_dir_xyz__/");
+        let paths = resolve_tracked_paths_in("__nexus_test_nonexistent_dir_xyz__/", None);
         assert!(
             paths.is_empty(),
             "no tracked paths expected for non-existent pattern"
@@ -1654,6 +1734,33 @@ mod tests {
         );
         let exclude = fs::read_to_string(dir.path().join(".git/info/exclude")).unwrap();
         assert!(exclude.lines().any(|l| l.trim() == ".mcp.json"));
+    }
+
+    #[test]
+    fn test_untrack_patterns_keeps_history_files_unless_all() {
+        let dir = make_temp_repo_with_commit("devbox.json", "{}");
+        let path = dir.path();
+        // An untracked-history file: staged but never committed.
+        fs::create_dir_all(path.join("scripts/devbox")).unwrap();
+        fs::write(path.join("scripts/devbox/new.sh"), "x").unwrap();
+        let ok = Command::new("git")
+            .args(["add", "scripts/devbox/new.sh"])
+            .current_dir(path)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+
+        let report = untrack_patterns_in_dir(WORKSPACE_PATTERNS, false, Some(path)).unwrap();
+        assert_eq!(report.removed, 1);
+        assert_eq!(report.kept, vec!["devbox.json"]);
+        assert_eq!(report.kept_roots, vec!["devbox.json"]);
+        assert!(!resolve_tracked_paths_in("devbox.json", Some(path)).is_empty());
+
+        let report = untrack_patterns_in_dir(WORKSPACE_PATTERNS, true, Some(path)).unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(report.kept.is_empty());
+        assert!(resolve_tracked_paths_in("devbox.json", Some(path)).is_empty());
+        assert!(path.join("devbox.json").exists());
     }
 
     #[test]

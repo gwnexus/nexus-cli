@@ -329,6 +329,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         &args.target,
                         args.all,
                         args.dry_run,
+                        args.untrack,
                         cli.yes,
                     )
                     .await?
@@ -340,6 +341,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         &args.target,
                         args.all,
                         args.dry_run,
+                        args.untrack,
                         cli.yes,
                     )
                     .await?
@@ -352,6 +354,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         &[shadow::ShadowTarget::Agentic],
                         false,
                         false,
+                        false,
                         cli.yes,
                     )
                     .await?
@@ -362,6 +365,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         &api_url,
                         true,
                         &[shadow::ShadowTarget::Nexus],
+                        false,
                         false,
                         false,
                         cli.yes,
@@ -396,14 +400,16 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                             "nexus workspace shadow on",
                             "nexus shadow on --target workspace",
                         );
-                        shadow::switch(&api_url, true, &workspace, false, false, cli.yes).await?
+                        shadow::switch(&api_url, true, &workspace, false, false, false, cli.yes)
+                            .await?
                     }
                     WorkspaceShadowAction::Off => {
                         shadow::deprecated(
                             "nexus workspace shadow off",
                             "nexus shadow off --target workspace",
                         );
-                        shadow::switch(&api_url, false, &workspace, false, false, cli.yes).await?
+                        shadow::switch(&api_url, false, &workspace, false, false, false, cli.yes)
+                            .await?
                     }
                     WorkspaceShadowAction::Status => shadow::status_with_server(&api_url).await?,
                 }
