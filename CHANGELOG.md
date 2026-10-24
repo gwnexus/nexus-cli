@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - 2026-10-24
+
+A GitHub account per project path: shells, git transport and commits of a repository use the project's account, separate from the global `gh` login. Plus safer zellij starts in `nexus run`.
+
+### Fixed
+- **`nexus run` no longer nests into a running zellij session.** Started from a zellij pane, zellij added the project layout as new tabs of the current session, so you ended up in another project's workspace. `nexus run` now refuses with the name of the current session (exit 1); inside the project's own session it only says so.
+- **Zellij socket path too long.** On macOS a Unix socket path may have at most 103 bytes (107 on Linux); a longer session name made zellij exit 1 before it started, without a message. A new pre-launch row `Zellij socket` computes the real path (`ZELLIJ_SOCKET_DIR`, else `$XDG_RUNTIME_DIR/zellij` on Linux, else `$TMPDIR/zellij-<uid>`, plus `contract_version_1/<session_name>`) and fails with the length, the limit and the workaround `ZELLIJ_SOCKET_DIR=/tmp/zj nexus run`.
+- **A zellij start failure shows its reason.** When zellij exits non-zero within 5 seconds, `nexus run` prints the last lines of the zellij log and its path before the session summary, instead of only `Exit code: 1`.
+
+### Added
+- **`nexus git login [--account <login> | --profile <name>] [--with-token]`.** Logs the project's account into its own `gh` profile (browser login by default; `--with-token` reads the token from stdin, with a hidden prompt on a terminal, and passes it to `gh` over stdin only). The login must be the expected account: a token of another account is refused before anything is written, a browser login as another account is logged out again. Then applies the account like `nexus git apply`. `--help` describes a fine-grained token for a customer organization.
+- **`.nexus/gh.env`.** Written by `nexus pull`, `nexus git apply` and `nexus git login` when the profile is logged in as the expected account: `GH_CONFIG_DIR` (absolute) and, for GitHub Enterprise Server, `GH_HOST`, no token. Values are unquoted when they only contain `[A-Za-z0-9_./@:-]`, otherwise single-quoted. Removed when the project has no account, the profile is not logged in or the login is another account; kept as is when the login cannot be verified (offline). A file without the Nexus header line is never touched. The path is added to `.git/info/exclude`.
+- **Transport identity in the local git config.** With an SSH key on the account, `core.sshCommand` uses that key (`ssh -i ~/.ssh/<key> -o IdentitiesOnly=yes`); a missing key file is reported. HTTPS remotes to the account's host get a credential helper that runs `gh auth git-credential` with the profile. `gh repo set-default` points at the configured repository or at `origin`.
+- **Commit identity of the account.** `user.name` / `user.email` come from the account when the project sets none (each field on its own; the project's identity wins as before).
+- **`nexus git apply --canonical-remotes`** rewrites remotes on an SSH host alias to `git@<host>:owner/repo.git` (needs an SSH key on the account, asks per remote unless `--yes`).
+- **One `GitHub:` line** in `nexus status`, `nexus pull`, `nexus run` and `nexus git verify`: login, host, profile, where the account comes from (project pin, project binding or user default), SSH key, `gh.env` state and the commit email. `nexus git verify` also reports a missing or stale `gh.env`, a missing or different `core.sshCommand`, remotes on an SSH host alias and a `user.email` that differs from the account's.
+
+### Changed
+- **Values the CLI did not write are kept unless you confirm.** A different local `core.sshCommand`, `user.name` or `user.email` is replaced only after confirmation or with `--yes`; values the CLI wrote itself (recorded under `nexus.*` in the local git config) follow the account without asking.
+- **Accounts with the token source `prompt` are never seeded from the keyring or environment.** `nexus run` points to `nexus git login --account <login>` instead; the login hints of `nexus run`, `nexus pull` and `nexus git verify` name that command for every source.
+- **`gh` checks ignore ambient tokens.** `GH_TOKEN`, `GITHUB_TOKEN` and the enterprise variants are removed from the `gh` calls that check or seed a profile, so a shell token cannot make another account look like the profile's login.
+
+29 net new tests; 860/860 passing, clippy/fmt clean.
+
 ## [0.29.3] - 2026-10-16
 
 Shadow mode explains committed files that stay visible in `git status`, and can untrack them.
