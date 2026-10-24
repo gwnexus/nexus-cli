@@ -12,6 +12,8 @@ use nexus_core::api::{GhEffective, GitConfig};
 use nexus_core::config;
 
 use super::display::status_line;
+use super::gh_account;
+use super::run::GH_TOKEN_ENV_VARS;
 
 /// Apply git config from the platform to the local repository.
 pub fn apply_git_config(dir: &Path, cfg: &GitConfig) -> Result<u32> {
@@ -113,11 +115,16 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
 
     // Effective per-project gh CLI profile.
     let mut gh_error = None;
+    let mut github_line = None;
     if let Some(gh) = gh {
         match config::Config::dir() {
             Ok(config_dir) => {
                 let profile_dir = gh_profile_dir(&config_dir, &gh.profile);
                 let status = gh_verify_login(&profile_dir, &gh.host, gh.user.as_deref());
+                let active = match &status {
+                    GhVerifyStatus::Ok { active } => Some(active.clone()),
+                    _ => None,
+                };
                 let (icon, detail) = match &status {
                     GhVerifyStatus::Ok { active } => {
                         (style("OK").green().to_string(), format!("active={active}"))
@@ -133,11 +140,7 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
                         all_ok = false;
                         (
                             style("NOT LOGGED IN").red().to_string(),
-                            format!(
-                                "run: GH_CONFIG_DIR={} gh auth login --hostname {}",
-                                profile_dir.display(),
-                                gh.host
-                            ),
+                            format!("run: {}", gh_account::login_command(gh)),
                         )
                     }
                     GhVerifyStatus::GhNotFound => {
@@ -153,6 +156,30 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
                     format!("profile={} host={}", gh.profile, gh.host),
                     icon,
                     detail,
+                ));
+                for (key, actual, ok, detail) in
+                    gh_account::verify_rows(dir, gh, cfg, &profile_dir, active.is_some())
+                {
+                    let icon = if ok {
+                        style("OK").green().to_string()
+                    } else {
+                        all_ok = false;
+                        style("CHECK").yellow().to_string()
+                    };
+                    rows.push((key, actual, icon, detail));
+                }
+                let file = gh_account::gh_env_file_state(dir, &profile_dir, &gh.host);
+                let gh_env = match (&file, active.is_some()) {
+                    (gh_account::GhEnvFile::Missing, false) => {
+                        "gh.env not written (profile not logged in)".to_string()
+                    }
+                    _ => file.describe().to_string(),
+                };
+                github_line = Some(gh_account::status_line(
+                    gh,
+                    active.as_deref(),
+                    &gh_env,
+                    gh_account::account_commit_email(gh, cfg),
                 ));
             }
             Err(e) => {
@@ -170,6 +197,9 @@ pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>)
             "gh",
             style(format!("could not resolve gh profile directory: {e}")).red(),
         );
+    }
+    if let Some(line) = github_line {
+        status_line("GitHub", line);
     }
 
     println!();
@@ -209,25 +239,26 @@ fn verify_values(rows: &[(&str, String, String, String)]) -> Vec<String> {
         .collect()
 }
 
-/// Run `nexus git apply` — set local git config from platform.
-pub fn run_apply(dir: &Path, cfg: Option<&GitConfig>) {
-    let Some(cfg) = cfg else {
-        println!("{}", style("No git identity settings to apply.").dim());
-        return;
-    };
-    match apply_git_config(dir, cfg) {
-        Ok(0) => println!("{}", style("No git identity settings to apply.").dim()),
-        Ok(n) => println!(
+/// Run `nexus git apply` — set local git config from platform, then apply
+/// the project's GitHub account (gh.env, transport and commit identity).
+pub fn run_apply(
+    dir: &Path,
+    cfg: Option<&GitConfig>,
+    gh: Option<&GhEffective>,
+    opts: &gh_account::ApplyOptions,
+) {
+    match cfg.map(|cfg| apply_git_config(dir, cfg)) {
+        None | Some(Ok(0)) => println!("{}", style("No git identity settings to apply.").dim()),
+        Some(Ok(n)) => println!(
             "{}",
             style(format!("Applied {} git config setting(s).", n)).green()
         ),
-        Err(e) => eprintln!("{} {}", style("Failed to apply git config:").red(), e),
+        Some(Err(e)) => eprintln!("{} {}", style("Failed to apply git config:").red(), e),
     }
-    // Nothing to apply for `gh`: login is interactive by design.
-    // `nexus run`'s pre-launch check and
-    // `nexus git verify` above tell the operator the exact one-time
-    // command to run, and `nexus run` itself can seed an empty profile
-    // (see `resolve_gh_seed_token`/`gh_auth_login_with_token`).
+    // Logging a profile in stays interactive (`nexus git login`).
+    if let Some(line) = gh_account::apply(dir, gh, cfg, opts) {
+        println!("GitHub: {line}");
+    }
 }
 
 // ── gh profile helpers ───
@@ -263,7 +294,7 @@ pub fn ensure_gh_profile_dir(config_dir: &Path, profile: &str) -> Result<std::pa
 /// profile needs seeding. Only confirms *a* login exists, not which one
 /// (see [`gh_verify_login`] for that, used by `nexus git verify`).
 pub fn gh_is_authenticated(profile_dir: &Path, host: &str) -> bool {
-    Command::new("gh")
+    without_token_env(Command::new("gh"))
         .env("GH_CONFIG_DIR", profile_dir)
         .args(["auth", "status", "--hostname", host])
         .output()
@@ -295,7 +326,7 @@ pub fn gh_verify_login(
     host: &str,
     expected_user: Option<&str>,
 ) -> GhVerifyStatus {
-    let output = Command::new("gh")
+    let output = without_token_env(Command::new("gh"))
         .env("GH_CONFIG_DIR", profile_dir)
         .args(["api", "user", "--jq", ".login", "--hostname", host])
         .output();
@@ -341,6 +372,7 @@ fn classify_gh_verify_output(
 ///   `gh` config -- i.e. without any `GH_CONFIG_DIR` override, since the
 ///   profile being seeded has no login yet.
 /// - `"env:<VAR>"`: only that named environment variable.
+/// - `"prompt"`: never; the profile is seeded only by `nexus git login`.
 /// - `"auto"` (or anything else, defensively): keyring first, then
 ///   `GH_TOKEN`, then `GITHUB_TOKEN`.
 ///
@@ -366,6 +398,7 @@ fn resolve_gh_seed_token_with(
     try_env: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
     match source {
+        "prompt" => None,
         "keyring" => try_keyring(),
         s if s.starts_with("env:") => s.strip_prefix("env:").and_then(&try_env),
         _ => try_keyring()
@@ -403,7 +436,7 @@ fn keyring_token(host: &str, user: Option<&str>) -> Option<String> {
 /// login, or `None` if the token is invalid or the call fails. The token
 /// itself is never logged.
 pub fn verify_gh_seed_token(token: &str, host: &str) -> Option<String> {
-    Command::new("gh")
+    without_token_env(Command::new("gh"))
         .env("GH_TOKEN", token)
         .args(["api", "user", "--jq", ".login", "--hostname", host])
         .output()
@@ -429,7 +462,7 @@ pub fn verify_gh_seed_token(token: &str, host: &str) -> Option<String> {
 pub fn gh_auth_login_with_token(profile_dir: &Path, host: &str, token: &str) -> Result<bool> {
     use std::io::Write as _;
 
-    let mut child = Command::new("gh")
+    let mut child = without_token_env(Command::new("gh"))
         .env("GH_CONFIG_DIR", profile_dir)
         .args(["auth", "login", "--with-token", "--hostname", host])
         .stdin(std::process::Stdio::piped())
@@ -451,6 +484,15 @@ pub fn gh_auth_login_with_token(profile_dir: &Path, host: &str, token: &str) -> 
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Remove ambient token variables from a `gh` child, so the call checks
+/// the profile (or the given token) and not a shell credential.
+fn without_token_env(mut cmd: Command) -> Command {
+    for var in GH_TOKEN_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
+}
 
 fn run_git_config(dir: &Path, key: &str, value: &str) -> Result<()> {
     let status = Command::new("git")
@@ -711,6 +753,16 @@ mod tests {
     #[test]
     fn test_resolve_seed_token_auto_none_when_all_sources_empty() {
         let token = resolve_gh_seed_token_with("auto", || None, |_| None);
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn test_resolve_seed_token_prompt_source_never_looks_up() {
+        let token = resolve_gh_seed_token_with(
+            "prompt",
+            || panic!("prompt must not read the keyring"),
+            |_| panic!("prompt must not read env vars"),
+        );
         assert_eq!(token, None);
     }
 

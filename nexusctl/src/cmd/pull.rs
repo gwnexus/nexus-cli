@@ -1843,42 +1843,21 @@ pub async fn run(
     println!();
     println!("{} Pull complete.", style("OK").bold().green());
 
-    // Login follow-up line for the effective gh CLI profile, if one is
-    // configured. Informational
-    // only -- pull never seeds or writes an auth token; that is `nexus
-    // run`'s job. Applies to all tool flavors, not just Claude Code.
+    // GitHub account of this project path: `.nexus/gh.env`, transport and
+    // commit identity in the local git config. Pull never logs a profile
+    // in (`nexus git login` does). Applies to all tool flavors.
     if let Ok(detail) = client.get_project(&project_id).await {
-        if let Some(gh) = detail.project.gh_effective {
-            match nexus_core::config::Config::dir()
-                .map(|d| super::git::gh_profile_dir(&d, &gh.profile))
-            {
-                Ok(dir) if super::git::gh_is_authenticated(&dir, &gh.host) => {
-                    println!(
-                        "   GitHub: {}@{} via profile {} ({})",
-                        gh.user.as_deref().unwrap_or("?"),
-                        gh.host,
-                        gh.profile,
-                        if gh.origin.eq_ignore_ascii_case("user") {
-                            "user default"
-                        } else {
-                            "project"
-                        }
-                    );
-                }
-                Ok(dir) => {
-                    println!(
-                        "   {} GitHub: profile '{}' not logged in to {} yet -- \
-                         'nexus run' will offer to import it, or run: \
-                         GH_CONFIG_DIR={} gh auth login --hostname {}",
-                        style("!").bold().yellow(),
-                        gh.profile,
-                        gh.host,
-                        dir.display(),
-                        gh.host
-                    );
-                }
-                Err(_) => {}
-            }
+        let opts = super::gh_account::ApplyOptions {
+            assume_yes: force,
+            canonical_remotes: false,
+        };
+        if let Some(line) = super::gh_account::apply(
+            &workspace,
+            detail.project.gh_effective.as_ref(),
+            detail.project.git_config.as_ref(),
+            &opts,
+        ) {
+            println!("   GitHub: {line}");
         }
     }
 

@@ -83,6 +83,9 @@ nexus deinit [--force]                  Remove all AI scaffold files from the wo
 nexus shadow on|off [--target T,...]    Hide (or stop hiding) agentic files, the workspace and Nexus internals from Git
 nexus shadow status                     Effective state per target, excluded paths, hook and check summary
 nexus shadow check [--commits N]        Scan tracked files and recent commit messages with the shadow rules
+nexus git verify                        Compare local git config and the GitHub account with the project
+nexus git apply [--canonical-remotes]   Apply git identity, .nexus/gh.env and the account's transport identity
+nexus git login [--account <login>]     Log the project's GitHub account into its own gh profile
 nexus config show                       Display effective configuration (with provenance)
 nexus config set K=V [--local|--global] Update a configuration value
 nexus config path [--local|--global]    Show a config file path
@@ -380,6 +383,57 @@ the same layout).
   - `-- ... unverified` — authentication already failed or no token is
     configured, so the project binding cannot be confirmed.
 
+### GitHub Account per Project Path (`nexus git`)
+
+A project can use its own GitHub account (for example a dedicated account
+for a customer organization), separate from your global `gh` login. The
+account is configured in Nexus; the CLI keeps its token in a local `gh`
+profile (`~/.config/nexus/gh-profiles/<profile>`). Tokens never leave your
+machine, never appear on a command line and are never logged; your global
+`gh` login, `~/.ssh/config` and global git config stay unchanged.
+
+```bash
+nexus git login --account octocat                  # browser login into the profile
+nexus git login --account octocat --with-token < token.txt
+```
+
+`nexus git login` checks that the login is the expected account. On a
+mismatch the profile is logged out again and nothing is written. For a
+fine-grained token see `nexus git login --help`.
+
+Once the profile is logged in as the expected account, `nexus pull`,
+`nexus git apply` and `nexus git login` write:
+
+- **`.nexus/gh.env`**: `GH_CONFIG_DIR` (absolute path) and, for GitHub
+  Enterprise Server, `GH_HOST`. No token. The devbox shell sources it, so
+  `gh` in that repository uses the project's account. The file is removed
+  when the project has no account, the profile is not logged in, or the
+  login is another account. A `.nexus/gh.env` without the Nexus header line
+  is never touched.
+- **Transport identity** (local git config only): with an SSH key on the
+  account, `core.sshCommand = ssh -i ~/.ssh/<key> -o IdentitiesOnly=yes`;
+  for HTTPS remotes, a credential helper that runs
+  `gh auth git-credential` with the profile. `gh repo set-default` points
+  at the configured repository, or at `origin`.
+- **Commit identity**: `user.name` / `user.email` of the account, each only
+  when the project does not set its own.
+
+A different local `core.sshCommand`, `user.name` or `user.email` that the
+CLI did not write is replaced only after confirmation (`--yes` replaces).
+`nexus git apply --canonical-remotes` rewrites remotes that use an SSH host
+alias to `git@<host>:owner/repo.git` (needs an SSH key on the account).
+
+`nexus status`, `nexus pull`, `nexus run` and `nexus git verify` print one
+line for the account:
+
+```
+GitHub: octocat@github.com via profile octocat (project binding), ssh key id_ed25519_work, gh.env written, commits as dev@example.com
+```
+
+`nexus git verify` also reports a missing or stale `gh.env`, a missing or
+different `core.sshCommand`, remotes on an SSH host alias, and a local
+`user.email` that differs from the account's.
+
 ### Preflight Checks
 
 `nexus preflight` validates the local environment is ready for Nexus:
@@ -420,6 +474,14 @@ workspace = "none"   # or "zellij"
 Precedence: flag, then `[run] workspace`, then the project default
 (`run_target.workspace`). The pre-launch check shows the choice and its
 source in a `Workspace` row; the session summary repeats it.
+
+Start the zellij workspace from a plain terminal: inside a running zellij
+session `nexus run` refuses, since zellij would add the layout as tabs of
+that session (inside the project's own session it only says so). The
+`Zellij socket` row checks that the session socket path fits the OS limit
+(103 bytes on macOS, 107 on Linux); if not, start with a shorter socket
+directory, e.g. `ZELLIJ_SOCKET_DIR=/tmp/zj nexus run`. If zellij exits
+right after the start, `nexus run` shows the end of the zellij log.
 
 **Personal layout.** When the backend renders a workspace layout
 for you (`af_export.claude_workspace`, e.g. a different preset than the team

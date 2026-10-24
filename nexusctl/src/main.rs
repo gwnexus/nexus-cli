@@ -615,7 +615,44 @@ pub enum GitAction {
     /// Verify local git config matches the project's expected identity.
     Verify,
     /// Apply the project's git identity settings to local .git/config.
-    Apply,
+    ///
+    /// With a GitHub account on the project path, also writes
+    /// `.nexus/gh.env` and sets the transport identity (`core.sshCommand`,
+    /// the HTTPS credential helper), the gh default repository and the
+    /// account's commit identity in the local git config.
+    Apply {
+        /// Rewrite remotes on an SSH host alias to git@<host>:owner/repo.git
+        /// (needs an ssh key on the account; asks per remote unless --yes).
+        #[arg(long)]
+        canonical_remotes: bool,
+    },
+    /// Log the project's GitHub account into its own gh profile.
+    ///
+    /// Opens the browser login by default (`gh auth login --web`), scoped
+    /// to the profile directory. Checks that the login is the expected
+    /// account (on a mismatch the profile is logged out again and nothing
+    /// is written), then writes `.nexus/gh.env` and the local git config
+    /// like `nexus git apply`. The global gh login stays unchanged.
+    ///
+    /// Fine-grained token for a customer organization (--with-token):
+    /// resource owner = the customer organization; repository access =
+    /// only the repositories needed; permissions: Contents read, Metadata
+    /// read, Pull requests read (write to comment on or open pull
+    /// requests). The organization owner may have to approve the token.
+    ///
+    /// Example: nexus git login --account octocat --with-token < token.txt
+    Login {
+        /// Expected GitHub login (must match the project's account).
+        #[arg(long, conflicts_with = "profile")]
+        account: Option<String>,
+        /// gh profile name (must match the project's account).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Read a token from stdin (hidden prompt on a terminal) instead of
+        /// the browser login. The token is passed to gh over stdin only.
+        #[arg(long)]
+        with_token: bool,
+    },
 }
 
 /// Project inference token subcommands.
@@ -1878,10 +1915,42 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "git", "apply"]).unwrap();
         match cli.command {
             Command::Git {
-                action: GitAction::Apply,
+                action:
+                    GitAction::Apply {
+                        canonical_remotes: false,
+                    },
             } => {}
             _ => panic!("expected Git Apply"),
         }
+    }
+
+    #[test]
+    fn test_parse_git_login_flags() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "git",
+            "login",
+            "--account",
+            "octocat",
+            "--with-token",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Git {
+                action:
+                    GitAction::Login {
+                        account: Some(ref a),
+                        profile: None,
+                        with_token: true,
+                    },
+            } => assert_eq!(a, "octocat"),
+            _ => panic!("expected Git Login"),
+        }
+        // --account and --profile exclude each other.
+        assert!(
+            Cli::try_parse_from(["nexus", "git", "login", "--account", "a", "--profile", "b"])
+                .is_err()
+        );
     }
 
     #[test]

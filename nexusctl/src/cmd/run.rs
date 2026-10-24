@@ -34,7 +34,7 @@ use super::preflight::{cmd_version, print_check, CheckResult};
 /// a per-project `gh` profile is active, so an ambient shell credential cannot silently
 /// authenticate `gh`/tools that shell out to it as the wrong account underneath the selected
 /// profile.
-const GH_TOKEN_ENV_VARS: &[&str] = &[
+pub(crate) const GH_TOKEN_ENV_VARS: &[&str] = &[
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "GH_ENTERPRISE_TOKEN",
@@ -96,21 +96,30 @@ fn gh_env_plan_for(gh: &nexus_core::api::GhEffective, profile_dir: &Path) -> GhE
     }
 }
 
-fn gh_origin_label(origin: &str) -> &'static str {
-    if origin.eq_ignore_ascii_case("user") {
-        "user default"
-    } else {
-        "project"
-    }
-}
-
-fn gh_login_hint(gh: &nexus_core::api::GhEffective, profile_dir: &Path, reason: &str) -> String {
+fn gh_login_hint(gh: &nexus_core::api::GhEffective, reason: &str) -> String {
     format!(
-        "gh profile '{}' not logged in to {} ({reason}) -- run: GH_CONFIG_DIR={} gh auth login --hostname {}",
+        "gh profile '{}' not logged in to {} ({reason}) -- run: {}",
         gh.profile,
         gh.host,
-        profile_dir.display(),
-        gh.host
+        super::gh_account::login_command(gh)
+    )
+}
+
+/// `GitHub:` status line for `nexus run`, with the state of
+/// `.nexus/gh.env` as the devbox shell sees it.
+fn gh_status_line(
+    workspace: &Path,
+    gh: &nexus_core::api::GhEffective,
+    git_config: Option<&nexus_core::api::GitConfig>,
+    profile_dir: &Path,
+    active: Option<&str>,
+) -> String {
+    let file = super::gh_account::gh_env_file_state(workspace, profile_dir, &gh.host);
+    super::gh_account::status_line(
+        gh,
+        active,
+        file.describe(),
+        super::gh_account::account_commit_email(gh, git_config),
     )
 }
 
@@ -125,13 +134,20 @@ fn gh_login_hint(gh: &nexus_core::api::GhEffective, profile_dir: &Path, reason: 
 /// failure path here returns [`GhOutcome::Fallback`], never touching the
 /// environment.
 fn seed_gh_profile(
+    workspace: &Path,
     gh: &nexus_core::api::GhEffective,
+    git_config: Option<&nexus_core::api::GitConfig>,
     profile_dir: &Path,
     assume_yes: bool,
 ) -> anyhow::Result<GhOutcome> {
     let fallback = |reason: &str| GhOutcome::Fallback {
-        warning: gh_login_hint(gh, profile_dir, reason),
+        warning: gh_login_hint(gh, reason),
     };
+
+    // `prompt`: never import a token; only `nexus git login` seeds.
+    if gh.source.eq_ignore_ascii_case("prompt") {
+        return Ok(fallback("the account is logged in with nexus git login"));
+    }
 
     let Some(token) = git::resolve_gh_seed_token(&gh.source, &gh.host, gh.user.as_deref()) else {
         return Ok(fallback("no token available to seed from"));
@@ -173,10 +189,8 @@ fn seed_gh_profile(
     Ok(GhOutcome::Ready {
         plan: gh_env_plan_for(gh, profile_dir),
         status_line: format!(
-            "{active}@{} via profile {} ({}, seeded from {})",
-            gh.host,
-            gh.profile,
-            gh_origin_label(&gh.origin),
+            "{} (seeded from {})",
+            gh_status_line(workspace, gh, git_config, profile_dir, Some(&active)),
             gh.source
         ),
     })
@@ -222,6 +236,7 @@ pub async fn run(
     // Also fetch the effective gh profile (af_export does not carry it) so
     // per-project `gh` handling can be applied below.
     let mut gh_effective: Option<nexus_core::api::GhEffective> = None;
+    let mut git_config: Option<nexus_core::api::GitConfig> = None;
     if !no_db {
         if let Some(token) = resolve_token() {
             if let Ok(client) = NexusClient::new(api_url, Some(token)) {
@@ -240,6 +255,7 @@ pub async fn run(
                     }
                     if let Ok(detail) = client.get_project(&project_id).await {
                         gh_effective = detail.project.gh_effective;
+                        git_config = detail.project.git_config;
                     }
                 }
             }
@@ -353,16 +369,10 @@ pub async fn run(
     let mut gh_outcome: GhOutcome = match (&gh_effective, &gh_profile_dir) {
         (Some(gh), Some(dir)) if git::gh_is_authenticated(dir, &gh.host) => GhOutcome::Ready {
             plan: gh_env_plan_for(gh, dir),
-            status_line: format!(
-                "{}@{} via profile {} ({})",
-                gh.user.as_deref().unwrap_or("?"),
-                gh.host,
-                gh.profile,
-                gh_origin_label(&gh.origin)
-            ),
+            status_line: gh_status_line(&workspace, gh, git_config.as_ref(), dir, None),
         },
-        (Some(gh), Some(dir)) => GhOutcome::Fallback {
-            warning: gh_login_hint(gh, dir, "no cached login yet"),
+        (Some(gh), Some(_)) => GhOutcome::Fallback {
+            warning: gh_login_hint(gh, "no cached login yet"),
         },
         _ => GhOutcome::NotConfigured,
     };
@@ -386,6 +396,34 @@ pub async fn run(
         println!();
     }
 
+    // ── 5.5a. Zellij: never nest into a running session ─────────────────────
+    // Zellij started from a pane applies the layout as new tabs of the
+    // *current* session instead of creating the project's session.
+    let zellij_session = (effective_tool == "zellij")
+        .then(|| super::zellij_guard::layout_arg(args))
+        .flatten()
+        .and_then(|layout| fs::read_to_string(layout).ok())
+        .and_then(|kdl| super::zellij_guard::session_name(&kdl));
+    if effective_tool == "zellij" {
+        match super::zellij_guard::detect_nested(zellij_session.as_deref()) {
+            super::zellij_guard::Nested::No => {}
+            super::zellij_guard::Nested::SameSession(name) => {
+                println!(
+                    "   {} Already running in zellij session {name}.",
+                    style("OK").bold().green()
+                );
+                return Ok(());
+            }
+            super::zellij_guard::Nested::OtherSession(name) => {
+                anyhow::bail!(
+                    "already inside zellij session {}; start nexus run from a plain terminal \
+                     (or detach first) so the project session is not mixed into it",
+                    name.as_deref().unwrap_or("(unknown)")
+                );
+            }
+        }
+    }
+
     // ── 5.6. Per-project gh CLI profile — Phase B ─────
     // ──────────────────────────────────────────────────────────────────────
     //
@@ -395,7 +433,7 @@ pub async fn run(
     // `gh auth login --with-token` call. The seed token is never logged.
     if let (Some(gh), Some(dir)) = (&gh_effective, &gh_profile_dir) {
         if matches!(gh_outcome, GhOutcome::Fallback { .. }) {
-            gh_outcome = seed_gh_profile(gh, dir, assume_yes)?;
+            gh_outcome = seed_gh_profile(&workspace, gh, git_config.as_ref(), dir, assume_yes)?;
         }
     }
     match &gh_outcome {
@@ -459,6 +497,9 @@ pub async fn run(
             account,
             &gh_outcome,
             workspace_row,
+            zellij_session
+                .as_deref()
+                .map(super::zellij_guard::socket_check),
         )
         .await?;
         if !should_continue {
@@ -559,6 +600,15 @@ pub async fn run(
 
         // ── 9. Post-session summary ──────────────────────────────────────
         let elapsed = start.elapsed();
+
+        // A zellij that exits right away failed to start; its reason is
+        // only in its log.
+        if effective_tool == "zellij"
+            && exit_code != 0
+            && elapsed.as_secs() < super::zellij_guard::EARLY_EXIT_SECS
+        {
+            print_zellij_start_failure(exit_code);
+        }
 
         // Show spinner so the user knows post-processing is in progress.
         let spinner = ProgressBar::new_spinner();
@@ -1352,6 +1402,7 @@ async fn run_prelaunch_checks(
     account: Option<&str>,
     gh_outcome: &GhOutcome,
     workspace_row: CheckResult,
+    zellij_socket_row: Option<CheckResult>,
 ) -> anyhow::Result<bool> {
     println!();
     println!("{} Nexus Pre-launch Check", style(">>").bold().cyan());
@@ -1386,6 +1437,9 @@ async fn run_prelaunch_checks(
     };
     checks.push(("Project", ws_check));
     checks.push(("Workspace", workspace_row));
+    if let Some(row) = zellij_socket_row {
+        checks.push(("Zellij socket", row));
+    }
 
     // Auth
     let resolved_token = resolve_token();
@@ -1691,6 +1745,22 @@ fn spawn_tool(tool: &str, args: &[String]) -> anyhow::Result<i32> {
         .with_context(|| format!("failed to wait for '{tool}'"))?;
 
     Ok(status.code().unwrap_or(1))
+}
+
+/// Explain an early zellij exit: the last lines of its log and the path.
+fn print_zellij_start_failure(exit_code: i32) {
+    println!();
+    println!(
+        "   {} zellij exited with code {exit_code} right after the start.",
+        style("!").bold().red()
+    );
+    if let Some(lines) = super::zellij_guard::log_tail(15) {
+        println!("   Last lines of the zellij log:");
+        for line in lines {
+            println!("     {}", style(line).dim());
+        }
+    }
+    println!("   Full log: {}", super::zellij_guard::log_path().display());
 }
 
 /// Replace the current process with the tool (Unix exec semantics).
@@ -2444,32 +2514,34 @@ mod tests {
             profile: "octocat".to_string(),
             source: source.to_string(),
             origin: origin.to_string(),
+            ssh_key: None,
+            repo: None,
+            commit_name: None,
+            commit_email: None,
         }
     }
 
     #[test]
-    fn test_gh_origin_label_project() {
-        assert_eq!(gh_origin_label("project"), "project");
-    }
-
-    #[test]
-    fn test_gh_origin_label_user_default() {
-        assert_eq!(gh_origin_label("user"), "user default");
-        // Case-insensitive, matching the rest of this file's host/source
-        // string handling.
-        assert_eq!(gh_origin_label("USER"), "user default");
-    }
-
-    #[test]
     fn test_gh_login_hint_includes_profile_host_and_command() {
-        let gh = sample_gh_effective(None, "auto", "project");
-        let dir = Path::new("/home/user/.config/nexus/gh-profiles/octocat");
-        let hint = gh_login_hint(&gh, dir, "no cached login yet");
+        let gh = sample_gh_effective(Some("octocat"), "auto", "project");
+        let hint = gh_login_hint(&gh, "no cached login yet");
         assert!(hint.contains("octocat"));
         assert!(hint.contains("github.com"));
         assert!(hint.contains("no cached login yet"));
-        assert!(hint.contains("gh auth login --hostname github.com"));
-        assert!(hint.contains(&dir.display().to_string()));
+        assert!(hint.contains("nexus git login --account octocat"));
+    }
+
+    #[test]
+    fn test_seed_gh_profile_prompt_source_never_imports() {
+        let gh = sample_gh_effective(Some("octocat"), "prompt", "binding");
+        let ws = tempfile::tempdir().unwrap();
+        let dir = Path::new("/nonexistent/gh-profiles/octocat");
+        match seed_gh_profile(ws.path(), &gh, None, dir, true).unwrap() {
+            GhOutcome::Fallback { warning } => {
+                assert!(warning.contains("nexus git login --account octocat"))
+            }
+            _ => panic!("prompt source must fall back"),
+        }
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod deinit;
 pub(crate) mod display;
 mod doctor;
 mod env_cmd;
+pub(crate) mod gh_account;
 pub(crate) mod git;
 pub(crate) mod githooks;
 pub(crate) mod import;
@@ -32,6 +33,7 @@ mod state_cmd;
 pub(crate) mod sync;
 mod upgrade;
 pub(crate) mod workspace_state;
+mod zellij_guard;
 
 use crate::{
     ActorAvatarAction, ActorsAction, ClaudeAction, Cli, Command, ConfigAction, DoctorTarget,
@@ -483,14 +485,40 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let git_config = detail.project.git_config.as_ref();
             let gh_effective = detail.project.gh_effective.as_ref();
 
-            if git_config.is_none() && gh_effective.is_none() {
+            if let GitAction::Login {
+                ref account,
+                ref profile,
+                with_token,
+            } = *action
+            {
+                gh_account::login(
+                    &workspace,
+                    gh_effective,
+                    git_config,
+                    account.as_deref(),
+                    profile.as_deref(),
+                    with_token,
+                    cli.yes,
+                )?;
+            } else if git_config.is_none() && gh_effective.is_none() {
+                // A gh.env left from an earlier account goes away.
+                gh_account::apply(&workspace, None, None, &Default::default());
                 println!(
                     "No git_config or gh profile set for this project. Configure it in the Nexus dashboard."
                 );
             } else {
-                match action {
+                match *action {
                     GitAction::Verify => git::run_verify(&workspace, git_config, gh_effective),
-                    GitAction::Apply => git::run_apply(&workspace, git_config),
+                    GitAction::Apply { canonical_remotes } => git::run_apply(
+                        &workspace,
+                        git_config,
+                        gh_effective,
+                        &gh_account::ApplyOptions {
+                            assume_yes: cli.yes,
+                            canonical_remotes,
+                        },
+                    ),
+                    GitAction::Login { .. } => unreachable!("handled above"),
                 }
             }
         }

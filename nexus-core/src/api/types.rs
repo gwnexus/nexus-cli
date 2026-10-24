@@ -832,10 +832,16 @@ fn default_gh_host() -> String {
 ///
 /// `source` describes where the seeding token should come from if the
 /// local profile has no login yet: `"auto"` (try the OS keyring first,
-/// then `GH_TOKEN`, then `GITHUB_TOKEN`), `"keyring"` (keyring only), or
-/// `"env:<VAR>"` (a specific named env var only). `origin` records whether
-/// this effective value came from the project's own configuration or a
-/// per-user default (`"project"` / `"user"`), for the login status line.
+/// then `GH_TOKEN`, then `GITHUB_TOKEN`), `"keyring"` (keyring only),
+/// `"env:<VAR>"` (a specific named env var only), or `"prompt"` (never
+/// import a token; the profile is seeded only by `nexus git login`).
+/// `origin` records whether this effective value is pinned by the project,
+/// comes from the caller's account bound to the project, or is the
+/// caller's default (`"project"` / `"binding"` / `"user"`), for the login
+/// status line.
+///
+/// The optional fields are absent on older backends; the CLI then makes no
+/// transport or commit identity changes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GhEffective {
     /// Lower-cased hostname; `github.com` unless this is a GitHub
@@ -846,11 +852,25 @@ pub struct GhEffective {
     /// Local `gh` CLI profile name.
     pub profile: String,
     /// Where to source a seeding token from if the profile is empty:
-    /// `"auto"` | `"keyring"` | `"env:<VAR>"`.
+    /// `"auto"` | `"keyring"` | `"env:<VAR>"` | `"prompt"`.
     pub source: String,
-    /// Whether this came from the project's own config or a per-user
-    /// default: `"project"` | `"user"`.
+    /// Where this value came from: `"project"` | `"binding"` | `"user"`.
     pub origin: String,
+    /// File name of a private key inside `~/.ssh` for git over SSH (never
+    /// a path; validated server-side and again by the CLI).
+    #[serde(default)]
+    pub ssh_key: Option<String>,
+    /// Default repository for `gh` as `owner/name`.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Commit author name of this account (personal data: local git
+    /// config only).
+    #[serde(default)]
+    pub commit_name: Option<String>,
+    /// Commit author email of this account (personal data: local git
+    /// config only).
+    #[serde(default)]
+    pub commit_email: Option<String>,
 }
 
 /// Wrapper for project list API response.
