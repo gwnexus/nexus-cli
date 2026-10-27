@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.1] - 2026-10-27
+
+The consent check now agrees with the backend's `executables` list.
+
+### Fixed
+- **MCP servers were always reported as changed by the backend.** The fingerprint compared with the backend's hash now covers the names of all env variables of a server, the templated ones and those with an inline value.
+- **Command settings (`hooks`, `apiKeyHelper` and the others) are compared with the backend's hash** instead of being skipped.
+- **`nexus pull --dry-run` left out `devbox.json` and devbox scripts** when listing the items a pull would ask about; they are now listed and checked against the workspace export's `executables` like the rest.
+
+### Changed
+- **Every executable kind is checked for items the backend did not declare**, not only file-based ones.
+- **`nexus pull --dry-run` reports hash differences and undeclared items**, and ends with how many executable items were checked and how many the backend declared.
+
+2 net new tests; 882/882 passing, clippy/fmt clean.
+
 ## [0.31.0] - 2026-10-27
 
 Executable content from the backend needs your consent before it lands on disk.
