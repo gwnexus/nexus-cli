@@ -795,7 +795,7 @@ pub async fn run(
 
     // Nothing above writes to the workspace.
     if dry_run {
-        dry_run_workspace(&client, &project_id, &workspace).await?;
+        let ws_export = dry_run_workspace(&client, &project_id, &workspace).await?;
         let desired = desired_skill_files(&export.skills, &agentic_root, is_claude);
         let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
         let skills = plan_dropped_skill_files(&workspace, &agentic_root, is_claude, &desired);
@@ -815,6 +815,10 @@ pub async fn run(
                 &agentic_root,
             ));
             declared.extend(af_export.executables.iter().cloned());
+        }
+        if let Some(ref ws_export) = ws_export {
+            items.extend(super::consent::collect_workspace_v2(&workspace, ws_export));
+            declared.extend(ws_export.executables.iter().cloned());
         }
         super::consent::preview(&workspace, &items, &declared);
         return Ok(());
@@ -2612,7 +2616,7 @@ async fn dry_run_workspace(
     client: &NexusClient,
     project_id: &str,
     workspace: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<nexus_core::api::WorkspaceForkExportResponse>> {
     println!(
         "   {} Dry run: devbox workspace files and skill removals; nothing is written.",
         style("·").dim()
@@ -2624,7 +2628,7 @@ async fn dry_run_workspace(
                 "   {} No workspace fork assigned to this project.",
                 style("·").dim()
             );
-            return Ok(());
+            return Ok(None);
         }
         Err(e) => anyhow::bail!("could not fetch workspace files: {e}"),
     };
@@ -2681,7 +2685,7 @@ async fn dry_run_workspace(
     if changes == 0 {
         println!("   {} Workspace files are up to date.", style("=").dim());
     }
-    Ok(())
+    Ok(Some(export))
 }
 
 /// Check whether a file contains the `source: nexus-platform` marker,

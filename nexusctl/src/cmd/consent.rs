@@ -29,8 +29,8 @@ use super::claude_render;
 use super::pull;
 
 /// What kind of executable an item is. The names match the server's
-/// `executables[].kind`; `claude_setting` is the CLI's own (settings keys
-/// such as `apiKeyHelper` that Claude Code runs as commands).
+/// `executables[].kind`; `claude_setting` covers settings keys such as
+/// `apiKeyHelper` that Claude Code runs as commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     ClaudeHook,
@@ -63,11 +63,6 @@ impl Kind {
             Kind::DevboxConfig => "devbox_config",
             Kind::SkillScript => "skill_script",
         }
-    }
-
-    /// Kinds the server lists in `executables`.
-    fn server_declared(self) -> bool {
-        self != Kind::ClaudeSetting
     }
 }
 
@@ -285,7 +280,13 @@ pub fn collect_agent_export(
             fingerprint,
             server_hash: Some(sha256_hex(&canonical(&json!({
                 "argv": argv,
-                "env_keys": sorted_env_keys(cfg),
+                // The server hashes the names of all env variables: the
+                // templated keys and those with an inline value.
+                "env_keys": cfg
+                    .env_keys
+                    .iter()
+                    .chain(cfg.environment.keys())
+                    .collect::<BTreeSet<_>>(),
                 "id": name,
                 "kind": Kind::McpServer.as_str(),
             })))),
@@ -372,13 +373,17 @@ fn collect_settings(spec: &ClaudeSettingsSpec, settings: &Value) -> Vec<Item> {
             .or_else(|| value.as_str())
             .map(str::to_string);
         let local = get_path(settings, key);
-        let server_hash = (kind == Kind::ClaudeStatusLine).then(|| {
+        let server_hash = if kind == Kind::ClaudeStatusLine {
             let mut obj = json!({ "id": key, "kind": kind.as_str() });
             if let Some(ref c) = command {
                 obj["command"] = json!(c);
             }
             sha256_hex(&canonical(&obj))
-        });
+        } else {
+            sha256_hex(&canonical(
+                &json!({ "id": key, "kind": kind.as_str(), "value": value }),
+            ))
+        };
         items.push(Item {
             kind,
             id: key.clone(),
@@ -388,7 +393,7 @@ fn collect_settings(spec: &ClaudeSettingsSpec, settings: &Value) -> Vec<Item> {
             local: local.map(pretty),
             fingerprint: sha256_hex(&canonical(value)),
             installed: local == Some(value),
-            server_hash,
+            server_hash: Some(server_hash),
             slot: Slot::Setting(key.clone()),
         });
     }
@@ -952,7 +957,7 @@ impl Gate {
         let mut adopted = false;
         for (i, item) in items.iter().enumerate() {
             let entry = server_entry(declared, item);
-            if entry.is_none() && !declared.is_empty() && item.kind.server_declared() {
+            if entry.is_none() && !declared.is_empty() {
                 undeclared.push(item.label());
             }
             let sha = server_sha(entry);
@@ -1052,13 +1057,21 @@ pub fn preview(workspace: &Path, items: &[Item], declared: &[ExportedExecutable]
         Ok(dir) => Store::load(Store::path_for(&dir, workspace), workspace),
         Err(_) => Store::default(),
     };
+    let mut undeclared = Vec::new();
     for item in items {
         let entry = server_entry(declared, item);
-        let state = classify(
-            item,
-            store.data.items.get(&item.key()),
-            server_sha(entry).as_deref(),
-        );
+        let sha = server_sha(entry);
+        if entry.is_none() && !declared.is_empty() {
+            undeclared.push(item.label());
+        }
+        if item.server_hash.is_some() && sha.is_some() && item.server_hash != sha {
+            println!(
+                "   {} {}: the server's fingerprint differs from what the CLI writes",
+                style("!").bold().yellow(),
+                item.label()
+            );
+        }
+        let state = classify(item, store.data.items.get(&item.key()), sha.as_deref());
         if matches!(state, State::New | State::Changed) {
             println!(
                 "   {} would ask: {} {} -> {}",
@@ -1069,6 +1082,19 @@ pub fn preview(workspace: &Path, items: &[Item], declared: &[ExportedExecutable]
             );
         }
     }
+    if !undeclared.is_empty() {
+        println!(
+            "   {} Not declared as executable by the server: {}",
+            style("·").dim(),
+            undeclared.join(", ")
+        );
+    }
+    println!(
+        "   {} {} executable item(s) checked, {} declared by the server",
+        style("·").dim(),
+        items.len(),
+        declared.len()
+    );
 }
 
 fn state_label(state: State) -> &'static str {
@@ -1689,6 +1715,41 @@ mod tests {
             r#"{"argv":["npx","-y","kept"],"env_keys":["TOKEN"],"id":"kept","kind":"mcp_server"}"#,
         );
         assert_eq!(kept.server_hash.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_mcp_server_hash_uses_every_env_key() {
+        let ws = tempfile::tempdir().unwrap();
+        let mut export = agent_export();
+        let headroom: McpServerConfig = serde_json::from_value(json!({
+            "command": ["headroom"],
+            "args": ["mcp", "serve"],
+            "env_keys": ["HEADROOM_MODE"],
+            "environment": { "HEADROOM_MODE": "transform", "HEADROOM_DEBUG": "0" }
+        }))
+        .unwrap();
+        export.mcp_servers.insert("nexus-headroom".into(), headroom);
+        let items = collect_agent_export(ws.path(), &export, true, ".nexus");
+        let item = items.iter().find(|i| i.id == "nexus-headroom").unwrap();
+        let expected = sha256_hex(
+            r#"{"argv":["headroom","mcp","serve"],"env_keys":["HEADROOM_DEBUG","HEADROOM_MODE"],"id":"nexus-headroom","kind":"mcp_server"}"#,
+        );
+        assert_eq!(item.server_hash.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_claude_setting_server_hash() {
+        let spec: ClaudeSettingsSpec = serde_json::from_value(json!({
+            "managed_keys": ["apiKeyHelper"],
+            "values": { "apiKeyHelper": "/bin/key" }
+        }))
+        .unwrap();
+        let items = collect_settings(&spec, &Value::Null);
+        assert_eq!(items[0].kind, Kind::ClaudeSetting);
+        assert_eq!(items[0].command.as_deref(), Some("/bin/key"));
+        let expected =
+            sha256_hex(r#"{"id":"apiKeyHelper","kind":"claude_setting","value":"/bin/key"}"#);
+        assert_eq!(items[0].server_hash.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
