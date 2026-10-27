@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-10-27
+
+Executable content from the backend needs your consent before it lands on disk.
+
+### Added
+- **Consent for executable content in `nexus pull` and `nexus init`.** Claude Code hook scripts and their registrations, `statusLine` and other command settings (`hooks`, `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`), enabled plugins and marketplaces, MCP servers, Zellij layouts, OpenCode plugins, agent files in runnable locations, skill scripts and skills with inline shell, `devbox.json` and devbox scripts are fingerprinted as the CLI writes them (MCP servers including their env values). A new or changed item is listed, and you accept all, skip all or review each with its command and a diff against the local file (env values shown as a short hash only). A refused item keeps its local version, or is left out when there is none; the rest of the pull continues.
+- **`--trust` for `nexus pull` and `nexus init`** accepts new or changed items without asking (for CI). It is not implied by `--yes` or `--force`. Without a terminal and without `--trust`, new or changed items are skipped and listed with the hint.
+- **`nexus pull --dry-run` lists the executable items** a pull would ask about.
+- **The backend's `executables` list is checked.** Each export (`af_export`, `sk_export`, `ws_export`) may declare its executable items with a hash. The CLI compares that hash with its own fingerprint, reports a difference and asks again, and lists items the backend did not declare. Older backends without the list work as before.
+
+### Changed
+- **Accepted fingerprints are stored outside the repository**, per workspace in `~/.config/nexus/consent/` (owner-only), so a commit cannot pre-approve anything. Items already on disk exactly as they would be written are accepted without asking, so the first pull after the upgrade only asks about real changes.
+- **API responses larger than 8 MiB are refused** (by `Content-Length` and while reading), and a `413` from the backend is reported as a too-large export.
+
+20 net new tests; 880/880 passing, clippy/fmt clean.
+
 ## [0.30.0] - 2026-10-24
 
 A GitHub account per project path: shells, git transport and commits of a repository use the project's account, separate from the global `gh` login. Plus safer zellij starts in `nexus run`.
