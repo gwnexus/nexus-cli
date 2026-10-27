@@ -5,5 +5,5 @@
 mod client;
 mod types;
 
-pub use client::NexusClient;
+pub use client::{NexusClient, MAX_RESPONSE_BYTES};
 pub use types::*;

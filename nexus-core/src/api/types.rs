@@ -164,6 +164,33 @@ pub struct SkillExportResponse {
     pub project: SkillExportProject,
     pub skills: Vec<ExportedSkill>,
     pub count: usize,
+    /// Executable items of this export (`skill_script`). Empty on older
+    /// servers.
+    #[serde(default)]
+    pub executables: Vec<ExportedExecutable>,
+}
+
+/// One executable item the server declares for an export: hooks, settings
+/// commands, plugins, MCP servers, layouts, scripts. `sha256` is advisory;
+/// the CLI fingerprints what it writes itself and compares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportedExecutable {
+    /// `claude_hook`, `claude_status_line`, `claude_plugin`,
+    /// `claude_marketplace`, `mcp_server`, `zellij_layout`,
+    /// `opencode_plugin`, `agent_script`, `devbox_script`,
+    /// `devbox_config` or `skill_script`. Open-ended.
+    pub kind: String,
+    /// Stable per kind (hook plugin name, server name, file path, ...).
+    pub id: String,
+    /// Repo-relative file the item lands in.
+    #[serde(default)]
+    pub target_path: String,
+    /// Effective command line for hooks, status line and MCP servers.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Hex SHA-256 over the file body or the canonical JSON of the item.
+    #[serde(default)]
+    pub sha256: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +475,10 @@ pub struct AgentFileExportResponse {
     /// only when the shadow level is not `off`; older backends omit it.
     #[serde(default)]
     pub shadow_guard: Option<ShadowGuard>,
+    /// Executable items of this export, sorted by kind and id. Empty on
+    /// older servers.
+    #[serde(default)]
+    pub executables: Vec<ExportedExecutable>,
 }
 
 /// `af_export.shadow_guard`: content rules for a shadowed project. The
@@ -1107,6 +1138,10 @@ pub struct WorkspaceForkExportResponse {
     /// Present in ws_export (MCP) responses
     #[serde(default)]
     pub workspace_name: Option<String>,
+    /// Executable items of this export (`devbox_script`, `devbox_config`).
+    /// Empty on older servers.
+    #[serde(default)]
+    pub executables: Vec<ExportedExecutable>,
 }
 
 // ---------------------------------------------------------------------------

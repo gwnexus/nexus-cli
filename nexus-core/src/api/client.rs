@@ -21,6 +21,17 @@ use crate::api::types::{
 };
 use crate::Error;
 
+/// Largest response body the client accepts (uncompressed), the same cap
+/// the server applies to its exports.
+pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+fn response_too_large() -> Error {
+    Error::Api(format!(
+        "response exceeds {} MiB; the export is too large",
+        MAX_RESPONSE_BYTES / (1024 * 1024)
+    ))
+}
+
 /// HTTP client for the Nexus API.
 #[derive(Clone)]
 pub struct NexusClient {
@@ -594,12 +605,29 @@ impl NexusClient {
     /// Map HTTP response status to typed errors or deserialize the body.
     async fn handle_response<T: serde::de::DeserializeOwned>(
         &self,
-        resp: reqwest::Response,
+        mut resp: reqwest::Response,
     ) -> Result<T, Error> {
         let status = resp.status();
 
         if status.is_success() {
-            return Ok(resp.json().await?);
+            if resp
+                .content_length()
+                .is_some_and(|n| n > MAX_RESPONSE_BYTES as u64)
+            {
+                return Err(response_too_large());
+            }
+            let mut body = Vec::new();
+            while let Some(chunk) = resp.chunk().await? {
+                body.extend_from_slice(&chunk);
+                if body.len() > MAX_RESPONSE_BYTES {
+                    return Err(response_too_large());
+                }
+            }
+            return serde_json::from_slice(&body)
+                .map_err(|e| Error::Api(format!("invalid response body: {e}")));
+        }
+        if status == StatusCode::PAYLOAD_TOO_LARGE {
+            return Err(response_too_large());
         }
 
         // Try to extract a structured error message from the body

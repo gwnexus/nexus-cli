@@ -16,6 +16,9 @@ mod deinit_tests;
 mod error_tests;
 
 #[cfg(test)]
+mod export_limit_tests;
+
+#[cfg(test)]
 mod link_tests;
 
 #[cfg(test)]

@@ -668,6 +668,7 @@ pub async fn run(
     with_actor_assets: bool,
     ccx_force: super::ccx::ForceMode,
     dry_run: bool,
+    trust: bool,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -733,7 +734,7 @@ pub async fn run(
     let mut agentic_root = ".nexus".to_string();
 
     // Try to get agentic_root early from af_export (before any file writes)
-    let af_export_result = client.export_agent_files(&project_id).await;
+    let mut af_export_result = client.export_agent_files(&project_id).await;
     if let Ok(ref af_export) = af_export_result {
         if !af_export.agentic_root.is_empty() {
             agentic_root = safe_agentic_root(&workspace, &af_export.agentic_root);
@@ -782,7 +783,7 @@ pub async fn run(
     let mut ws_report = WorkspaceSyncReport::default();
 
     // Export skills (always needed for project_name)
-    let export = client.export_skills(&project_id).await?;
+    let mut export = client.export_skills(&project_id).await?;
     let project_name = export.project.name.clone();
 
     println!(
@@ -803,8 +804,33 @@ pub async fn run(
             .iter()
             .filter(|i| !matches!(i, DroppedFile::Gone(_)))
             .for_each(|i| print_dropped_skill_file(i, &disabled));
+        let mut items =
+            super::consent::collect_skills(&workspace, &export.skills, is_claude, &agentic_root);
+        let mut declared = export.executables.clone();
+        if let Ok(ref af_export) = af_export_result {
+            items.extend(super::consent::collect_agent_export(
+                &workspace,
+                af_export,
+                is_claude,
+                &agentic_root,
+            ));
+            declared.extend(af_export.executables.iter().cloned());
+        }
+        super::consent::preview(&workspace, &items, &declared);
         return Ok(());
     }
+
+    // Executable content (hooks, settings commands, plugins, MCP servers,
+    // layouts, scripts) needs consent before anything is written; a refused
+    // item keeps its local version.
+    let mut consent = super::consent::Gate::open(&workspace, trust);
+    consent.exports(
+        &workspace,
+        af_export_result.as_mut().ok(),
+        Some(&mut export),
+        is_claude,
+        &agentic_root,
+    );
 
     if export.skills.is_empty() {
         println!(
@@ -1573,22 +1599,25 @@ pub async fn run(
             Ok(export) => {
                 v2_ok = true;
                 let mut ws_written = 0;
+                let held = consent.workspace_v2(&workspace, &export);
 
                 // devbox.json and scripts: same rules for every workspace
                 // file (see sync_workspace_file).
-                if sync_workspace_file(
-                    &workspace,
-                    "devbox.json",
-                    &export.devbox_json,
-                    false,
-                    force,
-                    explicit_force,
-                    &manifest,
-                    &mut ws_report,
-                )? {
+                if !held.contains("devbox.json")
+                    && sync_workspace_file(
+                        &workspace,
+                        "devbox.json",
+                        &export.devbox_json,
+                        false,
+                        force,
+                        explicit_force,
+                        &manifest,
+                        &mut ws_report,
+                    )?
+                {
                     ws_written += 1;
                 }
-                for script in &export.scripts {
+                for script in export.scripts.iter().filter(|s| !held.contains(&s.path)) {
                     if sync_workspace_file(
                         &workspace,
                         &script.path,
@@ -1679,10 +1708,15 @@ pub async fn run(
                         );
                     } else {
                         let mut ws_written = 0;
+                        let held = consent.workspace_v1(&workspace, &ws_export);
 
                         // Composed workspace template (devbox.json) and
                         // scripts, with the same rules as the v2 path.
-                        if let Some(ref tpl) = ws_export.workspace {
+                        if let Some(tpl) = ws_export
+                            .workspace
+                            .as_ref()
+                            .filter(|t| !held.contains(&t.target_path))
+                        {
                             if sync_workspace_file(
                                 &workspace,
                                 &tpl.target_path,
@@ -1696,7 +1730,11 @@ pub async fn run(
                                 ws_written += 1;
                             }
                         }
-                        for script in &ws_export.scripts {
+                        for script in ws_export
+                            .scripts
+                            .iter()
+                            .filter(|s| !held.contains(&s.target_path))
+                        {
                             if sync_workspace_file(
                                 &workspace,
                                 &script.target_path,
@@ -1839,6 +1877,8 @@ pub async fn run(
 
     // Git hook self-heal (v0.28.4): cheap, never fails the pull.
     super::githooks::run(&workspace);
+
+    consent.finish();
 
     println!();
     println!("{} Pull complete.", style("OK").bold().green());

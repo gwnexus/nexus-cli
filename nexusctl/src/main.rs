@@ -57,6 +57,12 @@ pub enum Command {
         #[arg(short, long)]
         force: bool,
 
+        /// Accept executable content from the server (hooks, settings
+        /// commands, plugins, MCP servers, layouts, scripts) without asking.
+        /// Not implied by --force or --yes.
+        #[arg(long)]
+        trust: bool,
+
         /// [DEPRECATED] Shadow flag is no longer needed; .nexus/ is always excluded via .git/info/exclude.
         #[arg(long, hide = true)]
         shadowed_ai: bool,
@@ -222,9 +228,17 @@ pub enum Command {
 
         /// Show what pull would do with the devbox workspace files
         /// (devbox.json, scripts), including removals of files the fork no
-        /// longer has, without writing anything.
+        /// longer has, without writing anything. Also lists the executable
+        /// items a pull would ask about.
         #[arg(long)]
         dry_run: bool,
+
+        /// Accept new or changed executable content from the server
+        /// (hooks, settings commands, plugins, MCP servers, layouts,
+        /// scripts) without asking. Without it, pull asks in a terminal and
+        /// keeps the local version otherwise. Not implied by --yes.
+        #[arg(long)]
+        trust: bool,
     },
 
     /// Deprecated: use `nexus status`, `nexus diff`, `nexus run`.
@@ -1040,12 +1054,14 @@ mod tests {
                 ref name,
                 ref project_id,
                 force,
+                trust,
                 shadowed_ai,
             } => {
                 assert_eq!(path, ".");
                 assert!(name.is_none());
                 assert!(project_id.is_none());
                 assert!(!force);
+                assert!(!trust);
                 assert!(!shadowed_ai);
             }
             _ => panic!("expected Init command"),
@@ -1542,6 +1558,16 @@ mod tests {
             }
             _ => panic!("expected Pull command"),
         }
+    }
+
+    #[test]
+    fn test_parse_pull_and_init_trust() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--trust"]).unwrap();
+        assert!(matches!(cli.command, Command::Pull { trust: true, .. }));
+        let cli = Cli::try_parse_from(["nexus", "pull", "-y"]).unwrap();
+        assert!(matches!(cli.command, Command::Pull { trust: false, .. }));
+        let cli = Cli::try_parse_from(["nexus", "init", "--trust"]).unwrap();
+        assert!(matches!(cli.command, Command::Init { trust: true, .. }));
     }
 
     #[test]

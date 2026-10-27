@@ -45,6 +45,7 @@ pub async fn run(
     api_url: &str,
     force: bool,
     mcp_source: McpSource,
+    trust: bool,
 ) -> anyhow::Result<()> {
     let target = PathBuf::from(path).canonicalize().unwrap_or_else(|_| {
         // Path doesn't exist yet; resolve relative to cwd
@@ -216,7 +217,7 @@ pub async fn run(
             // get_project provides agentic_root directly; export_agent_files
             // is used as fallback (it also returns agentic_root on the envelope).
             let project_detail = client.get_project(pid).await.ok();
-            let af_export_result = client.export_agent_files(pid).await;
+            let mut af_export_result = client.export_agent_files(pid).await;
 
             let tool_flavor = project_detail
                 .as_ref()
@@ -253,8 +254,20 @@ pub async fn run(
             create_agents_md(&target, project_name, force, &agentic_root)?;
             append_gitignore(&target)?;
 
+            // Executable content needs consent before it is written, as in
+            // `nexus pull`.
+            let mut consent = super::consent::Gate::open(&target, trust);
+            consent.exports(
+                &target,
+                af_export_result.as_mut().ok(),
+                None,
+                is_claude,
+                &agentic_root,
+            );
+
             match client.export_skills(pid).await {
-                Ok(export) => {
+                Ok(mut export) => {
+                    consent.exports(&target, None, Some(&mut export), is_claude, &agentic_root);
                     println!(
                         "   {} Project: {} {}",
                         style("+").bold().green(),
@@ -478,14 +491,17 @@ pub async fn run(
             match client.export_workspace_mcp(pid).await {
                 Ok(export) => {
                     let mut ws_written = 0;
+                    let held = consent.workspace_v2(&target, &export);
 
                     // Write devbox.json
-                    let devbox_target = target.join("devbox.json");
-                    fs::write(&devbox_target, &export.devbox_json)?;
-                    ws_written += 1;
+                    if !held.contains("devbox.json") {
+                        let devbox_target = target.join("devbox.json");
+                        fs::write(&devbox_target, &export.devbox_json)?;
+                        ws_written += 1;
+                    }
 
                     // Write scripts
-                    for script in &export.scripts {
+                    for script in export.scripts.iter().filter(|s| !held.contains(&s.path)) {
                         if !super::pull::safe_target(&target, &script.path) {
                             continue;
                         }
@@ -597,6 +613,8 @@ pub async fn run(
                     );
                 }
             }
+
+            consent.finish();
 
             // Show tool flavor and next steps
             {
@@ -1855,6 +1873,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -1894,6 +1913,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -1917,6 +1937,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
+            false,
         )
         .await;
         assert!(result.is_err());
@@ -1937,6 +1958,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             true,
             McpSource::Npm,
+            false,
         )
         .await;
         assert!(result.is_ok());
@@ -1958,6 +1980,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -1983,6 +2006,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -2007,6 +2031,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             true,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -2029,6 +2054,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -2041,6 +2067,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             true,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();
@@ -2073,6 +2100,7 @@ mod tests {
             "https://nexus.gatewarden.eu",
             false,
             McpSource::Npm,
+            false,
         )
         .await
         .unwrap();

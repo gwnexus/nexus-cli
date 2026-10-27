@@ -66,6 +66,7 @@ nexus project unlink                    Revoke the project inference token and c
 nexus project status                    List issued project inference tokens
 nexus pull [--project-id <id>]          Pull skills and config from the Nexus platform
 nexus pull --dry-run                    Preview devbox workspace changes (incl. removals) without writing
+nexus pull --trust                      Accept new or changed executable content without asking
 nexus push [path] [--name "..."]        Push content changes (agent files; devbox changes as a new fork)
 nexus reset [path]                      Discard local changes (content: backend version; projection: desired)
 nexus stash save                        Save modified content files to a stash
@@ -115,7 +116,8 @@ nexus upgrade                           Upgrade CLI to latest release version
 | `nexus project link` | `--restrict-profiles` | Restrict the token to profile slugs (comma-separated) |
 | `nexus project rotate` | `--finalize` | Revoke the previously superseded token after overlap |
 | `nexus pull`    | `--project-id`   | Pull from a specific project (skip picker)     |
-| `nexus pull`    | `--dry-run`      | Show devbox workspace changes (create, update, keep, remove) without writing |
+| `nexus pull`    | `--dry-run`      | Show devbox workspace changes (create, update, keep, remove) without writing, and the executable items pull would ask about |
+| `nexus pull`, `nexus init` | `--trust` | Accept new or changed executable content without asking (not implied by `--yes` / `--force`) |
 | `nexus push`    | `--name`         | Custom fork name (default: auto-generated)     |
 | `nexus push`    | `--dry-run`      | Show what would be pushed without sending      |
 | `nexus push`    | `--workspace`    | Only push workspace files (default for now)    |
@@ -547,7 +549,39 @@ back to `.nexus`. Prerequisite checks never run through a shell: only
 `<tool>`, `<tool> --version`, `-v`, `-V` or `version` is executed, otherwise
 the tool is looked up on `PATH`. The token-bearing `.mcp.json` and
 `opencode.json` are written owner-only (`0600`), listed in `.git/info/exclude`,
-and reported when git already tracks them.
+and reported when git already tracks them. Responses larger than 8 MiB are
+refused.
+
+**Executable content needs your consent.** Some of what the backend sends
+runs on your machine: Claude Code hook scripts and their registrations,
+`statusLine` and other command settings (`hooks`, `apiKeyHelper`,
+`awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`), enabled
+plugins and plugin marketplaces, MCP servers in `.mcp.json` / `opencode.json`,
+Zellij layouts, OpenCode plugins, agent files in runnable locations, skill
+scripts and skills with inline shell (`!` followed by a command in
+backticks), `devbox.json` and devbox scripts. `nexus pull` and `nexus init`
+fingerprint each item as it would be written (MCP servers including their
+env values) and ask before a new or changed item lands on disk:
+
+```
+   ? 2 executable item(s) from the server need your consent:
+      new      mcp_server task-master  ->  .mcp.json
+      changed  claude_hook session-guard  ->  .claude/hooks/nexus-session-guard.mjs
+? Install them? › Review each / Accept all / Skip all
+```
+
+"Review each" shows the command and a diff against the local file (env values
+only as a short hash). A refused item keeps its local version, or is left out
+when there is none; the rest of the pull continues. Without a terminal, new
+or changed items are skipped and listed; `--trust` accepts them (for CI).
+Items that are already on disk exactly as they would be written are accepted
+without asking, so the first pull after an upgrade only asks about real
+changes. Accepted fingerprints are stored per workspace in
+`~/.config/nexus/consent/` (owner-only), outside the repository, so a commit
+cannot pre-approve anything; delete the file to be asked again. The backend
+also declares its executables with a hash; the CLI compares it with its own
+fingerprint, reports a difference and then asks, and points out items the
+backend did not declare.
 
 ## Workflow
 

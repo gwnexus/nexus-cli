@@ -7,6 +7,7 @@ mod claude_cmd;
 pub(crate) mod claude_plugins;
 pub(crate) mod claude_render;
 mod config_cmd;
+mod consent;
 mod deinit;
 pub(crate) mod display;
 mod doctor;
@@ -49,6 +50,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             ref name,
             ref project_id,
             force,
+            trust,
             ..
         } => {
             let config = nexus_core::config::Config::load_effective(None)?;
@@ -60,6 +62,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 &api_url,
                 force || cli.yes,
                 config.mcp_source,
+                trust,
             )
             .await?;
         }
@@ -220,6 +223,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                             false,
                             ccx::ForceMode::None,
                             false,
+                            false,
                         )
                         .await?;
                     } else if changed {
@@ -236,6 +240,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             with_actor_assets,
             skip_actor_assets,
             dry_run,
+            trust,
         } => {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
@@ -252,6 +257,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 // not discard local edits to CCX files.
                 ccx::ForceMode::from_flags(force, force_unmanaged),
                 dry_run,
+                trust,
             )
             .await?;
         }
