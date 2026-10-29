@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.2] - 2026-10-29
+
+Tokens are no longer shown in clear text, neither while you type them nor in status output.
+
+### Fixed
+- **`nexus login` echoed the token while you typed or pasted it.** On a terminal the input is now read without echo: each character shows as `*` (with a count beyond 40), Backspace deletes, Ctrl-U clears, and after Enter only the masked token stays on screen. Piped input works as before.
+
+### Changed
+- **One masked form for tokens everywhere**: the public prefix plus the last four characters (`nxs_pat_****9f3c`), or the mask alone for short values. `nexus status` showed only the prefix, `nexus preflight` the first eight characters plus the last four, and the auth row of `nexus run` the first eight characters, which is more than the prefix for tokens without one.
+- **The env table of `nexus run` masks secrets.** Injected values whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `KEY`, `AUTH` or `CREDENTIAL` are masked; before, any value up to 40 characters was printed in full.
+
+3 net new tests; 885/885 passing, clippy/fmt clean.
+
 ## [0.31.1] - 2026-10-27
 
 The consent check now agrees with the backend's `executables` list.
