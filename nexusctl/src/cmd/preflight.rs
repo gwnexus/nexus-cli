@@ -9,7 +9,7 @@
 
 use console::style;
 use nexus_core::api::NexusClient;
-use nexus_core::auth::resolve_token;
+use nexus_core::auth::{mask_token, resolve_token};
 use nexus_core::config::Config;
 use std::process::Command as Proc;
 
@@ -145,11 +145,7 @@ fn check_config() -> (CheckResult, Option<Config>) {
 fn check_credentials() -> (CheckResult, Option<String>) {
     match resolve_token() {
         Some(token) => {
-            let prefix = if token.len() > 12 {
-                format!("{}...{}", &token[..8], &token[token.len() - 4..])
-            } else {
-                "nxs_pat_****".to_string()
-            };
+            let prefix = mask_token(&token);
             let from_env = std::env::var("NEXUS_PRIVATE_TOKEN")
                 .ok()
                 .filter(|v| !v.is_empty())

@@ -24,7 +24,7 @@ use std::time::Instant;
 use std::{env, fs};
 
 use nexus_core::api::NexusClient;
-use nexus_core::auth::resolve_token;
+use nexus_core::auth::{mask_token, resolve_token};
 use nexus_core::config;
 
 use super::git;
@@ -748,6 +748,23 @@ fn sync_mcp_credentials(
 // Env display
 // ---------------------------------------------------------------------------
 
+/// Value of an injected env var as shown in the env table: secrets
+/// (names with TOKEN, SECRET, PASSWORD, KEY, AUTH or CREDENTIAL) are masked,
+/// long values are shortened.
+fn env_display_value(key: &str, value: &str) -> String {
+    let upper = key.to_ascii_uppercase();
+    let secret = ["TOKEN", "SECRET", "PASSWORD", "KEY", "AUTH", "CREDENTIAL"]
+        .iter()
+        .any(|w| upper.contains(w));
+    if secret {
+        mask_token(value)
+    } else if value.chars().count() > 40 {
+        format!("{}...", value.chars().take(8).collect::<String>())
+    } else {
+        value.to_string()
+    }
+}
+
 fn print_env_table(
     workspace: &Path,
     tool: &str,
@@ -772,11 +789,7 @@ fn print_env_table(
             skipped.len()
         );
         for (k, v, source) in to_inject {
-            let display_val = if v.len() > 40 {
-                format!("{}...", &v[..8])
-            } else {
-                v.clone()
-            };
+            let display_val = env_display_value(k, v);
             println!(
                 "     {:<36} = {:<20}  [{}]",
                 style(k).bold(),
@@ -1444,8 +1457,7 @@ async fn run_prelaunch_checks(
     // Auth
     let resolved_token = resolve_token();
     let auth_check = match &resolved_token {
-        Some(t) if t.len() > 8 => CheckResult::Pass(format!("{}...", &t[..8])),
-        Some(_) => CheckResult::Pass("token present".into()),
+        Some(t) => CheckResult::Pass(mask_token(t)),
         None => CheckResult::Fail("Not authenticated — run 'nexus login'".into()),
     };
     checks.push(("Auth", auth_check));
@@ -2466,6 +2478,21 @@ fn resolve_project_name(workspace: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_env_display_value_masks_secrets() {
+        let token = format!("nxs_pat_{}9f3c", "x".repeat(24));
+        assert_eq!(
+            env_display_value("NEXUS_PRIVATE_TOKEN", &token),
+            "nxs_pat_****9f3c"
+        );
+        assert_eq!(env_display_value("OPENAI_API_KEY", "short"), "****");
+        assert_eq!(
+            env_display_value("NEXUS_API_URL", "https://example.test"),
+            "https://example.test"
+        );
+        assert_eq!(env_display_value("LONG", &"y".repeat(50)), "yyyyyyyy...");
+    }
     use std::fs;
     use std::path::PathBuf;
 

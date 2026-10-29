@@ -342,7 +342,7 @@ General
   Workspace:       /path/to/project  [devbox shell: active]
 
   Auth:            OK you@example.com (member)
-                   Token: nxs_pat_****... (global)
+                   Token: nxs_pat_****9f3c (global)
 
   Project:         OK My Project (my-project)
                    ID: 07303f0c-3713-4cb0-b03e-35f4db0c1acb
@@ -536,7 +536,14 @@ the server sends them:
 ```markdown
 ## Security
 
-- MUST: Never put secrets, credentials, tokens or private keys into output, logs, commits ...
+**Tokens are never shown in clear text.** `nexus login` reads the token
+without echo: each typed or pasted character shows as `*`, and once you press
+Enter only the masked form remains on screen (piped input, for example
+`printf '%s' "$TOKEN" | nexus login`, still works). `nexus status`,
+`nexus preflight` and the env table of `nexus run` show tokens as their
+prefix plus the last four characters (`nxs_pat_****9f3c`), and mask every
+injected env value whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `KEY`,
+`AUTH` or `CREDENTIAL`.
 
 **What `nexus pull` and `nexus init` accept from the backend.** Every path the
 server sends (agent files, skills and their resources, OpenCode commands,

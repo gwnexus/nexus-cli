@@ -26,6 +26,24 @@ pub use project_token::{
 /// Expected prefix for Nexus personal access tokens.
 pub const TOKEN_PREFIX: &str = "nxs_pat_";
 
+/// Display form of a secret token: the public prefix (`nxs_pat_`,
+/// `nxs_proj_`), a fixed mask and the last four characters, so two tokens
+/// can be told apart without revealing either. Values with a secret part
+/// shorter than 16 characters show the mask only.
+pub fn mask_token(token: &str) -> String {
+    let (prefix, secret) = [TOKEN_PREFIX, PROJECT_TOKEN_PREFIX]
+        .iter()
+        .find_map(|p| token.strip_prefix(p).map(|rest| (*p, rest)))
+        .unwrap_or(("", token));
+    let chars: Vec<char> = secret.chars().collect();
+    if chars.len() >= 16 {
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{prefix}****{tail}")
+    } else {
+        format!("{prefix}****")
+    }
+}
+
 /// Stored credentials for authenticating against the Nexus API.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Credentials {
@@ -224,6 +242,20 @@ pub fn require_token() -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_mask_token() {
+        let pat = format!("{TOKEN_PREFIX}{}wxyz", "a".repeat(28));
+        assert_eq!(mask_token(&pat), "nxs_pat_****wxyz");
+        let proj = format!("{PROJECT_TOKEN_PREFIX}{}1234", "b".repeat(20));
+        assert_eq!(mask_token(&proj), "nxs_proj_****1234");
+        assert_eq!(mask_token("nxs_pat_short"), "nxs_pat_****");
+        assert_eq!(mask_token("plainsecretvalue1234"), "****1234");
+        assert_eq!(mask_token("tiny"), "****");
+        assert_eq!(mask_token(""), "****");
+        // Multi-byte characters must not split.
+        assert_eq!(mask_token(&"ä".repeat(20)), "****ääää");
+    }
 
     /// Regression test for the PAT scope leak reported against `nexus login`:
     /// logging in to project A (local scope) must never mutate project B's

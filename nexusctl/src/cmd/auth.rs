@@ -2,7 +2,9 @@
 
 use console::style;
 use nexus_core::api::NexusClient;
-use nexus_core::auth::{resolve_token_with_source, Credentials, TokenSource, TOKEN_PREFIX};
+use nexus_core::auth::{
+    mask_token, resolve_token_with_source, Credentials, TokenSource, TOKEN_PREFIX,
+};
 use nexus_core::error::Error as CoreError;
 
 use super::display::status_line;
@@ -27,8 +29,7 @@ pub async fn login(api_url: &str, global: bool) -> anyhow::Result<()> {
     println!("You can generate one at: {}/dashboard/settings", api_url);
     println!();
 
-    // Read token from stdin
-    let token = read_token_from_stdin()?;
+    let token = read_token()?;
 
     // Validate format
     Credentials::validate_token_format(&token)?;
@@ -150,12 +151,8 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
             status_line("", "Run 'nexus login' to authenticate.");
         }
         Some(ref t) => {
-            // Show token prefix + source
-            let prefix = if t.len() > 8 {
-                format!("{}****...", &t[..8])
-            } else {
-                "****".to_string()
-            };
+            // Show the masked token + source
+            let prefix = mask_token(t);
             let source = resolved
                 .as_ref()
                 .map(|(_, s)| *s)
@@ -327,23 +324,74 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read a token from stdin (one line, trimmed).
-fn read_token_from_stdin() -> anyhow::Result<String> {
-    use std::io::{self, BufRead};
-    print!("Token: ");
-    // Flush to ensure prompt is visible
-    use std::io::Write;
-    io::stdout().flush()?;
+/// Longest run of mask characters shown while typing; longer input adds
+/// the character count instead, so the prompt never wraps.
+const MASK_WIDTH: usize = 40;
 
-    let mut line = String::new();
-    io::stdin().lock().read_line(&mut line)?;
-    let token = line.trim().to_string();
-
+/// Read the token: masked on a terminal, one plain line otherwise (for
+/// `printf '%s' "$TOKEN" | nexus login`).
+fn read_token() -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+    let term = console::Term::stdout();
+    let token = if std::io::stdin().is_terminal() && term.is_term() {
+        read_masked(&term)?
+    } else {
+        read_line()?
+    };
     if token.is_empty() {
         anyhow::bail!("No token provided");
     }
-
     Ok(token)
+}
+
+/// Prompt text for `len` typed characters.
+fn masked_prompt(len: usize) -> String {
+    let stars = "*".repeat(len.min(MASK_WIDTH));
+    if len > MASK_WIDTH {
+        format!("Token: {stars} ({len})")
+    } else {
+        format!("Token: {stars}")
+    }
+}
+
+/// Read a token key by key without echo: each character shows as `*`,
+/// Backspace deletes, Ctrl-U clears, Enter finishes. The final line shows
+/// the masked token (prefix and last four characters).
+fn read_masked(term: &console::Term) -> anyhow::Result<String> {
+    use console::Key;
+    let mut token = String::new();
+    term.write_str(&masked_prompt(0))?;
+    loop {
+        match term.read_key()? {
+            Key::Enter => break,
+            Key::Backspace => {
+                token.pop();
+            }
+            Key::Char('\u{15}') => token.clear(),
+            Key::Char(c) if !c.is_control() => token.push(c),
+            _ => continue,
+        }
+        term.clear_line()?;
+        term.write_str(&masked_prompt(token.chars().count()))?;
+    }
+    let token = token.trim().to_string();
+    term.clear_line()?;
+    if token.is_empty() {
+        term.write_line("Token:")?;
+    } else {
+        term.write_line(&format!("Token: {}", style(mask_token(&token)).dim()))?;
+    }
+    Ok(token)
+}
+
+/// Read one plain line from stdin (trimmed).
+fn read_line() -> anyhow::Result<String> {
+    use std::io::{self, BufRead, Write};
+    print!("Token: ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim().to_string())
 }
 
 /// Whether `nexus status` runs inside a devbox shell, from the variables
@@ -425,6 +473,20 @@ impl DevboxShell {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn test_masked_prompt() {
+        assert_eq!(masked_prompt(0), "Token: ");
+        assert_eq!(masked_prompt(3), "Token: ***");
+        assert_eq!(
+            masked_prompt(MASK_WIDTH),
+            format!("Token: {}", "*".repeat(MASK_WIDTH))
+        );
+        assert_eq!(
+            masked_prompt(52),
+            format!("Token: {} (52)", "*".repeat(MASK_WIDTH))
+        );
+    }
 
     #[test]
     fn test_devbox_shell_classify() {
