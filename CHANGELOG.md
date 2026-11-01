@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.3] - 2026-11-01
+
+The OpenAI key is no longer copied into workspace files.
+
+### Fixed
+- **`opencode.json` no longer carries `NEXUS_SEC_OPENAI_API_KEY`.** `nexus init` and `nexus pull` copied it into the environment of the nexus MCP server, taken from the shell or from `.env.nexus.local` / `.env.local` and written as a literal value. The nexus MCP server never reads it, so it only spread a secret into workspace files. Neither command writes it any more, and `nexus pull` removes an existing entry from the nexus server in `opencode.json` and `.mcp.json`, leaving every other key and server untouched.
+
+2 new tests, 6 removed with the env-file lookup; 881/881 passing, clippy/fmt clean.
+
 ## [0.31.2] - 2026-10-29
 
 Tokens are no longer shown in clear text, neither while you type them nor in status output.

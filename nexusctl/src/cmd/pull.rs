@@ -618,43 +618,38 @@ pub(crate) fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     (y, mo, days + 1)
 }
 
-/// Read a single key from a `.env`-style file in the workspace.
-///
-/// Searches `.env.nexus.local` (primary) and `.env.local` (fallback) for a
-/// line of the form `KEY=value` or `export KEY=value`. Strips surrounding
-/// quotes (`"` or `'`). Returns `None` when neither file exists or the key is
-/// not present.
-fn read_key_from_env_file(workspace: &Path, key: &str) -> Option<String> {
-    let candidates = [".env.nexus.local", ".env.local"];
-    for candidate in &candidates {
-        let path = workspace.join(candidate);
-        let Ok(content) = fs::read_to_string(&path) else {
+/// Env keys older CLI versions wrote into the nexus MCP server entry that
+/// the server never reads.
+const UNUSED_NEXUS_ENV_KEYS: &[&str] = &["NEXUS_SEC_OPENAI_API_KEY"];
+
+/// Remove [`UNUSED_NEXUS_ENV_KEYS`] from the nexus server entry of
+/// `opencode.json` and `.mcp.json`, leaving every other key and server as it
+/// is. Returns the files that changed.
+fn drop_unused_nexus_env(workspace: &Path) -> anyhow::Result<Vec<String>> {
+    let mut changed = Vec::new();
+    for (rel, pointer) in [
+        ("opencode.json", "/mcp/nexus/environment"),
+        (".mcp.json", "/mcpServers/nexus/env"),
+    ] {
+        let path = workspace.join(rel);
+        let Ok(raw) = fs::read_to_string(&path) else {
             continue;
         };
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with('#') || line.is_empty() {
-                continue;
-            }
-            // Strip optional `export ` prefix
-            let line = line.strip_prefix("export ").unwrap_or(line);
-            if let Some(rest) = line.strip_prefix(key) {
-                if let Some(value) = rest.strip_prefix('=') {
-                    let value = value.trim();
-                    // Strip surrounding quotes
-                    let value = value
-                        .strip_prefix('"')
-                        .and_then(|v| v.strip_suffix('"'))
-                        .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-                        .unwrap_or(value);
-                    if !value.is_empty() {
-                        return Some(value.to_string());
-                    }
-                }
-            }
+        let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(env) = root.pointer_mut(pointer).and_then(|v| v.as_object_mut()) else {
+            continue;
+        };
+        let before = env.len();
+        env.retain(|k, _| !UNUSED_NEXUS_ENV_KEYS.contains(&k.as_str()));
+        if env.len() != before {
+            fs::write(&path, serde_json::to_string_pretty(&root)? + "\n")?;
+            shadow::protect_token_file(workspace, rel, &[rel]);
+            changed.push(rel.to_string());
         }
     }
-    None
+    Ok(changed)
 }
 
 /// Run the pull command.
@@ -1261,6 +1256,13 @@ pub async fn run(
     // going to be written (skipped entirely for the claude-cli-only flavor,
     // since mcp.json carries no model/agent routing config).
     let opencode_will_be_written = !is_claude;
+
+    for rel in drop_unused_nexus_env(&workspace)? {
+        println!(
+            "   {} {rel}: removed NEXUS_SEC_OPENAI_API_KEY (not used by the nexus MCP server)",
+            style("-").red()
+        );
+    }
 
     let mut claude_report: Option<claude_render::ClaudeProjectionReport> = None;
     let proceed_with_opencode = if opencode_will_be_written {
@@ -3220,16 +3222,6 @@ fn write_mcp_configs(
                 }
             };
 
-            // Resolve NEXUS_SEC_OPENAI_API_KEY in priority order:
-            //   1. Shell environment variable (CI/CD, manually exported)
-            //   2. .env.nexus.local or .env.local in the workspace root
-            //   3. {env:} template fallback (OpenCode expands at startup)
-            let openai_key_value = std::env::var("NEXUS_SEC_OPENAI_API_KEY")
-                .ok()
-                .filter(|v| !v.is_empty())
-                .or_else(|| read_key_from_env_file(workspace, "NEXUS_SEC_OPENAI_API_KEY"))
-                .unwrap_or_else(|| "{env:NEXUS_SEC_OPENAI_API_KEY}".to_string());
-
             mcp_block.insert(
                 "nexus".to_string(),
                 serde_json::json!({
@@ -3238,8 +3230,7 @@ fn write_mcp_configs(
                     "environment": {
                         "NEXUS_API_URL": api_url,
                         "NEXUS_PRIVATE_TOKEN": token,
-                        "NEXUS_PROJECT_ID": project_id,
-                        "NEXUS_SEC_OPENAI_API_KEY": openai_key_value
+                        "NEXUS_PROJECT_ID": project_id
                     }
                 }),
             );
@@ -6295,10 +6286,6 @@ mod tests {
     fn test_write_mcp_configs_if_missing_creates_both() {
         let dir = temp_pull_dir("mcp-creates");
 
-        // Isolate from shell environment: NEXUS_SEC_OPENAI_API_KEY must be absent
-        // so the {env:} fallback is written. Devbox / .env.nexus.local may inject it.
-        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
-
         write_mcp_configs(
             &dir,
             "https://nexus.gatewarden.eu",
@@ -6326,9 +6313,8 @@ mod tests {
         // NEXUS_PRIVATE_TOKEN must never be an {env:} reference
         assert!(!oc.contains("{env:NEXUS_PRIVATE_TOKEN}"));
         assert!(!oc.contains("{env:NEXUS_API_URL}"));
-        // NEXUS_SEC_OPENAI_API_KEY: no env-file present in temp dir and no shell var set,
-        // so the {env:} fallback must be used.
-        assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
+        // The nexus MCP server needs no OpenAI key; none is written.
+        assert!(!oc.contains("OPENAI"));
 
         // One runtime per call: render the
         // Claude Code projection separately for its .mcp.json.
@@ -6943,69 +6929,8 @@ mod tests {
     }
 
     #[test]
-    fn test_read_key_from_env_file_nexus_local() {
-        let dir = temp_pull_dir("read-env-nexus-local");
-        fs::write(
-            dir.join(".env.nexus.local"),
-            "# comment\nNEXUS_SEC_OPENAI_API_KEY=sk-test-literal-value\nOTHER=ignore\n",
-        )
-        .unwrap();
-        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
-        assert_eq!(result, Some("sk-test-literal-value".to_string()));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_read_key_from_env_file_quoted_value() {
-        let dir = temp_pull_dir("read-env-quoted");
-        fs::write(
-            dir.join(".env.nexus.local"),
-            "NEXUS_SEC_OPENAI_API_KEY=\"sk-quoted-value\"\n",
-        )
-        .unwrap();
-        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
-        assert_eq!(result, Some("sk-quoted-value".to_string()));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_read_key_from_env_file_export_prefix() {
-        let dir = temp_pull_dir("read-env-export");
-        fs::write(
-            dir.join(".env.nexus.local"),
-            "export NEXUS_SEC_OPENAI_API_KEY=sk-exported-value\n",
-        )
-        .unwrap();
-        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
-        assert_eq!(result, Some("sk-exported-value".to_string()));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_read_key_from_env_file_missing_key() {
-        let dir = temp_pull_dir("read-env-missing-key");
-        fs::write(dir.join(".env.nexus.local"), "OTHER_KEY=something\n").unwrap();
-        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
-        assert_eq!(result, None);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_read_key_from_env_file_no_file() {
-        let dir = temp_pull_dir("read-env-no-file");
-        let result = read_key_from_env_file(&dir, "NEXUS_SEC_OPENAI_API_KEY");
-        assert_eq!(result, None);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_write_mcp_configs_reads_key_from_env_file() {
-        let dir = temp_pull_dir("mcp-env-file-key");
-
-        // Isolate from shell environment: the env-file key must win over any
-        // shell-level NEXUS_SEC_OPENAI_API_KEY that devbox may have injected.
-        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
-
+    fn test_write_mcp_configs_ignores_openai_key_from_env() {
+        let dir = temp_pull_dir("mcp-no-openai-key");
         fs::write(
             dir.join(".env.nexus.local"),
             "NEXUS_SEC_OPENAI_API_KEY=sk-from-env-file\n",
@@ -7031,15 +6956,59 @@ mod tests {
         .unwrap();
 
         let oc = fs::read_to_string(dir.join("opencode.json")).unwrap();
-        // Literal key from env file must be written — no {env:} template
-        assert!(
-            oc.contains("sk-from-env-file"),
-            "literal key must be present"
+        assert!(!oc.contains("sk-from-env-file"));
+        assert!(!oc.contains("NEXUS_SEC_OPENAI_API_KEY"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_drop_unused_nexus_env_keeps_other_keys() {
+        let dir = temp_pull_dir("drop-openai-key");
+        let opencode = serde_json::json!({
+            "mcp": {
+                "nexus": {
+                    "type": "local",
+                    "environment": {
+                        "NEXUS_API_URL": "u",
+                        "NEXUS_PRIVATE_TOKEN": "t",
+                        "NEXUS_SEC_OPENAI_API_KEY": "sk-old",
+                        "MY_FLAG": "1"
+                    }
+                },
+                "mine": { "environment": { "NEXUS_SEC_OPENAI_API_KEY": "kept" } }
+            },
+            "instructions": ["a.md"]
+        });
+        fs::write(
+            dir.join("opencode.json"),
+            serde_json::to_string_pretty(&opencode).unwrap(),
+        )
+        .unwrap();
+        let claude = serde_json::json!({
+            "mcpServers": { "nexus": { "env": { "NEXUS_SEC_OPENAI_API_KEY": "sk-old", "X": "y" } } }
+        });
+        fs::write(dir.join(".mcp.json"), claude.to_string()).unwrap();
+
+        let changed = drop_unused_nexus_env(&dir).unwrap();
+        assert_eq!(changed, vec!["opencode.json", ".mcp.json"]);
+
+        let oc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("opencode.json")).unwrap()).unwrap();
+        let mut expected = opencode.clone();
+        expected["mcp"]["nexus"]["environment"]
+            .as_object_mut()
+            .unwrap()
+            .remove("NEXUS_SEC_OPENAI_API_KEY");
+        assert_eq!(oc, expected);
+        let cm: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap();
+        assert_eq!(
+            cm["mcpServers"]["nexus"]["env"],
+            serde_json::json!({ "X": "y" })
         );
-        assert!(
-            !oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"),
-            "env template must not be used when file provides the key"
-        );
+
+        // Nothing left to remove: no rewrite.
+        assert!(drop_unused_nexus_env(&dir).unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -7047,7 +7016,6 @@ mod tests {
     #[test]
     fn test_write_mcp_configs_plugin_array_command_in_opencode_json() {
         let dir = temp_pull_dir("plugin-array-cmd");
-        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
 
         let mut plugin_servers = HashMap::new();
         plugin_servers.insert(
@@ -7098,7 +7066,6 @@ mod tests {
     #[test]
     fn test_write_mcp_configs_plugin_inline_environment_in_opencode_json() {
         let dir = temp_pull_dir("plugin-inline-env");
-        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
 
         let mut env_map = HashMap::new();
         env_map.insert("HEADROOM_MODE".to_string(), "transform".to_string());
@@ -7146,7 +7113,6 @@ mod tests {
     #[test]
     fn test_write_mcp_configs_plugin_env_keys_template_in_opencode_json() {
         let dir = temp_pull_dir("plugin-env-keys");
-        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
 
         let mut plugin_servers = HashMap::new();
         plugin_servers.insert(
@@ -7190,7 +7156,6 @@ mod tests {
     #[test]
     fn test_write_mcp_configs_inline_env_overrides_env_keys() {
         let dir = temp_pull_dir("plugin-env-override");
-        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
 
         let mut env_map = HashMap::new();
         // Inline value for a key that is also in env_keys — inline must win
@@ -7240,7 +7205,6 @@ mod tests {
     #[test]
     fn test_write_mcp_configs_plugin_mcp_json_claude_format() {
         let dir = temp_pull_dir("plugin-mcp-json");
-        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
 
         let mut plugin_servers = HashMap::new();
         plugin_servers.insert(

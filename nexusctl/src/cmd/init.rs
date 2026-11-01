@@ -1236,10 +1236,6 @@ fn write_mcp_configs(
                 McpSource::Local => r#""command": ["node", "tools/nexus-mcp/dist/server.js"]"#,
             };
 
-            // Resolve NEXAI_SEC_OPENAI_API_KEY at write time — use literal if available
-            let openai_key_value = std::env::var("NEXUS_SEC_OPENAI_API_KEY")
-                .unwrap_or_else(|_| "{env:NEXUS_SEC_OPENAI_API_KEY}".to_string());
-
             let opencode_json = format!(
                 r#"{{
   "$schema": "https://opencode.ai/config.json",
@@ -1250,8 +1246,7 @@ fn write_mcp_configs(
       "environment": {{
         "NEXUS_API_URL": "{api_url}",
         "NEXUS_PRIVATE_TOKEN": "{token}",
-        "NEXUS_PROJECT_ID": "{project_id}",
-        "NEXUS_SEC_OPENAI_API_KEY": "{openai_key}"
+        "NEXUS_PROJECT_ID": "{project_id}"
       }}
     }}
   }}
@@ -1261,7 +1256,6 @@ fn write_mcp_configs(
                 api_url = api_url,
                 token = token,
                 project_id = project_id,
-                openai_key = openai_key_value,
             );
 
             fs::write(&opencode_path, opencode_json)?;
@@ -2301,13 +2295,6 @@ mod tests {
     fn test_write_mcp_configs_npm_mode() {
         let dir = temp_project_dir("mcp-configs-npm");
 
-        // Isolate from shell environment: if NEXUS_SEC_OPENAI_API_KEY is set
-        // in the shell (e.g. from .env.nexus.local via devbox) the assertion
-        // `oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}")` would fail because
-        // write_mcp_configs would write the literal value instead.
-        let _prev_key = std::env::var("NEXUS_SEC_OPENAI_API_KEY").ok();
-        std::env::remove_var("NEXUS_SEC_OPENAI_API_KEY");
-
         write_mcp_configs(
             &dir,
             "test-proj",
@@ -2343,9 +2330,8 @@ mod tests {
         // NEXUS_PROJECT_ID must be present so agents can
         // bind to the correct project without guessing.
         assert!(oc.contains("\"NEXUS_PROJECT_ID\": \"test-project-id\""));
-        // NEXUS_SEC_OPENAI_API_KEY is intentionally an {env:} reference —
-        // it is not a Nexus credential and should be resolved from the shell at runtime
-        assert!(oc.contains("{env:NEXUS_SEC_OPENAI_API_KEY}"));
+        // The nexus MCP server needs no OpenAI key; none is written.
+        assert!(!oc.contains("OPENAI"));
 
         // One runtime per call: render the
         // Claude Code projection separately for its .mcp.json.
