@@ -1057,3 +1057,34 @@ fn test_agent_file_export_response_claude_workspace() {
     let resp: AgentFileExportResponse = serde_json::from_str(old).unwrap();
     assert!(resp.claude_workspace.is_none());
 }
+
+#[test]
+fn test_workspace_fork_export_shadow_notice() {
+    let with = serde_json::json!({
+        "devbox_json": "{}",
+        "scripts": [],
+        "meta": {
+            "shadow_mode": true,
+            "shadow_notice": "Shadowed project (shadow ai): the devbox files are committed in a shadow-safe form without AI tooling."
+        }
+    });
+    let resp: WorkspaceForkExportResponse = serde_json::from_value(with).unwrap();
+    assert!(resp
+        .meta
+        .shadow_notice()
+        .unwrap()
+        .starts_with("Shadowed project (shadow ai)"));
+
+    // Unshadowed (null), blank, or an older backend without the field.
+    for meta in [
+        serde_json::json!({ "shadow_notice": null }),
+        serde_json::json!({ "shadow_notice": "  " }),
+        serde_json::json!({}),
+    ] {
+        let resp: WorkspaceForkExportResponse = serde_json::from_value(serde_json::json!({
+            "devbox_json": "{}", "scripts": [], "meta": meta
+        }))
+        .unwrap();
+        assert_eq!(resp.meta.shadow_notice(), None);
+    }
+}

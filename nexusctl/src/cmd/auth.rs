@@ -134,6 +134,18 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
             format_args!("{} (no .nexus/ found){devbox}", style(cwd.display()).dim()),
         );
     }
+    let tracked = super::shadow::tracked_excluded(&cwd);
+    if !tracked.is_empty() {
+        status_line(
+            "",
+            format_args!(
+                "{} {} excluded path(s) still tracked by git ({}): stage with git add -u, or untrack with nexus pull --untrack-shadowed",
+                style("!").bold().yellow(),
+                tracked.len(),
+                tracked.join(", ")
+            ),
+        );
+    }
     println!();
 
     // --- Auth status ---

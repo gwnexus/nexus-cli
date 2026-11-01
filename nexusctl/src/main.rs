@@ -190,7 +190,8 @@ pub enum Command {
 
     /// Inspect and change the project's backend settings (executioner,
     /// execution mode, Claude Code experience, git identity). Never writes
-    /// local files except through `set --pull`.
+    /// local files except through `set --pull`. Alias: `nexus settings`.
+    #[command(visible_alias = "settings")]
     Env {
         #[command(subcommand)]
         action: Option<EnvAction>,
@@ -239,6 +240,12 @@ pub enum Command {
         /// keeps the local version otherwise. Not implied by --yes.
         #[arg(long)]
         trust: bool,
+
+        /// Take excluded (shadowed) paths that git still tracks out of the
+        /// index (`git rm -r --cached`); the files stay on disk and nothing
+        /// is committed. Never done without this flag.
+        #[arg(long)]
+        untrack_shadowed: bool,
     },
 
     /// Deprecated: use `nexus status`, `nexus diff`, `nexus run`.
@@ -1568,6 +1575,28 @@ mod tests {
         assert!(matches!(cli.command, Command::Pull { trust: false, .. }));
         let cli = Cli::try_parse_from(["nexus", "init", "--trust"]).unwrap();
         assert!(matches!(cli.command, Command::Init { trust: true, .. }));
+    }
+
+    #[test]
+    fn test_parse_pull_untrack_shadowed_and_settings_alias() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--untrack-shadowed"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Pull {
+                untrack_shadowed: true,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "pull", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Pull {
+                untrack_shadowed: false,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "settings", "get"]).unwrap();
+        assert!(matches!(cli.command, Command::Env { action: Some(_) }));
     }
 
     #[test]

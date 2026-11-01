@@ -67,12 +67,13 @@ nexus project status                    List issued project inference tokens
 nexus pull [--project-id <id>]          Pull skills and config from the Nexus platform
 nexus pull --dry-run                    Preview devbox workspace changes (incl. removals) without writing
 nexus pull --trust                      Accept new or changed executable content without asking
+nexus pull --untrack-shadowed           Untrack excluded paths git still tracks (kept on disk, not committed)
 nexus push [path] [--name "..."]        Push content changes (agent files; devbox changes as a new fork)
 nexus reset [path]                      Discard local changes (content: backend version; projection: desired)
 nexus stash save                        Save modified content files to a stash
 nexus stash pop                         Restore the most recent stash
 nexus stash list                        List all available stashes
-nexus env [get [key]]                   Show the project's backend settings
+nexus env [get [key]]                   Show the project's backend settings (alias: nexus settings)
 nexus env keys                          List settable keys, types and allowed values
 nexus env set <key> <value> [--pull]    Change a backend setting (admin), optionally pull afterwards
 nexus env set <key>=<value> [--pull]    Same, as one argument

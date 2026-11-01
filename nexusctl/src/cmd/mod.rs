@@ -224,6 +224,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                             ccx::ForceMode::None,
                             false,
                             false,
+                            false,
                         )
                         .await?;
                     } else if changed {
@@ -241,6 +242,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             skip_actor_assets,
             dry_run,
             trust,
+            untrack_shadowed,
         } => {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
@@ -258,6 +260,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 ccx::ForceMode::from_flags(force, force_unmanaged),
                 dry_run,
                 trust,
+                untrack_shadowed,
             )
             .await?;
         }

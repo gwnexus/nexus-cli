@@ -534,14 +534,37 @@ pub fn print_server_exclude_report(report: &ServerExcludeReport, shadow: Option<
             path
         );
     }
-    for path in &report.tracked {
-        println!(
-            "   {} {} is excluded but still tracked by git; untrack it with: git rm -r --cached {}",
-            style("!").bold().yellow(),
-            path,
-            path.trim_end_matches('/')
-        );
+    print_tracked_excluded(&report.tracked);
+}
+
+/// One warning for excluded paths git still tracks, with both ways out:
+/// `git add -u` keeps them tracked, `nexus pull --untrack-shadowed` takes
+/// them out of the index (never done automatically).
+pub fn print_tracked_excluded(paths: &[String]) {
+    if paths.is_empty() {
+        return;
     }
+    println!(
+        "   {} {} excluded path(s) still tracked by git: {}",
+        style("!").bold().yellow(),
+        paths.len(),
+        paths.join(", ")
+    );
+    println!("     git add <path> refuses them; stage their changes with: git add -u");
+    println!("     or untrack them (kept on disk, not committed): nexus pull --untrack-shadowed");
+}
+
+/// Server exclude entries that git still tracks in the repository of
+/// `workspace` (for `nexus status`).
+pub fn tracked_excluded(workspace: &Path) -> Vec<String> {
+    let Ok(git_dir) = find_git_dir_from(workspace.to_path_buf()) else {
+        return Vec::new();
+    };
+    let workdir = git_dir.parent().unwrap_or(workspace).to_path_buf();
+    server_exclude_entries(workspace)
+        .into_iter()
+        .filter(|p| !resolve_tracked_paths_in(p.trim_end_matches('/'), Some(&workdir)).is_empty())
+        .collect()
 }
 
 /// The server exclude block's entries for the repository containing
@@ -1231,7 +1254,7 @@ fn untrack_patterns_in_dir(
 
 /// `--untrack` with the server exclude list: take every entry git still
 /// tracks out of the index (files stay on disk).
-fn untrack_server_entries() {
+pub fn untrack_server_entries() {
     let Ok(workspace) = std::env::current_dir() else {
         return;
     };
@@ -1842,6 +1865,8 @@ mod tests {
             resolve_tracked_paths_in("AGENTS.md", Some(&dir)),
             vec!["AGENTS.md"]
         );
+        // nexus status reads the same list back from the exclude block.
+        assert_eq!(tracked_excluded(&dir), vec!["AGENTS.md", ".claude/"]);
 
         let _ = fs::remove_dir_all(&dir);
     }

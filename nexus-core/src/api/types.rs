@@ -1110,6 +1110,20 @@ pub struct WorkspaceForkExportMeta {
     pub scripts_path: String,
     #[serde(default)]
     pub upstream_changed: bool,
+    /// One-line hint how a shadowed project treats the devbox files; `None`
+    /// for unshadowed projects and on older backends.
+    #[serde(default)]
+    pub shadow_notice: Option<String>,
+}
+
+impl WorkspaceForkExportMeta {
+    /// The shadow notice, unless it is missing or blank.
+    pub fn shadow_notice(&self) -> Option<&str> {
+        self.shadow_notice
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+    }
 }
 
 /// A script entry in the v2 fork export.

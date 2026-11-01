@@ -136,6 +136,10 @@ fn unknown_key(key: &str, schema: &[SettingSchema]) -> anyhow::Error {
 
 /// Parse a command-line value into the JSON value the schema expects.
 fn parse_value(schema: &SettingSchema, raw: &str) -> anyhow::Result<serde_json::Value> {
+    // An empty value clears a nullable key; elsewhere it stays a value.
+    if schema.nullable && raw.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
     if matches!(raw, "null" | "unset") {
         if schema.nullable {
             return Ok(serde_json::Value::Null);
@@ -143,7 +147,7 @@ fn parse_value(schema: &SettingSchema, raw: &str) -> anyhow::Result<serde_json::
         anyhow::bail!("'{}' cannot be unset", schema.key);
     }
     match schema.kind.as_str() {
-        "bool" => match raw.to_ascii_lowercase().as_str() {
+        "bool" | "boolean" => match raw.to_ascii_lowercase().as_str() {
             "true" | "on" | "yes" => Ok(serde_json::Value::Bool(true)),
             "false" | "off" | "no" => Ok(serde_json::Value::Bool(false)),
             _ => anyhow::bail!("'{}' expects true or false, got '{}'", schema.key, raw),
@@ -386,7 +390,7 @@ pub async fn pick(api_url: &str) -> anyhow::Result<Option<(String, String)>> {
 /// `unset` for nullable keys. Empty for free-text settings.
 fn value_choices(schema: &SettingSchema) -> Vec<String> {
     let mut choices: Vec<String> = match schema.kind.as_str() {
-        "bool" => vec!["true".into(), "false".into()],
+        "bool" | "boolean" => vec!["true".into(), "false".into()],
         "enum" => schema.values.iter().map(display).collect(),
         _ => return Vec::new(),
     };
@@ -465,6 +469,23 @@ mod tests {
         assert_eq!(parse_value(&s, "off").unwrap(), serde_json::json!(false));
         assert!(parse_value(&s, "maybe").is_err());
         assert!(parse_value(&s, "unset").is_err());
+    }
+
+    #[test]
+    fn test_parse_boolean_kind_sends_json_bool() {
+        // The backend schema reports booleans as "boolean".
+        let s = schema("boolean", &[], true);
+        assert_eq!(parse_value(&s, "false").unwrap(), serde_json::json!(false));
+        assert_eq!(parse_value(&s, "TRUE").unwrap(), serde_json::json!(true));
+        assert!(parse_value(&s, "nope").is_err());
+        assert_eq!(parse_value(&s, "null").unwrap(), serde_json::Value::Null);
+        assert_eq!(parse_value(&s, "").unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            value_choices(&s),
+            vec!["true".to_string(), "false".into(), "unset".into()]
+        );
+        // Not nullable: an empty value is no boolean.
+        assert!(parse_value(&schema("boolean", &[], false), "").is_err());
     }
 
     #[test]

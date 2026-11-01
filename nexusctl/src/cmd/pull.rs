@@ -664,6 +664,7 @@ pub async fn run(
     ccx_force: super::ccx::ForceMode,
     dry_run: bool,
     trust: bool,
+    untrack_shadowed: bool,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -1376,8 +1377,18 @@ pub async fn run(
     // in .git/info/exclude; tracked files are never untracked, only hinted.
     if let Ok(ref af_export) = af_export_result {
         if !af_export.git_exclude.is_empty() || af_export.shadow.is_some() {
-            let report = super::shadow::apply_server_excludes(&workspace, &af_export.git_exclude);
+            let mut report =
+                super::shadow::apply_server_excludes(&workspace, &af_export.git_exclude);
+            // --untrack-shadowed: take tracked excluded paths out of the
+            // index instead of warning about them.
+            let untrack = untrack_shadowed && !report.tracked.is_empty();
+            if untrack {
+                report.tracked.clear();
+            }
             super::shadow::print_server_exclude_report(&report, af_export.shadow.as_deref());
+            if untrack {
+                super::shadow::untrack_server_entries();
+            }
         }
         // The server decides the workspace target too once it reports it.
         if let Some(effective) = af_export.shadow_workspace {
@@ -1677,6 +1688,9 @@ pub async fn run(
                             }
                         }
                     }
+                }
+                if let Some(notice) = export.meta.shadow_notice() {
+                    println!("   {} {}", style("i").bold().blue(), notice);
                 }
             }
             Err(e) => {
@@ -2686,6 +2700,9 @@ async fn dry_run_workspace(
     }
     if changes == 0 {
         println!("   {} Workspace files are up to date.", style("=").dim());
+    }
+    if let Some(notice) = export.meta.shadow_notice() {
+        println!("   {} {}", style("i").bold().blue(), notice);
     }
     Ok(Some(export))
 }
