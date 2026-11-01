@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.0] - 2026-11-01
+
+Shadowed workspaces keep their machine-local tooling out of git.
+
+### Added
+- **Machine-local scripts for shadowed workspaces.** Backends from 0.19.0 send `local_scripts` in the workspace export (today `scripts/devbox/init/local.sh`), which the committed, shadow-safe `devbox.json` sources when present, so a shadowed project keeps its AI tooling on your machine without committing it. `nexus pull` writes them after excluding them in their own `.git/info/exclude` block (`# >>> nexus local scripts`), puts them through the consent prompt as `devbox_script`, records them in the sync manifest as local scripts and keeps a local edit unless `--force` is given. `nexus pull --dry-run` lists them. When the backend stops sending one, an unchanged copy is deleted together with its exclude line; an edited copy is kept, stays excluded and is reported. Without the field (older backends) nothing changes.
+
+### Changed
+- **`nexus push`, `nexus status`, `nexus diff` and `nexus stash` ignore machine-local scripts**, and the workspace prune never treats them as files the fork dropped. Sync-manifest entries with an explicit kind other than `workspace` are no longer taken for legacy workspace entries.
+
+6 net new tests; 890/890 passing, clippy/fmt clean.
+
 ## [0.31.4] - 2026-11-01
 
 Boolean settings are sent as booleans, and shadowed workspaces explain themselves.

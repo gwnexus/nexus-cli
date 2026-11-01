@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-core"
-version = "0.31.4"
+version = "0.32.0"
 dependencies = [
  "dirs",
  "open",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-tests"
-version = "0.31.4"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "nexus-core",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "nexusctl"
-version = "0.31.4"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "clap",
