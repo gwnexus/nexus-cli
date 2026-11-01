@@ -5,6 +5,9 @@
 //! effort; offline it falls back to the cached run target). `--fix` prints
 //! devbox / brew / npm install commands and runs them only after an explicit
 //! confirmation; `nexus pull` never installs anything.
+//!
+//! For Zellij workspaces it also checks that copying from a pane reaches the
+//! system clipboard; `--fix` offers the matching `copy_command` line.
 
 use std::path::Path;
 
@@ -223,6 +226,13 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
             super::run::ZellijHost::detect().config_env.as_deref(),
         )
     });
+    let clipboard = zellij_config
+        .as_ref()
+        .and_then(|c| super::zellij_clipboard::config_target(c, &workspace))
+        .map(|t| {
+            let host = super::zellij_clipboard::ClipboardHost::detect();
+            (super::zellij_clipboard::check(&t, &host), t, host)
+        });
     let required = required_tools(requires.as_deref(), zellij_workspace);
     let preference = installer_preference(&workspace, super::run::on_path);
     let tools = collect(&required, &preference, probe_tool);
@@ -258,6 +268,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                     "source": c.kind(),
                     "label": c.label(),
                 })),
+                "clipboard": clipboard.as_ref().map(|(c, _, _)| c),
                 "ok": code == 0,
             }))?
         );
@@ -304,6 +315,12 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
             _ => CheckResult::Info(c.label()),
         };
         print_check("zellij config", &result);
+    }
+    if let Some((c, target, host)) = &clipboard {
+        print_clipboard(c, host);
+        if fix {
+            fix_clipboard(c, target, assume_yes)?;
+        }
     }
     let optional: Vec<String> = tools
         .iter()
@@ -399,6 +416,89 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
         );
     }
     Ok(i32::from(failed || !unfixable.is_empty()))
+}
+
+fn print_clipboard(
+    c: &super::zellij_clipboard::ClipboardCheck,
+    host: &super::zellij_clipboard::ClipboardHost,
+) {
+    use super::zellij_clipboard::Level;
+    let msg = c.verdict.message.clone();
+    let result = match c.verdict.level {
+        Level::Ok => CheckResult::Pass(msg),
+        Level::Info => CheckResult::Info(msg),
+        Level::Warn => CheckResult::Warn(msg),
+    };
+    print_check("workspace clipboard", &result);
+    if c.verdict.level == Level::Ok {
+        return;
+    }
+    let config = if c.config_exists {
+        c.config.clone()
+    } else {
+        format!("{} (not created yet)", c.config)
+    };
+    if let Some(line) = &c.verdict.fix_line {
+        if c.project_managed {
+            print_check(
+                "",
+                &CheckResult::Info(format!(
+                    "{config} is managed by nexus pull; add {line} to a config set via \
+                     ZELLIJ_CONFIG_FILE instead"
+                )),
+            );
+        } else {
+            print_check("", &CheckResult::Info(format!("fix: {line} in {config}")));
+        }
+    }
+    if let Some(alt) = &c.verdict.alternative {
+        print_check("", &CheckResult::Info(alt.clone()));
+    }
+    print_check(
+        "",
+        &CheckResult::Info(super::zellij_clipboard::bypass_hint(host).to_string()),
+    );
+}
+
+/// `--fix` for the clipboard: write `copy_command` after consent, with a
+/// backup. Never touches the project-managed config.
+fn fix_clipboard(
+    c: &super::zellij_clipboard::ClipboardCheck,
+    target: &super::zellij_clipboard::ConfigTarget,
+    assume_yes: bool,
+) -> anyhow::Result<()> {
+    let Some(line) = c.verdict.fix_line.as_deref() else {
+        return Ok(());
+    };
+    if !target.writable {
+        return Ok(());
+    }
+    let question = format!("Add {line} to {}?", target.path.display());
+    let confirmed = if assume_yes {
+        true
+    } else if console::Term::stdout().is_term() {
+        confirm(&question)?
+    } else {
+        println!("  (not a terminal: Zellij config unchanged; pass -y to write it)");
+        false
+    };
+    if !confirmed {
+        return Ok(());
+    }
+    match super::zellij_clipboard::write_fix(&target.path, line)? {
+        Some(backup) => println!(
+            "  {} wrote {line} to {} (backup {})",
+            style("✓").green(),
+            target.path.display(),
+            backup.display()
+        ),
+        None => println!(
+            "  {} wrote {line} to {}",
+            style("✓").green(),
+            target.path.display()
+        ),
+    }
+    Ok(())
 }
 
 fn confirm(question: &str) -> anyhow::Result<bool> {

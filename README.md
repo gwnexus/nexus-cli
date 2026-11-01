@@ -56,7 +56,7 @@ nexus login                             Authenticate with the Nexus platform
 nexus logout                            Remove stored credentials
 nexus status [--json]                   Auth, project, devbox shell, environment, and every non-clean file with its next action
 nexus status --agents [--watch] [--json] Local agent fleet view (main agent, subagents, background, state, tool, runtime)
-nexus doctor claude [--fix]             Check the host tools of the Claude Code workspace, offer install commands
+nexus doctor claude [--fix]             Check the host tools and clipboard of the Claude Code workspace, offer fixes
 nexus diff [path]                       Unified diffs for non-clean files (content and projection)
 nexus link [--project-id <id>]          Bind a project to the current workspace (picker: type to filter, arrow keys)
 nexus unlink                            Remove project binding from the workspace
@@ -522,6 +522,22 @@ against the project's CCX compatibility range. `--fix` prints devbox (for
 devbox projects), brew or npm install commands and runs them only after
 confirmation (`-y`). `nexus pull` never installs tools (managed Claude Code
 plugins are the one exception, see below).
+
+For Zellij workspaces the **workspace clipboard** row checks that text
+copied in a pane reaches the system clipboard. It reads the Zellij config
+the session uses (`ZELLIJ_CONFIG_FILE`, the project-local config, else
+`ZELLIJ_CONFIG_DIR` or `~/.config/zellij/config.kdl`). Without an active
+`copy_command`, Zellij copies via OSC 52: iTerm2 drops that unless
+"Applications in terminal may access clipboard" is enabled, Terminal.app
+does not support it, Ghostty, WezTerm and kitty do. On Linux the check
+suggests `wl-copy` (Wayland) or `xclip -selection clipboard` when
+installed; over SSH OSC 52 is the right default. `--fix` writes the
+matching `copy_command` line after confirmation: it uncomments the
+template line when present, else appends it, creates a minimal config when
+none exists, backs up an existing one to `config.kdl.bak-<date>` and
+changes nothing else. The project-local config is never written. `nexus
+run` prints a one-line warning while the check fails, at most once per day
+and CLI version.
 
 `nexus run` embeds the same checks and adds a **launch countdown** after
 they complete. The countdown gives you a moment to review the results before

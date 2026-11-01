@@ -404,6 +404,20 @@ pub async fn run(
         .flatten()
         .and_then(|layout| fs::read_to_string(layout).ok())
         .and_then(|kdl| super::zellij_guard::session_name(&kdl));
+    // Copying from a pane must reach the system clipboard; warn at most
+    // once per day and CLI version, never block.
+    if effective_tool == "zellij" {
+        let source = zellij_config_source(
+            run_target.as_ref(),
+            &workspace,
+            ZellijHost::detect().config_env.as_deref(),
+        );
+        if let Some(notice) =
+            super::zellij_clipboard::run_notice(&source, &workspace, &config::Config::dir()?)
+        {
+            println!("   {} {}", style("!").bold().yellow(), notice);
+        }
+    }
     if effective_tool == "zellij" {
         match super::zellij_guard::detect_nested(zellij_session.as_deref()) {
             super::zellij_guard::Nested::No => {}

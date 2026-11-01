@@ -465,11 +465,13 @@ pub enum EnvAction {
 #[derive(Debug, Subcommand)]
 pub enum DoctorTarget {
     /// Check the tools the Claude Code workspace needs (claude, zellij,
-    /// lazygit, ccusage, delta), driven by your workspace layout. Exits 1
-    /// when a required tool is missing. Supports --output json.
+    /// lazygit, ccusage, delta), driven by your workspace layout, and
+    /// whether copying from a Zellij pane reaches the system clipboard.
+    /// Exits 1 when a required tool is missing. Supports --output json.
     Claude {
         /// Print install commands (devbox, brew or npm) and run them after
-        /// confirmation. Nothing is installed without it.
+        /// confirmation; offer the Zellij `copy_command` line (with a
+        /// backup). Nothing is installed or written without it.
         #[arg(long)]
         fix: bool,
     },

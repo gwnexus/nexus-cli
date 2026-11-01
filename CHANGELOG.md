@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`nexus doctor claude` checks the workspace clipboard** for Zellij workspaces. Without an active `copy_command`, Zellij copies via OSC 52, which iTerm2 drops by default (unless "Applications in terminal may access clipboard" is enabled) and Terminal.app does not support, so selected text never reached the clipboard. The check reads the Zellij config the session uses, the OS and the terminal, and recommends `pbcopy` (macOS), `wl-copy` (Wayland) or `xclip -selection clipboard` (X11, when installed); over SSH and in terminals with OSC 52 support (Ghostty, WezTerm, kitty) it passes or shows info only. It also names the terminal-side alternative and the modifier that bypasses Zellij's mouse capture. Supports `--output json` (`clipboard`).
+- **`nexus doctor claude --fix` writes the `copy_command` line** after confirmation (`-y`): it uncomments the template line when present, else appends it, creates a minimal config when none exists and backs up an existing one to `config.kdl.bak-<date>`. A second run changes nothing; other settings and the project-local config are never touched.
+- **`nexus run` warns once** (per day and CLI version, non-blocking) while the clipboard check fails, pointing to `nexus doctor claude --fix`.
+
+14 net new tests; 904/904 passing, clippy/fmt clean.
+
 ## [0.32.0] - 2026-11-01
 
 Shadowed workspaces keep their machine-local tooling out of git.
