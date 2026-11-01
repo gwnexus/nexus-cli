@@ -164,6 +164,61 @@ pub fn update_workspace_manifest_after_pull(
 /// `kind` of sync-manifest entries for devbox workspace files.
 const WORKSPACE_KIND: &str = "workspace";
 
+/// `kind` of sync-manifest entries for machine-local scripts
+/// (`ws_export.local_scripts`).
+const LOCAL_SCRIPT_KIND: &str = "local_script";
+
+/// Default path of the machine-local script; the backend rejects it in a
+/// workspace push.
+const DEFAULT_LOCAL_SCRIPT: &str = "scripts/devbox/init/local.sh";
+
+/// Record a machine-local script as last written by pull.
+pub fn update_local_script_manifest_after_pull(
+    workspace: &Path,
+    path: &str,
+    content_hash: &str,
+) -> anyhow::Result<()> {
+    let mut manifest = load_manifest(workspace);
+    let obj = manifest
+        .as_object_mut()
+        .expect("manifest should be an object");
+    obj.insert(
+        path.to_string(),
+        serde_json::json!({
+            "target_path": path,
+            "hash": content_hash,
+            "kind": LOCAL_SCRIPT_KIND,
+        }),
+    );
+    save_manifest(workspace, &manifest)
+}
+
+/// The machine-local scripts recorded in the sync manifest, as
+/// `(target_path, hash)`.
+pub fn local_script_manifest_entries(manifest: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(obj) = manifest.as_object() else {
+        return Vec::new();
+    };
+    obj.values()
+        .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some(LOCAL_SCRIPT_KIND))
+        .filter_map(|e| {
+            Some((
+                e.get("target_path")?.as_str()?.to_string(),
+                e.get("hash")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// Whether `path` is a machine-local script: the default path or one pull
+/// recorded as such. These are never pushed, shown or diffed.
+pub fn is_local_script(manifest: &serde_json::Value, path: &str) -> bool {
+    path == DEFAULT_LOCAL_SCRIPT
+        || local_script_manifest_entries(manifest)
+            .iter()
+            .any(|(p, _)| p == path)
+}
+
 /// The devbox workspace files recorded in the sync manifest, as
 /// `(target_path, hash)`. Entries written before the `kind` marker existed
 /// are recognized by their shape: keyed by their own path, and
@@ -176,8 +231,10 @@ pub fn workspace_manifest_entries(manifest: &serde_json::Value) -> Vec<(String, 
         .filter_map(|(key, entry)| {
             let target = entry.get("target_path")?.as_str()?;
             let hash = entry.get("hash")?.as_str()?;
-            let marked = entry.get("kind").and_then(|k| k.as_str()) == Some(WORKSPACE_KIND);
-            let legacy = key == target
+            let kind = entry.get("kind").and_then(|k| k.as_str());
+            let marked = kind == Some(WORKSPACE_KIND);
+            let legacy = kind.is_none()
+                && key == target
                 && (target == "devbox.json"
                     || target.starts_with(&format!("{}/", super::push::SCRIPTS_DIR)));
             (marked || legacy).then(|| (target.to_string(), hash.to_string()))

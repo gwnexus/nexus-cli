@@ -113,6 +113,9 @@ fn collect_modified_in_dir(
                             .unwrap_or(&path)
                             .display()
                             .to_string();
+                        if super::sync::is_local_script(manifest, &rel) {
+                            continue;
+                        }
                         let current_hash = sha256_hex(&content);
                         let manifest_hash = manifest
                             .get(&rel)

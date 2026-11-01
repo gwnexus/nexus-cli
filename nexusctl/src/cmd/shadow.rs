@@ -392,6 +392,8 @@ pub fn ensure_git_excluded_in(start: &Path, paths: &[&str], reason: &str) {
 /// Marker comments for the block holding `af_export.git_exclude`.
 const SERVER_MARKER_START: &str = "# >>> nexus managed exclude (server)";
 const SERVER_MARKER_END: &str = "# <<< nexus managed exclude (server)";
+const LOCAL_MARKER_START: &str = "# >>> nexus local scripts";
+const LOCAL_MARKER_END: &str = "# <<< nexus local scripts";
 
 /// What [`apply_server_excludes`] changed.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -442,14 +444,46 @@ fn block_entries(content: &str, marker_start: &str, marker_end: &str) -> Vec<Str
 /// report which excluded paths git still tracks. Best effort: outside a git
 /// repository, or when the file cannot be written, nothing happens.
 pub fn apply_server_excludes(workspace: &Path, paths: &[String]) -> ServerExcludeReport {
+    apply_exclude_block(
+        workspace,
+        SERVER_MARKER_START,
+        SERVER_MARKER_END,
+        paths,
+        true,
+    )
+}
+
+/// Rewrite the `.git/info/exclude` block for machine-local scripts so it
+/// holds exactly `paths` (an empty list removes the block). The block is
+/// the lifecycle source for these files, so a path listed elsewhere in the
+/// file is still written here.
+pub fn apply_local_script_excludes(workspace: &Path, paths: &[String]) -> ServerExcludeReport {
+    apply_exclude_block(
+        workspace,
+        LOCAL_MARKER_START,
+        LOCAL_MARKER_END,
+        paths,
+        false,
+    )
+}
+
+/// Rewrite one marker-delimited block of `.git/info/exclude`; with
+/// `dedupe`, paths already listed outside the block are left out.
+fn apply_exclude_block(
+    workspace: &Path,
+    marker_start: &str,
+    marker_end: &str,
+    paths: &[String],
+    dedupe: bool,
+) -> ServerExcludeReport {
     let mut report = ServerExcludeReport::default();
     let Ok(git_dir) = find_git_dir_from(workspace.to_path_buf()) else {
         return report;
     };
     let exclude_path = git_dir.join("info").join("exclude");
     let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
-    let previous = block_entries(&existing, SERVER_MARKER_START, SERVER_MARKER_END);
-    let outside = remove_block(&existing, SERVER_MARKER_START, SERVER_MARKER_END);
+    let previous = block_entries(&existing, marker_start, marker_end);
+    let outside = remove_block(&existing, marker_start, marker_end);
 
     let mut valid: Vec<String> = Vec::new();
     for raw in paths {
@@ -462,7 +496,7 @@ pub fn apply_server_excludes(workspace: &Path, paths: &[String]) -> ServerExclud
     }
     let wanted: Vec<String> = valid
         .iter()
-        .filter(|p| !outside.lines().any(|l| l.trim() == p.as_str()))
+        .filter(|p| !dedupe || !outside.lines().any(|l| l.trim() == p.as_str()))
         .cloned()
         .collect();
 
@@ -482,13 +516,13 @@ pub fn apply_server_excludes(workspace: &Path, paths: &[String]) -> ServerExclud
         if !content.is_empty() && !content.ends_with("\n\n") {
             content.push('\n');
         }
-        content.push_str(SERVER_MARKER_START);
+        content.push_str(marker_start);
         content.push('\n');
         for p in &wanted {
             content.push_str(p);
             content.push('\n');
         }
-        content.push_str(SERVER_MARKER_END);
+        content.push_str(marker_end);
         content.push('\n');
     }
     if content != existing {

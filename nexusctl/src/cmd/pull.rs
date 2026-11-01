@@ -1652,6 +1652,17 @@ pub async fn run(
                     .chain(export.scripts.iter().map(|s| s.path.as_str()))
                     .collect();
                 prune_dropped_workspace_files(&workspace, &exported);
+                if let Some(ref local) = export.local_scripts {
+                    ws_written += sync_local_scripts(
+                        &workspace,
+                        local,
+                        &export.meta.scripts_path,
+                        &held,
+                        force,
+                        explicit_force,
+                        &mut ws_report,
+                    )?;
+                }
 
                 if ws_written > 0 {
                     println!(
@@ -2191,6 +2202,33 @@ pub(crate) fn sync_workspace_file(
     manifest: &serde_json::Value,
     report: &mut WorkspaceSyncReport,
 ) -> anyhow::Result<bool> {
+    sync_file_as(
+        workspace,
+        rel,
+        body,
+        executable,
+        force,
+        explicit_force,
+        manifest,
+        report,
+        false,
+    )
+}
+
+/// [`sync_workspace_file`], recording a machine-local script
+/// (`local_only`) under its own manifest kind.
+#[allow(clippy::too_many_arguments)]
+fn sync_file_as(
+    workspace: &Path,
+    rel: &str,
+    body: &str,
+    executable: bool,
+    force: bool,
+    explicit_force: bool,
+    manifest: &serde_json::Value,
+    report: &mut WorkspaceSyncReport,
+    local_only: bool,
+) -> anyhow::Result<bool> {
     if !safe_target(workspace, rel) {
         return Ok(false);
     }
@@ -2209,8 +2247,12 @@ pub(crate) fn sync_workspace_file(
         explicit_force,
     );
     let record = || {
-        let _ =
-            super::sync::update_workspace_manifest_after_pull(workspace, rel, &sha256_hex(body));
+        let hash = sha256_hex(body);
+        let _ = if local_only {
+            super::sync::update_local_script_manifest_after_pull(workspace, rel, &hash)
+        } else {
+            super::sync::update_workspace_manifest_after_pull(workspace, rel, &hash)
+        };
     };
     match action {
         WorkspaceAction::Unchanged => {
@@ -2436,6 +2478,135 @@ fn prune_dropped_workspace_files(workspace: &Path, exported: &[&str]) {
             e
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Machine-local scripts (`ws_export.local_scripts`)
+// ---------------------------------------------------------------------------
+
+/// The `local_scripts` entries pull may write: safe repo-relative paths
+/// below the fork's scripts directory. Others are reported and skipped.
+fn accepted_local_scripts<'a>(
+    workspace: &Path,
+    local: &'a std::collections::BTreeMap<String, String>,
+    scripts_path: &str,
+) -> Vec<(&'a str, &'a str)> {
+    let root = match scripts_path.trim().trim_end_matches('/') {
+        "" => super::push::SCRIPTS_DIR,
+        root => root,
+    };
+    local
+        .iter()
+        .filter_map(|(path, body)| {
+            let ok = path.starts_with(&format!("{root}/"))
+                && !path.ends_with('/')
+                && super::shadow::valid_exclude_path(path)
+                && safe_target(workspace, path);
+            if !ok {
+                println!(
+                    "   {} ignored local script outside {root}/: {path:?}",
+                    style("!").bold().yellow()
+                );
+            }
+            ok.then_some((path.as_str(), body.as_str()))
+        })
+        .collect()
+}
+
+/// What happens to the recorded machine-local scripts no longer in
+/// `delivered`: unchanged ones go, edited ones stay.
+fn plan_dropped_local_scripts(
+    workspace: &Path,
+    manifest: &serde_json::Value,
+    delivered: &[&str],
+) -> Vec<DroppedFile> {
+    super::sync::local_script_manifest_entries(manifest)
+        .into_iter()
+        .filter(|(path, _)| !delivered.contains(&path.as_str()) && safe_target(workspace, path))
+        .map(|(path, hash)| match fs::read(workspace.join(&path)) {
+            Err(_) => DroppedFile::Gone(path),
+            Ok(local) => {
+                if nexus_core::hash::hash_matches_text(&hash, &String::from_utf8_lossy(&local)) {
+                    DroppedFile::Remove(path)
+                } else {
+                    DroppedFile::KeepModified(path)
+                }
+            }
+        })
+        .collect()
+}
+
+fn print_dropped_local_script(item: &DroppedFile) {
+    match item {
+        DroppedFile::Remove(path) => println!(
+            "   {} {} (local script no longer delivered)",
+            style("REMOVE").bold().red(),
+            path
+        ),
+        DroppedFile::KeepModified(path) => println!(
+            "   {} {} (local script no longer delivered, but edited locally; delete it when you no longer need it)",
+            style("KEEP").bold().yellow(),
+            path
+        ),
+        DroppedFile::Gone(_) => {}
+    }
+}
+
+/// Sync the machine-local scripts: git-exclude them first (in their own
+/// block, together with edited files that stay), then write them with the
+/// workspace file rules, then remove the unchanged ones no longer
+/// delivered. `held` are paths refused at the consent prompt. Returns the
+/// number of files written.
+fn sync_local_scripts(
+    workspace: &Path,
+    local: &std::collections::BTreeMap<String, String>,
+    scripts_path: &str,
+    held: &std::collections::HashSet<String>,
+    force: bool,
+    explicit_force: bool,
+    report: &mut WorkspaceSyncReport,
+) -> anyhow::Result<usize> {
+    let manifest = super::sync::load_manifest_pub(workspace);
+    let accepted = accepted_local_scripts(workspace, local, scripts_path);
+    let delivered: Vec<&str> = accepted.iter().map(|(p, _)| *p).collect();
+    let dropped = plan_dropped_local_scripts(workspace, &manifest, &delivered);
+
+    let mut excluded: Vec<String> = delivered.iter().map(|p| p.to_string()).collect();
+    excluded.extend(
+        dropped
+            .iter()
+            .filter(|d| matches!(d, DroppedFile::KeepModified(_)))
+            .map(|d| d.path().to_string()),
+    );
+    super::shadow::apply_local_script_excludes(workspace, &excluded);
+
+    let mut written = 0;
+    for (rel, body) in accepted.iter().filter(|(p, _)| !held.contains(*p)) {
+        if sync_file_as(
+            workspace,
+            rel,
+            body,
+            false,
+            force,
+            explicit_force,
+            &manifest,
+            report,
+            true,
+        )? {
+            println!(
+                "   {} {} (local, git-excluded)",
+                style("+").bold().green(),
+                rel
+            );
+            written += 1;
+        }
+    }
+
+    if !dropped.is_empty() {
+        apply_dropped_workspace_files(workspace, &dropped)?;
+        dropped.iter().for_each(print_dropped_local_script);
+    }
+    Ok(written)
 }
 
 /// Workspace-relative directories of the skill projection pull manages for
@@ -2696,6 +2867,43 @@ async fn dry_run_workspace(
         if !matches!(item, DroppedFile::Gone(_)) {
             print_dropped_workspace_file(&item);
             changes += 1;
+        }
+    }
+    if let Some(ref local) = export.local_scripts {
+        let accepted = accepted_local_scripts(workspace, local, &export.meta.scripts_path);
+        for (rel, body) in &accepted {
+            let current = fs::read(workspace.join(rel))
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).into_owned());
+            let action = decide_workspace_write(
+                current.as_deref(),
+                body,
+                current.is_some() && is_pull_managed(workspace, rel, &manifest),
+                super::ccx::sync_manifest_hash(&manifest, rel).as_deref(),
+                || None,
+                false,
+                false,
+            );
+            let label = match action {
+                WorkspaceAction::Unchanged => continue,
+                WorkspaceAction::Write { .. } if current.is_none() => {
+                    style("CREATE").bold().green()
+                }
+                WorkspaceAction::Write { .. } => style("UPDATE").bold().green(),
+                WorkspaceAction::Skip(WorkspaceSkip::UserManaged) => {
+                    style("SKIP user-managed").bold().yellow()
+                }
+                WorkspaceAction::Skip(_) => style("KEEP modified").bold().yellow(),
+            };
+            println!("   {label} {rel} (local, git-excluded)");
+            changes += 1;
+        }
+        let delivered: Vec<&str> = accepted.iter().map(|(p, _)| *p).collect();
+        for item in plan_dropped_local_scripts(workspace, &manifest, &delivered) {
+            if !matches!(item, DroppedFile::Gone(_)) {
+                print_dropped_local_script(&item);
+                changes += 1;
+            }
         }
     }
     if changes == 0 {
@@ -4543,6 +4751,135 @@ mod tests {
 
     fn ws_manifest(rel: &str, recorded_body: &str) -> serde_json::Value {
         serde_json::json!({ rel: { "target_path": rel, "hash": sha256_hex(recorded_body) } })
+    }
+
+    const LOCAL_SH: &str = "scripts/devbox/init/local.sh";
+
+    fn local_map(entries: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(p, b)| (p.to_string(), b.to_string()))
+            .collect()
+    }
+
+    fn sync_local(dir: &Path, local: &std::collections::BTreeMap<String, String>) -> usize {
+        sync_local_scripts(
+            dir,
+            local,
+            "scripts/devbox",
+            &std::collections::HashSet::new(),
+            false,
+            false,
+            &mut WorkspaceSyncReport::default(),
+        )
+        .unwrap()
+    }
+
+    fn exclude_file(dir: &Path) -> String {
+        fs::read_to_string(dir.join(".git/info/exclude")).unwrap_or_default()
+    }
+
+    #[test]
+    fn test_local_scripts_written_excluded_and_kept_out_of_push() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path();
+        init_git_repo(dir, &[("devbox.json", "{}")]);
+
+        let local = local_map(&[(LOCAL_SH, "echo local\n")]);
+        assert_eq!(sync_local(dir, &local), 1);
+        assert_eq!(
+            fs::read_to_string(dir.join(LOCAL_SH)).unwrap(),
+            "echo local\n"
+        );
+        let exclude = exclude_file(dir);
+        assert!(exclude.contains("# >>> nexus local scripts"));
+        assert!(exclude.lines().any(|l| l == LOCAL_SH));
+
+        // git does not see the file (the test repo has no exclude for the
+        // sync manifest under .nexus/, real workspaces do), and push/status
+        // never collect it.
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(!status.contains("local.sh"), "{status}");
+        assert!(!super::super::push::collect_workspace_hashes(dir).contains_key(LOCAL_SH));
+
+        // Recorded as local, so the workspace prune never touches it.
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        assert_eq!(
+            super::super::sync::local_script_manifest_entries(&manifest),
+            vec![(LOCAL_SH.to_string(), sha256_hex("echo local\n"))]
+        );
+        assert!(super::super::sync::workspace_manifest_entries(&manifest).is_empty());
+
+        // Same content again: nothing written.
+        assert_eq!(sync_local(dir, &local), 0);
+    }
+
+    #[test]
+    fn test_local_scripts_keep_local_edits_and_remove_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path();
+        init_git_repo(dir, &[]);
+        assert_eq!(sync_local(dir, &local_map(&[(LOCAL_SH, "v1\n")])), 1);
+
+        // Edited locally: a new version is not written without --force.
+        fs::write(dir.join(LOCAL_SH), "mine\n").unwrap();
+        assert_eq!(sync_local(dir, &local_map(&[(LOCAL_SH, "v2\n")])), 0);
+        assert_eq!(fs::read_to_string(dir.join(LOCAL_SH)).unwrap(), "mine\n");
+
+        // No longer delivered while edited: kept, and still excluded.
+        assert_eq!(sync_local(dir, &local_map(&[])), 0);
+        assert!(dir.join(LOCAL_SH).exists());
+        assert!(exclude_file(dir).lines().any(|l| l == LOCAL_SH));
+
+        // Back to the delivered version, then dropped: removed with its
+        // exclude entry and manifest record.
+        fs::write(dir.join(LOCAL_SH), "v1\n").unwrap();
+        assert_eq!(sync_local(dir, &local_map(&[])), 0);
+        assert!(!dir.join(LOCAL_SH).exists());
+        assert!(!exclude_file(dir).contains("nexus local scripts"));
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        assert!(super::super::sync::local_script_manifest_entries(&manifest).is_empty());
+    }
+
+    #[test]
+    fn test_local_scripts_reject_paths_outside_scripts_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path();
+        init_git_repo(dir, &[]);
+        let local = local_map(&[
+            ("evil.sh", "x"),
+            ("scripts/devbox/../../evil.sh", "x"),
+            ("scripts/devboxx/a.sh", "x"),
+            ("scripts/devbox/init/", "x"),
+        ]);
+        assert_eq!(sync_local(dir, &local), 0);
+        assert!(!dir.join("evil.sh").exists());
+        assert!(!exclude_file(dir).contains("nexus local scripts"));
+    }
+
+    #[test]
+    fn test_local_scripts_held_by_consent_are_not_written() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path();
+        init_git_repo(dir, &[]);
+        let held: std::collections::HashSet<String> = [LOCAL_SH.to_string()].into();
+        let written = sync_local_scripts(
+            dir,
+            &local_map(&[(LOCAL_SH, "x\n")]),
+            "scripts/devbox",
+            &held,
+            false,
+            false,
+            &mut WorkspaceSyncReport::default(),
+        )
+        .unwrap();
+        assert_eq!(written, 0);
+        assert!(!dir.join(LOCAL_SH).exists());
     }
 
     #[test]

@@ -1156,6 +1156,11 @@ pub struct WorkspaceForkExportResponse {
     /// Empty on older servers.
     #[serde(default)]
     pub executables: Vec<ExportedExecutable>,
+    /// Machine-local scripts (repo-relative path to body): written on pull,
+    /// git-excluded, never pushed. `None` on backends without the field;
+    /// an empty map means none are delivered (and earlier ones go).
+    #[serde(default)]
+    pub local_scripts: Option<std::collections::BTreeMap<String, String>>,
 }
 
 // ---------------------------------------------------------------------------

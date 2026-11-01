@@ -1088,3 +1088,28 @@ fn test_workspace_fork_export_shadow_notice() {
         assert_eq!(resp.meta.shadow_notice(), None);
     }
 }
+
+#[test]
+fn test_workspace_fork_export_local_scripts() {
+    let parse = |extra: serde_json::Value| -> WorkspaceForkExportResponse {
+        let mut v = serde_json::json!({ "devbox_json": "{}", "scripts": [], "meta": {} });
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(v).unwrap()
+    };
+    // Older backend: absent, so pull leaves local scripts alone.
+    assert_eq!(parse(serde_json::json!({})).local_scripts, None);
+    // Present but empty: earlier local scripts are removed.
+    assert_eq!(
+        parse(serde_json::json!({ "local_scripts": {} })).local_scripts,
+        Some(Default::default())
+    );
+    let filled = parse(serde_json::json!({
+        "local_scripts": { "scripts/devbox/init/local.sh": "echo hi\n" }
+    }));
+    assert_eq!(
+        filled.local_scripts.unwrap()["scripts/devbox/init/local.sh"],
+        "echo hi\n"
+    );
+}

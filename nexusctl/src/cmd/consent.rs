@@ -534,6 +534,18 @@ pub fn collect_workspace_v2(workspace: &Path, export: &WorkspaceForkExportRespon
             ));
         }
     }
+    // Machine-local scripts are sourced into the devbox shell: always
+    // executable content.
+    for (path, body) in export.local_scripts.iter().flatten() {
+        items.push(file_item(
+            workspace,
+            Kind::DevboxScript,
+            path,
+            path,
+            body,
+            Slot::Workspace,
+        ));
+    }
     items
 }
 
@@ -1915,5 +1927,26 @@ mod tests {
             held, expected,
             "devbox.json is unchanged, README is no script"
         );
+    }
+
+    #[test]
+    fn test_local_scripts_need_consent() {
+        let cfg = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        write(ws.path(), "devbox.json", "{}\n");
+        let export: WorkspaceForkExportResponse = serde_json::from_value(json!({
+            "devbox_json": "{}\n",
+            "scripts": [],
+            "local_scripts": { "scripts/devbox/init/local.sh": "echo local\n" },
+            "meta": {}
+        }))
+        .unwrap();
+        let items = collect_workspace_v2(ws.path(), &export);
+        assert!(items.iter().any(
+            |i| i.kind == Kind::DevboxScript && i.target_path == "scripts/devbox/init/local.sh"
+        ));
+        let mut gate = Gate::with(store_in(cfg.path(), ws.path()), Answer::Refuse);
+        let held = gate.workspace_v2(ws.path(), &export);
+        assert!(held.contains("scripts/devbox/init/local.sh"));
     }
 }

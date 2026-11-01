@@ -32,11 +32,13 @@ pub fn collect_workspace_hashes(workspace: &Path) -> HashMap<String, String> {
         }
     }
 
-    // scripts/devbox/**
+    // scripts/devbox/**, without the machine-local scripts
     let scripts_dir = workspace.join(SCRIPTS_DIR);
     if scripts_dir.is_dir() {
         collect_script_hashes(workspace, &scripts_dir, &mut hashes);
     }
+    let manifest = super::sync::load_manifest_pub(workspace);
+    hashes.retain(|path, _| !super::sync::is_local_script(&manifest, path));
 
     hashes
 }
@@ -82,6 +84,10 @@ fn read_workspace_files(
     let script_files = if scripts_dir.is_dir() {
         let mut files = HashMap::new();
         read_scripts_recursive(&scripts_dir, &scripts_dir, &mut files);
+        let manifest = super::sync::load_manifest_pub(workspace);
+        files.retain(|rel, _| {
+            !super::sync::is_local_script(&manifest, &format!("{SCRIPTS_DIR}/{rel}"))
+        });
         if files.is_empty() {
             None
         } else {

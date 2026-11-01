@@ -669,6 +669,19 @@ The agentic and nexus targets are the project setting `policy.shadow`:
 | `ai`    | Agentic files stay out of git: `.claude/`, `.nexus/`, `AGENTS.md`, `CLAUDE.md`, `opencode.json`, `.opencode/`. |
 | `nexus` | As `ai`, plus no Nexus references in repository content and no AI attribution (enforced by the directives). |
 
+**Machine-local scripts.** A shadowed project that commits its devbox files
+gets them in a shadow-safe form without the AI tooling. The backend then
+also sends machine-local scripts (today `scripts/devbox/init/local.sh`,
+sourced by the committed `devbox.json` init hook when the file exists) that
+bring the tooling back on your machine only. `nexus pull` lists them in
+their own block in `.git/info/exclude` (`# >>> nexus local scripts`) before
+writing them, asks for consent like for any other script, and keeps a local
+edit unless you pass `--force`. `nexus push`, `nexus status`, `nexus diff`
+and `nexus stash` ignore them. When the backend stops sending one (the
+project is no longer shadowed, or its devbox files are excluded instead),
+the next pull deletes it with its exclude line; an edited copy stays and is
+reported. Backends without the field leave them alone.
+
 When the server sets a level, `nexus shadow status` labels the old local
 agentic block as `Local shadow block (legacy)` and the devbox block as
 `Workspace shadow (devbox files)`, so neither reads as a contradiction to the
