@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.33.0] - 2026-11-01
+
+Copying from a Zellij pane reaches the system clipboard.
 
 ### Added
 - **`nexus doctor claude` checks the workspace clipboard** for Zellij workspaces. Without an active `copy_command`, Zellij copies via OSC 52, which iTerm2 drops by default (unless "Applications in terminal may access clipboard" is enabled) and Terminal.app does not support, so selected text never reached the clipboard. The check reads the Zellij config the session uses, the OS and the terminal, and recommends `pbcopy` (macOS), `wl-copy` (Wayland) or `xclip -selection clipboard` (X11, when installed); over SSH and in terminals with OSC 52 support (Ghostty, WezTerm, kitty) it passes or shows info only. It also names the terminal-side alternative and the modifier that bypasses Zellij's mouse capture. Supports `--output json` (`clipboard`).
