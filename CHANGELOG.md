@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.4] - 2026-11-01
+
+Boolean settings are sent as booleans, and shadowed workspaces explain themselves.
+
+### Fixed
+- **Boolean settings were sent as strings.** The backend reports boolean settings with the kind `boolean`, which the CLI did not recognise, so `nexus env set policy.shadow_workspace false` (and `nexus shadow on|off --target workspace`) sent `"false"` and was rejected. Both `bool` and `boolean` now send a JSON boolean, and an empty value clears a nullable key like `unset` does.
+
+### Added
+- **`nexus pull` prints the backend's shadow notice** for the workspace files of a shadowed project, for example `Shadowed project (shadow ai): the devbox files are committed in a shadow-safe form without AI tooling.` (also with `--dry-run`). Unshadowed projects and older backends print nothing.
+- **`nexus pull --untrack-shadowed`** takes excluded paths that git still tracks out of the index (`git rm -r --cached`); the files stay on disk and nothing is committed. Without the flag nothing is untracked.
+- **`nexus settings`** as an alias for `nexus env`.
+
+### Changed
+- **One warning for excluded paths git still tracks**, on `nexus pull` and now also in `nexus status`. `git add <path>` refuses such paths, so the warning names both ways out: `git add -u` to stage their changes, or `nexus pull --untrack-shadowed` for a clean state. Before, `nexus pull` printed one `git rm --cached` hint per path.
+
+3 net new tests; 884/884 passing, clippy/fmt clean.
+
 ## [0.31.3] - 2026-11-01
 
 The OpenAI key is no longer copied into workspace files.
