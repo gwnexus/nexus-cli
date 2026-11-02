@@ -442,6 +442,23 @@ pub struct AgentFileExportResponse {
     /// and never rewritten by the CLI.
     #[serde(default)]
     pub claude_md_managed_block: Option<String>,
+    /// Claude Code subagents for session-lane actors, with Claude
+    /// frontmatter (`name`, `description`, `model`, `tools`). When present
+    /// they replace the raw actor markdown under `.claude/agents/`.
+    #[serde(default)]
+    pub claude_agents: Option<Vec<ClaudeAgentFile>>,
+    /// Gateway-lane actors: never session subagents, started as their own
+    /// `claude` process against the gateway (`nexus actors run`).
+    #[serde(default)]
+    pub claude_lane_actors: Option<Vec<ClaudeLaneActor>>,
+    /// Base URL of the gateway's Anthropic Messages surface for the local
+    /// lane (`ANTHROPIC_BASE_URL`).
+    #[serde(default)]
+    pub claude_lane_base_url: Option<String>,
+    /// Effective project classification (e.g. `restricted`). Restricted
+    /// projects get no delegate subagents for gateway-lane actors.
+    #[serde(default)]
+    pub effective_classification: Option<String>,
     /// Claude Code Experience bundle metadata. `None` when CCX is disabled or this is not a Claude
     /// project; then nothing CCX-specific happens and any existing lock is
     /// left untouched. When present, `agent_files` entries with category
@@ -776,6 +793,10 @@ pub struct ExportWarning {
     /// Suggested operator action, phrased as something to do.
     #[serde(default)]
     pub hint: Option<String>,
+    /// Runtime the warning applies to (`opencode` | `claude_code`); `None`
+    /// applies to every runtime.
+    #[serde(default)]
+    pub runtime: Option<String>,
 }
 
 fn default_agentic_root() -> String {
@@ -1317,6 +1338,30 @@ pub struct ActorAvatarResponse {
     pub avatar: Option<ActorAvatar>,
     #[serde(default)]
     pub message: Option<String>,
+}
+
+/// A Claude Code subagent file from af_export (`claude_agents`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeAgentFile {
+    pub slug: String,
+    /// `.claude/agents/<slug>.md`
+    #[serde(default)]
+    pub path: String,
+    pub body: String,
+}
+
+/// A gateway-lane actor from af_export (`claude_lane_actors`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeLaneActor {
+    pub slug: String,
+    /// Model ID the gateway resolves (`--model`).
+    pub profile_slug: String,
+    /// Actor profile markdown (without frontmatter).
+    #[serde(default)]
+    pub body: String,
+    /// Context window of the model, for `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// An exported actor file entry from af_export (actor profiles delivered during pull).

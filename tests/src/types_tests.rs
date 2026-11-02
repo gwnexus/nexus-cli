@@ -1113,3 +1113,41 @@ fn test_workspace_fork_export_local_scripts() {
         "echo hi\n"
     );
 }
+
+#[test]
+fn test_agent_file_export_claude_lane_fields() {
+    let base = serde_json::json!({
+        "project_id": "p", "project_name": "p", "agent_files": [], "count": 0
+    });
+    // Older backend: all absent.
+    let resp: AgentFileExportResponse = serde_json::from_value(base.clone()).unwrap();
+    assert!(resp.claude_agents.is_none());
+    assert!(resp.claude_lane_actors.is_none());
+    assert!(resp.claude_lane_base_url.is_none());
+    assert!(resp.effective_classification.is_none());
+
+    let mut v = base;
+    v["claude_agents"] = serde_json::json!([
+        {"slug": "planner", "path": ".claude/agents/planner.md", "body": "---\nname: planner\n---\n"}
+    ]);
+    v["claude_lane_actors"] = serde_json::json!([
+        {"slug": "spark-coder", "profile_slug": "local-coder-main", "body": "# Coder"}
+    ]);
+    v["claude_lane_base_url"] = serde_json::json!("https://gw.example.invalid");
+    v["effective_classification"] = serde_json::json!("restricted");
+    v["export_warnings"] =
+        serde_json::json!([{"code": "c", "message": "m", "runtime": "claude_code"}]);
+    let resp: AgentFileExportResponse = serde_json::from_value(v).unwrap();
+    assert_eq!(
+        resp.claude_agents.unwrap()[0].path,
+        ".claude/agents/planner.md"
+    );
+    let lane = &resp.claude_lane_actors.unwrap()[0];
+    assert_eq!(lane.profile_slug, "local-coder-main");
+    assert_eq!(lane.context_window, None);
+    assert_eq!(resp.effective_classification.as_deref(), Some("restricted"));
+    assert_eq!(
+        resp.export_warnings.unwrap()[0].runtime.as_deref(),
+        Some("claude_code")
+    );
+}

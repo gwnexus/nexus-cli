@@ -314,6 +314,7 @@ pub enum Command {
     },
 
     /// Manage actors assigned to the linked project.
+    #[command(visible_alias = "actor")]
     Actors {
         #[command(subcommand)]
         action: ActorsAction,
@@ -412,6 +413,12 @@ pub enum Command {
         /// the local `[run] workspace` and the project default.
         #[arg(long, value_name = "NAME")]
         workspace: Option<String>,
+
+        /// Add an `actors` tab to the zellij workspace with one pane per
+        /// local-lane actor (`nexus actors run <slug>`). The main pane keeps
+        /// its subscription.
+        #[arg(long)]
+        actor_panes: bool,
 
         /// Named Claude Code account (sets CLAUDE_CONFIG_DIR to an isolated
         /// directory under ~/.config/nexus/claude-accounts/<name>/, giving
@@ -863,6 +870,26 @@ pub enum ActorsAction {
     Avatar {
         #[command(subcommand)]
         action: ActorAvatarAction,
+    },
+
+    /// Start a local-lane actor as its own Claude Code session against the
+    /// Nexus gateway, authenticated with the project inference token (never
+    /// a claude.ai login). Exits with claude's exit code.
+    Run {
+        /// Actor slug (a local-lane actor of the linked project).
+        slug: String,
+
+        /// Run headless (`claude -p`) with this prompt and print the result.
+        #[arg(short = 'p', long)]
+        prompt: Option<String>,
+
+        /// Gateway base URL (default: NEXUS_GATEWAY_URL, then the backend).
+        #[arg(long)]
+        gateway_url: Option<String>,
+
+        /// Extra arguments for claude (after `--`).
+        #[arg(last = true)]
+        claude_args: Vec<String>,
     },
 }
 
@@ -2036,6 +2063,46 @@ mod tests {
             } => assert!(!with_actor_assets),
             _ => panic!("expected Pull command"),
         }
+    }
+
+    #[test]
+    fn test_parse_actor_run() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "actor",
+            "run",
+            "spark-coder",
+            "-p",
+            "review the diff",
+            "--",
+            "--verbose",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Run {
+                        ref slug,
+                        ref prompt,
+                        ref gateway_url,
+                        ref claude_args,
+                    },
+            } => {
+                assert_eq!(slug, "spark-coder");
+                assert_eq!(prompt.as_deref(), Some("review the diff"));
+                assert!(gateway_url.is_none());
+                assert_eq!(claude_args, &["--verbose"]);
+            }
+            _ => panic!("expected Actors Run command"),
+        }
+        let cli = Cli::try_parse_from(["nexus", "run", "--actor-panes"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                actor_panes: true,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -1219,11 +1219,14 @@ pub async fn run(
     // agent's model uses a provider Nexus can't verify, or a route-alias
     // migration hasn't been applied). Rendered verbatim and gated on operator
     // confirmation before opencode.json is written.
-    let export_warnings = af_export_result
-        .as_ref()
-        .ok()
-        .and_then(|r| r.export_warnings.clone())
-        .unwrap_or_default();
+    let export_warnings = warnings_for_runtime(
+        af_export_result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.export_warnings.clone())
+            .unwrap_or_default(),
+        is_claude,
+    );
 
     // Write model-routes.json for traceability
     if let Some(ref routes) = model_routes_export {
@@ -1345,8 +1348,15 @@ pub async fn run(
                     .as_ref()
                     .ok()
                     .and_then(|r| r.claude_md_managed_block.as_deref()),
+                &claude_render::ClaudeAgentInputs::from_export(af_export_result.as_ref().ok()),
                 ccx_force != super::ccx::ForceMode::None,
             )?);
+            if let Ok(ref export) = af_export_result {
+                super::lane::print_sync(
+                    &agentic_root,
+                    super::lane::sync_cache(&workspace, &agentic_root, export)?,
+                );
+            }
         }
     } else {
         println!(
@@ -3317,6 +3327,16 @@ fn confirm_export_warnings(warnings: &[ExportWarning], bypass: bool) -> anyhow::
 }
 
 /// Print `af_export`'s `export_warnings` verbatim, grouped by code.
+/// The warnings for this project's runtime: untagged ones plus those tagged
+/// `claude_code` (Claude projects) or `opencode` (all others).
+fn warnings_for_runtime(warnings: Vec<ExportWarning>, is_claude: bool) -> Vec<ExportWarning> {
+    let own = if is_claude { "claude_code" } else { "opencode" };
+    warnings
+        .into_iter()
+        .filter(|w| w.runtime.as_deref().is_none_or(|r| r == own))
+        .collect()
+}
+
 fn print_export_warnings(warnings: &[ExportWarning]) {
     if warnings.is_empty() {
         return;
@@ -4465,9 +4485,11 @@ pub(crate) fn cleanup_context(
         }
     }
     if !is_claude {
-        for (path, content) in
-            claude_render::claude_agent_files(&af_export.actors, &af_export.agent_files)
-        {
+        for (path, content) in claude_render::claude_agent_files(
+            &af_export.actors,
+            &af_export.agent_files,
+            &claude_render::ClaudeAgentInputs::from_export(Some(af_export)),
+        ) {
             ctx.add_known(&path, &content);
         }
     }
@@ -6371,6 +6393,7 @@ mod tests {
             agent: Some("nexus-plan".to_string()),
             model: Some("github-copilot/claude-sonnet-4.6".to_string()),
             hint: Some("Ensure github-copilot is configured.".to_string()),
+            runtime: None,
         }];
         // --yes / --force bypass: must not attempt to read from stdin.
         assert!(confirm_export_warnings(&warnings, true).unwrap());
@@ -6388,6 +6411,7 @@ mod tests {
                 agent: Some("nexus-plan".to_string()),
                 model: Some("github-copilot/claude-sonnet-4.6".to_string()),
                 hint: None,
+                runtime: None,
             },
             ExportWarning {
                 code: "route_alias_missing".to_string(),
@@ -6395,6 +6419,7 @@ mod tests {
                 agent: None,
                 model: None,
                 hint: Some("Apply migration 0218.".to_string()),
+                runtime: None,
             },
         ];
         assert!(confirm_export_warnings(&warnings, false).unwrap());
@@ -6411,6 +6436,30 @@ mod tests {
         assert!(warning.agent.is_none());
         assert!(warning.model.is_none());
         assert!(warning.hint.is_none());
+        assert!(warning.runtime.is_none());
+    }
+
+    #[test]
+    fn test_warnings_for_runtime_filters_tagged_warnings() {
+        let w = |code: &str, runtime: Option<&str>| ExportWarning {
+            code: code.into(),
+            message: code.into(),
+            agent: None,
+            model: None,
+            hint: None,
+            runtime: runtime.map(str::to_string),
+        };
+        let all = vec![
+            w("any", None),
+            w("oc", Some("opencode")),
+            w("cc", Some("claude_code")),
+        ];
+        let codes = |v: Vec<ExportWarning>| v.into_iter().map(|w| w.code).collect::<Vec<_>>();
+        assert_eq!(
+            codes(warnings_for_runtime(all.clone(), true)),
+            ["any", "cc"]
+        );
+        assert_eq!(codes(warnings_for_runtime(all, false)), ["any", "oc"]);
     }
 
     #[test]
@@ -6485,6 +6534,57 @@ mod tests {
         assert_eq!(instructions, vec![".nexus/AGENTS.md"]);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_opencode_json_unchanged_by_claude_actor_fields() {
+        // The Claude Code fields of af_export (claude_agents,
+        // claude_lane_actors) must not change what an OpenCode pull writes.
+        let base = serde_json::json!({
+            "project_id": "p",
+            "project_name": "p",
+            "agent_files": [],
+            "count": 0,
+            "opencode_agents": {
+                "spark-coder": {"model": "nexus/local-coder-main", "mode": "subagent"},
+                "nexus-plan": {"model": "anthropic/claude-sonnet-4-6", "mode": "primary"}
+            },
+            "opencode_default_model": "nexus/local-coder-main",
+            "opencode_default_agent": "nexus-plan",
+        });
+        let mut with_claude = base.clone();
+        with_claude["claude_agents"] = serde_json::json!([
+            {"slug": "nexus-plan", "path": ".claude/agents/nexus-plan.md", "body": "---\nname: nexus-plan\n---\n"}
+        ]);
+        with_claude["claude_lane_actors"] = serde_json::json!([{"slug": "spark-coder", "profile_slug": "local-coder-main", "body": ""}]);
+        let render = |export: serde_json::Value, name: &str| {
+            let export: nexus_core::api::AgentFileExportResponse =
+                serde_json::from_value(export).unwrap();
+            let dir = temp_pull_dir(name);
+            write_mcp_configs(
+                &dir,
+                "https://nexus.example.invalid",
+                "nxs_pat_regression-token",
+                "p",
+                McpSource::Npm,
+                Some("opencode"),
+                ".nexus",
+                &HashMap::new(),
+                &HashMap::new(),
+                &export.opencode_agents,
+                &export.opencode_default_model,
+                &export.opencode_default_agent,
+                &None,
+                false,
+            )
+            .unwrap();
+            let content = fs::read_to_string(dir.join("opencode.json")).unwrap();
+            let _ = fs::remove_dir_all(&dir);
+            content
+        };
+        let plain = render(base, "oc-regression-plain");
+        assert!(plain.contains("spark-coder"));
+        assert_eq!(plain, render(with_claude, "oc-regression-claude"));
     }
 
     #[test]

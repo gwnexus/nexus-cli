@@ -338,8 +338,17 @@ pub async fn run(
                                 .as_ref()
                                 .ok()
                                 .and_then(|r| r.claude_md_managed_block.as_deref()),
+                            &claude_render::ClaudeAgentInputs::from_export(
+                                af_export_result.as_ref().ok(),
+                            ),
                             force,
                         )?;
+                        if let Ok(ref export) = af_export_result {
+                            super::lane::print_sync(
+                                &agentic_root,
+                                super::lane::sync_cache(&target, &agentic_root, export)?,
+                            );
+                        }
                     }
                 }
                 Err(e) => {

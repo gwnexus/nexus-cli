@@ -30,6 +30,22 @@ impl CheckResult {
     pub(crate) fn is_warn(&self) -> bool {
         matches!(self, CheckResult::Warn(_))
     }
+    pub(crate) fn level(&self) -> &'static str {
+        match self {
+            CheckResult::Info(_) => "info",
+            CheckResult::Pass(_) => "pass",
+            CheckResult::Warn(_) => "warn",
+            CheckResult::Fail(_) => "fail",
+        }
+    }
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            CheckResult::Info(m)
+            | CheckResult::Pass(m)
+            | CheckResult::Warn(m)
+            | CheckResult::Fail(m) => m,
+        }
+    }
 }
 
 /// Display a single check result line.

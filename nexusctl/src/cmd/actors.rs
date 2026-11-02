@@ -371,7 +371,13 @@ pub async fn import(api_url: &str, path: &str, cli_project_id: Option<&str>) -> 
         actors: import_entries,
     };
 
-    let response = client.import_actors(&payload).await?;
+    let response = match client.import_actors(&payload).await {
+        Err(nexus_core::Error::NotFound(_)) => anyhow::bail!(
+            "this Nexus backend has no actor import endpoint (POST /api/mcp/actors); \
+             update the backend or create the actors in the dashboard"
+        ),
+        other => other?,
+    };
 
     println!(
         "   {} {} actor(s) imported",
@@ -495,7 +501,12 @@ pub async fn avatar_reset(
 
 /// Parse YAML frontmatter from a Markdown file.
 ///
-/// Returns a map of key-value pairs and the remaining body text.
+/// Returns a map of key-value pairs and the remaining body text. Nested keys
+/// are stored with their parent path (`routing.route_alias`), list items are
+/// skipped. The hub's export shape (`display_name`, `title`, nested
+/// `routing.route_alias`) is mapped onto the flat fields (`name`, `role`,
+/// `route_alias`) when those are missing, so both shapes validate and
+/// import alike.
 fn parse_frontmatter(content: &str) -> (std::collections::HashMap<String, String>, &str) {
     let mut map = std::collections::HashMap::new();
 
@@ -513,16 +524,45 @@ fn parse_frontmatter(content: &str) -> (std::collections::HashMap<String, String
     let frontmatter_block = &after_first[..end];
     let body_start = after_first[end + 4..].trim_start_matches(['\r', '\n', '-']);
 
-    for line in frontmatter_block.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    // (indent, key) of the enclosing mappings.
+    let mut parents: Vec<(usize, String)> = Vec::new();
+    for raw in frontmatter_block.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("- ") || line == "-" {
             continue;
         }
+        let indent = raw.len() - raw.trim_start().len();
+        while parents.last().is_some_and(|(i, _)| *i >= indent) {
+            parents.pop();
+        }
         if let Some((key, value)) = line.split_once(':') {
-            let key = key.trim().to_string();
-            let value = value.trim().to_string();
-            if !key.is_empty() && !value.is_empty() {
-                map.insert(key, value);
+            let key = key.trim();
+            let value = value.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let path = parents
+                .iter()
+                .map(|(_, k)| k.as_str())
+                .chain(std::iter::once(key))
+                .collect::<Vec<_>>()
+                .join(".");
+            if value.is_empty() {
+                parents.push((indent, key.to_string()));
+            } else {
+                map.insert(path, value.to_string());
+            }
+        }
+    }
+
+    for (flat, alias) in [
+        ("name", "display_name"),
+        ("role", "title"),
+        ("route_alias", "routing.route_alias"),
+    ] {
+        if !map.contains_key(flat) {
+            if let Some(v) = map.get(alias).cloned() {
+                map.insert(flat.to_string(), v);
             }
         }
     }
@@ -608,6 +648,52 @@ mod tests {
         let content = "\n\n---\nslug: test\n---\n\nBody.\n";
         let (fm, _body) = parse_frontmatter(content);
         assert_eq!(fm.get("slug").unwrap(), "test");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_hub_export_shape() {
+        let content = [
+            "---",
+            "id: actor-spark-coder",
+            "slug: spark-coder",
+            "display_name: Spark Coder",
+            "title: Local coder",
+            "mode: subagent",
+            "domains:",
+            "  - backend",
+            "routing:",
+            "  route_alias: local-coder-main",
+            "  local_allowed: true",
+            "avatar:",
+            "  provider: dicebear",
+            "export_targets:",
+            "  opencode:",
+            "    enabled: true",
+            "    mode: primary",
+            "---",
+            "",
+            "# Spark Coder",
+            "",
+        ]
+        .join("\n");
+        let (fm, body) = parse_frontmatter(&content);
+
+        assert_eq!(fm.get("name").unwrap(), "Spark Coder");
+        assert_eq!(fm.get("role").unwrap(), "Local coder");
+        assert_eq!(fm.get("route_alias").unwrap(), "local-coder-main");
+        // Nested keys no longer overwrite top-level ones.
+        assert_eq!(fm.get("mode").unwrap(), "subagent");
+        assert_eq!(fm.get("export_targets.opencode.mode").unwrap(), "primary");
+        assert!(!fm.contains_key("provider"));
+        assert!(body.starts_with("# Spark Coder"));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_flat_fields_win_over_hub_aliases() {
+        let content = "---\nslug: a\nname: Flat\ndisplay_name: Hub\nrole: dev\ntitle: T\n---\n";
+        let (fm, _) = parse_frontmatter(content);
+        assert_eq!(fm.get("name").unwrap(), "Flat");
+        assert_eq!(fm.get("role").unwrap(), "dev");
     }
 
     // -- normalize tests --

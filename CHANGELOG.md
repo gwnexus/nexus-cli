@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Claude Code local lane.** Actors on a gateway route run as their own Claude Code process against the Nexus gateway, so the main session keeps its subscription.
+  - **`nexus actors run <slug> [-p <prompt>] [--gateway-url <url>] [-- <claude args>]`** (alias `nexus actor`).
+    - Starts `claude` with a temporary settings file (mode 0600, removed on exit, also when `nexus` is terminated). The file sets the gateway base URL, the project inference token, every model tier to the actor's profile, `x-nexus-actor`, the context window when the backend sends one, and disables non-essential traffic.
+    - The token is never on the command line. Other credentials and provider switches are removed from the environment.
+    - Without a project token it refuses to start instead of falling back to a claude.ai login.
+    - `-p` runs headless.
+  - **`nexus run --actor-panes`** adds an `actors` tab with one pane per lane actor to the Zellij workspace.
+  - **`nexus doctor claude`** checks the lane: project token, gateway `/health/ready` (connection errors point to the WireGuard or LAN route) and `/v1/models` against the actor profiles. Supports `--output json` (`local_lane`).
+- **Claude Code subagents from the backend.**
+  - `nexus pull` writes the backend's `claude_agents` (Claude frontmatter with `name`, `description`, `model`, `tools`) to `.claude/agents/` instead of the raw actor markdown.
+  - Gateway-lane actors (`claude_lane_actors`) are never written as subagents with their own profile. They get a thin delegate that runs `nexus actors run <slug> -p` and are cached in `<agentic_root>/generated/claude-lane.json`.
+  - Restricted projects (`effective_classification`) get no delegates.
+  - Without the new fields (older backends) nothing changes, except that gateway-lane actors are never rendered as subagents. OpenCode output is unchanged.
+- **Export warnings are filtered by runtime**: warnings tagged `opencode` or `claude_code` show only for that runtime.
+
+### Fixed
+- **`nexus actors validate` and `import` accept the hub's export format**: `display_name`, `title` and nested `routing.route_alias` map to `name`, `role` and `route_alias`. Nested frontmatter keys no longer overwrite top-level ones (e.g. `export_targets.opencode.mode` and `mode`).
+- **`nexus actors import` against a backend without the actor endpoint** now says so instead of a bare `HTTP 404 Not Found`.
+
+17 net new tests; 921/921 passing, clippy/fmt clean.
+
 ## [0.33.0] - 2026-11-01
 
 Copying from a Zellij pane reaches the system clipboard.

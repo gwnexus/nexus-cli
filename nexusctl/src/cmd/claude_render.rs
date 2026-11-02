@@ -22,7 +22,8 @@ use std::path::Path;
 
 use console::style;
 use nexus_core::api::{
-    ClaudeHookAdapter, ClaudeSettingsSpec, ExportedActorFile, ExportedAgentFile, ExportedSkill,
+    ClaudeAgentFile, ClaudeHookAdapter, ClaudeLaneActor, ClaudeSettingsSpec, ExportedActorFile,
+    ExportedAgentFile, ExportedSkill,
 };
 
 use super::ccx;
@@ -202,23 +203,53 @@ pub fn actor_slug_from_agent_file(target_path: &str) -> Option<String> {
     path.file_stem().map(|s| s.to_string_lossy().to_string())
 }
 
-/// Write all assigned actors as native Claude Code sub-agent definitions:
-/// `.claude/agents/<slug>.md`. Merges two possible data sources so no
-/// backend response shape leaves this empty:
-///
-/// 1. The dedicated `actors` field on af_export (`ExportedActorFile`).
-/// 2. Generic `agent_files` entries whose `target_path` lives under an
-///    `.../actors/` directory (see `actor_slug_from_agent_file`).
-///
-/// Reuses the same profile markdown body already delivered for
-/// `<agentic_root>/actors/<slug>.md` — one canonical actor definition, two
-/// projections. Returns the number of files written.
+/// What the backend sends for `.claude/agents/` beyond the raw actor files.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClaudeAgentInputs<'a> {
+    /// `claude_agents`: ready subagents; when present they replace the raw
+    /// actor markdown.
+    pub claude_agents: Option<&'a [ClaudeAgentFile]>,
+    /// `claude_lane_actors`: never written as subagents; each gets a thin
+    /// delegate unless the project is restricted.
+    pub lane_actors: &'a [ClaudeLaneActor],
+    /// Effective classification is restricted: no delegates.
+    pub restricted: bool,
+}
+
+impl<'a> ClaudeAgentInputs<'a> {
+    /// The inputs from an af_export response (empty without one).
+    pub fn from_export(export: Option<&'a nexus_core::api::AgentFileExportResponse>) -> Self {
+        let Some(e) = export else {
+            return Self::default();
+        };
+        ClaudeAgentInputs {
+            claude_agents: e.claude_agents.as_deref(),
+            lane_actors: e.claude_lane_actors.as_deref().unwrap_or_default(),
+            restricted: is_restricted_classification(e.effective_classification.as_deref()),
+        }
+    }
+}
+
+/// Whether an effective classification counts as restricted
+/// (`restricted`, `eu-restricted`, ...).
+pub fn is_restricted_classification(classification: Option<&str>) -> bool {
+    classification.is_some_and(|c| c.trim().to_ascii_lowercase().ends_with("restricted"))
+}
+
+/// Write the actors as native Claude Code subagent definitions:
+/// `.claude/agents/<slug>.md` (see [`claude_agent_files`]). A
+/// gateway-lane actor's file that pull wrote earlier and that is not
+/// rendered anymore (restricted project) is removed when unmodified.
+/// Returns the number of files written.
 pub fn write_claude_agents(
     target: &Path,
+    agentic_root: &str,
     actors: &[ExportedActorFile],
     agent_files: &[ExportedAgentFile],
+    inputs: &ClaudeAgentInputs,
 ) -> anyhow::Result<usize> {
-    let files = claude_agent_files(actors, agent_files);
+    let files = claude_agent_files(actors, agent_files, inputs);
+    remove_stale_lane_agents(target, agentic_root, inputs.lane_actors, &files)?;
     if files.is_empty() {
         return Ok(0);
     }
@@ -237,20 +268,77 @@ pub fn write_claude_agents(
     Ok(written)
 }
 
+/// Remove `.claude/agents/<slug>.md` of gateway-lane actors that are not
+/// rendered, when the file is unchanged since pull wrote it.
+fn remove_stale_lane_agents(
+    target: &Path,
+    agentic_root: &str,
+    lane_actors: &[ClaudeLaneActor],
+    rendered: &[(String, String)],
+) -> anyhow::Result<()> {
+    let recorded = super::pull::load_pull_manifest(target, agentic_root);
+    let mut removed = Vec::new();
+    for actor in lane_actors {
+        let rel = format!(".claude/agents/{}.md", actor.slug);
+        if rendered.iter().any(|(p, _)| *p == rel) || !super::pull::safe_target(target, &rel) {
+            continue;
+        }
+        let Ok(local) = fs::read(target.join(&rel)) else {
+            continue;
+        };
+        if recorded.get(&rel).map(String::as_str)
+            == Some(nexus_core::hash::sha256_hex_bytes(&local).as_str())
+        {
+            fs::remove_file(target.join(&rel))?;
+            removed.push(rel);
+        }
+    }
+    if !removed.is_empty() {
+        super::pull::remove_generated_records(target, agentic_root, |p| {
+            removed.iter().any(|r| r == p)
+        })?;
+    }
+    Ok(())
+}
+
 /// The files [`write_claude_agents`] writes, as `(workspace-relative path,
 /// content)` pairs (`.claude/agents/<slug>.md`), one per actor slug.
+///
+/// With `claude_agents` from the backend those are the only subagents;
+/// without it (older backends) the raw actor markdown is used, merged from
+/// the `actors` field and `agent_files` entries under `.../actors/` (see
+/// [`actor_slug_from_agent_file`]). Gateway-lane actors are never written
+/// with their own profile: they get a thin delegate that runs
+/// `nexus actors run <slug>`, or nothing on restricted projects.
 pub fn claude_agent_files(
     actors: &[ExportedActorFile],
     agent_files: &[ExportedAgentFile],
+    inputs: &ClaudeAgentInputs,
 ) -> Vec<(String, String)> {
+    let is_lane = |slug: &str| inputs.lane_actors.iter().any(|a| a.slug == slug);
     let mut by_slug: BTreeMap<String, String> = BTreeMap::new();
 
-    for actor in actors {
-        by_slug.insert(actor.slug.clone(), actor.body.clone());
+    match inputs.claude_agents {
+        Some(agents) => {
+            for agent in agents {
+                by_slug.insert(agent.slug.clone(), agent.body.clone());
+            }
+        }
+        None => {
+            for actor in actors {
+                by_slug.insert(actor.slug.clone(), actor.body.clone());
+            }
+            for af in agent_files {
+                if let Some(slug) = actor_slug_from_agent_file(&af.target_path) {
+                    by_slug.entry(slug).or_insert_with(|| af.body.clone());
+                }
+            }
+        }
     }
-    for af in agent_files {
-        if let Some(slug) = actor_slug_from_agent_file(&af.target_path) {
-            by_slug.entry(slug).or_insert_with(|| af.body.clone());
+    by_slug.retain(|slug, _| !is_lane(slug) && safe_slug(slug));
+    if !inputs.restricted {
+        for actor in inputs.lane_actors.iter().filter(|a| safe_slug(&a.slug)) {
+            by_slug.insert(actor.slug.clone(), lane_delegate(&actor.slug));
         }
     }
 
@@ -258,6 +346,48 @@ pub fn claude_agent_files(
         .into_iter()
         .map(|(slug, body)| (format!(".claude/agents/{slug}.md"), body))
         .collect()
+}
+
+/// A slug that is a single path component.
+fn safe_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && slug != "."
+        && slug != ".."
+}
+
+/// Thin subagent that hands the task to the actor's own Claude Code
+/// process on the gateway lane; it does no work on the session model.
+pub fn lane_delegate(slug: &str) -> String {
+    format!(
+        "---\n\
+name: {slug}\n\
+description: {desc}\n\
+model: haiku\n\
+tools: Bash\n\
+---\n\
+\n\
+You are a thin delegate for the `{slug}` actor. Do not do the task yourself.\n\
+\n\
+Run it in the actor's own Claude Code process, which uses the project's\n\
+local model through the Nexus gateway:\n\
+\n\
+```bash\n\
+nexus actors run {slug} -p \"$(cat <<'NEXUS_TASK'\n\
+<the complete task, with all context the actor needs>\n\
+NEXUS_TASK\n\
+)\"\n\
+```\n\
+\n\
+Pass the task in full; the actor does not see this conversation. Return the\n\
+command's output unchanged. If the command fails, report the error and stop.\n",
+        desc = yaml_escape(&format!(
+            "Delegates to the {slug} actor, which runs on a local model via the Nexus gateway. \
+             The task and the result pass through the main session."
+        )),
+    )
 }
 
 /// Write the provider/model routing catalog consumed by the Claude Code
@@ -1207,6 +1337,7 @@ pub fn render_claude_projection(
     include_co_authored_by: Option<bool>,
     claude_settings: Option<&ClaudeSettingsSpec>,
     claude_md_managed_block: Option<&str>,
+    agent_inputs: &ClaudeAgentInputs,
     force: bool,
 ) -> anyhow::Result<ClaudeProjectionReport> {
     let mut skills_written = 0;
@@ -1223,12 +1354,26 @@ pub fn render_claude_projection(
         );
     }
 
-    let agents_written = write_claude_agents(target, actors, agent_files)?;
+    let agents_written =
+        write_claude_agents(target, agentic_root, actors, agent_files, agent_inputs)?;
     if agents_written > 0 {
         println!(
             "   {} .claude/agents/ ({} agent(s))",
             style("+").bold().green(),
             agents_written
+        );
+    }
+    if agent_inputs.restricted && !agent_inputs.lane_actors.is_empty() {
+        println!(
+            "   {} Restricted project: no delegate subagents for local-lane actors ({}); \
+             start them with nexus actors run <slug> or nexus run --actor-panes",
+            style("i").bold().blue(),
+            agent_inputs
+                .lane_actors
+                .iter()
+                .map(|a| a.slug.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -1237,7 +1382,7 @@ pub fn render_claude_projection(
     // and the operator's own skills/agents (v0.28.4 projection cleanup).
     let mut rendered: Vec<(String, String)> =
         skills.iter().flat_map(render_claude_skill_files).collect();
-    rendered.extend(claude_agent_files(actors, agent_files));
+    rendered.extend(claude_agent_files(actors, agent_files, agent_inputs));
     super::pull::record_generated_many(target, agentic_root, &rendered)?;
 
     // Routing-guard adapter inputs: only written when the backend supplies runtime_spec.
@@ -1706,7 +1851,9 @@ mod tests {
             },
         ];
 
-        let written = write_claude_agents(&dir, &actors, &[]).unwrap();
+        let written =
+            write_claude_agents(&dir, ".nexus", &actors, &[], &ClaudeAgentInputs::default())
+                .unwrap();
         assert_eq!(written, 2);
         assert!(dir.join(".claude/agents/planner.md").exists());
         assert!(dir.join(".claude/agents/reviewer.md").exists());
@@ -1718,10 +1865,120 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn raw_actor(slug: &str) -> ExportedActorFile {
+        ExportedActorFile {
+            slug: slug.into(),
+            name: slug.into(),
+            role: "agent".into(),
+            body: format!("---\nslug: {slug}\n---\n# {slug}"),
+            avatar: None,
+            route_alias: None,
+        }
+    }
+
+    fn lane(slug: &str) -> ClaudeLaneActor {
+        ClaudeLaneActor {
+            slug: slug.into(),
+            profile_slug: "local-coder-main".into(),
+            body: String::new(),
+            context_window: None,
+        }
+    }
+
+    #[test]
+    fn test_claude_agents_replace_raw_actor_markdown() {
+        let agents = vec![ClaudeAgentFile {
+            slug: "planner".into(),
+            path: ".claude/agents/planner.md".into(),
+            body: "---\nname: planner\ndescription: \"Plans\"\nmodel: sonnet\n---\n\nPlan.\n"
+                .into(),
+        }];
+        let inputs = ClaudeAgentInputs {
+            claude_agents: Some(&agents),
+            ..Default::default()
+        };
+        let files =
+            claude_agent_files(&[raw_actor("planner"), raw_actor("reviewer")], &[], &inputs);
+        // Only the backend's subagents: no fallback to raw markdown, even for
+        // actors the backend left out.
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, ".claude/agents/planner.md");
+        assert!(files[0].1.contains("model: sonnet"));
+    }
+
+    #[test]
+    fn test_lane_actors_get_a_delegate_not_their_profile() {
+        let lanes = [lane("spark-coder")];
+        let inputs = ClaudeAgentInputs {
+            lane_actors: &lanes,
+            ..Default::default()
+        };
+        // Older backend (no claude_agents): the raw file of a lane actor is
+        // not written either.
+        let files = claude_agent_files(
+            &[raw_actor("planner"), raw_actor("spark-coder")],
+            &[],
+            &inputs,
+        );
+        let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            [".claude/agents/planner.md", ".claude/agents/spark-coder.md"]
+        );
+        let delegate = &files[1].1;
+        assert!(delegate.starts_with("---\nname: spark-coder\n"));
+        assert!(delegate.contains("tools: Bash"));
+        assert!(delegate.contains("nexus actors run spark-coder -p"));
+        assert!(delegate.contains("pass through the main session"));
+        assert!(!delegate.contains("# spark-coder"));
+    }
+
+    #[test]
+    fn test_restricted_project_gets_no_delegates_and_drops_stale_ones() {
+        let dir = temp_dir("lane-restricted");
+        let lanes = [lane("spark-coder")];
+        let open = ClaudeAgentInputs {
+            lane_actors: &lanes,
+            ..Default::default()
+        };
+        // A delegate from an earlier pull, recorded in the manifest.
+        write_claude_agents(&dir, ".nexus", &[], &[], &open).unwrap();
+        crate::cmd::pull::record_generated_many(
+            &dir,
+            ".nexus",
+            &claude_agent_files(&[], &[], &open),
+        )
+        .unwrap();
+        assert!(dir.join(".claude/agents/spark-coder.md").exists());
+
+        let restricted = ClaudeAgentInputs {
+            restricted: true,
+            ..open
+        };
+        assert!(claude_agent_files(&[], &[], &restricted).is_empty());
+        write_claude_agents(&dir, ".nexus", &[], &[], &restricted).unwrap();
+        assert!(!dir.join(".claude/agents/spark-coder.md").exists());
+
+        // A locally edited file is kept.
+        fs::write(dir.join(".claude/agents/spark-coder.md"), "mine").unwrap();
+        write_claude_agents(&dir, ".nexus", &[], &[], &restricted).unwrap();
+        assert!(dir.join(".claude/agents/spark-coder.md").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_is_restricted_classification() {
+        assert!(is_restricted_classification(Some("restricted")));
+        assert!(is_restricted_classification(Some("eu-restricted")));
+        assert!(!is_restricted_classification(Some("internal")));
+        assert!(!is_restricted_classification(None));
+    }
+
     #[test]
     fn test_write_claude_agents_noop_when_empty() {
         let dir = temp_dir("agents-empty");
-        let written = write_claude_agents(&dir, &[], &[]).unwrap();
+        let written =
+            write_claude_agents(&dir, ".nexus", &[], &[], &ClaudeAgentInputs::default()).unwrap();
         assert_eq!(written, 0);
         assert!(!dir.join(".claude/agents").exists());
         let _ = fs::remove_dir_all(&dir);
@@ -1784,7 +2041,14 @@ mod tests {
         ];
 
         // Dedicated `actors` field is empty, as observed in the field report.
-        let written = write_claude_agents(&dir, &[], &agent_files).unwrap();
+        let written = write_claude_agents(
+            &dir,
+            ".nexus",
+            &[],
+            &agent_files,
+            &ClaudeAgentInputs::default(),
+        )
+        .unwrap();
         assert_eq!(written, 1);
         assert!(dir
             .join(".claude/agents/technical-project-manager.md")
@@ -1818,7 +2082,14 @@ mod tests {
             agent_file_id: None,
         }];
 
-        let written = write_claude_agents(&dir, &actors, &agent_files).unwrap();
+        let written = write_claude_agents(
+            &dir,
+            ".nexus",
+            &actors,
+            &agent_files,
+            &ClaudeAgentInputs::default(),
+        )
+        .unwrap();
         assert_eq!(written, 2);
         assert!(dir.join(".claude/agents/planner.md").exists());
         assert!(dir.join(".claude/agents/reviewer.md").exists());
@@ -2014,6 +2285,7 @@ mod tests {
             None,
             None,
             None,
+            &ClaudeAgentInputs::default(),
             false,
         )
         .unwrap();
@@ -2052,6 +2324,7 @@ mod tests {
             None,
             None,
             None,
+            &ClaudeAgentInputs::default(),
             false,
         )
         .unwrap();
@@ -2590,6 +2863,7 @@ mod tests {
             None,
             Some(&first_settings),
             None,
+            &ClaudeAgentInputs::default(),
             false,
         )
         .unwrap();
@@ -2612,6 +2886,7 @@ mod tests {
             None,
             None,
             None,
+            &ClaudeAgentInputs::default(),
             false,
         )
         .unwrap();
@@ -3371,6 +3646,7 @@ mod tests {
             None,
             None,
             None,
+            &ClaudeAgentInputs::default(),
             false,
         )
         .unwrap();

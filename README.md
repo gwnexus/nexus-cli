@@ -79,6 +79,9 @@ nexus env set <key> <value> [--pull]    Change a backend setting (admin), option
 nexus env set <key>=<value> [--pull]    Same, as one argument
 nexus env set                           Pick key and value interactively (schema-driven)
 nexus run [-- <args>]                   Start the agent environment the backend selects
+nexus run --actor-panes                 Add an actors tab with one pane per local-lane actor (zellij)
+nexus actors run <slug> [-p <prompt>]   Start a local-lane actor as its own Claude Code session on the gateway
+nexus actors validate|import <path>     Check or import actor profiles (flat or hub export frontmatter)
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
 nexus deinit [--force]                  Remove all AI scaffold files from the workspace
@@ -542,6 +545,40 @@ and CLI version.
 `nexus run` embeds the same checks and adds a **launch countdown** after
 they complete. The countdown gives you a moment to review the results before
 the tool starts. Press `Ctrl+C` at any time to abort.
+
+### Claude Code local lane
+
+Actors on a gateway route run as their **own Claude Code process** against
+the Nexus gateway, while the main session stays on your Claude
+subscription (Claude Code allows one base URL per process, so subagents
+cannot switch). `nexus pull` writes:
+
+- `.claude/agents/<slug>.md` for session-lane actors. When the backend sends
+  ready Claude subagents (`claude_agents`), they replace the raw actor
+  markdown.
+- a thin delegate `.claude/agents/<slug>.md` for each gateway-lane actor:
+  it hands the task to `nexus actors run <slug> -p ...` and returns the
+  result, so task and result pass through the main session. Restricted
+  projects get no delegates (an unmodified earlier one is removed); use the
+  actor pane or `nexus actors run` there.
+- `<agentic_root>/generated/claude-lane.json` with the lane actors.
+
+`nexus actors run <slug>` starts `claude` with a temporary settings file
+(mode 0600, removed on exit) that points `ANTHROPIC_BASE_URL` at the gateway
+and authenticates with the project inference token (`nexus project link`);
+every model tier is set to the actor's profile, the request carries
+`x-nexus-actor: <slug>`, and non-essential traffic is off. The token never
+appears on the command line, and other credentials are removed from the
+process environment. Without a project token it refuses to start, so a
+claude.ai login is never used. `-p "<prompt>"` runs headless; arguments
+after `--` go to `claude`. The gateway URL comes from `--gateway-url`,
+`NEXUS_GATEWAY_URL` or the backend.
+
+`nexus run --actor-panes` opens the Zellij workspace with an extra `actors`
+tab, one pane per lane actor. `nexus doctor claude` checks the lane: the
+project token, the gateway's `/health/ready` (a connection error points to
+the WireGuard or LAN route) and whether `/v1/models` lists every actor
+profile.
 
 ### Directives
 

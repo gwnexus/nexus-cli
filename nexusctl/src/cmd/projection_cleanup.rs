@@ -1536,6 +1536,7 @@ mod tests {
             None,
             Some(&settings_spec()),
             Some(BLOCK),
+            &claude_render::ClaudeAgentInputs::default(),
             false,
         )
         .unwrap();
@@ -1611,7 +1612,9 @@ mod tests {
                 c.add_known(&p, &content);
             }
         }
-        for (p, content) in claude_render::claude_agent_files(&[actor("planner")], &[]) {
+        for (p, content) in
+            claude_render::claude_agent_files(&[actor("planner")], &[], &Default::default())
+        {
             c.add_known(&p, &content);
         }
         c.keep.insert(".nexus/skills/nx-a/SKILL.md".into());

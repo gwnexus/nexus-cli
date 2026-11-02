@@ -17,6 +17,7 @@ pub(crate) mod git;
 pub(crate) mod githooks;
 pub(crate) mod import;
 mod init;
+mod lane;
 mod link;
 pub(crate) mod mcp_local;
 pub(crate) mod observer;
@@ -566,6 +567,23 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 } => {
                     actors::export(&api_url, target, project_id.as_deref()).await?;
                 }
+                ActorsAction::Run {
+                    ref slug,
+                    ref prompt,
+                    ref gateway_url,
+                    ref claude_args,
+                } => {
+                    exit_with(
+                        lane::run(
+                            &api_url,
+                            slug,
+                            prompt.as_deref(),
+                            gateway_url.as_deref(),
+                            claude_args,
+                        )
+                        .await?,
+                    );
+                }
                 ActorsAction::Avatar { ref action } => match action {
                     ActorAvatarAction::Generate {
                         ref slug,
@@ -620,6 +638,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             force,
             plain,
             ref workspace,
+            actor_panes,
             ref account,
             ref args,
         } => {
@@ -648,6 +667,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         .as_deref()
                         .map(|w| (w, run::WorkspaceSource::Flag))
                 },
+                actor_panes,
             )
             .await?;
         }

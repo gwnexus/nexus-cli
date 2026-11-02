@@ -233,6 +233,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
             let host = super::zellij_clipboard::ClipboardHost::detect();
             (super::zellij_clipboard::check(&t, &host), t, host)
         });
+    let lane_rows = super::lane::doctor_checks(&workspace).await;
     let required = required_tools(requires.as_deref(), zellij_workspace);
     let preference = installer_preference(&workspace, super::run::on_path);
     let tools = collect(&required, &preference, probe_tool);
@@ -269,6 +270,11 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                     "label": c.label(),
                 })),
                 "clipboard": clipboard.as_ref().map(|(c, _, _)| c),
+                "local_lane": lane_rows.iter().map(|(label, r)| serde_json::json!({
+                    "check": label,
+                    "level": r.level(),
+                    "message": r.message(),
+                })).collect::<Vec<_>>(),
                 "ok": code == 0,
             }))?
         );
@@ -315,6 +321,9 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
             _ => CheckResult::Info(c.label()),
         };
         print_check("zellij config", &result);
+    }
+    for (label, result) in &lane_rows {
+        print_check(label, result);
     }
     if let Some((c, target, host)) = &clipboard {
         print_clipboard(c, host);

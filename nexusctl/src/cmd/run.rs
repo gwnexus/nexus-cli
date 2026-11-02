@@ -216,6 +216,7 @@ pub async fn run(
     account: Option<&str>,
     assume_yes: bool,
     workspace_flag: Option<(&str, WorkspaceSource)>,
+    actor_panes: bool,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
     let agentic_root = resolve_agentic_root(&workspace);
@@ -305,7 +306,7 @@ pub async fn run(
             None => None,
         },
     };
-    let launch = resolve_launch(
+    let mut launch = resolve_launch(
         tool,
         default_tool,
         agent_owner.as_deref(),
@@ -314,6 +315,14 @@ pub async fn run(
         &workspace,
         &ZellijHost::detect(),
     );
+    if actor_panes {
+        let result = if launch.tool == "zellij" {
+            super::lane::apply_actor_panes(&workspace, &agentic_root, &mut launch.leading_args)?
+        } else {
+            CheckResult::Warn("--actor-panes needs the zellij workspace".into())
+        };
+        print_check("Actor panes", &result);
+    }
     let workspace_row = row_check(&launch.row);
     if skip_checks && workspace_row.is_warn() {
         // The row is part of the pre-launch check; keep the warning visible.
@@ -3056,10 +3065,12 @@ mod tests {
                 force,
                 plain,
                 workspace,
+                actor_panes,
                 account,
                 args,
             } => {
                 assert!(!plain);
+                assert!(!actor_panes);
                 assert!(workspace.is_none());
                 assert!(tool.is_none());
                 assert!(!dry_run);
