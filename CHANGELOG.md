@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.34.0] - 2026-11-02
+
+Gateway-lane actors run as their own agent session; the main session keeps its subscription.
 
 ### Added
 - **Claude Code local lane.** Actors on a gateway route run as their own Claude Code process against the Nexus gateway, so the main session keeps its subscription.
