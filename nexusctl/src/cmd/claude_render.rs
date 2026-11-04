@@ -212,7 +212,7 @@ pub struct ClaudeAgentInputs<'a> {
     /// `claude_lane_actors`: never written as subagents; each gets a thin
     /// delegate unless the project is restricted.
     pub lane_actors: &'a [ClaudeLaneActor],
-    /// Effective classification is restricted: no delegates.
+    /// Gateway classification is restricted: no delegates.
     pub restricted: bool,
 }
 
@@ -225,15 +225,15 @@ impl<'a> ClaudeAgentInputs<'a> {
         ClaudeAgentInputs {
             claude_agents: e.claude_agents.as_deref(),
             lane_actors: e.claude_lane_actors.as_deref().unwrap_or_default(),
-            restricted: is_restricted_classification(e.effective_classification.as_deref()),
+            restricted: is_restricted_classification(e.effective_gateway_classification.as_deref()),
         }
     }
 }
 
-/// Whether an effective classification counts as restricted
-/// (`restricted`, `eu-restricted`, ...).
+/// Whether a gateway classification (`public`, `internal`, `confidential`,
+/// `restricted`) is restricted. Missing means not restricted.
 pub fn is_restricted_classification(classification: Option<&str>) -> bool {
-    classification.is_some_and(|c| c.trim().to_ascii_lowercase().ends_with("restricted"))
+    classification.is_some_and(|c| c.trim().eq_ignore_ascii_case("restricted"))
 }
 
 /// Write the actors as native Claude Code subagent definitions:
@@ -1969,9 +1969,39 @@ mod tests {
     #[test]
     fn test_is_restricted_classification() {
         assert!(is_restricted_classification(Some("restricted")));
-        assert!(is_restricted_classification(Some("eu-restricted")));
+        assert!(is_restricted_classification(Some(" Restricted ")));
+        // Raw levels are not gateway classifications.
+        assert!(!is_restricted_classification(Some("eu-restricted")));
+        assert!(!is_restricted_classification(Some("confidential")));
         assert!(!is_restricted_classification(Some("internal")));
         assert!(!is_restricted_classification(None));
+    }
+
+    #[test]
+    fn test_from_export_uses_gateway_classification() {
+        let export = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "project_id": "p", "project_name": "p", "agent_files": [], "count": 0
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<nexus_core::api::AgentFileExportResponse>(v).unwrap()
+        };
+        let restricted = export(serde_json::json!({
+            "effective_classification": "strictly-confidential",
+            "effective_gateway_classification": "restricted"
+        }));
+        assert!(ClaudeAgentInputs::from_export(Some(&restricted)).restricted);
+        // EU RESTRICTED maps to confidential: delegates stay.
+        let eu = export(serde_json::json!({
+            "effective_classification": "eu-restricted",
+            "effective_gateway_classification": "confidential"
+        }));
+        assert!(!ClaudeAgentInputs::from_export(Some(&eu)).restricted);
+        // Older hub without the gateway classification.
+        let old = export(serde_json::json!({"effective_classification": "eu-restricted"}));
+        assert!(!ClaudeAgentInputs::from_export(Some(&old)).restricted);
     }
 
     #[test]

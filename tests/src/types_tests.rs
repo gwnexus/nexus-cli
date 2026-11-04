@@ -1125,6 +1125,7 @@ fn test_agent_file_export_claude_lane_fields() {
     assert!(resp.claude_lane_actors.is_none());
     assert!(resp.claude_lane_base_url.is_none());
     assert!(resp.effective_classification.is_none());
+    assert!(resp.effective_gateway_classification.is_none());
 
     let mut v = base;
     v["claude_agents"] = serde_json::json!([
@@ -1134,7 +1135,8 @@ fn test_agent_file_export_claude_lane_fields() {
         {"slug": "spark-coder", "profile_slug": "local-coder-main", "body": "# Coder"}
     ]);
     v["claude_lane_base_url"] = serde_json::json!("https://gw.example.invalid");
-    v["effective_classification"] = serde_json::json!("restricted");
+    v["effective_classification"] = serde_json::json!("strictly-confidential");
+    v["effective_gateway_classification"] = serde_json::json!("restricted");
     v["export_warnings"] =
         serde_json::json!([{"code": "c", "message": "m", "runtime": "claude_code"}]);
     let resp: AgentFileExportResponse = serde_json::from_value(v).unwrap();
@@ -1145,7 +1147,14 @@ fn test_agent_file_export_claude_lane_fields() {
     let lane = &resp.claude_lane_actors.unwrap()[0];
     assert_eq!(lane.profile_slug, "local-coder-main");
     assert_eq!(lane.context_window, None);
-    assert_eq!(resp.effective_classification.as_deref(), Some("restricted"));
+    assert_eq!(
+        resp.effective_classification.as_deref(),
+        Some("strictly-confidential")
+    );
+    assert_eq!(
+        resp.effective_gateway_classification.as_deref(),
+        Some("restricted")
+    );
     assert_eq!(
         resp.export_warnings.unwrap()[0].runtime.as_deref(),
         Some("claude_code")

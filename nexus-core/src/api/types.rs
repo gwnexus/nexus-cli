@@ -455,10 +455,15 @@ pub struct AgentFileExportResponse {
     /// lane (`ANTHROPIC_BASE_URL`).
     #[serde(default)]
     pub claude_lane_base_url: Option<String>,
-    /// Effective project classification (e.g. `restricted`). Restricted
-    /// projects get no delegate subagents for gateway-lane actors.
+    /// Effective confidentiality level of the project and customer
+    /// (e.g. `internal`, `vs-nfd`, `eu-secret`). Informational only.
     #[serde(default)]
     pub effective_classification: Option<String>,
+    /// Gateway classification derived from the effective level:
+    /// `public`, `internal`, `confidential` or `restricted`. Restricted
+    /// projects get no delegate subagents for gateway-lane actors.
+    #[serde(default)]
+    pub effective_gateway_classification: Option<String>,
     /// Claude Code Experience bundle metadata. `None` when CCX is disabled or this is not a Claude
     /// project; then nothing CCX-specific happens and any existing lock is
     /// left untouched. When present, `agent_files` entries with category
