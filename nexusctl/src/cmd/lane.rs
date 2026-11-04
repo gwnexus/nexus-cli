@@ -164,6 +164,7 @@ fn claude_args(
     settings: &Path,
     prompt: Option<&str>,
     extra: &[String],
+    neutral_agent: bool,
 ) -> Vec<String> {
     let mut args = vec![
         "--settings".to_string(),
@@ -171,6 +172,23 @@ fn claude_args(
         "--model".to_string(),
         actor.profile_slug.clone(),
     ];
+    if neutral_agent
+        && !extra
+            .iter()
+            .any(|a| a == "--agent" || a.starts_with("--agent="))
+    {
+        // An empty prompt keeps the default system prompt; no `model` or
+        // `tools` means the session's own apply.
+        let agents = serde_json::json!({
+            LANE_AGENT: {"description": "Nexus local lane actor", "prompt": ""}
+        });
+        args.extend([
+            "--agents".to_string(),
+            agents.to_string(),
+            "--agent".to_string(),
+            LANE_AGENT.to_string(),
+        ]);
+    }
     if !actor.body.trim().is_empty() {
         args.push("--append-system-prompt".into());
         args.push(actor.body.trim().to_string());
@@ -181,6 +199,32 @@ fn claude_args(
     }
     args.extend(extra.iter().cloned());
     args
+}
+
+/// Neutral agent a lane session starts under when a settings file names a
+/// main-thread `agent`; otherwise that agent's prompt and model would
+/// replace the actor's.
+const LANE_AGENT: &str = "nexus-lane";
+
+/// Whether a Claude settings file in scope (project, local, user) sets
+/// `agent`.
+fn main_agent_configured(workspace: &Path, home: Option<&Path>) -> bool {
+    let mut files = vec![
+        workspace.join(".claude/settings.json"),
+        workspace.join(".claude/settings.local.json"),
+    ];
+    files.extend(home.map(|h| h.join(".claude/settings.json")));
+    files.iter().any(|f| {
+        fs::read_to_string(f)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| {
+                v.get("agent")
+                    .and_then(|a| a.as_str())
+                    .map(|a| !a.trim().is_empty())
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Directory for the per-run settings files (0700).
@@ -316,7 +360,15 @@ pub async fn run(
         );
     }
     let mut cmd = std::process::Command::new("claude");
-    cmd.args(claude_args(actor, &settings.0, prompt, extra));
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let neutral_agent = main_agent_configured(&workspace, home.as_deref());
+    cmd.args(claude_args(
+        actor,
+        &settings.0,
+        prompt,
+        extra,
+        neutral_agent,
+    ));
     for key in SCRUBBED_ENV {
         cmd.env_remove(key);
     }
@@ -635,6 +687,7 @@ mod tests {
             Path::new("/s/x.json"),
             Some("fix it"),
             &["--verbose".into()],
+            false,
         );
         assert_eq!(
             &args[..4],
@@ -643,8 +696,48 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-p", "fix it"]));
         assert_eq!(args.last().unwrap(), "--verbose");
         assert!(args.iter().all(|a| !a.contains("nxs_proj")));
-        let interactive = claude_args(&a, Path::new("/s/x.json"), None, &[]);
+        let interactive = claude_args(&a, Path::new("/s/x.json"), None, &[], false);
         assert!(!interactive.contains(&"-p".to_string()));
+        assert!(!interactive.contains(&"--agent".to_string()));
+    }
+
+    #[test]
+    fn test_main_agent_setting_gets_a_neutral_lane_agent() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        assert!(!main_agent_configured(ws.path(), Some(home.path())));
+        fs::create_dir_all(home.path().join(".claude")).unwrap();
+        fs::write(
+            home.path().join(".claude/settings.json"),
+            r#"{"agent":"main"}"#,
+        )
+        .unwrap();
+        assert!(main_agent_configured(ws.path(), Some(home.path())));
+        assert!(!main_agent_configured(ws.path(), None));
+        fs::create_dir_all(ws.path().join(".claude")).unwrap();
+        fs::write(
+            ws.path().join(".claude/settings.json"),
+            r#"{"agent":"main"}"#,
+        )
+        .unwrap();
+        assert!(main_agent_configured(ws.path(), None));
+
+        let a = actor("spark-coder", "local-coder-main");
+        let args = claude_args(&a, Path::new("/s/x.json"), None, &[], true);
+        assert!(args.windows(2).any(|w| w == ["--agent", LANE_AGENT]));
+        let agents = args.iter().position(|x| x == "--agents").unwrap();
+        let def: serde_json::Value = serde_json::from_str(&args[agents + 1]).unwrap();
+        assert_eq!(def[LANE_AGENT]["prompt"], "");
+        assert!(def[LANE_AGENT].get("model").is_none());
+        // An explicit --agent from the caller wins.
+        let own = claude_args(
+            &a,
+            Path::new("/s/x.json"),
+            None,
+            &["--agent".into(), "x".into()],
+            true,
+        );
+        assert!(!own.contains(&"--agents".to_string()));
     }
 
     #[test]
