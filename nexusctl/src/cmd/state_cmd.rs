@@ -381,6 +381,7 @@ pub async fn push(
         return Ok(());
     }
 
+    let mut failed = 0usize;
     for (e, file_key) in agent_files {
         if dry_run {
             println!(
@@ -389,8 +390,9 @@ pub async fn push(
                 e.path,
                 file_key
             );
-        } else {
-            super::sync::push(api_url, Some(&project_id), file_key).await?;
+        } else if let Err(err) = super::sync::push(api_url, Some(&project_id), file_key).await {
+            println!("   {} {err}", style("!").bold().red());
+            failed += 1;
         }
     }
     if workspace_changes {
@@ -403,6 +405,9 @@ pub async fn push(
             &include_named,
         )
         .await?;
+    }
+    if failed > 0 {
+        anyhow::bail!("{failed} agent file push(es) failed");
     }
     Ok(())
 }

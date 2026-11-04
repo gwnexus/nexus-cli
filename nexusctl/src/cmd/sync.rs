@@ -40,6 +40,7 @@ fn save_manifest(workspace: &Path, manifest: &serde_json::Value) -> anyhow::Resu
 }
 
 /// `nexus sync push <file>` — upload local agent file changes to the platform.
+/// Every failure is returned as an error; the caller prints it.
 pub async fn push(
     api_url: &str,
     cli_project_id: Option<&str>,
@@ -103,9 +104,7 @@ pub async fn push(
                 println!("   {}", style(msg).dim());
             }
         }
-        Err(e) => {
-            println!("   {} Push failed: {}", style("!").bold().red(), e);
-        }
+        Err(e) => return Err(anyhow::anyhow!("Push failed: {e}")),
     }
 
     Ok(())

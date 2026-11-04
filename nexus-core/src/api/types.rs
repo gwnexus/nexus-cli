@@ -1646,11 +1646,17 @@ pub struct SyncStatusResponse {
 /// Response from `af_sync` action (push or pull direction).
 #[derive(Debug, Clone, Deserialize)]
 pub struct SyncResponse {
+    #[serde(default)]
     pub action: String,
+    #[serde(default)]
     pub project_id: String,
     pub file_key: String,
     pub direction: String,
+    /// Hash of the stored body (`content_hash` in the backend response).
+    #[serde(default, alias = "content_hash")]
     pub new_hash: Option<String>,
+    #[serde(default)]
+    pub sync_status: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
     #[serde(default)]

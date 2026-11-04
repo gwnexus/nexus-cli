@@ -430,7 +430,7 @@ impl NexusClient {
             "direction": direction
         });
         if let Some(content) = body_content {
-            payload["body"] = json!(content);
+            payload["local_body"] = json!(content);
         }
         if let Some(hash) = local_hash {
             payload["local_hash"] = json!(hash);
