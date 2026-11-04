@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.1] - 2026-11-04
+
+### Fixed
+- **`nexus push` of modified agent files works again.** The push sent the file content under the wrong key, so the backend rejected it with "local_body is required for push"; the backend's answer (`content_hash`, `sync_status`) is now read as well. A failed push now makes `nexus push` exit non-zero, after the remaining files were tried.
+
+### Changed
+- **`nexus classification` follows the live backend contract.** Blocked and newly allowed or blocked services show the backend's labels, the delegates line uses the backend's decision, `set` stops early when the backend says you cannot change the level (a dry run is still sent), and an unchanged project level is recognised from the backend's impact. The `levels` table sizes its columns to the labels.
+
+### Tests
+- 4 new tests (push request and response against a local stub, push rejection, live classification fields, table alignment); 945/945 pass.
+
 ## [0.35.0] - 2026-11-04
 
 The confidentiality classification can be read and changed from the CLI.
