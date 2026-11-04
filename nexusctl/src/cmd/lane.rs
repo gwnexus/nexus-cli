@@ -138,17 +138,27 @@ fn resolve_base_url(
         .map(|(u, src)| (normalize_base_url(u), src))
 }
 
+/// Gateway model id of a profile: `nexus/<profile_slug>`.
+fn gateway_model(profile_slug: &str) -> String {
+    if profile_slug.starts_with("nexus/") {
+        profile_slug.to_string()
+    } else {
+        format!("nexus/{profile_slug}")
+    }
+}
+
 /// The `env` block of the actor's settings file. Every model tier points
 /// at the actor's profile so background tasks stay on the lane.
 fn lane_env(actor: &ClaudeLaneActor, base_url: &str, token: &str) -> serde_json::Value {
+    let model = gateway_model(&actor.profile_slug);
     let mut env = serde_json::json!({
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": token,
-        "ANTHROPIC_MODEL": actor.profile_slug,
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": actor.profile_slug,
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": actor.profile_slug,
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": actor.profile_slug,
-        "CLAUDE_CODE_SUBAGENT_MODEL": actor.profile_slug,
+        "ANTHROPIC_MODEL": model,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+        "CLAUDE_CODE_SUBAGENT_MODEL": model,
         "ANTHROPIC_CUSTOM_HEADERS": format!("x-nexus-actor: {}", actor.slug),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     });
@@ -170,7 +180,7 @@ fn claude_args(
         "--settings".to_string(),
         settings.display().to_string(),
         "--model".to_string(),
-        actor.profile_slug.clone(),
+        gateway_model(&actor.profile_slug),
     ];
     if neutral_agent
         && !extra
@@ -354,7 +364,7 @@ pub async fn run(
             "{} Actor {}: model {} via {} ({source}), token {}",
             style(">>").bold().cyan(),
             style(slug).bold(),
-            actor.profile_slug,
+            gateway_model(&actor.profile_slug),
             base_url,
             mask_token(&token)
         );
@@ -579,10 +589,10 @@ pub(crate) async fn doctor_checks(workspace: &Path) -> Vec<(&'static str, CheckR
                     .await
                     .map(|b| model_ids(&b))
                     .unwrap_or_default();
-                let missing: Vec<&str> = cache
+                let missing: Vec<String> = cache
                     .actors
                     .iter()
-                    .map(|a| a.profile_slug.as_str())
+                    .map(|a| gateway_model(&a.profile_slug))
                     .filter(|p| !ids.iter().any(|id| id == p))
                     .collect();
                 if missing.is_empty() {
@@ -666,7 +676,7 @@ mod tests {
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
             "CLAUDE_CODE_SUBAGENT_MODEL",
         ] {
-            assert_eq!(env[k], "local-coder-main", "{k}");
+            assert_eq!(env[k], "nexus/local-coder-main", "{k}");
         }
         assert_eq!(
             env["ANTHROPIC_CUSTOM_HEADERS"],
@@ -691,7 +701,12 @@ mod tests {
         );
         assert_eq!(
             &args[..4],
-            ["--settings", "/s/x.json", "--model", "local-coder-main"]
+            [
+                "--settings",
+                "/s/x.json",
+                "--model",
+                "nexus/local-coder-main"
+            ]
         );
         assert!(args.windows(2).any(|w| w == ["-p", "fix it"]));
         assert_eq!(args.last().unwrap(), "--verbose");
@@ -699,6 +714,15 @@ mod tests {
         let interactive = claude_args(&a, Path::new("/s/x.json"), None, &[], false);
         assert!(!interactive.contains(&"-p".to_string()));
         assert!(!interactive.contains(&"--agent".to_string()));
+    }
+
+    #[test]
+    fn test_gateway_model_prefixes_once() {
+        assert_eq!(gateway_model("nexus-coder-long"), "nexus/nexus-coder-long");
+        assert_eq!(
+            gateway_model("nexus/nexus-coder-long"),
+            "nexus/nexus-coder-long"
+        );
     }
 
     #[test]
