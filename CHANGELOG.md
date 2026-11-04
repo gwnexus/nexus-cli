@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.1] - 2026-11-04
+
+### Changed
+- **Delegate suppression follows the gateway classification.** Thin delegates for gateway-lane actors are skipped when the backend's `effective_gateway_classification` is `restricted`. The raw confidentiality level (`effective_classification`) no longer decides it, so levels such as EU RESTRICTED, which map to `confidential`, keep their delegates. Without the field nothing is suppressed.
+
+### Fixed
+- **`nexus actors run` ignores a main-thread `agent` setting.** When a project, local or user Claude settings file names an `agent`, the lane session starts under a neutral agent with an empty prompt, so the default system prompt, the actor's prompt and the actor's model stay in effect.
+
+### Tests
+- 2 new tests (gateway classification from the export, neutral lane agent); 923/923 pass.
+
 ## [0.34.0] - 2026-11-02
 
 Gateway-lane actors run as their own agent session; the main session keeps its subscription.

@@ -558,9 +558,9 @@ cannot switch). `nexus pull` writes:
   markdown.
 - a thin delegate `.claude/agents/<slug>.md` for each gateway-lane actor:
   it hands the task to `nexus actors run <slug> -p ...` and returns the
-  result, so task and result pass through the main session. Restricted
-  projects get no delegates (an unmodified earlier one is removed); use the
-  actor pane or `nexus actors run` there.
+  result, so task and result pass through the main session. Projects whose
+  gateway classification is `restricted` get no delegates (an unmodified
+  earlier one is removed); use the actor pane or `nexus actors run` there.
 - `<agentic_root>/generated/claude-lane.json` with the lane actors.
 
 `nexus actors run <slug>` starts `claude` with a temporary settings file
@@ -572,7 +572,10 @@ appears on the command line, and other credentials are removed from the
 process environment. Without a project token it refuses to start, so a
 claude.ai login is never used. `-p "<prompt>"` runs headless; arguments
 after `--` go to `claude`. The gateway URL comes from `--gateway-url`,
-`NEXUS_GATEWAY_URL` or the backend.
+`NEXUS_GATEWAY_URL` or the backend. When a Claude settings file sets a
+main-thread `agent`, the lane session starts under a neutral agent instead,
+so that agent's prompt and model do not replace the actor's (pass your own
+`-- --agent <name>` to override).
 
 `nexus run --actor-panes` opens the Zellij workspace with an extra `actors`
 tab, one pane per lane actor. `nexus doctor claude` checks the lane: the
