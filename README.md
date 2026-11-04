@@ -80,6 +80,7 @@ nexus env set <key>=<value> [--pull]    Same, as one argument
 nexus env set                           Pick key and value interactively (schema-driven)
 nexus run [-- <args>]                   Start the agent environment the backend selects
 nexus run --actor-panes                 Add an actors tab with one pane per local-lane actor (zellij)
+nexus run --resume                      Resurrect the project's exited zellij session instead of starting fresh
 nexus actors run <slug> [-p <prompt>]   Start a local-lane actor as its own Claude Code session on the gateway
 nexus actors validate|import <path>     Check or import actor profiles (flat or hub export frontmatter)
 nexus skills export [--project-id <id>] Export enabled skills as JSON
@@ -489,6 +490,14 @@ that session (inside the project's own session it only says so). The
 directory, e.g. `ZELLIJ_SOCKET_DIR=/tmp/zj nexus run`. If zellij exits
 right after the start, `nexus run` shows the end of the zellij log.
 
+The `Zellij session` row says how the layout's `session_name` is entered:
+**attach to running session**, **fresh start**, or **resurrect**. A session
+that ended without `zellij kill-session` (terminal closed, reboot) stays
+listed as EXITED, and attaching would restore its old layout instead of the
+current one. `nexus run` therefore removes it (`zellij delete-session`,
+never a running session) and starts fresh; `--resume` resurrects it
+instead.
+
 **Personal layout.** When the backend renders a workspace layout
 for you (`af_export.claude_workspace`, e.g. a different preset than the team
 default), `nexus pull` writes it to `.nexus/claude/workspace.local.kdl`,
@@ -521,7 +530,10 @@ Checks `claude`, `zellij`, `lazygit`, `ccusage` and `delta`. Which ones are
 required comes from your workspace layout (`claude_workspace.requires`),
 else from the run target (zellij). Missing required tools fail (exit 1),
 missing optional ones are informational; the Claude Code version is checked
-against the project's CCX compatibility range. `--fix` prints devbox (for
+against the project's CCX compatibility range. For Zellij workspaces the
+**zellij session** row flags the project's session when it is EXITED
+(`--fix` deletes it after confirmation) and lists other exited sessions with
+the delete command. `--fix` prints devbox (for
 devbox projects), brew or npm install commands and runs them only after
 confirmation (`-y`). `nexus pull` never installs tools (managed Claude Code
 plugins are the one exception, see below).

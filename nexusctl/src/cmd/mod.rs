@@ -639,6 +639,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             plain,
             ref workspace,
             actor_panes,
+            resume,
             ref account,
             ref args,
         } => {
@@ -668,6 +669,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         .map(|w| (w, run::WorkspaceSource::Flag))
                 },
                 actor_panes,
+                resume,
             )
             .await?;
         }

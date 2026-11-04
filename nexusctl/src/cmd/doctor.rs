@@ -234,6 +234,22 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
             (super::zellij_clipboard::check(&t, &host), t, host)
         });
     let lane_rows = super::lane::doctor_checks(&workspace).await;
+    // The project's zellij session and other exited (resurrectable) ones.
+    let project_session = run_target
+        .as_ref()
+        .and_then(|t| t.layout.as_deref())
+        .and_then(|l| std::fs::read_to_string(workspace.join(l)).ok())
+        .and_then(|kdl| super::zellij_guard::session_name(&kdl));
+    let zellij_sessions = zellij_workspace
+        .then(super::zellij_guard::list_sessions)
+        .flatten()
+        .map(|s| {
+            let (row, others) = super::zellij_guard::doctor_rows(&s, project_session.as_deref());
+            let exited = project_session.as_deref().filter(|n| {
+                super::zellij_guard::state_of(&s, n) == super::zellij_guard::SessionState::Exited
+            });
+            (row, others, exited.map(str::to_string))
+        });
     let required = required_tools(requires.as_deref(), zellij_workspace);
     let preference = installer_preference(&workspace, super::run::on_path);
     let tools = collect(&required, &preference, probe_tool);
@@ -270,6 +286,12 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                     "label": c.label(),
                 })),
                 "clipboard": clipboard.as_ref().map(|(c, _, _)| c),
+                "zellij_sessions": zellij_sessions.as_ref().map(|(row, others, exited)| serde_json::json!({
+                    "project_session": project_session,
+                    "project_session_exited": exited.is_some(),
+                    "message": row.as_ref().map(|r| r.message()),
+                    "other_exited": others,
+                })),
                 "local_lane": lane_rows.iter().map(|(label, r)| serde_json::json!({
                     "check": label,
                     "level": r.level(),
@@ -321,6 +343,24 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
             _ => CheckResult::Info(c.label()),
         };
         print_check("zellij config", &result);
+    }
+    if let Some((row, others, exited)) = &zellij_sessions {
+        if let Some(row) = row {
+            print_check("zellij session", row);
+        }
+        if !others.is_empty() {
+            print_check(
+                "",
+                &CheckResult::Info(format!(
+                    "other exited sessions (attach resurrects their old layout): {}; \
+                     remove one with zellij delete-session <name>",
+                    others.join(", ")
+                )),
+            );
+        }
+        if let (true, Some(name)) = (fix, exited) {
+            fix_exited_session(name, assume_yes)?;
+        }
     }
     for (label, result) in &lane_rows {
         print_check(label, result);
@@ -506,6 +546,26 @@ fn fix_clipboard(
             style("✓").green(),
             target.path.display()
         ),
+    }
+    Ok(())
+}
+
+/// `--fix` for an exited project session: delete it after consent.
+fn fix_exited_session(name: &str, assume_yes: bool) -> anyhow::Result<()> {
+    let confirmed = if assume_yes {
+        true
+    } else if console::Term::stdout().is_term() {
+        confirm(&format!("Delete the exited zellij session {name}?"))?
+    } else {
+        println!("  (not a terminal: session kept; pass -y to delete it)");
+        false
+    };
+    if confirmed {
+        super::zellij_guard::delete_session(name)?;
+        println!(
+            "  {} removed exited zellij session {name}",
+            style("✓").green()
+        );
     }
     Ok(())
 }

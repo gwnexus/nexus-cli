@@ -217,6 +217,7 @@ pub async fn run(
     assume_yes: bool,
     workspace_flag: Option<(&str, WorkspaceSource)>,
     actor_panes: bool,
+    resume: bool,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
     let agentic_root = resolve_agentic_root(&workspace);
@@ -447,6 +448,16 @@ pub async fn run(
         }
     }
 
+    // ── 5.5b. Zellij: an exited session would be resurrected ──────────────
+    // `attach_to_session` attaches to a serialized (EXITED) session and
+    // restores its old layout instead of starting the current one.
+    let session_start = zellij_session.as_deref().map(|name| {
+        let state = super::zellij_guard::list_sessions()
+            .map(|s| super::zellij_guard::state_of(&s, name))
+            .unwrap_or(super::zellij_guard::SessionState::Missing);
+        (name, super::zellij_guard::session_start(state, resume))
+    });
+
     // ── 5.6. Per-project gh CLI profile — Phase B ─────
     // ──────────────────────────────────────────────────────────────────────
     //
@@ -523,11 +534,20 @@ pub async fn run(
             zellij_session
                 .as_deref()
                 .map(super::zellij_guard::socket_check),
+            session_start
+                .map(|(name, start)| super::zellij_guard::session_start_check(name, start)),
         )
         .await?;
         if !should_continue {
             return Ok(());
         }
+    }
+    if let Some((name, super::zellij_guard::SessionStart::FreshAfterDelete)) = session_start {
+        super::zellij_guard::delete_session(name)?;
+        println!(
+            "   {} removed exited zellij session {name} (stale resurrect state)",
+            style("i").bold().blue()
+        );
     }
 
     // ── 7. Inject env vars (with denylist for dangerous variables) ────────────
@@ -1439,6 +1459,7 @@ async fn run_prelaunch_checks(
     gh_outcome: &GhOutcome,
     workspace_row: CheckResult,
     zellij_socket_row: Option<CheckResult>,
+    zellij_session_row: Option<CheckResult>,
 ) -> anyhow::Result<bool> {
     println!();
     println!("{} Nexus Pre-launch Check", style(">>").bold().cyan());
@@ -1475,6 +1496,9 @@ async fn run_prelaunch_checks(
     checks.push(("Workspace", workspace_row));
     if let Some(row) = zellij_socket_row {
         checks.push(("Zellij socket", row));
+    }
+    if let Some(row) = zellij_session_row {
+        checks.push(("Zellij session", row));
     }
 
     // Auth
@@ -3066,11 +3090,13 @@ mod tests {
                 plain,
                 workspace,
                 actor_panes,
+                resume,
                 account,
                 args,
             } => {
                 assert!(!plain);
                 assert!(!actor_panes);
+                assert!(!resume);
                 assert!(workspace.is_none());
                 assert!(tool.is_none());
                 assert!(!dry_run);

@@ -420,6 +420,11 @@ pub enum Command {
         #[arg(long)]
         actor_panes: bool,
 
+        /// Resurrect the project's exited zellij session (its old layout)
+        /// instead of removing it and starting the current layout.
+        #[arg(long)]
+        resume: bool,
+
         /// Named Claude Code account (sets CLAUDE_CONFIG_DIR to an isolated
         /// directory under ~/.config/nexus/claude-accounts/<name>/, giving
         /// this invocation its own Keychain login). Only applies to
@@ -2095,11 +2100,12 @@ mod tests {
             }
             _ => panic!("expected Actors Run command"),
         }
-        let cli = Cli::try_parse_from(["nexus", "run", "--actor-panes"]).unwrap();
+        let cli = Cli::try_parse_from(["nexus", "run", "--actor-panes", "--resume"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Run {
                 actor_panes: true,
+                resume: true,
                 ..
             }
         ));

@@ -2,7 +2,8 @@
 //
 // Guards around the zellij launch of `nexus run`: refuse to start inside a
 // running zellij session, check that the session socket path fits the OS
-// limit, and show zellij's log when it exits right away.
+// limit, start fresh instead of resurrecting an exited session, and show
+// zellij's log when it exits right away.
 
 use std::path::{Path, PathBuf};
 
@@ -126,6 +127,118 @@ pub fn detect_nested(target: Option<&str>) -> Nested {
     )
 }
 
+/// State of a named session in `zellij list-sessions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionState {
+    Missing,
+    Running,
+    /// Serialized after an abnormal end; attaching resurrects the old
+    /// layout instead of starting the current one.
+    Exited,
+}
+
+/// Every session in `zellij list-sessions --no-formatting` output, e.g.
+/// `name [Created 2days ago] (EXITED - attach to resurrect)`.
+pub fn parse_sessions(output: &str) -> Vec<(String, SessionState)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let name = line.split_whitespace().next()?;
+            let state = if line.contains("(EXITED") {
+                SessionState::Exited
+            } else {
+                SessionState::Running
+            };
+            Some((name.to_string(), state))
+        })
+        .collect()
+}
+
+/// State of `name` in a session list.
+pub fn state_of(sessions: &[(String, SessionState)], name: &str) -> SessionState {
+    sessions
+        .iter()
+        .find(|(n, _)| n == name)
+        .map_or(SessionState::Missing, |(_, s)| *s)
+}
+
+/// Sessions as zellij lists them; `None` when zellij cannot be asked.
+pub fn list_sessions() -> Option<Vec<(String, SessionState)>> {
+    let out = std::process::Command::new("zellij")
+        .args(["list-sessions", "--no-formatting"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    // Without sessions zellij exits non-zero ("No active zellij sessions").
+    Some(parse_sessions(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Delete an exited session (never `--force`, so a running one survives).
+pub fn delete_session(name: &str) -> anyhow::Result<()> {
+    let status = std::process::Command::new("zellij")
+        .args(["delete-session", name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    anyhow::ensure!(status.success(), "zellij delete-session {name} failed");
+    Ok(())
+}
+
+/// Doctor rows for the project's session (`project`) and the names of
+/// other exited sessions.
+pub(crate) fn doctor_rows(
+    sessions: &[(String, SessionState)],
+    project: Option<&str>,
+) -> (Option<CheckResult>, Vec<String>) {
+    let row = project.map(|name| match state_of(sessions, name) {
+        SessionState::Exited => CheckResult::Warn(format!(
+            "{name}: exited; nexus run removes it and starts fresh (fix: zellij delete-session {name})"
+        )),
+        SessionState::Running => CheckResult::Pass(format!("{name}: running")),
+        SessionState::Missing => CheckResult::Pass(format!("{name}: not started")),
+    });
+    let others = sessions
+        .iter()
+        .filter(|(n, s)| *s == SessionState::Exited && Some(n.as_str()) != project)
+        .map(|(n, _)| n.clone())
+        .collect();
+    (row, others)
+}
+
+/// How `nexus run` enters the project's session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStart {
+    Attach,
+    Fresh,
+    /// Remove the exited session first, then start fresh.
+    FreshAfterDelete,
+    Resurrect,
+}
+
+pub fn session_start(state: SessionState, resume: bool) -> SessionStart {
+    match (state, resume) {
+        (SessionState::Running, _) => SessionStart::Attach,
+        (SessionState::Missing, _) => SessionStart::Fresh,
+        (SessionState::Exited, true) => SessionStart::Resurrect,
+        (SessionState::Exited, false) => SessionStart::FreshAfterDelete,
+    }
+}
+
+/// Pre-launch row "Zellij session".
+pub(crate) fn session_start_check(name: &str, start: SessionStart) -> CheckResult {
+    match start {
+        SessionStart::Attach => CheckResult::Info(format!("{name}: attach to running session")),
+        SessionStart::Fresh => CheckResult::Pass(format!("{name}: fresh start")),
+        SessionStart::FreshAfterDelete => CheckResult::Warn(format!(
+            "{name}: fresh start (removes the exited session; --resume resurrects it)"
+        )),
+        SessionStart::Resurrect => CheckResult::Warn(format!(
+            "{name}: resurrect exited session (old layout, not the current one)"
+        )),
+    }
+}
+
 /// Path of zellij's log file.
 pub fn log_path() -> PathBuf {
     zellij_tmp_dir().join("zellij-log").join("zellij.log")
@@ -231,6 +344,57 @@ mod tests {
             nested(true, Some("a"), None),
             Nested::OtherSession(Some("a".into()))
         );
+    }
+
+    #[test]
+    fn test_parse_sessions_and_state() {
+        let out = "beta [Created 23days ago] (EXITED - attach to resurrect)\n\
+                   cli [Created 14days ago] (current)\n\
+                   app [Created 13days ago] \n";
+        let sessions = parse_sessions(out);
+        assert_eq!(state_of(&sessions, "beta"), SessionState::Exited);
+        assert_eq!(state_of(&sessions, "cli"), SessionState::Running);
+        assert_eq!(state_of(&sessions, "app"), SessionState::Running);
+        assert_eq!(state_of(&sessions, "be"), SessionState::Missing);
+        assert!(parse_sessions("").is_empty());
+    }
+
+    #[test]
+    fn test_doctor_rows() {
+        let sessions = parse_sessions(
+            "proj [Created 1d ago] (EXITED - attach to resurrect)\n\
+             other [Created 2d ago] (EXITED - attach to resurrect)\n\
+             live [Created 3d ago] \n",
+        );
+        let (row, others) = doctor_rows(&sessions, Some("proj"));
+        let row = row.unwrap();
+        assert_eq!(row.level(), "warn");
+        assert!(row.message().contains("zellij delete-session proj"));
+        assert_eq!(others, ["other"]);
+        let (row, _) = doctor_rows(&sessions, Some("live"));
+        assert_eq!(row.unwrap().level(), "pass");
+        let (row, others) = doctor_rows(&sessions, None);
+        assert!(row.is_none());
+        assert_eq!(others, ["proj", "other"]);
+    }
+
+    #[test]
+    fn test_session_start() {
+        use SessionStart::*;
+        assert_eq!(session_start(SessionState::Running, false), Attach);
+        assert_eq!(session_start(SessionState::Running, true), Attach);
+        assert_eq!(session_start(SessionState::Missing, true), Fresh);
+        assert_eq!(session_start(SessionState::Exited, false), FreshAfterDelete);
+        assert_eq!(session_start(SessionState::Exited, true), Resurrect);
+        assert!(session_start_check("p", FreshAfterDelete)
+            .message()
+            .contains("fresh start"));
+        assert!(session_start_check("p", Attach)
+            .message()
+            .contains("attach to running session"));
+        assert!(session_start_check("p", Resurrect)
+            .message()
+            .contains("resurrect"));
     }
 
     #[test]
