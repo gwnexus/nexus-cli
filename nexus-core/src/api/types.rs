@@ -686,6 +686,14 @@ pub struct ClassificationLevel {
     pub gateway_classification: Option<String>,
 }
 
+/// A confidentiality-gate action with its display label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassificationGateAction {
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 /// The customer of a project and its level (read-only in the CLI).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassificationCustomer {
@@ -707,10 +715,20 @@ pub struct ClassificationResponse {
     #[serde(default)]
     pub customer: Option<ClassificationCustomer>,
     pub effective_level: String,
-    /// `project` | `customer`: which level dominates.
+    /// `project` | `customer` | `default`: where the effective level comes
+    /// from.
     #[serde(default)]
     pub effective_source: Option<String>,
     pub gateway_classification: String,
+    /// `rendered` | `suppressed`, as the hub decides it.
+    #[serde(default)]
+    pub delegates: Option<String>,
+    /// Labels for the gate action ids in `blocked_actions`.
+    #[serde(default)]
+    pub actions: Vec<ClassificationGateAction>,
+    /// Whether the caller may change the level (`project.manage`).
+    #[serde(default)]
+    pub can_write: Option<bool>,
     #[serde(default)]
     pub severity: Option<String>,
     #[serde(default)]
@@ -746,6 +764,10 @@ pub struct ClassificationState {
 /// What a classification change does, as the hub computes it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClassificationImpact {
+    #[serde(default)]
+    pub project_level_changed: Option<bool>,
+    #[serde(default)]
+    pub effective_level_changed: Option<bool>,
     #[serde(default)]
     pub gateway_classification_changed: bool,
     /// The gateway class goes down (e.g. restricted to confidential).

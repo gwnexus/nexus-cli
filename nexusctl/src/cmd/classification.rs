@@ -8,8 +8,8 @@
 
 use console::style;
 use nexus_core::api::{
-    ClassificationLevel, ClassificationPatchOutcome, ClassificationPatchResponse,
-    ClassificationResponse, NexusClient,
+    ClassificationGateAction, ClassificationLevel, ClassificationPatchOutcome,
+    ClassificationPatchResponse, ClassificationResponse, NexusClient,
 };
 use nexus_core::config;
 
@@ -71,12 +71,31 @@ fn opt_level(levels: &[ClassificationLevel], value: Option<&str>) -> String {
     value.map_or_else(|| "(none)".to_string(), |v| level_name(levels, v))
 }
 
-fn list_or_none(items: &[String]) -> String {
-    if items.is_empty() {
-        "none".to_string()
-    } else {
-        items.join(", ")
+/// Gate action ids with the hub's labels, e.g. `Embeddings (embedding_generation)`.
+fn action_names(ids: &[String], actions: &[ClassificationGateAction]) -> String {
+    if ids.is_empty() {
+        return "none".to_string();
     }
+    ids.iter()
+        .map(|id| {
+            match actions
+                .iter()
+                .find(|a| &a.id == id)
+                .and_then(|a| a.label.as_deref())
+            {
+                Some(label) if label != id => format!("{label} ({id})"),
+                _ => id.clone(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Delegates as the hub reports them, else derived from the gateway class.
+fn delegates_of(c: &ClassificationResponse) -> String {
+    c.delegates
+        .clone()
+        .unwrap_or_else(|| delegates_for(Some(&c.gateway_classification)).to_string())
 }
 
 /// Where the gateway may route this project.
@@ -115,7 +134,7 @@ fn show_lines(c: &ClassificationResponse) -> Vec<String> {
     if !details.is_empty() {
         gateway = format!("{gateway} ({})", details.join(", "));
     }
-    let delegates = delegates_for(Some(&c.gateway_classification));
+    let delegates = delegates_of(c);
     let delegates = if delegates == "suppressed" {
         "suppressed (start lane actors with nexus actors run <slug> or nexus run --actor-panes)"
             .to_string()
@@ -138,14 +157,17 @@ fn show_lines(c: &ClassificationResponse) -> Vec<String> {
         "Consequences".to_string(),
         format!("  Lane delegates:     {delegates}"),
         format!("  Gateway routing:    {}", routing(c)),
-        format!("  Blocked services:   {}", list_or_none(&c.blocked_actions)),
+        format!(
+            "  Blocked services:   {}",
+            action_names(&c.blocked_actions, &c.actions)
+        ),
     ]
 }
 
 fn show_json(c: &ClassificationResponse) -> serde_json::Value {
     let mut v = serde_json::to_value(c).unwrap_or_default();
     v["consequences"] = serde_json::json!({
-        "delegates": delegates_for(Some(&c.gateway_classification)),
+        "delegates": delegates_of(c),
         "gateway_routing": routing(c),
         "blocked_actions": c.blocked_actions,
     });
@@ -168,6 +190,60 @@ pub async fn show(api_url: &str, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The table of `nexus classification levels`, columns sized to fit.
+fn level_rows(c: &ClassificationResponse) -> Vec<String> {
+    let cell = |v: &Option<String>| v.clone().unwrap_or_default();
+    let rows: Vec<[String; 4]> = c
+        .levels
+        .iter()
+        .map(|l| {
+            [
+                l.value.clone(),
+                cell(&l.label),
+                cell(&l.group),
+                format!(
+                    "{}{}",
+                    cell(&l.gateway_classification),
+                    if l.value == c.effective_level {
+                        "  (effective)"
+                    } else {
+                        ""
+                    }
+                ),
+            ]
+        })
+        .collect();
+    let header = [
+        "LEVEL".to_string(),
+        "LABEL".to_string(),
+        "GROUP".to_string(),
+        "GATEWAY CLASS".to_string(),
+    ];
+    let width = |i: usize| {
+        rows.iter()
+            .chain(std::iter::once(&header))
+            .map(|r| r[i].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let (w0, w1, w2) = (width(0), width(1), width(2));
+    let pad = |s: &str, w: usize| format!("{s}{}", " ".repeat(w.saturating_sub(s.chars().count())));
+    std::iter::once(&header)
+        .chain(rows.iter())
+        .map(|r| {
+            format!(
+                "{}  {}  {}  {}",
+                pad(&r[0], w0),
+                pad(&r[1], w1),
+                pad(&r[2], w2),
+                r[3]
+            )
+            .trim_end()
+            .to_string()
+        })
+        .collect()
+}
+
 /// `nexus classification levels`.
 pub async fn levels(api_url: &str, json: bool) -> anyhow::Result<()> {
     let (project_id, client) = super::env_cmd::connect(api_url)?;
@@ -176,26 +252,8 @@ pub async fn levels(api_url: &str, json: bool) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&c.levels)?);
         return Ok(());
     }
-    println!(
-        "  {:<24} {:<26} {:<16} {}",
-        style("LEVEL").bold(),
-        style("LABEL").bold(),
-        style("GROUP").bold(),
-        style("GATEWAY CLASS").bold()
-    );
-    for l in &c.levels {
-        let marker = if l.value == c.effective_level {
-            " (effective)"
-        } else {
-            ""
-        };
-        println!(
-            "  {:<24} {:<26} {:<16} {}{marker}",
-            l.value,
-            l.label.as_deref().unwrap_or(""),
-            l.group.as_deref().unwrap_or(""),
-            l.gateway_classification.as_deref().unwrap_or("")
-        );
+    for line in level_rows(&c) {
+        println!("  {line}");
     }
     Ok(())
 }
@@ -219,7 +277,11 @@ fn customer_dominates(plan: &ClassificationPatchResponse) -> bool {
 }
 
 /// The impact plan of `nexus classification set`.
-fn plan_lines(plan: &ClassificationPatchResponse, customer_level: Option<&str>) -> Vec<String> {
+fn plan_lines(
+    plan: &ClassificationPatchResponse,
+    customer_level: Option<&str>,
+    actions: &[ClassificationGateAction],
+) -> Vec<String> {
     let (b, a) = (&plan.before, &plan.after);
     let delegates_after = plan
         .impact
@@ -256,11 +318,11 @@ fn plan_lines(plan: &ClassificationPatchResponse, customer_level: Option<&str>) 
         ),
         format!(
             "Newly allowed:    {}",
-            list_or_none(&plan.impact.newly_allowed_actions)
+            action_names(&plan.impact.newly_allowed_actions, actions)
         ),
         format!(
             "Newly blocked:    {}",
-            list_or_none(&plan.impact.newly_blocked_actions)
+            action_names(&plan.impact.newly_blocked_actions, actions)
         ),
     ];
     if customer_dominates(plan) {
@@ -295,7 +357,9 @@ fn decide(
     force: bool,
     dry_run: bool,
 ) -> Decision {
-    if plan.before.project_level == plan.after.project_level {
+    if plan.impact.project_level_changed == Some(false)
+        || plan.before.project_level == plan.after.project_level
+    {
         return Decision::NoOp(format!(
             "The project level is already {}.",
             plan.after.project_level.as_deref().unwrap_or("(none)")
@@ -358,6 +422,17 @@ fn unknown_level(level: &str, levels: &[ClassificationLevel]) -> anyhow::Error {
     )
 }
 
+/// Refuse a change up front when the hub says the caller cannot write; a
+/// dry run is still sent (the hub answers 403 if it needs rights too).
+fn write_check(can_write: Option<bool>, dry_run: bool) -> anyhow::Result<()> {
+    if can_write == Some(false) && !dry_run {
+        anyhow::bail!(
+            "you cannot change this project's classification (needs project admin rights, project.manage)"
+        );
+    }
+    Ok(())
+}
+
 /// Map the 4xx outcomes of a PATCH to errors; `Done` passes through.
 fn expect_done(
     outcome: ClassificationPatchOutcome,
@@ -404,6 +479,7 @@ pub async fn set(
 ) -> anyhow::Result<bool> {
     let (project_id, client) = super::env_cmd::connect(api_url)?;
     let current = fetch(&client, &project_id).await?;
+    write_check(current.can_write, dry_run)?;
     if !current.levels.is_empty() && !current.levels.iter().any(|l| l.value == level) {
         return Err(unknown_level(level, &current.levels));
     }
@@ -429,7 +505,7 @@ pub async fn set(
     if !json {
         println!("{}", style("Classification change (plan)").bold());
         println!();
-        for line in plan_lines(&plan, customer_level.as_deref()) {
+        for line in plan_lines(&plan, customer_level.as_deref(), &current.actions) {
             println!("  {line}");
         }
         println!();
@@ -560,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_plan_downgrade_shows_old_and_new() {
-        let lines = plan_lines(&downgrade(), None).join("\n");
+        let lines = plan_lines(&downgrade(), None, &[]).join("\n");
         assert!(lines.contains("strictly-confidential -> confidential"));
         assert!(lines.contains("restricted -> confidential (downgrade)"));
         assert!(lines.contains("suppressed -> rendered"));
@@ -576,7 +652,7 @@ mod tests {
             state("geheim", "geheim", "restricted"),
             false,
         );
-        let lines = plan_lines(&p, None).join("\n");
+        let lines = plan_lines(&p, None, &[]).join("\n");
         assert!(lines.contains("internal -> restricted"));
         assert!(!lines.contains("(downgrade)"));
         assert!(lines.contains("rendered -> suppressed"));
@@ -591,7 +667,7 @@ mod tests {
             false,
         );
         p.warnings = vec!["customer_dominates".into()];
-        let lines = plan_lines(&p, Some("geheim")).join("\n");
+        let lines = plan_lines(&p, Some("geheim"), &[]).join("\n");
         assert!(lines.contains("customer level (geheim) dominates"));
         assert!(lines.contains("geheim (unchanged)"));
         assert!(matches!(decide(&p, None, false, false), Decision::NoOp(_)));
@@ -673,6 +749,42 @@ mod tests {
         assert_eq!(v["consequences"]["delegates"], "suppressed");
         assert_eq!(v["gateway_classification"], "restricted");
         assert_eq!(v["customer"]["name"], "Acme");
+    }
+
+    #[test]
+    fn test_live_contract_fields() {
+        let mut c = response();
+        c.actions = vec![ClassificationGateAction {
+            id: "textract_extraction".into(),
+            label: Some("Document extraction".into()),
+        }];
+        c.delegates = Some("rendered".into());
+        let lines = show_lines(&c).join("\n");
+        assert!(lines.contains("Document extraction (textract_extraction), embedding_generation"));
+        // The hub's decision wins over the local derivation.
+        assert!(lines.contains("Lane delegates:     rendered"));
+        assert_eq!(show_json(&c)["consequences"]["delegates"], "rendered");
+
+        let mut p = downgrade();
+        p.impact.project_level_changed = Some(false);
+        assert!(matches!(decide(&p, None, false, false), Decision::NoOp(_)));
+        let lines = plan_lines(&downgrade(), None, &c.actions).join("\n");
+        assert!(lines.contains("Newly allowed:    embedding_generation"));
+
+        assert!(write_check(Some(false), false).is_err());
+        assert!(write_check(Some(false), true).is_ok());
+        assert!(write_check(None, false).is_ok());
+    }
+
+    #[test]
+    fn test_level_rows_align_long_labels() {
+        let mut c = response();
+        c.levels[0].label = Some("VS-NfD (Nur für den Dienstgebrauch)".into());
+        let rows = level_rows(&c);
+        let col = |r: &str| r[..r.find("standard").unwrap()].chars().count();
+        assert_eq!(col(&rows[1]), col(&rows[2]));
+        assert!(rows[2].ends_with("restricted  (effective)"));
+        assert!(rows[0].starts_with("LEVEL"));
     }
 
     #[test]
