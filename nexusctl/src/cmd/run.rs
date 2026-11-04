@@ -1509,6 +1509,18 @@ async fn run_prelaunch_checks(
     };
     checks.push(("Auth", auth_check));
 
+    // Classification: read from the hub, never cached.
+    if let (Some(token), Some(pid)) = (&resolved_token, &linked_project_id) {
+        if let Ok(client) = nexus_core::api::NexusClient::new(api_url, Some(token.clone())) {
+            if let Some(c) = super::classification::try_fetch(&client, pid).await {
+                checks.push((
+                    "Classification",
+                    CheckResult::Info(super::classification::summary_line(&c)),
+                ));
+            }
+        }
+    }
+
     // MCP Config — which artifact is authoritative depends on the project's
     // tool flavor: OpenCode reads opencode.json,
     // Claude Code reads the root .mcp.json written by `claude_render`.

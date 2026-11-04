@@ -25,6 +25,8 @@ mod link_tests;
 mod project_token_tests;
 
 #[cfg(test)]
+mod classification_tests;
+#[cfg(test)]
 mod settings_tests;
 
 #[cfg(test)]

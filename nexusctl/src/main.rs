@@ -197,6 +197,15 @@ pub enum Command {
         action: Option<EnvAction>,
     },
 
+    /// Show or change the project's confidentiality classification and what
+    /// it drives (gateway class, lane delegates, blocked external services).
+    /// Without a subcommand: show. Alias: `nexus class`.
+    #[command(visible_alias = "class")]
+    Classification {
+        #[command(subcommand)]
+        action: Option<ClassificationAction>,
+    },
+
     /// Pull skills and configuration from the Nexus platform into this workspace.
     Pull {
         /// Override the linked project ID.
@@ -468,6 +477,42 @@ pub enum EnvAction {
         dry_run: bool,
 
         /// Run `nexus pull` afterwards to apply the change locally.
+        #[arg(long)]
+        pull: bool,
+    },
+}
+
+/// `nexus classification` subcommands. Levels, labels and the gateway
+/// mapping come from the hub.
+#[derive(Debug, Subcommand)]
+pub enum ClassificationAction {
+    /// Project, customer and effective level, gateway class and
+    /// consequences. Supports --output json.
+    Show,
+
+    /// All levels with group, label and gateway class.
+    Levels,
+
+    /// Change the project level. Always prints the impact plan first;
+    /// lowering the gateway class needs --reason and a typed confirmation.
+    Set {
+        /// New level, e.g. confidential (see `nexus classification levels`).
+        level: String,
+
+        /// Why the level changes (recorded in the audit log; required when
+        /// the gateway class goes down).
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Print the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Store the project level even when the customer level dominates.
+        #[arg(long)]
+        force: bool,
+
+        /// Run `nexus pull` afterwards so delegates appear or disappear.
         #[arg(long)]
         pull: bool,
     },
@@ -1712,6 +1757,50 @@ mod tests {
         // Bare `nexus push` keeps working.
         let cli = Cli::try_parse_from(["nexus", "push"]).unwrap();
         assert!(matches!(cli.command, Command::Push { path: None, .. }));
+    }
+
+    #[test]
+    fn test_parse_classification_commands() {
+        let cli = Cli::try_parse_from(["nexus", "classification"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Classification { action: None }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "class", "levels"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Classification {
+                action: Some(ClassificationAction::Levels)
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "classification",
+            "set",
+            "confidential",
+            "--reason",
+            "lane test",
+            "--dry-run",
+            "--pull",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Classification {
+                action:
+                    Some(ClassificationAction::Set {
+                        level,
+                        reason,
+                        dry_run,
+                        force,
+                        pull,
+                    }),
+            } => {
+                assert_eq!(level, "confidential");
+                assert_eq!(reason.as_deref(), Some("lane test"));
+                assert!(dry_run && pull && !force);
+            }
+            _ => panic!("expected Classification Set"),
+        }
     }
 
     #[test]

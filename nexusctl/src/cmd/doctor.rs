@@ -198,12 +198,15 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
     let mut observer: Option<String> = None;
     let mut compat_range: Option<String> = None;
     let mut run_target = config::load_run_target(Some(&workspace));
+    // Lane actors whose delegates the classification suppresses.
+    let mut suppressed_delegates: Option<String> = None;
     if let (Some(token), Ok(project_id)) = (
         resolve_token(),
         config::resolve_project_id(None, Some(&workspace)),
     ) {
         if let Ok(client) = NexusClient::new(api_url, Some(token)) {
             if let Ok(export) = client.export_agent_files(&project_id).await {
+                suppressed_delegates = delegates_note(&export);
                 if let Some(layout) = export.claude_workspace {
                     observer = layout.non_default_observer().map(str::to_string);
                     requires = Some(layout.requires);
@@ -292,6 +295,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                     "message": row.as_ref().map(|r| r.message()),
                     "other_exited": others,
                 })),
+                "suppressed_delegates": suppressed_delegates,
                 "local_lane": lane_rows.iter().map(|(label, r)| serde_json::json!({
                     "check": label,
                     "level": r.level(),
@@ -364,6 +368,9 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
     }
     for (label, result) in &lane_rows {
         print_check(label, result);
+    }
+    if let Some(note) = &suppressed_delegates {
+        print_check("lane delegates", &CheckResult::Info(note.clone()));
     }
     if let Some((c, target, host)) = &clipboard {
         print_clipboard(c, host);
@@ -550,6 +557,28 @@ fn fix_clipboard(
     Ok(())
 }
 
+/// Info when lane actors exist but the gateway classification suppresses
+/// their delegates.
+fn delegates_note(export: &nexus_core::api::AgentFileExportResponse) -> Option<String> {
+    let lanes = export.claude_lane_actors.as_deref().unwrap_or_default();
+    if lanes.is_empty()
+        || !super::claude_render::is_restricted_classification(
+            export.effective_gateway_classification.as_deref(),
+        )
+    {
+        return None;
+    }
+    Some(format!(
+        "suppressed for {}: classification {} is restricted (see nexus classification)",
+        lanes
+            .iter()
+            .map(|a| a.slug.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        export.effective_classification.as_deref().unwrap_or("?")
+    ))
+}
+
 /// `--fix` for an exited project session: delete it after consent.
 fn fix_exited_session(name: &str, assume_yes: bool) -> anyhow::Result<()> {
     let confirmed = if assume_yes {
@@ -582,6 +611,37 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_delegates_note_only_for_restricted_lane_projects() {
+        let export = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "project_id": "p", "project_name": "p", "agent_files": [], "count": 0
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<nexus_core::api::AgentFileExportResponse>(v).unwrap()
+        };
+        let lanes = serde_json::json!([{"slug": "spark-coder", "profile_slug": "p", "body": ""}]);
+        let restricted = export(serde_json::json!({
+            "claude_lane_actors": lanes,
+            "effective_classification": "strictly-confidential",
+            "effective_gateway_classification": "restricted"
+        }));
+        let note = delegates_note(&restricted).unwrap();
+        assert!(note.contains("spark-coder"));
+        assert!(note.contains("strictly-confidential"));
+        assert!(note.contains("nexus classification"));
+        let open = export(serde_json::json!({
+            "claude_lane_actors": lanes,
+            "effective_gateway_classification": "confidential"
+        }));
+        assert!(delegates_note(&open).is_none());
+        let no_lanes =
+            export(serde_json::json!({"effective_gateway_classification": "restricted"}));
+        assert!(delegates_note(&no_lanes).is_none());
+    }
 
     #[test]
     fn test_tidy_version() {

@@ -673,6 +673,124 @@ pub enum SettingsPatchOutcome {
     },
 }
 
+/// One confidentiality level as the hub lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassificationLevel {
+    pub value: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    /// `public` | `internal` | `confidential` | `restricted`.
+    #[serde(default)]
+    pub gateway_classification: Option<String>,
+}
+
+/// The customer of a project and its level (read-only in the CLI).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassificationCustomer {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
+/// `GET /api/mcp/projects/{id}/classification`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationResponse {
+    #[serde(default)]
+    pub project_slug: Option<String>,
+    #[serde(default)]
+    pub project_level: Option<String>,
+    #[serde(default)]
+    pub customer: Option<ClassificationCustomer>,
+    pub effective_level: String,
+    /// `project` | `customer`: which level dominates.
+    #[serde(default)]
+    pub effective_source: Option<String>,
+    pub gateway_classification: String,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub mapping_version: Option<u32>,
+    /// External services the confidentiality gate blocks at this level.
+    #[serde(default)]
+    pub blocked_actions: Vec<String>,
+    /// Model profiles the gateway may route this project to, when sent.
+    #[serde(default)]
+    pub allowed_profiles: Option<Vec<String>>,
+    pub revision: String,
+    #[serde(default)]
+    pub levels: Vec<ClassificationLevel>,
+}
+
+/// One side (`before`/`after`) of a classification change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationState {
+    #[serde(default)]
+    pub project_level: Option<String>,
+    #[serde(default)]
+    pub effective_level: Option<String>,
+    #[serde(default)]
+    pub effective_source: Option<String>,
+    #[serde(default)]
+    pub gateway_classification: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub blocked_actions: Vec<String>,
+}
+
+/// What a classification change does, as the hub computes it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationImpact {
+    #[serde(default)]
+    pub gateway_classification_changed: bool,
+    /// The gateway class goes down (e.g. restricted to confidential).
+    #[serde(default)]
+    pub downgrade: bool,
+    /// `rendered` | `suppressed` after the change.
+    #[serde(default)]
+    pub delegates: Option<String>,
+    #[serde(default)]
+    pub newly_allowed_actions: Vec<String>,
+    #[serde(default)]
+    pub newly_blocked_actions: Vec<String>,
+}
+
+/// `PATCH /api/mcp/projects/{id}/classification` (plan or applied change).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationPatchResponse {
+    #[serde(default)]
+    pub applied: bool,
+    #[serde(default)]
+    pub before: ClassificationState,
+    #[serde(default)]
+    pub after: ClassificationState,
+    #[serde(default)]
+    pub impact: ClassificationImpact,
+    /// e.g. `customer_dominates`.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub revision: Option<String>,
+}
+
+/// Result of a classification PATCH; the 4xx cases the CLI acts on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClassificationPatchOutcome {
+    Done(Box<ClassificationPatchResponse>),
+    /// 400: unknown level or malformed request.
+    Invalid(String),
+    Forbidden(String),
+    /// 409: changed since the plan was made.
+    Conflict(String),
+    /// 422: a downgrade needs a reason.
+    ReasonRequired(String),
+}
+
 /// `af_export.run_target`: `{ tool: "opencode"|"claude", workspace:
 /// "none"|"zellij", layout?, config? }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

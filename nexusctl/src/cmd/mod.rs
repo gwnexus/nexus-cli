@@ -3,6 +3,7 @@
 mod actors;
 pub(crate) mod auth;
 pub(crate) mod ccx;
+mod classification;
 mod claude_cmd;
 pub(crate) mod claude_plugins;
 pub(crate) mod claude_render;
@@ -39,9 +40,9 @@ mod zellij_clipboard;
 mod zellij_guard;
 
 use crate::{
-    ActorAvatarAction, ActorsAction, ClaudeAction, Cli, Command, ConfigAction, DoctorTarget,
-    EnvAction, GitAction, ProjectAction, ShadowAction, SkillsAction, StashAction, SyncAction,
-    WorkspaceAction, WorkspaceShadowAction,
+    ActorAvatarAction, ActorsAction, ClassificationAction, ClaudeAction, Cli, Command,
+    ConfigAction, DoctorTarget, EnvAction, GitAction, ProjectAction, ShadowAction, SkillsAction,
+    StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
 };
 
 /// Dispatch the parsed CLI command to the appropriate handler.
@@ -186,6 +187,57 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             state_cmd::reset(&api_url, project_id.as_deref(), path.as_deref(), cli.yes).await?;
+        }
+        Command::Classification { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            let json = matches!(
+                cli.resolve_output(&config),
+                nexus_core::OutputPreference::Json
+            );
+            match action.as_ref().unwrap_or(&ClassificationAction::Show) {
+                ClassificationAction::Show => classification::show(&api_url, json).await?,
+                ClassificationAction::Levels => classification::levels(&api_url, json).await?,
+                ClassificationAction::Set {
+                    level,
+                    reason,
+                    dry_run,
+                    force,
+                    pull,
+                } => {
+                    let changed = classification::set(
+                        &api_url,
+                        level,
+                        reason.as_deref(),
+                        *dry_run,
+                        *force,
+                        cli.yes,
+                        json,
+                    )
+                    .await?;
+                    match classification::after_set(changed, *pull) {
+                        classification::AfterSet::Pull => {
+                            pull::run(
+                                &api_url,
+                                None,
+                                false,
+                                config.mcp_source,
+                                &[],
+                                false,
+                                ccx::ForceMode::None,
+                                false,
+                                false,
+                                false,
+                            )
+                            .await?
+                        }
+                        classification::AfterSet::Hint => println!(
+                            "   Run 'nexus pull' so lane delegates follow the new classification."
+                        ),
+                        classification::AfterSet::Nothing => {}
+                    }
+                }
+            }
         }
         Command::Env { ref action } => {
             let config = nexus_core::config::Config::load_effective(None)?;

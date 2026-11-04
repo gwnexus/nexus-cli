@@ -1366,7 +1366,8 @@ pub fn render_claude_projection(
     if agent_inputs.restricted && !agent_inputs.lane_actors.is_empty() {
         println!(
             "   {} Restricted project: no delegate subagents for local-lane actors ({}); \
-             start them with nexus actors run <slug> or nexus run --actor-panes",
+             start them with nexus actors run <slug> or nexus run --actor-panes \
+             (why: nexus classification)",
             style("i").bold().blue(),
             agent_inputs
                 .lane_actors

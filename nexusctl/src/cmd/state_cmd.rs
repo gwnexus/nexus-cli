@@ -98,6 +98,7 @@ pub async fn status(api_url: &str, api_url_source: &str, json: bool) -> anyhow::
         }
     };
     let pending = state.pending().count();
+    let classification = super::classification::try_fetch(&client, &project_id).await;
 
     if json {
         let files: Vec<_> = state
@@ -127,6 +128,11 @@ pub async fn status(api_url: &str, api_url_source: &str, json: bool) -> anyhow::
                     state.export.ccx.as_ref().and_then(|c| c.compatibility.claude_code.as_deref()),
                     false,
                 )),
+                "classification": classification.as_ref().map(|c| serde_json::json!({
+                    "effective_level": c.effective_level,
+                    "gateway_classification": c.gateway_classification,
+                    "effective_source": c.effective_source,
+                })),
                 "files": files,
                 "pending": pending > 0,
             }))?
@@ -143,6 +149,9 @@ pub async fn status(api_url: &str, api_url_source: &str, json: bool) -> anyhow::
             style("nexus run").bold()
         ),
     );
+    if let Some(c) = &classification {
+        super::display::status_line("Classification:", super::classification::summary_line(c));
+    }
     println!();
 
     let compat = state

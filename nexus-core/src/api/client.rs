@@ -12,8 +12,9 @@ use tracing::debug;
 use crate::api::types::{
     ActorAvatarResponse, ActorExportResponse, ActorGetResponse, ActorImportPayload,
     ActorImportResponse, ActorListResponse, AgentFileExportResponse, ApiError, AuthStatus,
-    AuthStatusResponse, DirectiveExportResponse, FileStatusResponse, IdentityResponse,
-    InferenceTokenInfo, InferenceTokenIssueRequest, InferenceTokenResponse, McpPreflightResponse,
+    AuthStatusResponse, ClassificationPatchOutcome, ClassificationResponse,
+    DirectiveExportResponse, FileStatusResponse, IdentityResponse, InferenceTokenInfo,
+    InferenceTokenIssueRequest, InferenceTokenResponse, McpPreflightResponse,
     ProjectDetailResponse, ProjectListResponse, ProjectSettingsResponse, SettingsPatchOutcome,
     SkillExportResponse, SkillListResponse, SyncCheckResponse, SyncFileHash, SyncResponse,
     SyncStatusResponse, TaskListResponse, WorkspaceExportResponse, WorkspaceForkExportResponse,
@@ -538,6 +539,69 @@ impl NexusClient {
                     .and_then(|r| r.as_str())
                     .map(str::to_string),
             }),
+            StatusCode::UNAUTHORIZED => Err(Error::Unauthorized(error)),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(error)),
+            _ => Err(Error::Api(error)),
+        }
+    }
+
+    /// Read the project's confidentiality level, its customer's level and
+    /// the effective gateway classification (`nexus classification`).
+    pub async fn get_project_classification(
+        &self,
+        project_id: &str,
+    ) -> Result<ClassificationResponse, Error> {
+        self.get(&format!("/api/mcp/projects/{}/classification", project_id))
+            .await
+    }
+
+    /// Plan (`dry_run`) or apply a new project level. `revision` comes from
+    /// the read or the plan; 400/403/409/422 are returned as
+    /// [`ClassificationPatchOutcome`] variants.
+    pub async fn patch_project_classification(
+        &self,
+        project_id: &str,
+        level: &str,
+        reason: Option<&str>,
+        dry_run: bool,
+        revision: &str,
+    ) -> Result<ClassificationPatchOutcome, Error> {
+        let url = format!(
+            "{}/api/mcp/projects/{}/classification",
+            self.base_url, project_id
+        );
+        debug!("PATCH {}", url);
+        let mut body = json!({ "level": level, "dry_run": dry_run, "revision": revision });
+        if let Some(reason) = reason {
+            body["reason"] = serde_json::Value::String(reason.to_string());
+        }
+        let mut req = self.client.patch(&url).json(&body);
+        if let Some(ref token) = self.token {
+            req = req.bearer_auth(token);
+        }
+        if let Some(ref mid) = self.machine_id {
+            req = req.header("X-Nexus-Machine-Id", mid);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(ClassificationPatchOutcome::Done(Box::new(
+                resp.json().await?,
+            )));
+        }
+        let value: serde_json::Value = resp.json().await.unwrap_or_default();
+        let error = value
+            .get("error")
+            .and_then(|e| e.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("HTTP {}", status));
+        match status {
+            StatusCode::BAD_REQUEST => Ok(ClassificationPatchOutcome::Invalid(error)),
+            StatusCode::FORBIDDEN => Ok(ClassificationPatchOutcome::Forbidden(error)),
+            StatusCode::CONFLICT => Ok(ClassificationPatchOutcome::Conflict(error)),
+            StatusCode::UNPROCESSABLE_ENTITY => {
+                Ok(ClassificationPatchOutcome::ReasonRequired(error))
+            }
             StatusCode::UNAUTHORIZED => Err(Error::Unauthorized(error)),
             StatusCode::NOT_FOUND => Err(Error::NotFound(error)),
             _ => Err(Error::Api(error)),
