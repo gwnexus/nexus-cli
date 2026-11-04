@@ -290,24 +290,24 @@ fn plan_lines(
         .unwrap_or_else(|| delegates_for(a.gateway_classification.as_deref()).to_string());
     let mut lines = vec![
         format!(
-            "Project level:    {}",
-            change(b.project_level.as_deref(), a.project_level.as_deref())
+            "Project level:    {}{}",
+            change(b.project_level.as_deref(), a.project_level.as_deref()),
+            if plan.impact.downgrade {
+                " (downgrade)"
+            } else {
+                ""
+            }
         ),
         format!(
             "Effective level:  {}",
             change(b.effective_level.as_deref(), a.effective_level.as_deref())
         ),
         format!(
-            "Gateway class:    {}{}",
+            "Gateway class:    {}",
             change(
                 b.gateway_classification.as_deref(),
                 a.gateway_classification.as_deref()
-            ),
-            if plan.impact.downgrade {
-                " (downgrade)"
-            } else {
-                ""
-            }
+            )
         ),
         format!(
             "Lane delegates:   {}",
@@ -344,7 +344,7 @@ enum Decision {
     /// Nothing to change; the reason is printed.
     NoOp(String),
     DryRun,
-    /// A gateway-class downgrade without `--reason`.
+    /// A downgrade (as the hub rates it) without `--reason`.
     NeedsReason,
     /// Downgrade: the user types the project slug.
     ConfirmDowngrade,
@@ -447,7 +447,7 @@ fn expect_done(
             anyhow::bail!("{error} (changing the classification needs project admin rights)")
         }
         ClassificationPatchOutcome::ReasonRequired(error) => {
-            anyhow::bail!("{error}: a gateway-class downgrade needs --reason \"<text>\"")
+            anyhow::bail!("{error}: a downgrade needs --reason \"<text>\"")
         }
     }
 }
@@ -521,14 +521,14 @@ pub async fn set(
             return Ok(false);
         }
         Decision::NeedsReason => anyhow::bail!(
-            "this lowers the gateway class ({} -> {}); pass --reason \"<text>\" (recorded in the audit log)",
-            plan.before.gateway_classification.as_deref().unwrap_or("?"),
-            plan.after.gateway_classification.as_deref().unwrap_or("?")
+            "this lowers the classification ({} -> {}); pass --reason \"<text>\" (recorded in the audit log)",
+            plan.before.project_level.as_deref().unwrap_or("?"),
+            plan.after.project_level.as_deref().unwrap_or("?")
         ),
         Decision::ConfirmDowngrade => {
             if !interactive() {
                 anyhow::bail!(
-                    "lowering the gateway class needs an interactive confirmation (-y does not apply)"
+                    "lowering the classification needs an interactive confirmation (-y does not apply)"
                 );
             }
             let slug = current
@@ -637,12 +637,26 @@ mod tests {
     #[test]
     fn test_plan_downgrade_shows_old_and_new() {
         let lines = plan_lines(&downgrade(), None, &[]).join("\n");
-        assert!(lines.contains("strictly-confidential -> confidential"));
-        assert!(lines.contains("restricted -> confidential (downgrade)"));
+        assert!(lines.contains("strictly-confidential -> confidential (downgrade)"));
+        assert!(lines.contains("Gateway class:    restricted -> confidential\n"));
         assert!(lines.contains("suppressed -> rendered"));
         assert!(lines.contains("Newly allowed:    embedding_generation"));
         assert!(lines.contains("Newly blocked:    none"));
         assert!(!lines.contains("dominates"));
+    }
+
+    #[test]
+    fn test_plan_downgrade_with_unchanged_gateway_class() {
+        // The hub rates downgrades by level; the gateway class may stay put.
+        let p = plan(
+            state("vs-nfd", "vs-nfd", "confidential"),
+            state("confidential", "confidential", "confidential"),
+            true,
+        );
+        let lines = plan_lines(&p, None, &[]).join("\n");
+        assert!(lines.contains("vs-nfd -> confidential (downgrade)"));
+        assert!(lines.contains("Gateway class:    confidential (unchanged)\n"));
+        assert_eq!(decide(&p, None, false, false), Decision::NeedsReason);
     }
 
     #[test]

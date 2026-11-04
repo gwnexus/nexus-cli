@@ -580,9 +580,11 @@ nexus classification set confidential --reason "lane test" --pull
 
 `set` always prints an impact plan first (effective level, gateway class,
 delegates, newly allowed or blocked services) and asks before applying it;
-`-y` skips the question. Lowering the gateway class (e.g. `restricted` to
-`confidential`) needs `--reason`, which goes into the audit log, and you
-type the project slug to confirm; `-y` does not skip that. When the
+`-y` skips the question. A downgrade (the backend decides which changes
+count as one and marks it in the plan, e.g. `vs-nfd` to `confidential`,
+even when the gateway class stays the same) needs `--reason`, which goes
+into the audit log, and you type the project slug to confirm; `-y` does
+not skip that. When the
 customer level dominates, the change would have no effect: `set` says so
 and stops unless `--force`; the customer level is changed by customer
 admins in the dashboard. If the classification changed since it was read
