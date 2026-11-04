@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.0] - 2026-11-04
+
+The confidentiality classification can be read and changed from the CLI.
+
+### Added
+- **`nexus classification`** (alias `nexus class`).
+  - `show` (default): project level, customer level, effective level and which one dominates, gateway class with severity and mapping version, and the consequences: lane delegates rendered or suppressed, gateway routing, and the external services the confidentiality gate blocks (as the hub sends them). Supports `--output json`.
+  - `levels`: every level with label, group and gateway class.
+  - `set <level> [--reason <text>] [--dry-run] [--force] [--pull]`: always prints the hub's impact plan first and asks before applying it (`-y` skips the question). Lowering the gateway class needs `--reason` plus typing the project slug, and `-y` does not skip that. When the customer level dominates, it explains that the change has no effect and stops unless `--force`. A concurrent change (409) shows the current state and asks for a re-run. `--pull` re-renders the delegates afterwards.
+- `nexus status` and the `nexus run` pre-launch check show `classification: <effective> (<gateway class>, from <project|customer>)`.
+- `nexus doctor claude` explains suppressed lane delegates (info, not an error).
+
+### Changed
+- **Lane model ids use the gateway form `nexus/<profile>`.** `nexus actors run` passes `--model`, `ANTHROPIC_MODEL`, every default tier and the subagent model as `nexus/<profile_slug>` (unless the value already starts with `nexus/`), and the doctor compares `/v1/models` against that form.
+
+### Tests
+- 15 new tests (plans for upgrade, downgrade, no-op and dry-run, `--reason` enforcement, 409 and 422 handling, JSON output, the pull decision, the client contract against a local stub, the doctor note, the model prefix, command parsing); 941/941 pass.
+
 ## [0.34.2] - 2026-11-04
 
 ### Fixed

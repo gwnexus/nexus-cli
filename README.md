@@ -78,6 +78,8 @@ nexus env keys                          List settable keys, types and allowed va
 nexus env set <key> <value> [--pull]    Change a backend setting (admin), optionally pull afterwards
 nexus env set <key>=<value> [--pull]    Same, as one argument
 nexus env set                           Pick key and value interactively (schema-driven)
+nexus classification [show|levels]      Project, customer and effective confidentiality level and what it drives
+nexus classification set <level>        Change the project level after an impact plan (--reason, --dry-run, --pull)
 nexus run [-- <args>]                   Start the agent environment the backend selects
 nexus run --actor-panes                 Add an actors tab with one pane per local-lane actor (zellij)
 nexus run --resume                      Resurrect the project's exited zellij session instead of starting fresh
@@ -558,6 +560,44 @@ and CLI version.
 they complete. The countdown gives you a moment to review the results before
 the tool starts. Press `Ctrl+C` at any time to abort.
 
+### Classification (`nexus classification`)
+
+A project's confidentiality level drives runtime behaviour. The effective
+level is the higher of the project level and its customer's level; the hub
+maps it to a gateway class (`public`, `internal`, `confidential`,
+`restricted`). That class decides fail-closed gateway routing and whether
+lane delegates are rendered, and the level decides which external services
+the confidentiality gate blocks. Everything is read from the hub on each
+call, never cached.
+
+```bash
+nexus classification                     # project, customer, effective level, gateway class, consequences
+nexus classification --output json
+nexus classification levels              # every level with label, group and gateway class
+nexus classification set confidential --dry-run
+nexus classification set confidential --reason "lane test" --pull
+```
+
+`set` always prints an impact plan first (effective level, gateway class,
+delegates, newly allowed or blocked services) and asks before applying it;
+`-y` skips the question. Lowering the gateway class (e.g. `restricted` to
+`confidential`) needs `--reason`, which goes into the audit log, and you
+type the project slug to confirm; `-y` does not skip that. When the
+customer level dominates, the change would have no effect: `set` says so
+and stops unless `--force`; the customer level is changed by customer
+admins in the dashboard. If the classification changed since it was read
+(409), `set` shows the current state and you re-run it. `--pull` runs
+`nexus pull` afterwards so delegates appear or disappear right away.
+`nexus status` and the `nexus run` pre-launch check show
+`classification: <effective> (<gateway class>, from <project|customer>)`.
+
+**Why are my delegates missing?** Lane delegates are not rendered when the
+gateway class is `restricted` (e.g. strictly confidential, VS-Vertraulich
+and above, EU CONFIDENTIAL and above). `nexus pull` and `nexus doctor
+claude` say so; `nexus classification` shows which level is responsible.
+Lane actors still run in their own session: `nexus actors run <slug>` or
+`nexus run --actor-panes`.
+
 ### Claude Code local lane
 
 Actors on a gateway route run as their **own Claude Code process** against
@@ -578,7 +618,8 @@ cannot switch). `nexus pull` writes:
 `nexus actors run <slug>` starts `claude` with a temporary settings file
 (mode 0600, removed on exit) that points `ANTHROPIC_BASE_URL` at the gateway
 and authenticates with the project inference token (`nexus project link`);
-every model tier is set to the actor's profile, the request carries
+every model tier is set to the actor's profile as gateway model id
+`nexus/<profile>`, the request carries
 `x-nexus-actor: <slug>`, and non-essential traffic is off. The token never
 appears on the command line, and other credentials are removed from the
 process environment. Without a project token it refuses to start, so a
