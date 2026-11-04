@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.2] - 2026-11-04
+
+### Fixed
+- **`nexus run` no longer resurrects an exited Zellij session.** A project session that ended abnormally (terminal closed, reboot) stays listed as EXITED, and `attach_to_session` restored its old layout instead of the current one. `nexus run` now removes that session (`zellij delete-session`, never a running one) right before the start and starts the current layout. A running session is still attached.
+
+### Added
+- **`nexus run --resume`** resurrects the exited session on purpose.
+- **Pre-launch row `Zellij session`:** attach to running session, fresh start, or resurrect.
+- **`nexus doctor claude`:** a `zellij session` row flags the project's exited session (`--fix` deletes it after confirmation, `-y` without asking) and lists other exited sessions with the delete command. JSON: `zellij_sessions`.
+
+### Tests
+- 3 new tests (session list parsing, start decision, doctor rows); 926/926 pass.
+
 ## [0.34.1] - 2026-11-04
 
 ### Changed
