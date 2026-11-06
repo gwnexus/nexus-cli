@@ -1318,6 +1318,9 @@ pub struct WorkspaceForkExportResponse {
     /// Present in ws_export (MCP) responses
     #[serde(default)]
     pub workspace_name: Option<String>,
+    /// Name of the active fork; `None` on backends that do not send it.
+    #[serde(default)]
+    pub fork_name: Option<String>,
     /// Executable items of this export (`devbox_script`, `devbox_config`).
     /// Empty on older servers.
     #[serde(default)]

@@ -241,6 +241,7 @@ async fn adopt_local_push(
         println!("     {} {}", style("A").green().bold(), key);
     }
     println!();
+    print_fork_plan(fork_name, None);
 
     if dry_run {
         println!(
@@ -259,13 +260,6 @@ async fn adopt_local_push(
                 .collect::<HashMap<_, _>>()
         })
         .filter(|files| !files.is_empty());
-
-    let name_display = fork_name.unwrap_or("(auto-generated)");
-    println!(
-        "   {} Pushing as fork: {}",
-        style(">>").bold().cyan(),
-        style(name_display).bold()
-    );
 
     let result = client
         .workspace_push(project_id, devbox_json, script_files, fork_name)
@@ -365,6 +359,7 @@ pub async fn run(
     // compared with the sync manifest and nothing is treated as dropped.
     let export = client.export_workspace_mcp(&project_id).await.ok();
     let exported = export.as_ref().map(exported_paths);
+    let active_fork = export.as_ref().and_then(active_fork_label);
     let desired: HashMap<String, String> = export
         .map(|e| {
             std::iter::once(("devbox.json".to_string(), e.devbox_json))
@@ -451,6 +446,7 @@ pub async fn run(
         }
     }
     println!();
+    print_fork_plan(fork_name, active_fork.as_deref());
 
     if dry_run {
         println!(
@@ -474,13 +470,6 @@ pub async fn run(
         })
         .filter(|files| !files.is_empty());
 
-    let name_display = fork_name.unwrap_or("(auto-generated)");
-    println!(
-        "   {} Pushing as fork: {}",
-        style(">>").bold().cyan(),
-        style(name_display).bold()
-    );
-
     let result = client
         .workspace_push(&project_id, devbox_json, script_files, fork_name)
         .await?;
@@ -488,6 +477,36 @@ pub async fn run(
     print_push_result(&result);
 
     Ok(())
+}
+
+/// How the active fork is named in the push plan: its name, else its id.
+fn active_fork_label(export: &nexus_core::api::WorkspaceForkExportResponse) -> Option<String> {
+    export
+        .fork_name
+        .clone()
+        .or_else(|| export.fork_id.as_ref().map(|id| format!("id {id}")))
+}
+
+/// The push plan's fork lines: a push always creates a new fork and the
+/// backend archives the active one, so say so before (and in a dry run).
+fn fork_plan_lines(fork_name: Option<&str>, active_fork: Option<&str>) -> [String; 2] {
+    [
+        format!(
+            "New fork:       {}",
+            fork_name.unwrap_or("(auto-generated name)")
+        ),
+        format!(
+            "Archived fork:  {} (it stays in the dashboard and can be activated again)",
+            active_fork.unwrap_or("the active fork, if any")
+        ),
+    ]
+}
+
+fn print_fork_plan(fork_name: Option<&str>, active_fork: Option<&str>) {
+    for line in fork_plan_lines(fork_name, active_fork) {
+        println!("   {line}");
+    }
+    println!();
 }
 
 /// Workspace-relative paths of the files in a fork export.
@@ -506,6 +525,36 @@ fn is_dropped(key: &str, exported: Option<&[String]>, include_named: &[String]) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_fork_plan_names_the_archived_fork() {
+        let [new, archived] = super::fork_plan_lines(Some("rust-toolchain"), Some("gitleaks"));
+        assert!(new.ends_with("rust-toolchain"));
+        assert!(archived.contains("gitleaks (it stays in the dashboard"));
+        let [new, archived] = super::fork_plan_lines(None, None);
+        assert!(new.ends_with("(auto-generated name)"));
+        assert!(archived.contains("the active fork, if any"));
+    }
+
+    #[test]
+    fn test_active_fork_label_prefers_the_name() {
+        let mut export: nexus_core::api::WorkspaceForkExportResponse =
+            serde_json::from_value(serde_json::json!({
+                "devbox_json": "{}",
+                "meta": {},
+                "fork_id": "00000000-0000-4000-8000-000000000002"
+            }))
+            .unwrap();
+        assert_eq!(
+            super::active_fork_label(&export).as_deref(),
+            Some("id 00000000-0000-4000-8000-000000000002")
+        );
+        export.fork_name = Some("gitleaks".into());
+        assert_eq!(
+            super::active_fork_label(&export).as_deref(),
+            Some("gitleaks")
+        );
+    }
+
     use super::*;
     use std::fs;
     use tempfile::TempDir;

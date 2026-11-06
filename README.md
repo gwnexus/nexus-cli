@@ -230,7 +230,9 @@ the file never runs anything.
 
 Each push **archives the current active fork** and creates a new one. The
 fork name is either auto-generated (`push-2026-08-23T10-30-00`) or set
-via `--name`. Previous forks remain accessible in the dashboard.
+via `--name`. The push plan (also with `--dry-run`) names the new fork and
+the fork that gets archived. Previous forks remain accessible in the
+dashboard and can be activated again.
 
 `nexus push` requires a prior `nexus pull --scope workspace` (it tracks
 which files came from Nexus via `.nexus/sync-manifest.json`, and refuses to
