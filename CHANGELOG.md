@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.0] - 2026-11-06
+
+### Added
+- **`nexus actors export --target claude`.** Prints the backend's Claude Code export as JSON: subagent files, gateway-lane actors and the main-thread agent. Backend warnings go to stderr; no files are written.
+
+### Tests
+- 2 new tests (claude export shape, answer without claude fields); 948/948 pass.
+
 ## [0.35.2] - 2026-11-04
 
 ### Fixed
