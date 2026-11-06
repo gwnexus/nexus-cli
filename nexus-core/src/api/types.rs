@@ -1589,6 +1589,17 @@ pub struct ActorExportResponse {
     /// OpenCode-compatible agent configuration.
     #[serde(default)]
     pub opencode_agents: Option<serde_json::Value>,
+    /// Target `claude`: subagent files, same shape as in af_export.
+    #[serde(default)]
+    pub claude_agents: Vec<ClaudeAgentFile>,
+    /// Target `claude`: gateway-lane actors (without `context_window`).
+    #[serde(default)]
+    pub claude_lane_actors: Vec<ClaudeLaneActor>,
+    /// Target `claude`: the session-lane primary actor, informational only.
+    #[serde(default)]
+    pub claude_main_agent: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
     #[serde(default)]
     pub count: usize,
 }

@@ -379,7 +379,8 @@ impl NexusClient {
 
     /// Export actor configuration for a target format via `POST /api/mcp/actors`.
     ///
-    /// Calls the `actor_export` action. Target: "opencode" for opencode.json agent section.
+    /// Calls the `actor_export` action. Target: "opencode" for the opencode.json
+    /// agent section, "claude" for Claude Code subagents and lane actors.
     pub async fn export_actors(
         &self,
         project_id: &str,

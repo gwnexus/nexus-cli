@@ -907,7 +907,7 @@ pub enum ActorsAction {
 
     /// Export actor configuration for a target format.
     Export {
-        /// Export target format.
+        /// Export target format: `opencode` or `claude`.
         #[arg(long, default_value = "opencode")]
         target: String,
 

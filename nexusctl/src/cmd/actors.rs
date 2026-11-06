@@ -419,12 +419,35 @@ pub async fn export(
                 );
             }
         }
+        "claude" => {
+            for warning in &response.warnings {
+                eprintln!("   {} {warning}", style("!").bold().yellow());
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&claude_export_json(&response))?
+            );
+        }
         _ => {
-            anyhow::bail!("Unsupported export target: '{}'. Use 'opencode'.", target);
+            anyhow::bail!(
+                "Unsupported export target: '{}'. Use 'opencode' or 'claude'.",
+                target
+            );
         }
     }
 
     Ok(())
+}
+
+/// The `--target claude` output: what `nexus pull` would render for Claude
+/// Code (subagent files, lane actors and the main-thread agent).
+fn claude_export_json(response: &nexus_core::api::ActorExportResponse) -> serde_json::Value {
+    serde_json::json!({
+        "claude_agents": response.claude_agents,
+        "claude_lane_actors": response.claude_lane_actors,
+        "claude_main_agent": response.claude_main_agent,
+        "count": response.count,
+    })
 }
 
 /// Trigger avatar regeneration for an actor.
@@ -742,6 +765,46 @@ mod tests {
         assert!(result.contains("# Profile Body"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_claude_export_json_keeps_hub_shapes() {
+        let response: nexus_core::api::ActorExportResponse = serde_json::from_value(
+            serde_json::json!({
+                "action": "actor_export",
+                "project_id": "00000000-0000-4000-8000-000000000001",
+                "target": "claude",
+                "claude_agents": [
+                    {"slug": "lead", "path": ".claude/agents/lead.md", "body": "---\nname: lead\n---\n"}
+                ],
+                "claude_lane_actors": [
+                    {"slug": "coder", "profile_slug": "coder-long", "body": "Writes code."}
+                ],
+                "claude_main_agent": "lead",
+                "warnings": ["actor x has no profile"],
+                "count": 2
+            }),
+        )
+        .unwrap();
+        assert_eq!(response.warnings, vec!["actor x has no profile"]);
+        let out = claude_export_json(&response);
+        assert_eq!(out["claude_agents"][0]["path"], ".claude/agents/lead.md");
+        assert_eq!(out["claude_lane_actors"][0]["profile_slug"], "coder-long");
+        assert!(out["claude_lane_actors"][0].get("context_window").is_none());
+        assert_eq!(out["claude_main_agent"], "lead");
+        assert_eq!(out["count"], 2);
+    }
+
+    #[test]
+    fn test_claude_export_json_without_claude_fields() {
+        // An opencode-only hub answer still parses; the claude lists are empty.
+        let response: nexus_core::api::ActorExportResponse = serde_json::from_value(
+            serde_json::json!({"action": "actor_export", "project_id": "p", "count": 0}),
+        )
+        .unwrap();
+        let out = claude_export_json(&response);
+        assert_eq!(out["claude_agents"], serde_json::json!([]));
+        assert!(out["claude_main_agent"].is_null());
     }
 
     #[test]

@@ -85,6 +85,7 @@ nexus run --actor-panes                 Add an actors tab with one pane per loca
 nexus run --resume                      Resurrect the project's exited zellij session instead of starting fresh
 nexus actors run <slug> [-p <prompt>]   Start a local-lane actor as its own Claude Code session on the gateway
 nexus actors validate|import <path>     Check or import actor profiles (flat or hub export frontmatter)
+nexus actors export --target claude     Print the Claude Code agents and lane actors as JSON
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
 nexus deinit [--force]                  Remove all AI scaffold files from the workspace
@@ -637,6 +638,12 @@ tab, one pane per lane actor. `nexus doctor claude` checks the lane: the
 project token, the gateway's `/health/ready` (a connection error points to
 the WireGuard or LAN route) and whether `/v1/models` lists every actor
 profile.
+
+`nexus actors export --target claude` prints, as JSON, what the backend
+renders for Claude Code: the subagent files, the lane actors and the
+main-thread agent; backend warnings go to stderr. It writes no files
+(`nexus pull` does that), so it suits checks and scripts.
+`--target opencode` (the default) prints the OpenCode agent section.
 
 ### Directives
 
