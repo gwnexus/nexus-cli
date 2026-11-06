@@ -635,6 +635,12 @@ main-thread `agent`, the lane session starts under a neutral agent instead,
 so that agent's prompt and model do not replace the actor's (pass your own
 `-- --agent <name>` to override).
 
+Two lines Claude Code prints on every lane run are expected and harmless:
+`[claude-code:unrecognized_model]` (the gateway model id `nexus/<profile>`
+is not an Anthropic model name) and the note that claude.ai connectors are
+disabled because another auth source is set (the lane authenticates with
+the project token on purpose; your claude.ai login is not touched).
+
 `nexus run --actor-panes` opens the Zellij workspace with an extra `actors`
 tab, one pane per lane actor. `nexus doctor claude` checks the lane: the
 project token, the gateway's `/health/ready` (a connection error points to
