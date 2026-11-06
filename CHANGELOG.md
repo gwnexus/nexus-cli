@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.1] - 2026-11-06
+
+### Changed
+- **`nexus push` announces the fork it archives.** A devbox push always creates a new fork and the backend archives the active one; the push plan, `--dry-run` included, now names the new fork and the archived one (by name when the backend sends it, else by id). The same plan lines appear for `--adopt-local`.
+
+### Tests
+- 2 new tests (fork plan lines, active fork label); 950/950 pass.
+
 ## [0.36.0] - 2026-11-06
 
 ### Added
