@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-11-07
+
+### Added
+- **Colors in `nexus dispatch status`** (full and compact view): what waits on us yellow and bold, blocked and the blocking mark red, in progress blue, open cyan, resolved green, closed dimmed, and counters of 0 dimmed. Row statuses use the same colors. Column widths stay the same; `NO_COLOR`, a pipe and `--json` stay plain.
+
+### Fixed
+- `nexus dispatch status` cut a value that filled its column exactly (`prog` showed as `pro…` in the compact view).
+
 ### Tests
-- 5 more tests for `nexus dispatch status` and `--dispatch-pane`: compact totals as a lower bound, the compact error line and empty state, a Dispatch addressed to the own project, status abbreviations, and the layout copy written for `--layout`.
+- 5 more tests for `nexus dispatch status` and `--dispatch-pane`: compact totals as a lower bound, the compact error line and empty state, a Dispatch addressed to the own project, status abbreviations, and the layout copy written for `--layout`; 2 more for the colors and the column fit; 969/969 pass.
 
 ### Documentation
 - `nexus dispatch status`: `--project` and `--window`, a sample of the compact view and a legend for its marks and abbreviations.

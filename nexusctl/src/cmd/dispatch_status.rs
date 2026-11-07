@@ -378,8 +378,84 @@ fn status_short(status: &str) -> &str {
 
 /// Pad or cut to exactly `width` characters.
 fn fit(s: &str, width: usize) -> String {
+    // `truncate_str` also cuts a string of exactly `width` characters.
+    if console::measure_text_width(s) <= width {
+        return format!("{s:<width$}");
+    }
     let cut = console::truncate_str(s, width, "…");
     format!("{cut:<width$}")
+}
+
+/// Color of a counter or status. Shown only on a color terminal; pipes,
+/// `NO_COLOR` and `--json` stay plain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    Ours,
+    Blocked,
+    Progress,
+    Open,
+    Peer,
+    Resolved,
+    Closed,
+}
+
+fn tone_style(text: String, tone: Tone) -> console::StyledObject<String> {
+    let s = style(text);
+    match tone {
+        Tone::Ours => s.yellow().bold(),
+        Tone::Blocked => s.red(),
+        Tone::Progress => s.blue(),
+        Tone::Open => s.cyan(),
+        Tone::Peer => s,
+        Tone::Resolved => s.green(),
+        Tone::Closed => s.dim(),
+    }
+}
+
+/// `<count> <label>` in its tone; dimmed when zero (also `0+`), so
+/// non-zero values stand out.
+fn counter_style(c: Count, label: &str, tone: Tone) -> console::StyledObject<String> {
+    let text = format!("{} {label}", c.show());
+    if c.value == 0 {
+        style(text).dim()
+    } else {
+        tone_style(text, tone)
+    }
+}
+
+fn counter(c: Count, label: &str, tone: Tone) -> String {
+    counter_style(c, label, tone).to_string()
+}
+
+/// A row's status tone: blocked first, then our turn, then the state.
+fn status_tone(r: &Row) -> Tone {
+    match r.status.as_str() {
+        "blocked" => Tone::Blocked,
+        _ if r.waiting_on_us => Tone::Ours,
+        "in_progress" => Tone::Progress,
+        "open" => Tone::Open,
+        _ => Tone::Peer,
+    }
+}
+
+fn blocking_mark(r: &Row) -> String {
+    if r.blocking {
+        style("!").red().bold().to_string()
+    } else {
+        " ".into()
+    }
+}
+
+/// `<n> <label>` for the per-peer lines: highlighted when something waits on us.
+fn ours_count(n: usize, label: &str) -> String {
+    counter(
+        Count {
+            value: n,
+            truncated: false,
+        },
+        label,
+        Tone::Ours,
+    )
 }
 
 fn marker(r: &Row) -> String {
@@ -413,25 +489,25 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
             snap.runner.state
         ),
         format!(
-            "  in   {} open · {} waiting on us · {} in progress · {} blocked",
-            i.open.show(),
-            i.waiting_on_us.show(),
-            i.in_progress.show(),
-            i.blocked.show()
+            "  in   {} · {} · {} · {}",
+            counter(i.open, "open", Tone::Open),
+            counter(i.waiting_on_us, "waiting on us", Tone::Ours),
+            counter(i.in_progress, "in progress", Tone::Progress),
+            counter(i.blocked, "blocked", Tone::Blocked)
         ),
         format!(
-            "  out  {} open · {} waiting on us · {} waiting on peer",
-            o.open.show(),
-            o.waiting_on_us.show(),
-            o.waiting_on_peer.show()
+            "  out  {} · {} · {}",
+            counter(o.open, "open", Tone::Open),
+            counter(o.waiting_on_us, "waiting on us", Tone::Ours),
+            counter(o.waiting_on_peer, "waiting on peer", Tone::Peer)
         ),
         format!(
-            "  {}d   in {} resolved · {} closed   out {} resolved · {} closed",
+            "  {}d   in {} · {}   out {} · {}",
             snap.window_days,
-            i.resolved.show(),
-            i.closed.show(),
-            o.resolved.show(),
-            o.closed.show()
+            counter(i.resolved, "resolved", Tone::Resolved),
+            counter(i.closed, "closed", Tone::Closed),
+            counter(o.resolved, "resolved", Tone::Resolved),
+            counter(o.closed, "closed", Tone::Closed)
         ),
     ];
     lines.extend(error_line(snap));
@@ -456,8 +532,8 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
             fit(&r.peer, 16),
             fit(&r.kind, 22),
             fit(&r.priority, 7),
-            if r.blocking { "!" } else { " " },
-            fit(&r.status, 21),
+            blocking_mark(r),
+            tone_style(fit(&r.status, 21), status_tone(r)),
             age(Some(&r.created_at), now),
             age(r.updated_at.as_deref(), now),
             r.title
@@ -466,11 +542,11 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
     lines.push(String::new());
     for p in &snap.peers {
         lines.push(format!(
-            "  {} {} in / {} out, {} waiting on us",
+            "  {} {} in / {} out, {}",
             fit(&p.name, 16),
             p.incoming,
             p.outgoing,
-            p.waiting_on_us
+            ours_count(p.waiting_on_us, "waiting on us")
         ));
     }
     lines
@@ -488,23 +564,23 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
             snap.runner.state
         ),
         format!(
-            "in  {} open {} ours {} prog {} blkd",
-            i.open.show(),
-            i.waiting_on_us.show(),
-            i.in_progress.show(),
-            i.blocked.show()
+            "in  {} {} {} {}",
+            counter(i.open, "open", Tone::Open),
+            counter(i.waiting_on_us, "ours", Tone::Ours),
+            counter(i.in_progress, "prog", Tone::Progress),
+            counter(i.blocked, "blkd", Tone::Blocked)
         ),
         format!(
-            "out {} open {} ours {} peer",
-            o.open.show(),
-            o.waiting_on_us.show(),
-            o.waiting_on_peer.show()
+            "out {} {} {}",
+            counter(o.open, "open", Tone::Open),
+            counter(o.waiting_on_us, "ours", Tone::Ours),
+            counter(o.waiting_on_peer, "peer", Tone::Peer)
         ),
         format!(
-            "{}d  {} resolved {} closed",
+            "{}d  {} {}",
             snap.window_days,
-            i.resolved.plus(o.resolved).show(),
-            i.closed.plus(o.closed).show()
+            counter(i.resolved.plus(o.resolved), "resolved", Tone::Resolved),
+            counter(i.closed.plus(o.closed), "closed", Tone::Closed)
         ),
     ];
     lines.extend(error_line(snap));
@@ -516,21 +592,21 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
         lines.push(format!(
             "{}{}{:<3} {} {} {:>3} {}",
             marker(r),
-            if r.blocking { "!" } else { " " },
+            blocking_mark(r),
             r.direction.label(),
             fit(&r.peer, 10),
-            fit(status_short(&r.status), 4),
+            tone_style(fit(status_short(&r.status), 4), status_tone(r)),
             age(r.updated_at.as_deref().or(Some(&r.created_at)), now),
             r.title
         ));
     }
     for p in &snap.peers {
         lines.push(format!(
-            "{} {}/{}, {} ours",
+            "{} {}/{}, {}",
             fit(&p.name, 12),
             p.incoming,
             p.outgoing,
-            p.waiting_on_us
+            ours_count(p.waiting_on_us, "ours")
         ));
     }
     lines
@@ -971,7 +1047,7 @@ mod tests {
         let row = lines.iter().find(|l| l.contains("title o1")).unwrap();
         let plain = console::strip_ansi_codes(row);
         assert!(plain.find("title o1").unwrap() <= 28, "{plain}");
-        assert!(lines[1].contains("2 ours"));
+        assert!(console::strip_ansi_codes(&lines[1]).contains("2 ours"));
     }
 
     #[test]
@@ -1035,7 +1111,10 @@ mod tests {
             .collect();
         let lines = render_compact(&snap(&lists), NOW);
         // Both counts come from the full outgoing list, so both are bounds.
-        assert_eq!(lines[3], "7d  1+ resolved 50+ closed");
+        assert_eq!(
+            console::strip_ansi_codes(&lines[3]),
+            "7d  1+ resolved 50+ closed"
+        );
     }
 
     #[test]
@@ -1074,6 +1153,71 @@ mod tests {
         assert!(dirs.contains(&Direction::In) && dirs.contains(&Direction::Out));
         assert_eq!(s.peers.len(), 1);
         assert_eq!(s.peers[0].name, "NEXUS-CLI");
+    }
+
+    #[test]
+    fn test_tones_highlight_what_needs_attention() {
+        let paint = |c: usize, label: &str, tone: Tone| {
+            counter_style(
+                Count {
+                    value: c,
+                    truncated: false,
+                },
+                label,
+                tone,
+            )
+            .force_styling(true)
+            .to_string()
+        };
+        assert!(paint(2, "ours", Tone::Ours).contains("\x1b[33m"));
+        assert!(paint(1, "blkd", Tone::Blocked).contains("\x1b[31m"));
+        assert!(paint(1, "prog", Tone::Progress).contains("\x1b[34m"));
+        assert!(paint(1, "open", Tone::Open).contains("\x1b[36m"));
+        assert!(paint(1, "resolved", Tone::Resolved).contains("\x1b[32m"));
+        // Zero is dimmed whatever its tone, also as a lower bound.
+        let zero = paint(0, "ours", Tone::Ours);
+        assert!(zero.contains("\x1b[2m") && !zero.contains("\x1b[33m"));
+        let bound = counter_style(
+            Count {
+                value: 0,
+                truncated: true,
+            },
+            "resolved",
+            Tone::Resolved,
+        )
+        .force_styling(true)
+        .to_string();
+        assert!(bound.contains("\x1b[2m") && !bound.contains("\x1b[32m"));
+        let full = counter_style(
+            Count {
+                value: 3,
+                truncated: true,
+            },
+            "resolved",
+            Tone::Resolved,
+        )
+        .force_styling(true)
+        .to_string();
+        assert!(full.contains("\x1b[32m"));
+
+        let s = snap(&sample());
+        let tone = |id: &str| status_tone(s.dispatches.iter().find(|r| r.id == id).unwrap());
+        assert_eq!(tone("i1"), Tone::Ours); // open incoming: our turn
+        assert_eq!(tone("i3"), Tone::Progress);
+        assert_eq!(tone("o2"), Tone::Progress);
+        assert_eq!(tone("o3"), Tone::Open); // open outgoing: the peer's turn
+        assert_eq!(tone("o1"), Tone::Ours);
+        let mut blocked = s.dispatches[0].clone();
+        blocked.status = "blocked".into();
+        blocked.waiting_on_us = true;
+        assert_eq!(status_tone(&blocked), Tone::Blocked);
+    }
+
+    #[test]
+    fn test_fit_keeps_an_exact_width() {
+        assert_eq!(fit("prog", 4), "prog");
+        assert_eq!(fit("ack", 4), "ack ");
+        assert_eq!(fit("progress", 4), "pro…");
     }
 
     #[test]
