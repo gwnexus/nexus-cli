@@ -10,6 +10,7 @@ pub(crate) mod claude_render;
 mod config_cmd;
 mod consent;
 mod deinit;
+mod dispatch_status;
 pub(crate) mod display;
 mod doctor;
 mod env_cmd;
@@ -41,8 +42,8 @@ mod zellij_guard;
 
 use crate::{
     ActorAvatarAction, ActorsAction, ClassificationAction, ClaudeAction, Cli, Command,
-    ConfigAction, DoctorTarget, EnvAction, GitAction, ProjectAction, ShadowAction, SkillsAction,
-    StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
+    ConfigAction, DispatchAction, DoctorTarget, EnvAction, GitAction, ProjectAction, ShadowAction,
+    SkillsAction, StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
 };
 
 /// Dispatch the parsed CLI command to the appropriate handler.
@@ -187,6 +188,38 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
             state_cmd::reset(&api_url, project_id.as_deref(), path.as_deref(), cli.yes).await?;
+        }
+        Command::Dispatch { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            match action {
+                DispatchAction::Status {
+                    watch,
+                    interval,
+                    ref project,
+                    window,
+                    compact,
+                    json,
+                } => {
+                    let json = *json
+                        || matches!(
+                            cli.resolve_output(&config),
+                            nexus_core::OutputPreference::Json
+                        );
+                    dispatch_status::status(
+                        &api_url,
+                        dispatch_status::StatusOptions {
+                            project_id: project.as_deref(),
+                            watch: *watch,
+                            interval_secs: *interval,
+                            window_days: *window,
+                            compact: *compact,
+                            json,
+                        },
+                    )
+                    .await?
+                }
+            }
         }
         Command::Classification { ref action } => {
             let config = nexus_core::config::Config::load_effective(None)?;
@@ -691,6 +724,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             plain,
             ref workspace,
             actor_panes,
+            dispatch_pane,
             resume,
             ref account,
             ref args,
@@ -721,6 +755,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         .map(|w| (w, run::WorkspaceSource::Flag))
                 },
                 actor_panes,
+                dispatch_pane,
                 resume,
             )
             .await?;

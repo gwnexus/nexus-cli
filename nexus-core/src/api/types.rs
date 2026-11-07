@@ -1188,6 +1188,41 @@ pub struct TaskListResponse {
     pub tasks: Vec<TaskSummary>,
 }
 
+/// A Dispatch row from `dispatch_inbox` / `dispatch_outbox`
+/// (`POST /api/mcp/dispatches`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchSummary {
+    pub id: String,
+    pub source_project_id: String,
+    pub target_project_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub priority: String,
+    pub status: String,
+    #[serde(default)]
+    pub blocking: bool,
+    #[serde(default)]
+    pub due_at: Option<String>,
+    #[serde(default)]
+    pub resolved_at: Option<String>,
+    #[serde(default)]
+    pub closed_at: Option<String>,
+    pub created_at: String,
+    /// Moves with every new message; the "last activity" of a Dispatch.
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+/// Response from `dispatch_inbox` / `dispatch_outbox`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchListResponse {
+    #[serde(default)]
+    pub dispatches: Vec<DispatchSummary>,
+}
+
 // ---------------------------------------------------------------------------
 // Generic error
 // ---------------------------------------------------------------------------

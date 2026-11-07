@@ -1,0 +1,986 @@
+//! `nexus dispatch status`: a read-only view of a project's Dispatch traffic
+//! (incoming, outgoing, what waits on us), for the terminal and as a narrow
+//! pane in the `nexus run` workspace (`nexus run --dispatch-pane`).
+//!
+//! Everything comes from `dispatch_inbox` / `dispatch_outbox` on
+//! `POST /api/mcp/dispatches` with the user's token and is computed client
+//! side. The hub returns at most 50 rows per call and has no cursor, so a
+//! count from a full page is shown as `50+`. The command holds no lock: the
+//! runner file is only read, to show its state.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+use std::time::Duration;
+
+use console::style;
+use nexus_core::api::{DispatchSummary, NexusClient, DISPATCH_LIST_LIMIT};
+use nexus_core::auth::resolve_token;
+use nexus_core::config;
+use serde::Serialize;
+
+use super::observer::{days_from_civil, draw, now_ms, parse_rfc3339};
+use super::preflight::CheckResult;
+
+/// Statuses of a Dispatch that still needs someone.
+const ACTIVE: &[&str] = &[
+    "open",
+    "acknowledged",
+    "in_progress",
+    "waiting_for_requester",
+    "blocked",
+    "needs_review",
+];
+const FINISHED: &[&str] = &["resolved", "closed"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Direction {
+    In,
+    Out,
+}
+
+impl Direction {
+    fn label(self) -> &'static str {
+        match self {
+            Direction::In => "in",
+            Direction::Out => "out",
+        }
+    }
+}
+
+/// Whether the next step of a Dispatch is ours: incoming that we have not
+/// taken up or that is blocked, outgoing that waits for us as requester.
+fn waits_on_us(dir: Direction, status: &str) -> bool {
+    match dir {
+        Direction::In => matches!(status, "open" | "acknowledged" | "blocked"),
+        Direction::Out => matches!(status, "waiting_for_requester" | "needs_review"),
+    }
+}
+
+/// A count and whether it came from a full page (`50+`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+struct Count {
+    value: usize,
+    truncated: bool,
+}
+
+impl Count {
+    fn plus(self, other: Count) -> Count {
+        Count {
+            value: self.value + other.value,
+            truncated: self.truncated || other.truncated,
+        }
+    }
+
+    fn show(self) -> String {
+        if self.truncated {
+            format!("{}+", self.value)
+        } else {
+            self.value.to_string()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+struct Incoming {
+    open: Count,
+    waiting_on_us: Count,
+    in_progress: Count,
+    blocked: Count,
+    resolved: Count,
+    closed: Count,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+struct Outgoing {
+    open: Count,
+    waiting_on_us: Count,
+    waiting_on_peer: Count,
+    resolved: Count,
+    closed: Count,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Row {
+    direction: Direction,
+    id: String,
+    peer_project_id: String,
+    peer: String,
+    title: String,
+    #[serde(rename = "type")]
+    kind: String,
+    priority: String,
+    blocking: bool,
+    status: String,
+    created_at: String,
+    updated_at: Option<String>,
+    waiting_on_us: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Peer {
+    project_id: String,
+    name: String,
+    incoming: usize,
+    outgoing: usize,
+    waiting_on_us: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ProjectRef {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Runner {
+    state: String,
+}
+
+/// The `--json` shape (`nexus.dispatch-status.v1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Snapshot {
+    schema: &'static str,
+    project: ProjectRef,
+    refreshed_at: String,
+    runner: Runner,
+    window_days: u32,
+    incoming: Incoming,
+    outgoing: Outgoing,
+    peers: Vec<Peer>,
+    dispatches: Vec<Row>,
+    /// The last refresh failed; the rest is the last good state.
+    error: Option<String>,
+}
+
+/// The four lists one refresh reads.
+struct Lists {
+    inbox: Vec<DispatchSummary>,
+    outbox: Vec<DispatchSummary>,
+    inbox_done: Vec<DispatchSummary>,
+    outbox_done: Vec<DispatchSummary>,
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+fn full(list: &[DispatchSummary]) -> bool {
+    list.len() >= DISPATCH_LIST_LIMIT
+}
+
+/// Count rows matching `pred`; a full page makes the count a lower bound.
+fn count(list: &[DispatchSummary], pred: impl Fn(&DispatchSummary) -> bool) -> Count {
+    Count {
+        value: list.iter().filter(|d| pred(d)).count(),
+        truncated: full(list),
+    }
+}
+
+/// Finished within the window: resolved by `resolved_at`, closed by `closed_at`.
+fn finished(list: &[DispatchSummary], status: &str, since_ms: i64) -> Count {
+    count(list, |d| {
+        let at = match status {
+            "resolved" => d.resolved_at.as_deref(),
+            _ => d.closed_at.as_deref(),
+        };
+        d.status == status && at.and_then(parse_rfc3339).is_some_and(|t| t >= since_ms)
+    })
+}
+
+/// RFC 3339 UTC timestamp for epoch milliseconds.
+fn rfc3339(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Inverse of `days_from_civil` (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    debug_assert_eq!(days_from_civil(y, m, d), z - 719_468);
+    (y, m, d)
+}
+
+/// Build the snapshot from one refresh's lists.
+fn snapshot(
+    project: ProjectRef,
+    names: &BTreeMap<String, String>,
+    lists: &Lists,
+    runner: Runner,
+    window_days: u32,
+    now: i64,
+) -> Snapshot {
+    let since = now - i64::from(window_days) * 86_400_000;
+    let active = |d: &&DispatchSummary| ACTIVE.contains(&d.status.as_str());
+    let name_of = |id: &str| names.get(id).cloned().unwrap_or_else(|| short_id(id));
+
+    let mut rows: Vec<Row> = lists
+        .inbox
+        .iter()
+        .filter(active)
+        .map(|d| (Direction::In, d, &d.source_project_id))
+        .chain(
+            lists
+                .outbox
+                .iter()
+                .filter(active)
+                .map(|d| (Direction::Out, d, &d.target_project_id)),
+        )
+        .map(|(direction, d, peer)| Row {
+            direction,
+            id: d.id.clone(),
+            peer_project_id: peer.clone(),
+            peer: name_of(peer),
+            title: d.title.clone(),
+            kind: d.kind.clone(),
+            priority: d.priority.clone(),
+            blocking: d.blocking,
+            status: d.status.clone(),
+            created_at: d.created_at.clone(),
+            updated_at: d.updated_at.clone(),
+            waiting_on_us: waits_on_us(direction, &d.status),
+        })
+        .collect();
+    // Ours first, then blocking, then the most recent activity.
+    rows.sort_by(|a, b| {
+        let last = |r: &Row| {
+            r.updated_at
+                .as_deref()
+                .or(Some(&r.created_at))
+                .and_then(parse_rfc3339)
+                .unwrap_or(0)
+        };
+        b.waiting_on_us
+            .cmp(&a.waiting_on_us)
+            .then(b.blocking.cmp(&a.blocking))
+            .then(last(b).cmp(&last(a)))
+    });
+
+    let mut peers: BTreeMap<String, Peer> = BTreeMap::new();
+    for r in &rows {
+        let p = peers
+            .entry(r.peer_project_id.clone())
+            .or_insert_with(|| Peer {
+                project_id: r.peer_project_id.clone(),
+                name: r.peer.clone(),
+                incoming: 0,
+                outgoing: 0,
+                waiting_on_us: 0,
+            });
+        match r.direction {
+            Direction::In => p.incoming += 1,
+            Direction::Out => p.outgoing += 1,
+        }
+        p.waiting_on_us += usize::from(r.waiting_on_us);
+    }
+    let mut peers: Vec<Peer> = peers.into_values().collect();
+    peers.sort_by(|a, b| {
+        b.waiting_on_us
+            .cmp(&a.waiting_on_us)
+            .then((b.incoming + b.outgoing).cmp(&(a.incoming + a.outgoing)))
+            .then(a.name.cmp(&b.name))
+    });
+
+    let (inbox, outbox) = (&lists.inbox, &lists.outbox);
+    Snapshot {
+        schema: "nexus.dispatch-status.v1",
+        project,
+        refreshed_at: rfc3339(now),
+        runner,
+        window_days,
+        incoming: Incoming {
+            open: count(inbox, |d| d.status == "open"),
+            waiting_on_us: count(inbox, |d| waits_on_us(Direction::In, &d.status)),
+            in_progress: count(inbox, |d| d.status == "in_progress"),
+            blocked: count(inbox, |d| d.status == "blocked"),
+            resolved: finished(&lists.inbox_done, "resolved", since),
+            closed: finished(&lists.inbox_done, "closed", since),
+        },
+        outgoing: Outgoing {
+            open: count(outbox, |d| d.status == "open"),
+            waiting_on_us: count(outbox, |d| waits_on_us(Direction::Out, &d.status)),
+            waiting_on_peer: count(outbox, |d| {
+                ACTIVE.contains(&d.status.as_str()) && !waits_on_us(Direction::Out, &d.status)
+            }),
+            resolved: finished(&lists.outbox_done, "resolved", since),
+            closed: finished(&lists.outbox_done, "closed", since),
+        },
+        peers,
+        dispatches: rows,
+        error: None,
+    }
+}
+
+/// Runner state from `~/.config/nexus/state/dispatch/runner.json`, read
+/// only; `none` while no runner has written it.
+fn runner_state(path: &Path) -> Runner {
+    let state = match fs::read_to_string(path) {
+        Err(_) => "none".to_string(),
+        Ok(body) => serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("state")?.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string()),
+    };
+    Runner { state }
+}
+
+fn runner_path() -> Option<std::path::PathBuf> {
+    config::Config::dir()
+        .ok()
+        .map(|d| d.join("state").join("dispatch").join("runner.json"))
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+/// `12s`, `5m`, `3h`, `2d`.
+fn age(from: Option<&str>, now: i64) -> String {
+    let Some(t) = from.and_then(parse_rfc3339) else {
+        return "?".into();
+    };
+    let s = ((now - t).max(0) / 1000) as u64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        3600..=172_799 => format!("{}h", s / 3600),
+        _ => format!("{}d", s / 86_400),
+    }
+}
+
+/// Short status for the compact view.
+fn status_short(status: &str) -> &str {
+    match status {
+        "acknowledged" => "ack",
+        "in_progress" => "prog",
+        "waiting_for_requester" => "wait",
+        "needs_review" => "revw",
+        "blocked" => "blkd",
+        other => other,
+    }
+}
+
+/// Pad or cut to exactly `width` characters.
+fn fit(s: &str, width: usize) -> String {
+    let cut = console::truncate_str(s, width, "…");
+    format!("{cut:<width$}")
+}
+
+fn marker(r: &Row) -> String {
+    if r.waiting_on_us {
+        style(">").bold().yellow().to_string()
+    } else {
+        " ".into()
+    }
+}
+
+fn hhmm(refreshed_at: &str) -> &str {
+    refreshed_at.get(11..19).unwrap_or(refreshed_at)
+}
+
+fn error_line(snap: &Snapshot) -> Option<String> {
+    snap.error.as_ref().map(|e| {
+        style(format!("! refresh failed, showing last state: {e}"))
+            .red()
+            .to_string()
+    })
+}
+
+fn render(snap: &Snapshot, now: i64) -> Vec<String> {
+    let (i, o) = (&snap.incoming, &snap.outgoing);
+    let mut lines = vec![
+        format!(
+            "{}  {}   refreshed {}Z   runner: {}",
+            style("Dispatches").bold(),
+            style(&snap.project.name).bold(),
+            hhmm(&snap.refreshed_at),
+            snap.runner.state
+        ),
+        format!(
+            "  in   {} open · {} waiting on us · {} in progress · {} blocked",
+            i.open.show(),
+            i.waiting_on_us.show(),
+            i.in_progress.show(),
+            i.blocked.show()
+        ),
+        format!(
+            "  out  {} open · {} waiting on us · {} waiting on peer",
+            o.open.show(),
+            o.waiting_on_us.show(),
+            o.waiting_on_peer.show()
+        ),
+        format!(
+            "  {}d   in {} resolved · {} closed   out {} resolved · {} closed",
+            snap.window_days,
+            i.resolved.show(),
+            i.closed.show(),
+            o.resolved.show(),
+            o.closed.show()
+        ),
+    ];
+    lines.extend(error_line(snap));
+    lines.push(String::new());
+    if snap.dispatches.is_empty() {
+        lines.push("  No open Dispatches.".into());
+        return lines;
+    }
+    lines.push(
+        style(format!(
+            "  {:<3} {:<16} {:<22} {:<7} {:<22} {:>4} {:>6}  TITLE",
+            "DIR", "PEER", "TYPE", "PRIO", "STATUS", "AGE", "ACTIVE"
+        ))
+        .dim()
+        .to_string(),
+    );
+    for r in &snap.dispatches {
+        lines.push(format!(
+            "{} {:<3} {} {} {} {}{} {:>4} {:>6}  {}",
+            marker(r),
+            r.direction.label(),
+            fit(&r.peer, 16),
+            fit(&r.kind, 22),
+            fit(&r.priority, 7),
+            if r.blocking { "!" } else { " " },
+            fit(&r.status, 21),
+            age(Some(&r.created_at), now),
+            age(r.updated_at.as_deref(), now),
+            r.title
+        ));
+    }
+    lines.push(String::new());
+    for p in &snap.peers {
+        lines.push(format!(
+            "  {} {} in / {} out, {} waiting on us",
+            fit(&p.name, 16),
+            p.incoming,
+            p.outgoing,
+            p.waiting_on_us
+        ));
+    }
+    lines
+}
+
+/// The narrow pane view (readable at 45 columns): columns are dropped and
+/// titles cut instead of wrapping.
+fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
+    let (i, o) = (&snap.incoming, &snap.outgoing);
+    let mut lines = vec![
+        format!(
+            "{} {}Z runner {}",
+            style(console::truncate_str(&snap.project.name, 20, "…")).bold(),
+            &hhmm(&snap.refreshed_at)[..5.min(hhmm(&snap.refreshed_at).len())],
+            snap.runner.state
+        ),
+        format!(
+            "in  {} open {} ours {} prog {} blkd",
+            i.open.show(),
+            i.waiting_on_us.show(),
+            i.in_progress.show(),
+            i.blocked.show()
+        ),
+        format!(
+            "out {} open {} ours {} peer",
+            o.open.show(),
+            o.waiting_on_us.show(),
+            o.waiting_on_peer.show()
+        ),
+        format!(
+            "{}d  {} resolved {} closed",
+            snap.window_days,
+            i.resolved.plus(o.resolved).show(),
+            i.closed.plus(o.closed).show()
+        ),
+    ];
+    lines.extend(error_line(snap));
+    if snap.dispatches.is_empty() {
+        lines.push("no open Dispatches".into());
+        return lines;
+    }
+    for r in &snap.dispatches {
+        lines.push(format!(
+            "{}{}{:<3} {} {} {:>3} {}",
+            marker(r),
+            if r.blocking { "!" } else { " " },
+            r.direction.label(),
+            fit(&r.peer, 10),
+            fit(status_short(&r.status), 4),
+            age(r.updated_at.as_deref().or(Some(&r.created_at)), now),
+            r.title
+        ));
+    }
+    for p in &snap.peers {
+        lines.push(format!(
+            "{} {}/{}, {} ours",
+            fit(&p.name, 12),
+            p.incoming,
+            p.outgoing,
+            p.waiting_on_us
+        ));
+    }
+    lines
+}
+
+// ---------------------------------------------------------------------------
+// Command
+// ---------------------------------------------------------------------------
+
+async fn fetch(client: &NexusClient, project_id: &str) -> anyhow::Result<Lists> {
+    let (inbox, outbox, inbox_done, outbox_done) = tokio::try_join!(
+        client.list_dispatches("dispatch_inbox", project_id, ACTIVE),
+        client.list_dispatches("dispatch_outbox", project_id, ACTIVE),
+        client.list_dispatches("dispatch_inbox", project_id, FINISHED),
+        client.list_dispatches("dispatch_outbox", project_id, FINISHED),
+    )?;
+    Ok(Lists {
+        inbox: inbox.dispatches,
+        outbox: outbox.dispatches,
+        inbox_done: inbox_done.dispatches,
+        outbox_done: outbox_done.dispatches,
+    })
+}
+
+/// Project names by id, from the project list; empty when it cannot be read.
+async fn project_names(client: &NexusClient) -> BTreeMap<String, String> {
+    client
+        .list_projects()
+        .await
+        .map(|r| r.projects.into_iter().map(|p| (p.id, p.name)).collect())
+        .unwrap_or_default()
+}
+
+pub struct StatusOptions<'a> {
+    pub project_id: Option<&'a str>,
+    pub watch: bool,
+    pub interval_secs: u64,
+    pub window_days: u32,
+    pub compact: bool,
+    pub json: bool,
+}
+
+/// `nexus dispatch status`.
+pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()> {
+    let workspace = std::env::current_dir()?;
+    let project_id = config::resolve_project_id(opts.project_id, Some(&workspace))?;
+    let token = resolve_token().ok_or_else(|| {
+        anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
+    })?;
+    let client = NexusClient::new(api_url, Some(token))?;
+    let runner_file = runner_path();
+    let mut names = project_names(&client).await;
+    let project_name = |names: &BTreeMap<String, String>| ProjectRef {
+        id: project_id.clone(),
+        name: names
+            .get(&project_id)
+            .cloned()
+            .unwrap_or_else(|| short_id(&project_id)),
+    };
+    let runner = || {
+        runner_file.as_deref().map(runner_state).unwrap_or(Runner {
+            state: "none".into(),
+        })
+    };
+
+    if !opts.watch {
+        let lists = fetch(&client, &project_id).await?;
+        let now = now_ms();
+        let snap = snapshot(
+            project_name(&names),
+            &names,
+            &lists,
+            runner(),
+            opts.window_days,
+            now,
+        );
+        if opts.json {
+            println!("{}", serde_json::to_string_pretty(&snap)?);
+        } else {
+            let lines = if opts.compact {
+                render_compact(&snap, now)
+            } else {
+                render(&snap, now)
+            };
+            for line in lines {
+                println!("{line}");
+            }
+        }
+        return Ok(());
+    }
+
+    let term = console::Term::stdout();
+    let mut last: Option<Snapshot> = None;
+    loop {
+        let now = now_ms();
+        match fetch(&client, &project_id).await {
+            Ok(lists) => {
+                let unknown = lists
+                    .inbox
+                    .iter()
+                    .map(|d| &d.source_project_id)
+                    .chain(lists.outbox.iter().map(|d| &d.target_project_id))
+                    .any(|id| !names.contains_key(id));
+                if unknown || names.is_empty() {
+                    let fresh = project_names(&client).await;
+                    if !fresh.is_empty() {
+                        names = fresh;
+                    }
+                }
+                last = Some(snapshot(
+                    project_name(&names),
+                    &names,
+                    &lists,
+                    runner(),
+                    opts.window_days,
+                    now,
+                ));
+            }
+            Err(e) => {
+                let snap = last.get_or_insert_with(|| {
+                    snapshot(
+                        project_name(&names),
+                        &names,
+                        &Lists {
+                            inbox: vec![],
+                            outbox: vec![],
+                            inbox_done: vec![],
+                            outbox_done: vec![],
+                        },
+                        runner(),
+                        opts.window_days,
+                        now,
+                    )
+                });
+                snap.error = Some(format!("{} at {}Z", e, hhmm(&rfc3339(now))));
+            }
+        }
+        if let Some(snap) = last.as_ref() {
+            if opts.json {
+                println!("{}", serde_json::to_string(snap)?);
+            } else {
+                let lines = if opts.compact {
+                    render_compact(snap, now)
+                } else {
+                    render(snap, now)
+                };
+                draw(&term, &lines)?;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(opts.interval_secs)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace pane (`nexus run --dispatch-pane`)
+// ---------------------------------------------------------------------------
+
+/// KDL string literal.
+fn kdl_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The layout with a `dispatches` pane running `nexus dispatch status
+/// --watch --compact`: in the right column of the CLAUDE tab, above the
+/// `terminal` pane (else above `usage` or `observer`), otherwise as its own
+/// `dispatches` tab. `None` when the layout has no closing brace.
+fn layout_with_dispatch_pane(layout: &str, nexus: &str) -> Option<String> {
+    let args = "args \"dispatch\" \"status\" \"--watch\" \"--compact\"";
+    let tab_start = layout.find("tab name=\"CLAUDE\"");
+    let anchor = tab_start.and_then(|start| {
+        let tab = &layout[start..];
+        ["name=\"terminal\"", "name=\"usage\"", "name=\"observer\""]
+            .iter()
+            .find_map(|needle| {
+                let at = tab.find(needle)?;
+                let line_start = tab[..at].rfind('\n').map_or(0, |i| i + 1);
+                tab[line_start..at]
+                    .trim_start()
+                    .starts_with("pane")
+                    .then_some(start + line_start)
+            })
+    });
+    if let Some(at) = anchor {
+        let indent: String = layout[at..]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        let pane = format!(
+            "{indent}pane command={} name=\"dispatches\" {{\n{indent}    {args}\n{indent}}}\n",
+            kdl_string(nexus)
+        );
+        return Some(format!("{}{pane}{}", &layout[..at], &layout[at..]));
+    }
+    let end = layout.rfind('}')?;
+    let tab = format!(
+        "    tab name=\"dispatches\" {{\n        pane command={} name=\"dispatches\" {{\n            {args}\n        }}\n    }}\n",
+        kdl_string(nexus)
+    );
+    let head = layout[..end].trim_end();
+    Some(format!("{head}\n{tab}{}", &layout[end..]))
+}
+
+/// `nexus run --dispatch-pane`: point the zellij `--layout` argument at a
+/// copy of the layout with the Dispatch status pane. Returns a status line.
+pub(crate) fn apply_dispatch_pane(
+    workspace: &Path,
+    leading_args: &mut [String],
+) -> anyhow::Result<CheckResult> {
+    let Some(i) = leading_args.iter().position(|a| a == "--layout") else {
+        return Ok(CheckResult::Warn("no zellij layout to extend".into()));
+    };
+    let Some(layout_path) = leading_args.get(i + 1).cloned() else {
+        return Ok(CheckResult::Warn("no zellij layout to extend".into()));
+    };
+    let nexus = std::env::current_exe()?.display().to_string();
+    let Some(kdl) = fs::read_to_string(&layout_path)
+        .ok()
+        .and_then(|l| layout_with_dispatch_pane(&l, &nexus))
+    else {
+        return Ok(CheckResult::Warn(format!("could not extend {layout_path}")));
+    };
+    let dir = config::Config::dir()?.join("state").join("layouts");
+    fs::create_dir_all(&dir)?;
+    let name = nexus_core::hash::sha256_hex(&workspace.display().to_string());
+    let path = dir.join(format!("{}-dispatch.kdl", &name[..16]));
+    fs::write(&path, kdl)?;
+    leading_args[i + 1] = path.display().to_string();
+    Ok(CheckResult::Pass(
+        "nexus dispatch status --watch --compact".into(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: i64 = 1_793_000_000_000;
+    const ME: &str = "00000000-0000-4000-8000-0000000000aa";
+    const PEER: &str = "00000000-0000-4000-8000-0000000000bb";
+
+    fn at(ms_ago: i64) -> String {
+        rfc3339(NOW - ms_ago)
+    }
+
+    fn d(id: &str, source: &str, target: &str, status: &str) -> DispatchSummary {
+        DispatchSummary {
+            id: id.into(),
+            source_project_id: source.into(),
+            target_project_id: target.into(),
+            title: format!("title {id}"),
+            kind: "implementation_request".into(),
+            priority: "normal".into(),
+            status: status.into(),
+            blocking: false,
+            due_at: None,
+            resolved_at: None,
+            closed_at: None,
+            created_at: at(3 * 86_400_000),
+            updated_at: Some(at(3_600_000)),
+        }
+    }
+
+    fn names() -> BTreeMap<String, String> {
+        [
+            (ME.to_string(), "NEXUS-CLI".to_string()),
+            (PEER.to_string(), "NEXUS-APP".to_string()),
+        ]
+        .into()
+    }
+
+    fn snap(lists: &Lists) -> Snapshot {
+        snapshot(
+            ProjectRef {
+                id: ME.into(),
+                name: "NEXUS-CLI".into(),
+            },
+            &names(),
+            lists,
+            Runner {
+                state: "none".into(),
+            },
+            7,
+            NOW,
+        )
+    }
+
+    fn sample() -> Lists {
+        let mut done_recent = d("r1", PEER, ME, "resolved");
+        done_recent.resolved_at = Some(at(86_400_000));
+        let mut done_old = d("r2", PEER, ME, "closed");
+        done_old.closed_at = Some(at(30 * 86_400_000));
+        let mut out_closed = d("c1", ME, PEER, "closed");
+        out_closed.closed_at = Some(at(2 * 86_400_000));
+        let mut blocking = d("i3", PEER, ME, "in_progress");
+        blocking.blocking = true;
+        Lists {
+            inbox: vec![
+                d("i1", PEER, ME, "open"),
+                d("i2", PEER, ME, "acknowledged"),
+                blocking,
+                d(
+                    "i4",
+                    "00000000-0000-4000-8000-0000000000cc",
+                    ME,
+                    "waiting_for_requester",
+                ),
+            ],
+            outbox: vec![
+                d("o1", ME, PEER, "waiting_for_requester"),
+                d("o2", ME, PEER, "in_progress"),
+                d("o3", ME, PEER, "open"),
+            ],
+            inbox_done: vec![done_recent, done_old],
+            outbox_done: vec![out_closed],
+        }
+    }
+
+    #[test]
+    fn test_counters_follow_the_ownership_rules() {
+        let s = snap(&sample());
+        assert_eq!(s.incoming.open.value, 1);
+        assert_eq!(s.incoming.waiting_on_us.value, 2); // open + acknowledged
+        assert_eq!(s.incoming.in_progress.value, 1);
+        assert_eq!(s.incoming.blocked.value, 0);
+        assert_eq!(s.incoming.resolved.value, 1); // the old close is outside 7d
+        assert_eq!(s.incoming.closed.value, 0);
+        assert_eq!(s.outgoing.open.value, 1);
+        assert_eq!(s.outgoing.waiting_on_us.value, 1); // waiting_for_requester
+        assert_eq!(s.outgoing.waiting_on_peer.value, 2);
+        assert_eq!(s.outgoing.closed.value, 1);
+    }
+
+    #[test]
+    fn test_rows_put_our_turn_first_and_name_peers() {
+        let s = snap(&sample());
+        assert_eq!(s.dispatches.len(), 7);
+        let ours: Vec<_> = s
+            .dispatches
+            .iter()
+            .take_while(|r| r.waiting_on_us)
+            .collect();
+        assert_eq!(ours.len(), 3);
+        assert!(s.dispatches.iter().any(|r| r.peer == "00000000")); // unknown peer: short id
+        let app = s.peers.iter().find(|p| p.name == "NEXUS-APP").unwrap();
+        assert_eq!((app.incoming, app.outgoing, app.waiting_on_us), (3, 3, 3));
+        let o1 = s.dispatches.iter().find(|r| r.id == "o1").unwrap();
+        assert_eq!(
+            (o1.direction, o1.peer.as_str()),
+            (Direction::Out, "NEXUS-APP")
+        );
+    }
+
+    #[test]
+    fn test_full_page_is_a_lower_bound() {
+        let lists = Lists {
+            inbox: (0..DISPATCH_LIST_LIMIT)
+                .map(|n| d(&format!("i{n}"), PEER, ME, "open"))
+                .collect(),
+            outbox: vec![],
+            inbox_done: vec![],
+            outbox_done: vec![],
+        };
+        let s = snap(&lists);
+        assert_eq!(s.incoming.open.show(), "50+");
+        assert_eq!(s.outgoing.open.show(), "0");
+    }
+
+    #[test]
+    fn test_json_shape_is_stable() {
+        let v = serde_json::to_value(snap(&sample())).unwrap();
+        assert_eq!(v["schema"], "nexus.dispatch-status.v1");
+        assert_eq!(v["runner"]["state"], "none");
+        assert_eq!(v["incoming"]["waiting_on_us"]["value"], 2);
+        assert_eq!(v["outgoing"]["waiting_on_peer"]["truncated"], false);
+        assert_eq!(v["dispatches"][0]["direction"], "in");
+        assert!(v["dispatches"][0].get("type").is_some());
+        assert!(v["error"].is_null());
+    }
+
+    #[test]
+    fn test_compact_fits_a_narrow_pane() {
+        let s = snap(&sample());
+        let lines = render_compact(&s, NOW);
+        // Everything before the title fits in 45 columns; draw() cuts the rest.
+        for line in &lines {
+            let plain = console::strip_ansi_codes(line);
+            let head: String = plain.chars().take(45).collect();
+            assert!(!head.contains('\n'));
+        }
+        let row = lines.iter().find(|l| l.contains("title o1")).unwrap();
+        let plain = console::strip_ansi_codes(row);
+        assert!(plain.find("title o1").unwrap() <= 28, "{plain}");
+        assert!(lines[1].contains("2 ours"));
+    }
+
+    #[test]
+    fn test_full_view_marks_error_and_blocking() {
+        let mut s = snap(&sample());
+        s.error = Some("connection refused at 10:00:00Z".into());
+        let text = render(&s, NOW)
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("refresh failed, showing last state"));
+        assert!(text.contains("!in_progress"));
+        assert!(text.contains("NEXUS-APP        3 in / 3 out, 3 waiting on us"));
+    }
+
+    #[test]
+    fn test_rfc3339_round_trip() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        let t = "2026-11-06T12:39:21Z";
+        assert_eq!(rfc3339(parse_rfc3339(t).unwrap()), t);
+        assert_eq!(age(Some(&at(90_000)), NOW), "1m");
+        assert_eq!(age(Some(&at(3 * 86_400_000)), NOW), "3d");
+    }
+
+    #[test]
+    fn test_runner_state_is_read_only_and_optional() {
+        let dir = std::env::temp_dir().join(format!("nexus-runner-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("runner.json");
+        assert_eq!(runner_state(&file).state, "none");
+        fs::write(&file, r#"{"state":"listening","pid":1}"#).unwrap();
+        assert_eq!(runner_state(&file).state, "listening");
+        fs::write(&file, "garbage").unwrap();
+        assert_eq!(runner_state(&file).state, "unknown");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dispatch_pane_goes_into_the_claude_tab() {
+        let layout = "layout {\n    tab name=\"CLAUDE\" {\n        pane split_direction=\"vertical\" {\n            pane name=\"claude\"\n            pane split_direction=\"horizontal\" {\n                pane command=\"node\" name=\"usage\" {\n                }\n                pane name=\"terminal\"\n            }\n        }\n    }\n    tab name=\"GIT\" {\n        pane name=\"terminal\"\n    }\n}\n";
+        let out = layout_with_dispatch_pane(layout, "/bin/nexus").unwrap();
+        let pane = out.find("name=\"dispatches\"").unwrap();
+        let term = out.find("pane name=\"terminal\"").unwrap();
+        assert!(pane < term && pane > out.find("name=\"usage\"").unwrap());
+        assert!(out.contains(
+            "                pane command=\"/bin/nexus\" name=\"dispatches\" {\n                    args \"dispatch\" \"status\" \"--watch\" \"--compact\"\n                }\n                pane name=\"terminal\""
+        ));
+        assert_eq!(out.matches("name=\"dispatches\"").count(), 1);
+    }
+
+    #[test]
+    fn test_dispatch_pane_falls_back_to_a_tab() {
+        let layout = "layout {\n    tab name=\"MAIN\" {\n        pane\n    }\n}\n";
+        let out = layout_with_dispatch_pane(layout, "/bin/nexus").unwrap();
+        assert!(out.contains("tab name=\"dispatches\""));
+        assert!(out.trim_end().ends_with('}'));
+        assert_eq!(layout_with_dispatch_pane("no braces", "n"), None);
+    }
+}

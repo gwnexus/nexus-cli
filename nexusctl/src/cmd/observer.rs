@@ -239,7 +239,7 @@ fn parse_ts(v: &serde_json::Value) -> Option<i64> {
     }
 }
 
-fn parse_rfc3339(s: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339(s: &str) -> Option<i64> {
     let s = s.trim();
     let num = |a: usize, b: usize| s.get(a..b)?.parse::<i64>().ok();
     if s.len() < 19 || !matches!(s.as_bytes().get(10), Some(b'T' | b't' | b' ')) {
@@ -274,7 +274,7 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
 }
 
 /// Days since 1970-01-01 (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -284,7 +284,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -686,7 +686,7 @@ pub fn watch(file: Option<&str>, json: bool, all: bool) -> anyhow::Result<()> {
 
 /// Redraw in place: home, each line cleared to its end, rest of the screen
 /// cleared. Lines are cut to the terminal size.
-fn draw(term: &console::Term, lines: &[String]) -> anyhow::Result<()> {
+pub(crate) fn draw(term: &console::Term, lines: &[String]) -> anyhow::Result<()> {
     let (rows, cols) = term.size();
     let mut out = String::from("\x1b[H");
     for line in lines.iter().take(rows.saturating_sub(1).max(1) as usize) {

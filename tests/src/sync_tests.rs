@@ -7,7 +7,10 @@ use tokio::sync::oneshot;
 
 /// Serve exactly one HTTP response; returns the base URL and a receiver for
 /// the raw request (request line, headers and body).
-async fn stub(status: &'static str, body: &'static str) -> (String, oneshot::Receiver<String>) {
+pub(crate) async fn stub(
+    status: &'static str,
+    body: &'static str,
+) -> (String, oneshot::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = oneshot::channel();

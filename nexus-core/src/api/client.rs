@@ -13,8 +13,8 @@ use crate::api::types::{
     ActorAvatarResponse, ActorExportResponse, ActorGetResponse, ActorImportPayload,
     ActorImportResponse, ActorListResponse, AgentFileExportResponse, ApiError, AuthStatus,
     AuthStatusResponse, ClassificationPatchOutcome, ClassificationResponse,
-    DirectiveExportResponse, FileStatusResponse, IdentityResponse, InferenceTokenInfo,
-    InferenceTokenIssueRequest, InferenceTokenResponse, McpPreflightResponse,
+    DirectiveExportResponse, DispatchListResponse, FileStatusResponse, IdentityResponse,
+    InferenceTokenInfo, InferenceTokenIssueRequest, InferenceTokenResponse, McpPreflightResponse,
     ProjectDetailResponse, ProjectListResponse, ProjectSettingsResponse, SettingsPatchOutcome,
     SkillExportResponse, SkillListResponse, SyncCheckResponse, SyncFileHash, SyncResponse,
     SyncStatusResponse, TaskListResponse, WorkspaceExportResponse, WorkspaceForkExportResponse,
@@ -25,6 +25,9 @@ use crate::Error;
 /// Largest response body the client accepts (uncompressed), the same cap
 /// the server applies to its exports.
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Most rows one `dispatch_inbox` / `dispatch_outbox` call returns.
+pub const DISPATCH_LIST_LIMIT: usize = 50;
 
 fn response_too_large() -> Error {
     Error::Api(format!(
@@ -180,6 +183,25 @@ impl NexusClient {
     /// List all projects accessible to the authenticated user.
     pub async fn list_projects(&self) -> Result<ProjectListResponse, Error> {
         self.get("/api/mcp/projects").await
+    }
+
+    /// List Dispatches of a project via `POST /api/mcp/dispatches`:
+    /// `dispatch_inbox` (target = project) or `dispatch_outbox` (source =
+    /// project), filtered by status. The hub returns at most
+    /// [`DISPATCH_LIST_LIMIT`] rows and has no cursor.
+    pub async fn list_dispatches(
+        &self,
+        action: &str,
+        project_id: &str,
+        status_filter: &[&str],
+    ) -> Result<DispatchListResponse, Error> {
+        let body = json!({
+            "action": action,
+            "project_id": project_id,
+            "status_filter": status_filter,
+            "limit": DISPATCH_LIST_LIMIT
+        });
+        self.post("/api/mcp/dispatches", &body).await
     }
 
     /// List tasks for a project via `POST /api/mcp/tasks` with `task_list` action.

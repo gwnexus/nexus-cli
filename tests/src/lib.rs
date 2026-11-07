@@ -30,6 +30,9 @@ mod classification_tests;
 mod settings_tests;
 
 #[cfg(test)]
+mod dispatch_tests;
+
+#[cfg(test)]
 mod sync_tests;
 
 #[cfg(test)]

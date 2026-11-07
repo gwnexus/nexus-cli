@@ -217,6 +217,7 @@ pub async fn run(
     assume_yes: bool,
     workspace_flag: Option<(&str, WorkspaceSource)>,
     actor_panes: bool,
+    dispatch_pane: bool,
     resume: bool,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
@@ -323,6 +324,14 @@ pub async fn run(
             CheckResult::Warn("--actor-panes needs the zellij workspace".into())
         };
         print_check("Actor panes", &result);
+    }
+    if dispatch_pane {
+        let result = if launch.tool == "zellij" {
+            super::dispatch_status::apply_dispatch_pane(&workspace, &mut launch.leading_args)?
+        } else {
+            CheckResult::Warn("--dispatch-pane needs the zellij workspace".into())
+        };
+        print_check("Dispatch pane", &result);
     }
     let workspace_row = row_check(&launch.row);
     if skip_checks && workspace_row.is_warn() {
@@ -3102,12 +3111,14 @@ mod tests {
                 plain,
                 workspace,
                 actor_panes,
+                dispatch_pane,
                 resume,
                 account,
                 args,
             } => {
                 assert!(!plain);
                 assert!(!actor_panes);
+                assert!(!dispatch_pane);
                 assert!(!resume);
                 assert!(workspace.is_none());
                 assert!(tool.is_none());

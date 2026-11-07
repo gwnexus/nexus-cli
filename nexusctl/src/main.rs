@@ -206,6 +206,13 @@ pub enum Command {
         action: Option<ClassificationAction>,
     },
 
+    /// Dispatches between projects: `nexus dispatch status` shows the
+    /// linked project's incoming and outgoing traffic (read-only).
+    Dispatch {
+        #[command(subcommand)]
+        action: DispatchAction,
+    },
+
     /// Pull skills and configuration from the Nexus platform into this workspace.
     Pull {
         /// Override the linked project ID.
@@ -429,6 +436,11 @@ pub enum Command {
         #[arg(long)]
         actor_panes: bool,
 
+        /// Add a Dispatch status pane (`nexus dispatch status --watch
+        /// --compact`) to the right column of the CLAUDE tab.
+        #[arg(long)]
+        dispatch_pane: bool,
+
         /// Resurrect the project's exited zellij session (its old layout)
         /// instead of removing it and starting the current layout.
         #[arg(long)]
@@ -479,6 +491,41 @@ pub enum EnvAction {
         /// Run `nexus pull` afterwards to apply the change locally.
         #[arg(long)]
         pull: bool,
+    },
+}
+
+/// `nexus dispatch` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum DispatchAction {
+    /// Incoming and outgoing Dispatches of the project: counters, one row
+    /// per open Dispatch (highlighted when the next step is ours) and a
+    /// per-peer summary. Read-only.
+    Status {
+        /// Redraw at --interval until interrupted; on a network error the
+        /// last state stays with an error marker.
+        #[arg(long)]
+        watch: bool,
+
+        /// Seconds between refreshes with --watch (at least 10).
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(10..))]
+        interval: u64,
+
+        /// Project ID instead of the linked project.
+        #[arg(long = "project", alias = "project-id")]
+        project: Option<String>,
+
+        /// Days counted for resolved and closed Dispatches.
+        #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=365))]
+        window: u32,
+
+        /// Narrow layout for a side pane (about 40 to 60 columns).
+        #[arg(long)]
+        compact: bool,
+
+        /// Machine-readable output (`nexus.dispatch-status.v1`); with
+        /// --watch one JSON line per refresh.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2189,6 +2236,42 @@ mod tests {
             }
             _ => panic!("expected Actors Run command"),
         }
+        let cli = Cli::try_parse_from(["nexus", "run", "--dispatch-pane"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                dispatch_pane: true,
+                actor_panes: false,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "dispatch",
+            "status",
+            "--watch",
+            "--compact",
+            "--interval",
+            "15",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Dispatch {
+                action: DispatchAction::Status {
+                    watch: true,
+                    compact: true,
+                    interval: 15,
+                    window: 7,
+                    json: false,
+                    ..
+                }
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["nexus", "dispatch", "status", "--interval", "5"]).is_err(),
+            "the interval has a 10 s floor"
+        );
         let cli = Cli::try_parse_from(["nexus", "run", "--actor-panes", "--resume"]).unwrap();
         assert!(matches!(
             cli.command,

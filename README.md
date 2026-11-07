@@ -82,6 +82,8 @@ nexus classification [show|levels]      Project, customer and effective confiden
 nexus classification set <level>        Change the project level after an impact plan (--reason, --dry-run, --pull)
 nexus run [-- <args>]                   Start the agent environment the backend selects
 nexus run --actor-panes                 Add an actors tab with one pane per local-lane actor (zellij)
+nexus run --dispatch-pane               Add a Dispatch status pane to the CLAUDE tab (zellij)
+nexus dispatch status [--watch]         Incoming and outgoing Dispatches of the project (--compact, --json)
 nexus run --resume                      Resurrect the project's exited zellij session instead of starting fresh
 nexus actors run <slug> [-p <prompt>]   Start a local-lane actor as its own Claude Code session on the gateway
 nexus actors validate|import <path>     Check or import actor profiles (flat or hub export frontmatter)
@@ -652,6 +654,46 @@ renders for Claude Code: the subagent files, the lane actors and the
 main-thread agent; backend warnings go to stderr. It writes no files
 (`nexus pull` does that), so it suits checks and scripts.
 `--target opencode` (the default) prints the OpenCode agent section.
+
+### Dispatch status (`nexus dispatch status`)
+
+A read-only view of the project's Dispatch traffic with other projects:
+
+```bash
+nexus dispatch status                    # counters, open Dispatches, per-peer summary
+nexus dispatch status --watch            # redraw every 30 s (--interval, at least 10)
+nexus dispatch status --compact          # for a narrow side pane (about 45 columns)
+nexus dispatch status --json             # nexus.dispatch-status.v1
+nexus run --dispatch-pane                # the compact view as a pane in the CLAUDE tab
+```
+
+- **Incoming** (this project is the target): counted as open, waiting on us (open, acknowledged or blocked), in progress and blocked.
+- **Outgoing** (this project is the sender): counted as open, waiting on us (`waiting_for_requester`, `needs_review`) and waiting on the peer (every other open status).
+- **Resolved and closed** counts cover the last `--window` days (default 7).
+- **Rows:** one per open Dispatch, with direction, peer project, type, priority, a `!` for blocking, status, age and the time since the last activity. A `>` marks the ones where the next step is ours; they come first.
+
+The backend returns at most 50 Dispatches per list, so a count from a full list is shown as a lower bound (`50+`). With `--watch`, a failed refresh keeps the last state on screen and adds an error line. The command uses your token only as the request's bearer header. It holds no lock, so `pull`, `push` and `run` work while it runs. The runner state in the header is read from `~/.config/nexus/state/dispatch/runner.json` and stays `none` until a runner writes that file.
+
+`--json` prints one object (with `--watch`, one line per refresh):
+
+```json
+{
+  "schema": "nexus.dispatch-status.v1",
+  "project": {"id": "<uuid>", "name": "<name>"},
+  "refreshed_at": "2026-11-07T03:52:07Z",
+  "runner": {"state": "none"},
+  "window_days": 7,
+  "incoming": {"open": {"value": 0, "truncated": false}, "waiting_on_us": {...}, "in_progress": {...}, "blocked": {...}, "resolved": {...}, "closed": {...}},
+  "outgoing": {"open": {...}, "waiting_on_us": {...}, "waiting_on_peer": {...}, "resolved": {...}, "closed": {...}},
+  "peers": [{"project_id": "<uuid>", "name": "<name>", "incoming": 1, "outgoing": 0, "waiting_on_us": 1}],
+  "dispatches": [{"direction": "in", "id": "<uuid>", "peer_project_id": "<uuid>", "peer": "<name>", "title": "...", "type": "bug_report", "priority": "high", "blocking": false, "status": "open", "created_at": "...", "updated_at": "...", "waiting_on_us": true}],
+  "error": null
+}
+```
+
+`truncated: true` means the count came from a full list of 50 and may be higher. `error` holds the last refresh error in watch mode.
+
+`nexus run --dispatch-pane` adds a `dispatches` pane running `nexus dispatch status --watch --compact` to the right column of the CLAUDE tab, above the `terminal` pane. A layout without that column gets a separate `dispatches` tab instead.
 
 ### Directives
 

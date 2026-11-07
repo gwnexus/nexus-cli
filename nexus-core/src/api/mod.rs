@@ -5,5 +5,5 @@
 mod client;
 mod types;
 
-pub use client::{NexusClient, MAX_RESPONSE_BYTES};
+pub use client::{NexusClient, DISPATCH_LIST_LIMIT, MAX_RESPONSE_BYTES};
 pub use types::*;
