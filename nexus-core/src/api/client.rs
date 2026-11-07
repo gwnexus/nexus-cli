@@ -80,6 +80,9 @@ impl NexusClient {
             ))
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
+            // The API closes idle connections after 30 s; dropping them
+            // earlier keeps a reused connection from being closed mid-send.
+            .pool_idle_timeout(std::time::Duration::from_secs(20))
             .build()?;
 
         Ok(Self {
@@ -201,7 +204,12 @@ impl NexusClient {
             "status_filter": status_filter,
             "limit": DISPATCH_LIST_LIMIT
         });
-        self.post("/api/mcp/dispatches", &body).await
+        // A read, so one retry is safe when the request did not go through
+        // (e.g. a pooled connection closed by the server).
+        match self.post("/api/mcp/dispatches", &body).await {
+            Err(e) if e.is_transport() => self.post("/api/mcp/dispatches", &body).await,
+            other => other,
+        }
     }
 
     /// List tasks for a project via `POST /api/mcp/tasks` with `task_list` action.

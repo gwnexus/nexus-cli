@@ -470,6 +470,22 @@ fn hhmm(refreshed_at: &str) -> &str {
     refreshed_at.get(11..19).unwrap_or(refreshed_at)
 }
 
+/// An error with its causes, skipping a cause already in the text
+/// (`HTTP error: ...` repeats the transport message).
+fn error_text(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let msg = cause.to_string();
+        if !text.contains(&msg) {
+            text.push_str(": ");
+            text.push_str(&msg);
+        }
+        source = cause.source();
+    }
+    text
+}
+
 fn error_line(snap: &Snapshot) -> Option<String> {
     snap.error.as_ref().map(|e| {
         style(format!("! refresh failed, showing last state: {e}"))
@@ -741,7 +757,11 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
                         now,
                     )
                 });
-                snap.error = Some(format!("{} at {}Z", e, hhmm(&rfc3339(now))));
+                snap.error = Some(format!(
+                    "{} at {}Z",
+                    error_text(e.as_ref()),
+                    hhmm(&rfc3339(now))
+                ));
             }
         }
         if let Some(snap) = last.as_ref() {
@@ -1211,6 +1231,36 @@ mod tests {
         blocked.status = "blocked".into();
         blocked.waiting_on_us = true;
         assert_eq!(status_tone(&blocked), Tone::Blocked);
+    }
+
+    #[test]
+    fn test_error_text_adds_new_causes_only() {
+        #[derive(Debug)]
+        struct E(&'static str, Option<Box<E>>);
+        impl std::fmt::Display for E {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for E {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|e| e as _)
+            }
+        }
+        let e = E(
+            "HTTP error: error sending request",
+            Some(Box::new(E(
+                "error sending request",
+                Some(Box::new(E(
+                    "connection closed before message completed",
+                    None,
+                ))),
+            ))),
+        );
+        assert_eq!(
+            error_text(&e),
+            "HTTP error: error sending request: connection closed before message completed"
+        );
     }
 
     #[test]

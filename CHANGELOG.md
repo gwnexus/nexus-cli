@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.1] - 2026-11-07
+
+### Fixed
+- **`nexus dispatch status --watch` showed "refresh failed" now and then.** The API closes idle connections after 30 seconds, the same as the default refresh interval, so a refresh could send on a connection that was just being closed. The client now drops idle connections after 20 seconds, and the Dispatch list requests (reads only) retry once when the request fails in transport.
+- The refresh error line names the cause behind a transport error (for example `connection closed before message completed`), not only `error sending request`.
+
+### Tests
+- 2 new tests (retry after a dropped connection, the error text with its causes); 971/971 pass.
+
 ## [0.38.0] - 2026-11-07
 
 ### Added

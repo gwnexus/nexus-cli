@@ -2,6 +2,9 @@
 
 use nexus_core::api::{NexusClient, DISPATCH_LIST_LIMIT};
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
 use crate::sync_tests::stub;
 
 #[tokio::test]
@@ -34,4 +37,36 @@ async fn test_list_dispatches_sends_filter_and_limit() {
     );
     assert_eq!(d.updated_at.as_deref(), Some("2026-11-06T12:40:00+00:00"));
     assert!(d.resolved_at.is_none());
+}
+
+/// A connection the server closes without answering (as with an idle
+/// connection it dropped) is retried once on a new connection.
+#[tokio::test]
+async fn test_list_dispatches_retries_a_dropped_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        let (mut first, _) = listener.accept().await.unwrap();
+        let _ = first.read(&mut buf).await;
+        drop(first);
+        let (mut second, _) = listener.accept().await.unwrap();
+        let _ = second.read(&mut buf).await;
+        let body = r#"{"action":"dispatch_inbox","project_id":"p1","count":0,"dispatches":[]}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        second.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let client = NexusClient::new(
+        &format!("http://127.0.0.1:{}", addr.port()),
+        Some("nxs_pat_test".into()),
+    )
+    .unwrap();
+    let resp = client
+        .list_dispatches("dispatch_inbox", "p1", &["open"])
+        .await
+        .unwrap();
+    assert!(resp.dispatches.is_empty());
 }

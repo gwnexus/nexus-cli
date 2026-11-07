@@ -53,6 +53,14 @@ pub enum Error {
     Other(String),
 }
 
+impl Error {
+    /// The request failed in transport (connect or send), before any
+    /// HTTP status came back; a retry may succeed.
+    pub fn is_transport(&self) -> bool {
+        matches!(self, Error::Http(e) if e.is_connect() || e.is_request())
+    }
+}
+
 impl From<toml::de::Error> for Error {
     fn from(err: toml::de::Error) -> Self {
         Error::Toml(err.to_string())
