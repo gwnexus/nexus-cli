@@ -7,6 +7,10 @@
 //! side. The hub returns at most 50 rows per call and has no cursor, so a
 //! count from a full page is shown as `50+`. The command holds no lock: the
 //! runner file is only read, to show its state.
+//!
+//! With `--scope linked` (the default) the lists also cover the projects
+//! linked to this one. Their Dispatches are shown read only in a section of
+//! their own; counters, peers and "waiting on us" stay with this project.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -45,6 +49,26 @@ impl Direction {
         match self {
             Direction::In => "in",
             Direction::Out => "out",
+        }
+    }
+}
+
+/// Which projects a refresh covers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// This project only.
+    #[default]
+    Project,
+    /// This project and the projects linked to it.
+    Linked,
+}
+
+impl Scope {
+    fn param(self) -> Option<&'static str> {
+        match self {
+            Scope::Project => None,
+            Scope::Linked => Some("linked"),
         }
     }
 }
@@ -116,6 +140,9 @@ struct Row {
     created_at: String,
     updated_at: Option<String>,
     waiting_on_us: bool,
+    /// The project on our side: this one, or a linked one (read only).
+    project_id: String,
+    linked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -146,6 +173,10 @@ struct Snapshot {
     refreshed_at: String,
     runner: Runner,
     window_days: u32,
+    scope: Scope,
+    /// The linked projects the lists covered (empty with `--scope project`
+    /// or a hub without the scope).
+    linked_projects: Vec<ProjectRef>,
     incoming: Incoming,
     outgoing: Outgoing,
     peers: Vec<Peer>,
@@ -155,11 +186,15 @@ struct Snapshot {
 }
 
 /// The four lists one refresh reads.
+#[derive(Default)]
 struct Lists {
     inbox: Vec<DispatchSummary>,
     outbox: Vec<DispatchSummary>,
     inbox_done: Vec<DispatchSummary>,
     outbox_done: Vec<DispatchSummary>,
+    scope: Scope,
+    /// Covered project ids from the hub, own project first.
+    projects: Vec<String>,
 }
 
 fn short_id(id: &str) -> String {
@@ -171,16 +206,26 @@ fn full(list: &[DispatchSummary]) -> bool {
 }
 
 /// Count rows matching `pred`; a full page makes the count a lower bound.
-fn count(list: &[DispatchSummary], pred: impl Fn(&DispatchSummary) -> bool) -> Count {
+/// `list` is the whole page, `keep` selects this project's side of it.
+fn count(
+    list: &[DispatchSummary],
+    keep: impl Fn(&DispatchSummary) -> bool,
+    pred: impl Fn(&DispatchSummary) -> bool,
+) -> Count {
     Count {
-        value: list.iter().filter(|d| pred(d)).count(),
+        value: list.iter().filter(|d| keep(d) && pred(d)).count(),
         truncated: full(list),
     }
 }
 
 /// Finished within the window: resolved by `resolved_at`, closed by `closed_at`.
-fn finished(list: &[DispatchSummary], status: &str, since_ms: i64) -> Count {
-    count(list, |d| {
+fn finished(
+    list: &[DispatchSummary],
+    keep: impl Fn(&DispatchSummary) -> bool,
+    status: &str,
+    since_ms: i64,
+) -> Count {
+    count(list, keep, |d| {
         let at = match status {
             "resolved" => d.resolved_at.as_deref(),
             _ => d.closed_at.as_deref(),
@@ -229,20 +274,20 @@ fn snapshot(
     let since = now - i64::from(window_days) * 86_400_000;
     let active = |d: &&DispatchSummary| ACTIVE.contains(&d.status.as_str());
     let name_of = |id: &str| names.get(id).cloned().unwrap_or_else(|| short_id(id));
+    let me = project.id.as_str();
+    let own_in = |d: &DispatchSummary| d.target_project_id == me;
+    let own_out = |d: &DispatchSummary| d.source_project_id == me;
+    // A linked project's traffic, without what is ours anyway: a Dispatch
+    // between us and a linked project already is one of our rows.
+    let linked = |d: &DispatchSummary| !own_in(d) && !own_out(d);
 
-    let mut rows: Vec<Row> = lists
-        .inbox
-        .iter()
-        .filter(active)
-        .map(|d| (Direction::In, d, &d.source_project_id))
-        .chain(
-            lists
-                .outbox
-                .iter()
-                .filter(active)
-                .map(|d| (Direction::Out, d, &d.target_project_id)),
-        )
-        .map(|(direction, d, peer)| Row {
+    let to_row = |direction: Direction, d: &DispatchSummary| {
+        let (side, peer) = match direction {
+            Direction::In => (&d.target_project_id, &d.source_project_id),
+            Direction::Out => (&d.source_project_id, &d.target_project_id),
+        };
+        let linked = side != me;
+        Row {
             direction,
             id: d.id.clone(),
             peer_project_id: peer.clone(),
@@ -254,10 +299,48 @@ fn snapshot(
             status: d.status.clone(),
             created_at: d.created_at.clone(),
             updated_at: d.updated_at.clone(),
-            waiting_on_us: waits_on_us(direction, &d.status),
-        })
+            // Linked projects are read only: their next step is not ours.
+            waiting_on_us: !linked && waits_on_us(direction, &d.status),
+            project_id: side.clone(),
+            linked,
+        }
+    };
+    let mut rows: Vec<Row> = lists
+        .inbox
+        .iter()
+        .filter(active)
+        .filter(|d| own_in(d))
+        .map(|d| to_row(Direction::In, d))
+        .chain(
+            lists
+                .outbox
+                .iter()
+                .filter(active)
+                .filter(|d| own_out(d))
+                .map(|d| to_row(Direction::Out, d)),
+        )
         .collect();
-    // Ours first, then blocking, then the most recent activity.
+    // A Dispatch between two linked projects is in both lists: keep it once,
+    // as the receiver's.
+    let mut seen = std::collections::BTreeSet::new();
+    rows.extend(
+        lists
+            .inbox
+            .iter()
+            .filter(active)
+            .filter(|d| linked(d))
+            .map(|d| to_row(Direction::In, d))
+            .chain(
+                lists
+                    .outbox
+                    .iter()
+                    .filter(active)
+                    .filter(|d| linked(d))
+                    .map(|d| to_row(Direction::Out, d)),
+            )
+            .filter(|r| seen.insert(r.id.clone())),
+    );
+    // Own rows first; then ours, blocking, and the most recent activity.
     rows.sort_by(|a, b| {
         let last = |r: &Row| {
             r.updated_at
@@ -266,14 +349,15 @@ fn snapshot(
                 .and_then(parse_rfc3339)
                 .unwrap_or(0)
         };
-        b.waiting_on_us
-            .cmp(&a.waiting_on_us)
+        a.linked
+            .cmp(&b.linked)
+            .then(b.waiting_on_us.cmp(&a.waiting_on_us))
             .then(b.blocking.cmp(&a.blocking))
             .then(last(b).cmp(&last(a)))
     });
 
     let mut peers: BTreeMap<String, Peer> = BTreeMap::new();
-    for r in &rows {
+    for r in rows.iter().filter(|r| !r.linked) {
         let p = peers
             .entry(r.peer_project_id.clone())
             .or_insert_with(|| Peer {
@@ -297,30 +381,43 @@ fn snapshot(
             .then(a.name.cmp(&b.name))
     });
 
+    let linked_projects = lists
+        .projects
+        .iter()
+        .filter(|id| id.as_str() != me)
+        .map(|id| ProjectRef {
+            id: id.clone(),
+            name: name_of(id),
+        })
+        .collect();
     let (inbox, outbox) = (&lists.inbox, &lists.outbox);
+    let incoming = Incoming {
+        open: count(inbox, own_in, |d| d.status == "open"),
+        waiting_on_us: count(inbox, own_in, |d| waits_on_us(Direction::In, &d.status)),
+        in_progress: count(inbox, own_in, |d| d.status == "in_progress"),
+        blocked: count(inbox, own_in, |d| d.status == "blocked"),
+        resolved: finished(&lists.inbox_done, own_in, "resolved", since),
+        closed: finished(&lists.inbox_done, own_in, "closed", since),
+    };
+    let outgoing = Outgoing {
+        open: count(outbox, own_out, |d| d.status == "open"),
+        waiting_on_us: count(outbox, own_out, |d| waits_on_us(Direction::Out, &d.status)),
+        waiting_on_peer: count(outbox, own_out, |d| {
+            ACTIVE.contains(&d.status.as_str()) && !waits_on_us(Direction::Out, &d.status)
+        }),
+        resolved: finished(&lists.outbox_done, own_out, "resolved", since),
+        closed: finished(&lists.outbox_done, own_out, "closed", since),
+    };
     Snapshot {
         schema: "nexus.dispatch-status.v1",
         project,
         refreshed_at: rfc3339(now),
         runner,
         window_days,
-        incoming: Incoming {
-            open: count(inbox, |d| d.status == "open"),
-            waiting_on_us: count(inbox, |d| waits_on_us(Direction::In, &d.status)),
-            in_progress: count(inbox, |d| d.status == "in_progress"),
-            blocked: count(inbox, |d| d.status == "blocked"),
-            resolved: finished(&lists.inbox_done, "resolved", since),
-            closed: finished(&lists.inbox_done, "closed", since),
-        },
-        outgoing: Outgoing {
-            open: count(outbox, |d| d.status == "open"),
-            waiting_on_us: count(outbox, |d| waits_on_us(Direction::Out, &d.status)),
-            waiting_on_peer: count(outbox, |d| {
-                ACTIVE.contains(&d.status.as_str()) && !waits_on_us(Direction::Out, &d.status)
-            }),
-            resolved: finished(&lists.outbox_done, "resolved", since),
-            closed: finished(&lists.outbox_done, "closed", since),
-        },
+        scope: lists.scope,
+        linked_projects,
+        incoming,
+        outgoing,
         peers,
         dispatches: rows,
         error: None,
@@ -528,44 +625,76 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
     ];
     lines.extend(error_line(snap));
     lines.push(String::new());
-    if snap.dispatches.is_empty() {
-        lines.push("  No open Dispatches.".into());
-        return lines;
-    }
-    lines.push(
+    let (own, linked): (Vec<&Row>, Vec<&Row>) = snap.dispatches.iter().partition(|r| !r.linked);
+    let header = |first: &str| {
         style(format!(
             "  {:<3} {:<16} {:<22} {:<7} {:<22} {:>4} {:>6}  TITLE",
-            "DIR", "PEER", "TYPE", "PRIO", "STATUS", "AGE", "ACTIVE"
+            "DIR", first, "TYPE", "PRIO", "STATUS", "AGE", "ACTIVE"
         ))
         .dim()
-        .to_string(),
-    );
-    for r in &snap.dispatches {
-        lines.push(format!(
+        .to_string()
+    };
+    // `cell` is the peer for our rows, the linked project for theirs.
+    let row = |r: &Row, cell: &str, title: String| {
+        format!(
             "{} {:<3} {} {} {} {}{} {:>4} {:>6}  {}",
             marker(r),
             r.direction.label(),
-            fit(&r.peer, 16),
+            fit(cell, 16),
             fit(&r.kind, 22),
             fit(&r.priority, 7),
             blocking_mark(r),
             tone_style(fit(&r.status, 21), status_tone(r)),
             age(Some(&r.created_at), now),
             age(r.updated_at.as_deref(), now),
-            r.title
-        ));
+            title
+        )
+    };
+    if own.is_empty() {
+        lines.push("  No open Dispatches.".into());
+    } else {
+        lines.push(header("PEER"));
+        for r in &own {
+            lines.push(row(r, &r.peer, r.title.clone()));
+        }
+        lines.push(String::new());
+        for p in &snap.peers {
+            lines.push(format!(
+                "  {} {} in / {} out, {}",
+                fit(&p.name, 16),
+                p.incoming,
+                p.outgoing,
+                ours_count(p.waiting_on_us, "waiting on us")
+            ));
+        }
     }
-    lines.push(String::new());
-    for p in &snap.peers {
-        lines.push(format!(
-            "  {} {} in / {} out, {}",
-            fit(&p.name, 16),
-            p.incoming,
-            p.outgoing,
-            ours_count(p.waiting_on_us, "waiting on us")
-        ));
+    if !linked.is_empty() {
+        lines.push(String::new());
+        lines.push(
+            style("  Linked projects (read only; the title starts with the peer)")
+                .bold()
+                .to_string(),
+        );
+        lines.push(header("PROJECT"));
+        for r in &linked {
+            lines.push(row(r, &linked_name(snap, r), linked_title(r)));
+        }
     }
     lines
+}
+
+/// The name of a linked row's project.
+fn linked_name(snap: &Snapshot, r: &Row) -> String {
+    snap.linked_projects
+        .iter()
+        .find(|p| p.id == r.project_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| short_id(&r.project_id))
+}
+
+/// A linked row's title, led by the project on the other side.
+fn linked_title(r: &Row) -> String {
+    format!("{}: {}", r.peer, r.title)
 }
 
 /// The narrow pane view (readable at 45 columns): columns are dropped and
@@ -600,21 +729,24 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
         ),
     ];
     lines.extend(error_line(snap));
-    if snap.dispatches.is_empty() {
-        lines.push("no open Dispatches".into());
-        return lines;
-    }
-    for r in &snap.dispatches {
-        lines.push(format!(
+    let (own, linked): (Vec<&Row>, Vec<&Row>) = snap.dispatches.iter().partition(|r| !r.linked);
+    let row = |r: &Row, cell: &str, title: String| {
+        format!(
             "{}{}{:<3} {} {} {:>3} {}",
             marker(r),
             blocking_mark(r),
             r.direction.label(),
-            fit(&r.peer, 10),
+            fit(cell, 10),
             tone_style(fit(status_short(&r.status), 4), status_tone(r)),
             age(r.updated_at.as_deref().or(Some(&r.created_at)), now),
-            r.title
-        ));
+            title
+        )
+    };
+    if own.is_empty() {
+        lines.push("no open Dispatches".into());
+    }
+    for r in &own {
+        lines.push(row(r, &r.peer, r.title.clone()));
     }
     for p in &snap.peers {
         lines.push(format!(
@@ -625,6 +757,12 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
             ours_count(p.waiting_on_us, "ours")
         ));
     }
+    if !linked.is_empty() {
+        lines.push(style("linked, read only").bold().to_string());
+        for r in &linked {
+            lines.push(row(r, &linked_name(snap, r), linked_title(r)));
+        }
+    }
     lines
 }
 
@@ -632,18 +770,21 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
 // Command
 // ---------------------------------------------------------------------------
 
-async fn fetch(client: &NexusClient, project_id: &str) -> anyhow::Result<Lists> {
+async fn fetch(client: &NexusClient, project_id: &str, scope: Scope) -> anyhow::Result<Lists> {
+    let param = scope.param();
     let (inbox, outbox, inbox_done, outbox_done) = tokio::try_join!(
-        client.list_dispatches("dispatch_inbox", project_id, ACTIVE),
-        client.list_dispatches("dispatch_outbox", project_id, ACTIVE),
-        client.list_dispatches("dispatch_inbox", project_id, FINISHED),
-        client.list_dispatches("dispatch_outbox", project_id, FINISHED),
+        client.list_dispatches("dispatch_inbox", project_id, ACTIVE, param),
+        client.list_dispatches("dispatch_outbox", project_id, ACTIVE, param),
+        client.list_dispatches("dispatch_inbox", project_id, FINISHED, param),
+        client.list_dispatches("dispatch_outbox", project_id, FINISHED, param),
     )?;
     Ok(Lists {
+        projects: inbox.projects,
         inbox: inbox.dispatches,
         outbox: outbox.dispatches,
         inbox_done: inbox_done.dispatches,
         outbox_done: outbox_done.dispatches,
+        scope,
     })
 }
 
@@ -661,6 +802,7 @@ pub struct StatusOptions<'a> {
     pub watch: bool,
     pub interval_secs: u64,
     pub window_days: u32,
+    pub scope: Scope,
     pub compact: bool,
     pub json: bool,
 }
@@ -689,7 +831,7 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
     };
 
     if !opts.watch {
-        let lists = fetch(&client, &project_id).await?;
+        let lists = fetch(&client, &project_id, opts.scope).await?;
         let now = now_ms();
         let snap = snapshot(
             project_name(&names),
@@ -718,7 +860,7 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
     let mut last: Option<Snapshot> = None;
     loop {
         let now = now_ms();
-        match fetch(&client, &project_id).await {
+        match fetch(&client, &project_id, opts.scope).await {
             Ok(lists) => {
                 let unknown = lists
                     .inbox
@@ -747,10 +889,8 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
                         project_name(&names),
                         &names,
                         &Lists {
-                            inbox: vec![],
-                            outbox: vec![],
-                            inbox_done: vec![],
-                            outbox_done: vec![],
+                            scope: opts.scope,
+                            ..Lists::default()
                         },
                         runner(),
                         opts.window_days,
@@ -989,6 +1129,7 @@ mod tests {
             ],
             inbox_done: vec![done_recent, done_old],
             outbox_done: vec![out_closed],
+            ..Lists::default()
         }
     }
 
@@ -1036,6 +1177,7 @@ mod tests {
             outbox: vec![],
             inbox_done: vec![],
             outbox_done: vec![],
+            ..Lists::default()
         };
         let s = snap(&lists);
         assert_eq!(s.incoming.open.show(), "50+");
@@ -1144,6 +1286,7 @@ mod tests {
             outbox: vec![],
             inbox_done: vec![],
             outbox_done: vec![],
+            ..Lists::default()
         });
         s.error = Some("timeout at 10:00:00Z".into());
         let lines: Vec<String> = render_compact(&s, NOW)
@@ -1166,6 +1309,7 @@ mod tests {
             outbox: vec![d("s1", ME, ME, "open")],
             inbox_done: vec![],
             outbox_done: vec![],
+            ..Lists::default()
         };
         let s = snap(&lists);
         let dirs: Vec<_> = s.dispatches.iter().map(|r| r.direction).collect();
@@ -1173,6 +1317,116 @@ mod tests {
         assert!(dirs.contains(&Direction::In) && dirs.contains(&Direction::Out));
         assert_eq!(s.peers.len(), 1);
         assert_eq!(s.peers[0].name, "NEXUS-CLI");
+    }
+
+    const LINKED: &str = "00000000-0000-4000-8000-0000000000dd";
+
+    /// What the hub returns with `project_scope: "linked"`: our traffic plus
+    /// the linked project's, where a Dispatch between us shows up on both
+    /// sides.
+    fn linked_lists() -> Lists {
+        Lists {
+            inbox: vec![
+                d("i1", PEER, ME, "open"),
+                d("l1", PEER, LINKED, "open"),
+                d("x1", ME, LINKED, "in_progress"),
+            ],
+            outbox: vec![
+                d("x1", ME, LINKED, "in_progress"),
+                d("l2", LINKED, PEER, "needs_review"),
+            ],
+            scope: Scope::Linked,
+            projects: vec![ME.into(), LINKED.into()],
+            ..Lists::default()
+        }
+    }
+
+    fn linked_names() -> BTreeMap<String, String> {
+        let mut n = names();
+        n.insert(LINKED.into(), "NEXUS-MCP".into());
+        n
+    }
+
+    #[test]
+    fn test_linked_rows_are_read_only_and_kept_apart() {
+        let s = snapshot(
+            ProjectRef {
+                id: ME.into(),
+                name: "NEXUS-CLI".into(),
+            },
+            &linked_names(),
+            &linked_lists(),
+            Runner {
+                state: "none".into(),
+            },
+            7,
+            NOW,
+        );
+        assert_eq!(s.scope, Scope::Linked);
+        assert_eq!(s.linked_projects.len(), 1);
+        assert_eq!(s.linked_projects[0].name, "NEXUS-MCP");
+        // Counters and peers are ours only: i1 in, x1 out.
+        assert_eq!(s.incoming.open.value, 1);
+        assert_eq!(s.outgoing.waiting_on_peer.value, 1);
+        assert_eq!(s.peers.len(), 2);
+        let ids: Vec<(&str, bool)> = s
+            .dispatches
+            .iter()
+            .map(|r| (r.id.as_str(), r.linked))
+            .collect();
+        assert_eq!(
+            ids,
+            [("i1", false), ("x1", false), ("l1", true), ("l2", true)]
+        );
+        // A linked project's open or needs_review rows do not wait on us.
+        assert!(s
+            .dispatches
+            .iter()
+            .filter(|r| r.linked)
+            .all(|r| !r.waiting_on_us));
+        let l2 = s.dispatches.iter().find(|r| r.id == "l2").unwrap();
+        assert_eq!(
+            (l2.direction, l2.project_id.as_str()),
+            (Direction::Out, LINKED)
+        );
+
+        let compact: Vec<String> = render_compact(&s, NOW)
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).to_string())
+            .collect();
+        let at = compact
+            .iter()
+            .position(|l| l == "linked, read only")
+            .unwrap();
+        assert!(
+            compact[at + 1].contains("NEXUS-MCP")
+                && compact[at + 1].contains("NEXUS-APP: title l1")
+        );
+        let full: Vec<String> = render(&s, NOW)
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).to_string())
+            .collect();
+        assert!(full
+            .iter()
+            .any(|l| l.starts_with("  Linked projects (read only")));
+    }
+
+    #[test]
+    fn test_linked_only_traffic_keeps_the_empty_note() {
+        let lists = Lists {
+            inbox: vec![d("l1", PEER, LINKED, "open")],
+            scope: Scope::Linked,
+            projects: vec![ME.into(), LINKED.into()],
+            ..Lists::default()
+        };
+        let s = snap(&lists);
+        let compact: Vec<String> = render_compact(&s, NOW)
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).to_string())
+            .collect();
+        assert!(compact.contains(&"no open Dispatches".to_string()));
+        assert!(compact.contains(&"linked, read only".to_string()));
+        assert!(s.peers.is_empty());
     }
 
     #[test]

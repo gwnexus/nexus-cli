@@ -1221,6 +1221,10 @@ pub struct DispatchSummary {
 pub struct DispatchListResponse {
     #[serde(default)]
     pub dispatches: Vec<DispatchSummary>,
+    /// Project ids the result covers, own project first (with
+    /// `project_scope: "linked"`); empty from hubs without the scope.
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -191,19 +191,25 @@ impl NexusClient {
     /// List Dispatches of a project via `POST /api/mcp/dispatches`:
     /// `dispatch_inbox` (target = project) or `dispatch_outbox` (source =
     /// project), filtered by status. The hub returns at most
-    /// [`DISPATCH_LIST_LIMIT`] rows and has no cursor.
+    /// [`DISPATCH_LIST_LIMIT`] rows and has no cursor. `project_scope`
+    /// `"linked"` also covers the projects linked to it (read only); the
+    /// response then lists the covered ids in `projects`.
     pub async fn list_dispatches(
         &self,
         action: &str,
         project_id: &str,
         status_filter: &[&str],
+        project_scope: Option<&str>,
     ) -> Result<DispatchListResponse, Error> {
-        let body = json!({
+        let mut body = json!({
             "action": action,
             "project_id": project_id,
             "status_filter": status_filter,
             "limit": DISPATCH_LIST_LIMIT
         });
+        if let Some(scope) = project_scope {
+            body["project_scope"] = json!(scope);
+        }
         // A read, so one retry is safe when the request did not go through
         // (e.g. a pooled connection closed by the server).
         match self.post("/api/mcp/dispatches", &body).await {

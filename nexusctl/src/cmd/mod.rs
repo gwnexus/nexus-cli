@@ -198,6 +198,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     interval,
                     ref project,
                     window,
+                    ref scope,
                     compact,
                     json,
                 } => {
@@ -213,6 +214,11 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                             watch: *watch,
                             interval_secs: *interval,
                             window_days: *window,
+                            scope: if scope == "project" {
+                                dispatch_status::Scope::Project
+                            } else {
+                                dispatch_status::Scope::Linked
+                            },
                             compact: *compact,
                             json,
                         },

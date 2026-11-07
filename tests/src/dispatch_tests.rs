@@ -16,7 +16,7 @@ async fn test_list_dispatches_sends_filter_and_limit() {
     .await;
     let client = NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
     let resp = client
-        .list_dispatches("dispatch_inbox", "p1", &["open", "blocked"])
+        .list_dispatches("dispatch_inbox", "p1", &["open", "blocked"], None)
         .await
         .unwrap();
     let raw = req.await.unwrap();
@@ -30,6 +30,9 @@ async fn test_list_dispatches_sends_filter_and_limit() {
         serde_json::json!(["open", "blocked"])
     );
     assert_eq!(body["limit"], DISPATCH_LIST_LIMIT);
+    // Without a scope the parameter is left out, so older hubs see no change.
+    assert!(body.get("project_scope").is_none());
+    assert!(resp.projects.is_empty());
     let d = &resp.dispatches[0];
     assert_eq!(
         (d.kind.as_str(), d.status.as_str(), d.blocking),
@@ -65,8 +68,27 @@ async fn test_list_dispatches_retries_a_dropped_connection() {
     )
     .unwrap();
     let resp = client
-        .list_dispatches("dispatch_inbox", "p1", &["open"])
+        .list_dispatches("dispatch_inbox", "p1", &["open"], None)
         .await
         .unwrap();
     assert!(resp.dispatches.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_dispatches_linked_scope() {
+    let (url, req) = stub(
+        "200 OK",
+        r#"{"action":"dispatch_outbox","project_id":"p1","project_scope":"linked","projects":["p1","p2"],"count":0,"dispatches":[]}"#,
+    )
+    .await;
+    let client = NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
+    let resp = client
+        .list_dispatches("dispatch_outbox", "p1", &["open"], Some("linked"))
+        .await
+        .unwrap();
+    let raw = req.await.unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(&raw[raw.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    assert_eq!(body["project_scope"], "linked");
+    assert_eq!(resp.projects, ["p1", "p2"]);
 }

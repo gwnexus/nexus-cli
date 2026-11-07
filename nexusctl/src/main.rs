@@ -518,6 +518,11 @@ pub enum DispatchAction {
         #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=365))]
         window: u32,
 
+        /// `linked` also shows the Dispatches of the projects linked to
+        /// this one (read only); `project` only this project's.
+        #[arg(long, default_value = "linked", value_parser = ["linked", "project"])]
+        scope: String,
+
         /// Narrow layout for a side pane (about 40 to 60 columns).
         #[arg(long)]
         compact: bool,
@@ -2272,6 +2277,21 @@ mod tests {
             Cli::try_parse_from(["nexus", "dispatch", "status", "--interval", "5"]).is_err(),
             "the interval has a 10 s floor"
         );
+        let scope = |args: &[&str]| match Cli::try_parse_from(args).map(|c| c.command) {
+            Ok(Command::Dispatch {
+                action: DispatchAction::Status { scope, .. },
+            }) => Some(scope),
+            _ => None,
+        };
+        assert_eq!(
+            scope(&["nexus", "dispatch", "status"]).as_deref(),
+            Some("linked")
+        );
+        assert_eq!(
+            scope(&["nexus", "dispatch", "status", "--scope", "project"]).as_deref(),
+            Some("project")
+        );
+        assert!(scope(&["nexus", "dispatch", "status", "--scope", "all"]).is_none());
         let cli = Cli::try_parse_from(["nexus", "run", "--actor-panes", "--resume"]).unwrap();
         assert!(matches!(
             cli.command,

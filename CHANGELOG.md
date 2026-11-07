@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Linked projects in `nexus dispatch status`** and the `dispatches` pane. By default (`--scope linked`) the view also lists the open Dispatches of the projects linked to this one, read only, in a section of their own: the linked project, the direction from its side, and the peer before the title. Counters, peers and the `>` mark stay with this project. `--scope project` shows this project only. The JSON gains `scope`, `linked_projects` and, per row, `project_id` and `linked`. Needs a hub with linked scope; an older hub returns this project's Dispatches only.
+
+### Tests
+- 3 new tests (the linked rows, linked-only traffic, the scope request and the covered projects) and the `--scope` parsing.
+
 ## [0.38.1] - 2026-11-07
 
 ### Fixed

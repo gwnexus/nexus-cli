@@ -664,12 +664,14 @@ nexus dispatch status                    # counters, open Dispatches, per-peer s
 nexus dispatch status --watch            # redraw every 30 s (--interval, at least 10)
 nexus dispatch status --compact          # for a narrow side pane (about 45 columns)
 nexus dispatch status --json             # nexus.dispatch-status.v1
+nexus dispatch status --scope project    # without the linked projects
 nexus run --dispatch-pane                # the compact view as a pane in the CLAUDE tab
 ```
 
 - **Incoming** (this project is the target): counted as open, waiting on us (open, acknowledged or blocked), in progress and blocked.
 - **Outgoing** (this project is the sender): counted as open, waiting on us (`waiting_for_requester`, `needs_review`) and waiting on the peer (every other open status).
 - **Resolved and closed** counts cover the last `--window` days (default 7).
+- **Linked projects** (`--scope linked`, the default): the Dispatches of the projects linked to this one (one link away, up to 25) follow in a section of their own, read only. A row shows the linked project, the direction from its side, and the peer before the title. Counters, peers and the `>` mark stay with this project, because a linked project's agent handles its own Dispatches; to act on one, send a Dispatch to that project. `--scope project` leaves the section out. A hub without linked scope returns only this project's Dispatches.
 - **Rows:** one per open Dispatch, with direction, peer project, type, priority, a `!` for blocking, status, age and the time since the last activity. A `>` marks the ones where the next step is ours; they come first.
 - **Options:** `--project <id>` shows another project you can access instead of the linked one. `--window <days>` sets the period for resolved and closed counts.
 
@@ -708,15 +710,17 @@ The backend returns at most 50 Dispatches per list, so a count from a full list 
   "refreshed_at": "2026-11-07T03:52:07Z",
   "runner": {"state": "none"},
   "window_days": 7,
+  "scope": "linked",
+  "linked_projects": [{"id": "<uuid>", "name": "<name>"}],
   "incoming": {"open": {"value": 0, "truncated": false}, "waiting_on_us": {...}, "in_progress": {...}, "blocked": {...}, "resolved": {...}, "closed": {...}},
   "outgoing": {"open": {...}, "waiting_on_us": {...}, "waiting_on_peer": {...}, "resolved": {...}, "closed": {...}},
   "peers": [{"project_id": "<uuid>", "name": "<name>", "incoming": 1, "outgoing": 0, "waiting_on_us": 1}],
-  "dispatches": [{"direction": "in", "id": "<uuid>", "peer_project_id": "<uuid>", "peer": "<name>", "title": "...", "type": "bug_report", "priority": "high", "blocking": false, "status": "open", "created_at": "...", "updated_at": "...", "waiting_on_us": true}],
+  "dispatches": [{"direction": "in", "id": "<uuid>", "peer_project_id": "<uuid>", "peer": "<name>", "title": "...", "type": "bug_report", "priority": "high", "blocking": false, "status": "open", "created_at": "...", "updated_at": "...", "waiting_on_us": true, "project_id": "<uuid>", "linked": false}],
   "error": null
 }
 ```
 
-`truncated: true` means the count came from a full list of 50 and may be higher. `error` holds the last refresh error in watch mode.
+`truncated: true` means the count came from a full list of 50 and may be higher. `error` holds the last refresh error in watch mode. A row's `project_id` is the project on our side (this one, or the linked one when `linked` is true).
 
 `nexus run --dispatch-pane` adds a `dispatches` pane running `nexus dispatch status --watch --compact` to the right column of the CLAUDE tab, above the `terminal` pane. A layout without that column gets a separate `dispatches` tab instead. Run from inside the project's running zellij session, it opens the pane there (above the focused pane), because a layout only applies to a new session.
 
