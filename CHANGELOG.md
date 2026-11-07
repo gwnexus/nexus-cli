@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.2] - 2026-11-07
+
+### Changed
+- `nexus run --dispatch-pane` inside a running zellij session opens the `dispatches` pane below the focused pane (was: above), shrinks it to about a fifth of the height and gives the focus back to the pane above.
+
 ## [0.38.1] - 2026-11-07
 
 ### Fixed

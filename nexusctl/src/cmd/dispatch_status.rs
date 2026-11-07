@@ -869,7 +869,7 @@ fn extend_layout_arg(
     ))
 }
 
-/// `zellij run` arguments that open the status pane above the focused pane
+/// `zellij run` arguments that open the status pane below the focused pane
 /// of the current session.
 fn session_pane_args(nexus: &str) -> Vec<String> {
     [
@@ -877,7 +877,7 @@ fn session_pane_args(nexus: &str) -> Vec<String> {
         "--name",
         "dispatches",
         "--direction",
-        "up",
+        "down",
         "--",
         nexus,
         "dispatch",
@@ -901,11 +901,33 @@ pub(crate) fn open_pane_in_session() -> CheckResult {
         .stdout(std::process::Stdio::null())
         .status()
     {
-        Ok(s) if s.success() => CheckResult::Pass("opened in the running session".into()),
+        Ok(s) if s.success() => {
+            // Best effort: a failed resize leaves a half-height pane.
+            for &args in SHRINK_PANE {
+                let _ = std::process::Command::new("zellij")
+                    .args(args)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            CheckResult::Pass("opened below in the running session".into())
+        }
         Ok(s) => CheckResult::Warn(format!("zellij run failed ({s})")),
         Err(e) => CheckResult::Warn(format!("zellij run failed: {e}")),
     }
 }
+
+/// `zellij run` splits the focused pane in half and focuses the new pane:
+/// shrink it to about a fifth, then give the focus back to the pane above.
+const SHRINK_PANE: &[&[&str]] = &[
+    &["action", "resize", "decrease", "up"],
+    &["action", "resize", "decrease", "up"],
+    &["action", "resize", "decrease", "up"],
+    &["action", "resize", "decrease", "up"],
+    &["action", "resize", "decrease", "up"],
+    &["action", "resize", "decrease", "up"],
+    &["action", "move-focus", "up"],
+];
 
 #[cfg(test)]
 mod tests {
@@ -1317,7 +1339,11 @@ mod tests {
     fn test_session_pane_runs_the_compact_watch() {
         let args = session_pane_args("/bin/nexus");
         let sep = args.iter().position(|a| a == "--").unwrap();
-        assert_eq!(&args[..3], ["run", "--name", "dispatches"]);
+        assert_eq!(
+            &args[..5],
+            ["run", "--name", "dispatches", "--direction", "down"]
+        );
+        assert_eq!(SHRINK_PANE.last().unwrap(), &["action", "move-focus", "up"]);
         assert_eq!(
             &args[sep + 1..],
             ["/bin/nexus", "dispatch", "status", "--watch", "--compact"]
