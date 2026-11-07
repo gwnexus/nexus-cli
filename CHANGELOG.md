@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.0] - 2026-11-07
+
+### Added
+- **`nexus dispatch status`.** A read-only view of the project's Dispatches:
+  - incoming and outgoing counters, including what waits on us;
+  - resolved and closed counts within `--window` days;
+  - one row per open Dispatch, with the ones where the next step is ours first;
+  - a per-peer summary.
+
+  `--watch` redraws every `--interval` seconds (at least 10) and keeps the last state with an error line when a refresh fails. `--compact` fits a narrow pane, and `--json` prints the documented `nexus.dispatch-status.v1` shape. Counts from a full backend list (50 rows) are shown as `50+`. The command holds no lock and only reads the runner state file.
+- **`nexus run --dispatch-pane`** adds that view, as `nexus dispatch status --watch --compact`, to the right column of the CLAUDE tab in the zellij workspace.
+
+### Tests
+- 11 new tests:
+  - counters and ownership rules, row order and peer names, the `50+` bound, the JSON shape;
+  - compact width, the error marker, timestamps, the runner file;
+  - pane placement and the tab fallback;
+  - CLI parsing, and the list request against a local stub.
+
+  961/961 pass.
+
 ## [0.36.1] - 2026-11-06
 
 ### Changed
