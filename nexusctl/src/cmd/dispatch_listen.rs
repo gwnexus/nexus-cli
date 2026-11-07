@@ -587,10 +587,20 @@ pub(crate) fn lock(path: &Path) -> anyhow::Result<RunnerLock> {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
-        // SAFETY: the descriptor belongs to `file`, which outlives the lock.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc != 0 {
-            anyhow::bail!("another runner is already listening on this machine");
+        // A child process forked elsewhere in this process can hold a copy
+        // of a just-released lock until it execs, so retry briefly.
+        let mut tries = 0;
+        loop {
+            // SAFETY: the descriptor belongs to `file`, which outlives the lock.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                break;
+            }
+            tries += 1;
+            if tries >= 20 {
+                anyhow::bail!("another runner is already listening on this machine");
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
     Ok(RunnerLock { _file: file })
