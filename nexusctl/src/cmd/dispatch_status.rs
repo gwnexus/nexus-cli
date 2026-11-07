@@ -763,6 +763,44 @@ pub(crate) fn apply_dispatch_pane(
     ))
 }
 
+/// `zellij run` arguments that open the status pane above the focused pane
+/// of the current session.
+fn session_pane_args(nexus: &str) -> Vec<String> {
+    [
+        "run",
+        "--name",
+        "dispatches",
+        "--direction",
+        "up",
+        "--",
+        nexus,
+        "dispatch",
+        "status",
+        "--watch",
+        "--compact",
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// `nexus run --dispatch-pane` inside the project's running zellij session:
+/// the layout no longer applies, so open the pane with `zellij run`.
+pub(crate) fn open_pane_in_session() -> CheckResult {
+    let nexus = match std::env::current_exe() {
+        Ok(p) => p.display().to_string(),
+        Err(e) => return CheckResult::Warn(format!("cannot locate nexus: {e}")),
+    };
+    match std::process::Command::new("zellij")
+        .args(session_pane_args(&nexus))
+        .stdout(std::process::Stdio::null())
+        .status()
+    {
+        Ok(s) if s.success() => CheckResult::Pass("opened in the running session".into()),
+        Ok(s) => CheckResult::Warn(format!("zellij run failed ({s})")),
+        Err(e) => CheckResult::Warn(format!("zellij run failed: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -973,6 +1011,17 @@ mod tests {
             "                pane command=\"/bin/nexus\" name=\"dispatches\" {\n                    args \"dispatch\" \"status\" \"--watch\" \"--compact\"\n                }\n                pane name=\"terminal\""
         ));
         assert_eq!(out.matches("name=\"dispatches\"").count(), 1);
+    }
+
+    #[test]
+    fn test_session_pane_runs_the_compact_watch() {
+        let args = session_pane_args("/bin/nexus");
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(&args[..3], ["run", "--name", "dispatches"]);
+        assert_eq!(
+            &args[sep + 1..],
+            ["/bin/nexus", "dispatch", "status", "--watch", "--compact"]
+        );
     }
 
     #[test]

@@ -693,7 +693,7 @@ The backend returns at most 50 Dispatches per list, so a count from a full list 
 
 `truncated: true` means the count came from a full list of 50 and may be higher. `error` holds the last refresh error in watch mode.
 
-`nexus run --dispatch-pane` adds a `dispatches` pane running `nexus dispatch status --watch --compact` to the right column of the CLAUDE tab, above the `terminal` pane. A layout without that column gets a separate `dispatches` tab instead.
+`nexus run --dispatch-pane` adds a `dispatches` pane running `nexus dispatch status --watch --compact` to the right column of the CLAUDE tab, above the `terminal` pane. A layout without that column gets a separate `dispatches` tab instead. Run from inside the project's running zellij session, it opens the pane there (above the focused pane), because a layout only applies to a new session.
 
 ### Directives
 

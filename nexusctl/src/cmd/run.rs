@@ -445,6 +445,22 @@ pub async fn run(
                     "   {} Already running in zellij session {name}.",
                     style("OK").bold().green()
                 );
+                // The layout only applies to a new session; open the pane
+                // in the running one instead.
+                if dispatch_pane {
+                    print_check(
+                        "Dispatch pane",
+                        &super::dispatch_status::open_pane_in_session(),
+                    );
+                }
+                if actor_panes {
+                    print_check(
+                        "Actor panes",
+                        &CheckResult::Info(
+                            "apply to a new session; leave this one and run nexus run --actor-panes again".into(),
+                        ),
+                    );
+                }
                 return Ok(());
             }
             super::zellij_guard::Nested::OtherSession(name) => {
