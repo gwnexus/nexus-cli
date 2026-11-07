@@ -1223,6 +1223,194 @@ pub struct DispatchListResponse {
     pub dispatches: Vec<DispatchSummary>,
 }
 
+/// One message of a Dispatch timeline (`dispatch_get`); the body is not
+/// kept, a runner only needs who wrote it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchMessageRef {
+    pub id: String,
+    #[serde(default)]
+    pub author_project_id: Option<String>,
+    #[serde(default)]
+    pub message_type: Option<String>,
+}
+
+/// Response from `dispatch_get`, reduced to the Dispatch and its message
+/// authors.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchGetResponse {
+    pub dispatch: DispatchSummary,
+    #[serde(default)]
+    pub messages: Vec<DispatchMessageRef>,
+}
+
+/// One entry of the Dispatch event feed (`dispatch_events`): metadata only,
+/// never a message body. `id` is the cursor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchEvent {
+    pub id: i64,
+    pub dispatch_id: String,
+    #[serde(default)]
+    pub source_project_id: Option<String>,
+    #[serde(default)]
+    pub target_project_id: Option<String>,
+    #[serde(default)]
+    pub previous_target_project_id: Option<String>,
+    pub event_type: String,
+    #[serde(default)]
+    pub status_from: Option<String>,
+    #[serde(default)]
+    pub status_to: Option<String>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub message_type: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// Bound projects the event concerns (runner feed without `project_id`).
+    #[serde(default)]
+    pub bound_project_ids: Vec<String>,
+}
+
+/// Response from `dispatch_events`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchEventsResponse {
+    #[serde(default)]
+    pub projects: Vec<String>,
+    #[serde(default)]
+    pub next_cursor: i64,
+    #[serde(default)]
+    pub has_more: bool,
+    #[serde(default)]
+    pub events: Vec<DispatchEvent>,
+}
+
+/// A runtime the runner reports: `claude_code` with its version and the
+/// capabilities a probe confirmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerRuntime {
+    pub runtime: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// A project binding in `runner_register`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerProjectRequest {
+    pub project_id: String,
+    pub mode: String,
+    pub runtime: String,
+    /// sha256 of the repository path, never the path itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_path_hash: Option<String>,
+}
+
+/// Request body of `runner_register` (personal access token).
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerRegisterRequest {
+    pub machine_id: String,
+    pub name: String,
+    pub cli_version: String,
+    pub runtimes: Vec<RunnerRuntime>,
+    pub projects: Vec<RunnerProjectRequest>,
+    pub expires_in_days: u32,
+}
+
+/// A binding as the hub describes it: requested and effective mode, the
+/// switch that blocks it, and the progress the runner reported.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunnerBinding {
+    pub project_id: String,
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub mode_requested: Option<String>,
+    #[serde(default)]
+    pub mode_effective: Option<String>,
+    #[serde(default)]
+    pub writes_allowed: bool,
+    #[serde(default)]
+    pub blocked_by: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<i64>,
+    #[serde(default)]
+    pub latest_event_id: Option<i64>,
+    #[serde(default)]
+    pub lag: Option<i64>,
+    #[serde(default)]
+    pub delivered_total: Option<i64>,
+    #[serde(default)]
+    pub failed_total: Option<i64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Response from `runner_register`. `token` is shown this once.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunnerRegisterResponse {
+    pub runner_id: String,
+    pub token: String,
+    #[serde(default)]
+    pub token_prefix: Option<String>,
+    #[serde(default)]
+    pub token_expires_at: Option<String>,
+    #[serde(default)]
+    pub replaced: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub platform_enabled: bool,
+    #[serde(default)]
+    pub projects: Vec<RunnerBinding>,
+}
+
+/// Response from `runner_heartbeat`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RunnerHeartbeatResponse {
+    #[serde(default)]
+    pub runner_id: String,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub platform_enabled: bool,
+    #[serde(default)]
+    pub projects: Vec<RunnerBinding>,
+}
+
+/// One runner in `runner_list`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunnerInfo {
+    pub id: String,
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub cli_version: Option<String>,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+    #[serde(default)]
+    pub token_prefix: Option<String>,
+    #[serde(default)]
+    pub token_expires_at: Option<String>,
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
+    #[serde(default)]
+    pub stale: Option<bool>,
+    #[serde(default)]
+    pub platform_enabled: Option<bool>,
+    #[serde(default)]
+    pub projects: Vec<RunnerBinding>,
+}
+
+/// Response from `runner_list`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunnerListResponse {
+    #[serde(default)]
+    pub runners: Vec<RunnerInfo>,
+}
+
 // ---------------------------------------------------------------------------
 // Generic error
 // ---------------------------------------------------------------------------

@@ -36,6 +36,10 @@ pub enum Error {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    /// Conflict (HTTP 409), e.g. a runner cursor that would move backwards.
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     /// Filesystem I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

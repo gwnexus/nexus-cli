@@ -10,6 +10,8 @@ pub(crate) mod claude_render;
 mod config_cmd;
 mod consent;
 mod deinit;
+mod dispatch_listen;
+mod dispatch_runner;
 mod dispatch_status;
 pub(crate) mod display;
 mod doctor;
@@ -42,8 +44,8 @@ mod zellij_guard;
 
 use crate::{
     ActorAvatarAction, ActorsAction, ClassificationAction, ClaudeAction, Cli, Command,
-    ConfigAction, DispatchAction, DoctorTarget, EnvAction, GitAction, ProjectAction, ShadowAction,
-    SkillsAction, StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
+    ConfigAction, DispatchAction, DoctorTarget, EnvAction, GitAction, ProjectAction, RunnerAction,
+    ShadowAction, SkillsAction, StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
 };
 
 /// Dispatch the parsed CLI command to the appropriate handler.
@@ -200,6 +202,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     window,
                     compact,
                     json,
+                    no_listen,
                 } => {
                     let json = *json
                         || matches!(
@@ -215,8 +218,47 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                             window_days: *window,
                             compact: *compact,
                             json,
+                            listen: !*no_listen,
                         },
                     )
+                    .await?
+                }
+                DispatchAction::Runner { action } => match action {
+                    RunnerAction::Register {
+                        projects,
+                        mode,
+                        name,
+                        expires_days,
+                        replace,
+                    } => {
+                        dispatch_runner::register(
+                            &api_url,
+                            dispatch_runner::RegisterOptions {
+                                project_ids: projects,
+                                mode,
+                                name: name.as_deref(),
+                                expires_days: *expires_days,
+                                replace: *replace,
+                            },
+                        )
+                        .await?
+                    }
+                    RunnerAction::Status { json } => dispatch_runner::status(*json).await?,
+                    RunnerAction::Pause => dispatch_runner::control("pause").await?,
+                    RunnerAction::Resume => dispatch_runner::control("resume").await?,
+                    RunnerAction::Revoke => dispatch_runner::control("revoke").await?,
+                    RunnerAction::Probe { json } => dispatch_runner::probe(*json)?,
+                },
+                DispatchAction::Listen {
+                    interval,
+                    heartbeat,
+                    once,
+                } => {
+                    dispatch_listen::listen(dispatch_listen::ListenOptions {
+                        interval_secs: *interval,
+                        heartbeat_secs: *heartbeat,
+                        once: *once,
+                    })
                     .await?
                 }
             }

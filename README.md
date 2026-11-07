@@ -84,6 +84,9 @@ nexus run [-- <args>]                   Start the agent environment the backend 
 nexus run --actor-panes                 Add an actors tab with one pane per local-lane actor (zellij)
 nexus run --dispatch-pane               Add a Dispatch status pane to the CLAUDE tab (zellij)
 nexus dispatch status [--watch]         Incoming and outgoing Dispatches of the project (--compact, --json)
+nexus dispatch runner register          Register this machine's Dispatch runner (notify mode) for the project
+nexus dispatch runner status|pause|resume|revoke|probe   Manage the runner; probe checks Claude Code
+nexus dispatch listen                   Run the Dispatch runner in the foreground (notices into sessions)
 nexus run --resume                      Resurrect the project's exited zellij session instead of starting fresh
 nexus actors run <slug> [-p <prompt>]   Start a local-lane actor as its own Claude Code session on the gateway
 nexus actors validate|import <path>     Check or import actor profiles (flat or hub export frontmatter)
@@ -716,9 +719,31 @@ The backend returns at most 50 Dispatches per list, so a count from a full list 
 }
 ```
 
-`truncated: true` means the count came from a full list of 50 and may be higher. `error` holds the last refresh error in watch mode.
+`truncated: true` means the count came from a full list of 50 and may be higher. `error` holds the last refresh error in watch mode. `runner.note` appears when a watching view cannot run the runner, with the reason.
 
-`nexus run --dispatch-pane` adds a `dispatches` pane running `nexus dispatch status --watch --compact` to the right column of the CLAUDE tab, above the `terminal` pane. A layout without that column gets a separate `dispatches` tab instead. Run from inside the project's running zellij session, it opens the pane there below the focused pane, at about a fifth of its height, and returns the focus to the pane above, because a layout only applies to a new session.
+`nexus run --dispatch-pane` adds a `dispatches` pane running `nexus dispatch status --watch --compact` to the right column of the CLAUDE tab, above the `terminal` pane. A layout without that column gets a separate `dispatches` tab instead. Run from inside the project's running zellij session, it opens the pane there below the focused pane, at about a fifth of its height, and returns the focus to the pane above, because a layout only applies to a new session. A layout or tab that already has a `dispatches` pane (the hub workspace presets include one) is left as it is.
+
+With `--watch`, the view also runs this machine's Dispatch runner in the same process (see below) when it is registered and bound to the project. Otherwise a yellow `runner:` line says why it is not listening; `--no-listen` turns this off. Only one runner runs per machine: a second view shows the state of the one that listens.
+
+### Dispatch runner (`nexus dispatch runner`, `nexus dispatch listen`)
+
+The runner tells running agent sessions about Dispatch traffic, so nobody has to relay it by hand. For now it is notify only: it reads the hub event feed and delivers short notices. It starts no agent, claims nothing and changes no status.
+
+```bash
+nexus dispatch runner register           # once per machine; binds the linked project
+nexus dispatch runner register --project <id>   # bind another project (earlier bindings stay)
+nexus dispatch runner status             # heartbeat: effective mode, blocking switch, lag
+nexus dispatch runner pause|resume       # on the hub; the hub dashboard can do the same
+nexus dispatch runner revoke             # final; removes the local token file
+nexus dispatch runner probe              # can the installed Claude Code take notices?
+nexus dispatch listen                    # the runner in the foreground (Ctrl-C stops it)
+```
+
+- **Register** uses your personal access token once. The hub returns a runner token (`nxs_run_...`) a single time; it is stored in `~/.config/nexus/dispatch-runner.json` with mode 0600 and never printed again. A binding carries the sha256 of the repository path, never the path itself. A new register on the same machine replaces the earlier runner.
+- **Listen** polls the feed every 30 seconds and sends a heartbeat every 60 seconds with its cursor and delivery counts. It holds an exclusive lock (`~/.config/nexus/state/dispatch/runner.lock`) and writes its state atomically to `runner.json` next to it, without the token. It stays idle while the platform, the project or the runner is switched off on the hub, and it restarts itself when the `nexus` binary is upgraded.
+- **Notices** are raised for a new incoming Dispatch, a reply or clarification on a Dispatch you requested, a move of your request to `waiting_for_requester` or `needs_review`, and its resolution. Each is appended once to `~/.config/nexus/state/dispatch/notices/<project-id>.jsonl` (`id`, `dispatch_id`, `event_id`, `kind`, `mode`, `text`, `created_at`). The text holds the Dispatch id, title and peer, never the body, for example `Nexus: Dispatch c0164531 "Fix the export" from NEXUS-GATEWAY needs your reply (waiting_for_requester). Run /nexus-dispatch-sweep.` The cursor moves only after the notices are on disk, so a restart or a repeated event never queues a notice twice.
+- **Delivery to Claude Code** goes through the cross-session inbox of each running session in the bound repository. Sessions announce themselves in `~/.config/nexus/state/dispatch/sessions/<session-id>.json` (written by the Nexus runtime plugin). A session whose `crossSessionInbound` setting is `hold` or `refuse` (in managed, user or repository settings) gets nothing pushed; its notices stay queued for the plugin's session-start catch-up. Keystrokes are never injected. Without a matching session, or with a Claude Code version outside the tested range (2.1.319 to 2.1.x, see `runner probe`), a notice becomes one desktop notification instead. Deliveries are recorded in `notices/<project-id>.delivered.runner.jsonl`.
+
 
 ### Directives
 

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-11-07
+
+### Added
+- **Dispatch runner, notify mode.** `nexus dispatch runner register | status | pause | resume | revoke | probe` and `nexus dispatch listen`:
+  - `register` uses the personal access token once and keeps the runner token in `~/.config/nexus/dispatch-runner.json` (mode 0600); it is never printed again. A binding carries the sha256 of the repository path, not the path.
+  - `listen` polls the hub event feed every 30 seconds, sends a heartbeat with cursor and delivery counts every 60 seconds, holds an exclusive lock (one runner per machine), writes its state atomically, honours the hub switches and restarts itself after an upgrade.
+  - Notices for new incoming Dispatches, replies on your requests, requests waiting for you and resolutions are queued once per event in `~/.config/nexus/state/dispatch/notices/<project>.jsonl`, with id, title and peer but never the body.
+  - Delivery into running Claude Code sessions of the bound repository through their cross-session inbox (tested with 2.1.319 to 2.1.x); a session that holds or refuses inbound messages gets nothing pushed. Otherwise a desktop notification.
+- **`nexus dispatch status --watch` runs the runner** in the same process when it is registered and bound to the project, so the `dispatches` pane starts it; otherwise the view shows why not (`--no-listen` turns this off). `nexus run` reports the runner in its checks. A runner state whose process is gone shows as `stopped`.
+
+### Changed
+- `nexus run --dispatch-pane` leaves a layout or tab alone that already has a `dispatches` pane (the hub workspace presets include one).
+
+### Tests
+- 19 new tests, among them the restart, replay and lost-state scenarios and a session that holds messages, against a local hub stub.
+
 ## [0.38.2] - 2026-11-07
 
 ### Changed

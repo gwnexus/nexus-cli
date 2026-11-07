@@ -332,6 +332,10 @@ pub async fn run(
             CheckResult::Warn("--dispatch-pane needs the zellij workspace".into())
         };
         print_check("Dispatch pane", &result);
+        print_check(
+            "Dispatch runner",
+            &super::dispatch_status::runner_check(&workspace),
+        );
     }
     let workspace_row = row_check(&launch.row);
     if skip_checks && workspace_row.is_warn() {

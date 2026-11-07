@@ -13,12 +13,14 @@ use crate::api::types::{
     ActorAvatarResponse, ActorExportResponse, ActorGetResponse, ActorImportPayload,
     ActorImportResponse, ActorListResponse, AgentFileExportResponse, ApiError, AuthStatus,
     AuthStatusResponse, ClassificationPatchOutcome, ClassificationResponse,
-    DirectiveExportResponse, DispatchListResponse, FileStatusResponse, IdentityResponse,
-    InferenceTokenInfo, InferenceTokenIssueRequest, InferenceTokenResponse, McpPreflightResponse,
-    ProjectDetailResponse, ProjectListResponse, ProjectSettingsResponse, SettingsPatchOutcome,
-    SkillExportResponse, SkillListResponse, SyncCheckResponse, SyncFileHash, SyncResponse,
-    SyncStatusResponse, TaskListResponse, WorkspaceExportResponse, WorkspaceForkExportResponse,
-    WorkspaceForksResponse, WorkspacePushResponse,
+    DirectiveExportResponse, DispatchEventsResponse, DispatchGetResponse, DispatchListResponse,
+    FileStatusResponse, IdentityResponse, InferenceTokenInfo, InferenceTokenIssueRequest,
+    InferenceTokenResponse, McpPreflightResponse, ProjectDetailResponse, ProjectListResponse,
+    ProjectSettingsResponse, RunnerHeartbeatResponse, RunnerListResponse, RunnerRegisterRequest,
+    RunnerRegisterResponse, SettingsPatchOutcome, SkillExportResponse, SkillListResponse,
+    SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse, TaskListResponse,
+    WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
+    WorkspacePushResponse,
 };
 use crate::Error;
 
@@ -210,6 +212,78 @@ impl NexusClient {
             Err(e) if e.is_transport() => self.post("/api/mcp/dispatches", &body).await,
             other => other,
         }
+    }
+
+    /// One Dispatch with its message authors (`dispatch_get`).
+    pub async fn dispatch_get(&self, dispatch_id: &str) -> Result<DispatchGetResponse, Error> {
+        let body = json!({ "action": "dispatch_get", "dispatch_id": dispatch_id });
+        match self.post("/api/mcp/dispatches", &body).await {
+            Err(e) if e.is_transport() => self.post("/api/mcp/dispatches", &body).await,
+            other => other,
+        }
+    }
+
+    /// The Dispatch event feed after `since` (`dispatch_events`). Without
+    /// `project_id` a runner token reads all its bound projects.
+    pub async fn dispatch_events(
+        &self,
+        project_id: Option<&str>,
+        since: i64,
+        limit: u32,
+    ) -> Result<DispatchEventsResponse, Error> {
+        let mut body = json!({ "action": "dispatch_events", "since": since, "limit": limit });
+        if let Some(id) = project_id {
+            body["project_id"] = json!(id);
+        }
+        match self.post("/api/mcp/dispatches", &body).await {
+            Err(e) if e.is_transport() => self.post("/api/mcp/dispatches", &body).await,
+            other => other,
+        }
+    }
+
+    /// Register this machine's Dispatch runner (personal access token). The
+    /// response carries the runner token once.
+    pub async fn runner_register(
+        &self,
+        request: &RunnerRegisterRequest,
+    ) -> Result<RunnerRegisterResponse, Error> {
+        let mut body = serde_json::to_value(request)?;
+        body["action"] = json!("runner_register");
+        self.post("/api/mcp/dispatch-runners", &body).await
+    }
+
+    /// Heartbeat with a runner token; `report` holds the optional
+    /// `cursors`, `delivered`, `failed`, `errors` and `cli_version`.
+    pub async fn runner_heartbeat(
+        &self,
+        report: serde_json::Value,
+    ) -> Result<RunnerHeartbeatResponse, Error> {
+        let mut body = report;
+        body["action"] = json!("runner_heartbeat");
+        self.post("/api/mcp/dispatch-runners", &body).await
+    }
+
+    /// The caller's runners (personal access token).
+    pub async fn runner_list(&self) -> Result<RunnerListResponse, Error> {
+        self.post(
+            "/api/mcp/dispatch-runners",
+            &json!({ "action": "runner_list" }),
+        )
+        .await
+    }
+
+    /// `runner_pause`, `runner_resume` or `runner_revoke`; with a runner
+    /// token `runner_id` may be omitted (the runner itself).
+    pub async fn runner_control(
+        &self,
+        action: &str,
+        runner_id: Option<&str>,
+    ) -> Result<serde_json::Value, Error> {
+        let mut body = json!({ "action": action });
+        if let Some(id) = runner_id {
+            body["runner_id"] = json!(id);
+        }
+        self.post("/api/mcp/dispatch-runners", &body).await
     }
 
     /// List tasks for a project via `POST /api/mcp/tasks` with `task_list` action.
@@ -735,6 +809,7 @@ impl NexusClient {
             StatusCode::UNAUTHORIZED => Err(Error::Unauthorized(error_msg)),
             StatusCode::FORBIDDEN => Err(Error::Forbidden(error_msg)),
             StatusCode::NOT_FOUND => Err(Error::NotFound(error_msg)),
+            StatusCode::CONFLICT => Err(Error::Conflict(error_msg)),
             _ => Err(Error::Api(error_msg)),
         }
     }

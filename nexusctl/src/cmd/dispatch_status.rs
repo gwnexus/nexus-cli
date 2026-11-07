@@ -136,6 +136,9 @@ struct ProjectRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct Runner {
     state: String,
+    /// Why the runner of a watching view is not listening.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 /// The `--json` shape (`nexus.dispatch-status.v1`).
@@ -189,8 +192,13 @@ fn finished(list: &[DispatchSummary], status: &str, since_ms: i64) -> Count {
     })
 }
 
+/// RFC 3339 UTC timestamp for now.
+pub(crate) fn rfc3339_now() -> String {
+    rfc3339(now_ms())
+}
+
 /// RFC 3339 UTC timestamp for epoch milliseconds.
-fn rfc3339(ms: i64) -> String {
+pub(crate) fn rfc3339(ms: i64) -> String {
     let secs = ms.div_euclid(1000);
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     let (y, m, d) = civil_from_days(days);
@@ -332,12 +340,42 @@ fn snapshot(
 fn runner_state(path: &Path) -> Runner {
     let state = match fs::read_to_string(path) {
         Err(_) => "none".to_string(),
-        Ok(body) => serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("state")?.as_str().map(str::to_string))
-            .unwrap_or_else(|| "unknown".to_string()),
+        Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+            Err(_) => "unknown".to_string(),
+            Ok(v) => {
+                let state = v
+                    .get("state")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let pid = v.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
+                // A runner killed without a chance to write "stopped".
+                let live = matches!(state.as_str(), "starting" | "running" | "blocked" | "error");
+                if live && !process_alive(pid) {
+                    "stopped".to_string()
+                } else {
+                    state
+                }
+            }
+        },
     };
-    Runner { state }
+    Runner { state, note: None }
+}
+
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that the process exists.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn runner_path() -> Option<std::path::PathBuf> {
@@ -472,7 +510,7 @@ fn hhmm(refreshed_at: &str) -> &str {
 
 /// An error with its causes, skipping a cause already in the text
 /// (`HTTP error: ...` repeats the transport message).
-fn error_text(e: &(dyn std::error::Error + 'static)) -> String {
+pub(crate) fn error_text(e: &(dyn std::error::Error + 'static)) -> String {
     let mut text = e.to_string();
     let mut source = e.source();
     while let Some(cause) = source {
@@ -484,6 +522,13 @@ fn error_text(e: &(dyn std::error::Error + 'static)) -> String {
         source = cause.source();
     }
     text
+}
+
+fn runner_note_line(snap: &Snapshot) -> Option<String> {
+    snap.runner
+        .note
+        .as_ref()
+        .map(|n| style(format!("runner: {n}")).yellow().to_string())
 }
 
 fn error_line(snap: &Snapshot) -> Option<String> {
@@ -526,6 +571,7 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
             counter(o.closed, "closed", Tone::Closed)
         ),
     ];
+    lines.extend(runner_note_line(snap));
     lines.extend(error_line(snap));
     lines.push(String::new());
     if snap.dispatches.is_empty() {
@@ -599,6 +645,7 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
             counter(i.closed.plus(o.closed), "closed", Tone::Closed)
         ),
     ];
+    lines.extend(runner_note_line(snap));
     lines.extend(error_line(snap));
     if snap.dispatches.is_empty() {
         lines.push("no open Dispatches".into());
@@ -663,6 +710,8 @@ pub struct StatusOptions<'a> {
     pub window_days: u32,
     pub compact: bool,
     pub json: bool,
+    /// With --watch: run the Dispatch runner in this process (default).
+    pub listen: bool,
 }
 
 /// `nexus dispatch status`.
@@ -682,10 +731,23 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
             .cloned()
             .unwrap_or_else(|| short_id(&project_id)),
     };
+    // With --watch the view also runs the runner, or says why it cannot.
+    let blocker = (opts.listen && opts.watch)
+        .then(|| super::dispatch_listen::listen_blocker(&project_id))
+        .flatten();
+    let listener = (opts.listen && opts.watch && blocker.is_none())
+        .then(super::dispatch_listen::spawn_embedded);
     let runner = || {
-        runner_file.as_deref().map(runner_state).unwrap_or(Runner {
+        let mut r = runner_file.as_deref().map(runner_state).unwrap_or(Runner {
             state: "none".into(),
-        })
+            note: None,
+        });
+        r.note = blocker.clone().or_else(|| {
+            listener
+                .as_ref()
+                .and_then(|slot| slot.lock().ok().and_then(|s| s.clone()))
+        });
+        r
     };
 
     if !opts.watch {
@@ -829,6 +891,33 @@ fn layout_with_dispatch_pane(layout: &str, nexus: &str) -> Option<String> {
     Some(format!("{head}\n{tab}{}", &layout[end..]))
 }
 
+/// Whether a layout (or one tab of it) already runs the status view: a pane
+/// named `dispatches`, or one running `dispatch status` (`zellij run` does
+/// not keep the name in `dump-layout`).
+fn has_dispatch_pane(layout: &str) -> bool {
+    layout.contains("name=\"dispatches\"") || layout.contains("args \"dispatch\" \"status\"")
+}
+
+/// The focused tab of a `zellij action dump-layout`, or the whole dump
+/// when no tab is marked.
+fn focused_tab(dump: &str) -> &str {
+    let Some(at) = dump.match_indices("tab ").map(|(i, _)| i).find(|&i| {
+        dump[i..]
+            .lines()
+            .next()
+            .is_some_and(|l| l.contains("focus=true"))
+    }) else {
+        return dump;
+    };
+    let rest = &dump[at + 4..];
+    let end = rest
+        .match_indices("\n    tab ")
+        .map(|(i, _)| i)
+        .next()
+        .unwrap_or(rest.len());
+    &dump[at..at + 4 + end]
+}
+
 /// `nexus run --dispatch-pane`: point the zellij `--layout` argument at a
 /// copy of the layout with the Dispatch status pane. Returns a status line.
 pub(crate) fn apply_dispatch_pane(
@@ -853,10 +942,14 @@ fn extend_layout_arg(
     let Some(layout_path) = leading_args.get(i + 1).cloned() else {
         return Ok(CheckResult::Warn("no zellij layout to extend".into()));
     };
-    let Some(kdl) = fs::read_to_string(&layout_path)
-        .ok()
-        .and_then(|l| layout_with_dispatch_pane(&l, nexus))
-    else {
+    let layout = fs::read_to_string(&layout_path).ok();
+    if layout.as_deref().is_some_and(has_dispatch_pane) {
+        // The hub presets already carry the pane.
+        return Ok(CheckResult::Info(
+            "the layout already has a dispatches pane".into(),
+        ));
+    }
+    let Some(kdl) = layout.and_then(|l| layout_with_dispatch_pane(&l, nexus)) else {
         return Ok(CheckResult::Warn(format!("could not extend {layout_path}")));
     };
     fs::create_dir_all(dir)?;
@@ -867,6 +960,29 @@ fn extend_layout_arg(
     Ok(CheckResult::Pass(
         "nexus dispatch status --watch --compact".into(),
     ))
+}
+
+/// `nexus run` preflight for the runner in the dispatches pane: registered
+/// and bound here, plus the Claude Code probe. Token and switches are
+/// checked by the first heartbeat; the pane shows the result.
+pub(crate) fn runner_check(workspace: &Path) -> CheckResult {
+    let Ok(project_id) = config::resolve_project_id(None, Some(workspace)) else {
+        return CheckResult::Info("no linked project".into());
+    };
+    match super::dispatch_listen::listen_blocker(&project_id) {
+        Some(reason) => CheckResult::Warn(format!("not listening: {reason}")),
+        None => {
+            let probe = super::dispatch_runner::probe_claude();
+            CheckResult::Pass(format!(
+                "listens in the dispatches pane (notify; claude_code inbox: {})",
+                if probe.inbox.is_ok() {
+                    "yes"
+                } else {
+                    "no, desktop notifications"
+                }
+            ))
+        }
+    }
 }
 
 /// `zellij run` arguments that open the status pane below the focused pane
@@ -896,6 +1012,20 @@ pub(crate) fn open_pane_in_session() -> CheckResult {
         Ok(p) => p.display().to_string(),
         Err(e) => return CheckResult::Warn(format!("cannot locate nexus: {e}")),
     };
+    let dump = std::process::Command::new("zellij")
+        .args(["action", "dump-layout"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+    if dump
+        .as_deref()
+        .map(focused_tab)
+        .is_some_and(has_dispatch_pane)
+    {
+        return CheckResult::Info("this tab already has a dispatches pane".into());
+    }
     match std::process::Command::new("zellij")
         .args(session_pane_args(&nexus))
         .stdout(std::process::Stdio::null())
@@ -977,6 +1107,7 @@ mod tests {
             lists,
             Runner {
                 state: "none".into(),
+                note: None,
             },
             7,
             NOW,
@@ -1117,12 +1248,18 @@ mod tests {
 
     #[test]
     fn test_runner_state_is_read_only_and_optional() {
-        let dir = std::env::temp_dir().join(format!("nexus-runner-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nexus-runstate-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("runner.json");
         assert_eq!(runner_state(&file).state, "none");
         fs::write(&file, r#"{"state":"listening","pid":1}"#).unwrap();
         assert_eq!(runner_state(&file).state, "listening");
+        // A running state needs a live process.
+        let me = std::process::id();
+        fs::write(&file, format!(r#"{{"state":"running","pid":{me}}}"#)).unwrap();
+        assert_eq!(runner_state(&file).state, "running");
+        fs::write(&file, r#"{"state":"running","pid":0}"#).unwrap();
+        assert_eq!(runner_state(&file).state, "stopped");
         fs::write(&file, "garbage").unwrap();
         assert_eq!(runner_state(&file).state, "unknown");
         let _ = fs::remove_dir_all(&dir);
@@ -1348,6 +1485,40 @@ mod tests {
             &args[sep + 1..],
             ["/bin/nexus", "dispatch", "status", "--watch", "--compact"]
         );
+    }
+
+    #[test]
+    fn test_layout_with_a_dispatches_pane_is_left_alone() {
+        // The hub preset (standard-terminal v2): the pane is already there.
+        let preset = "layout {\n    tab name=\"CLAUDE\" focus=true {\n        pane split_direction=\"vertical\" {\n            pane split_direction=\"horizontal\" size=\"75%\" {\n                pane command=\"sh\" name=\"claude\" focus=true\n                pane command=\"nexus\" name=\"dispatches\" size=\"13%\" {\n                    args \"dispatch\" \"status\" \"--watch\" \"--compact\"\n                }\n            }\n            pane name=\"terminal\"\n        }\n    }\n}\n";
+        let dir = std::env::temp_dir().join(format!("nexus-preset-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let layout = dir.join("preset.kdl");
+        fs::write(&layout, preset).unwrap();
+        let mut args = vec!["--layout".to_string(), layout.display().to_string()];
+        let r = extend_layout_arg(&dir, &mut args, "/bin/nexus", &dir.join("out")).unwrap();
+        assert!(matches!(r, CheckResult::Info(_)));
+        assert_eq!(args[1], layout.display().to_string(), "layout unchanged");
+        // Without one, the pane is still added once.
+        let plain =
+            "layout {\n    tab name=\"CLAUDE\" {\n        pane name=\"terminal\"\n    }\n}\n";
+        fs::write(&layout, plain).unwrap();
+        let mut args = vec!["--layout".to_string(), layout.display().to_string()];
+        let r = extend_layout_arg(&dir, &mut args, "/bin/nexus", &dir.join("out")).unwrap();
+        assert!(matches!(r, CheckResult::Pass(_)));
+        let out = fs::read_to_string(&args[1]).unwrap();
+        assert_eq!(out.matches("name=\"dispatches\"").count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_focused_tab_is_checked_for_a_pane() {
+        let dump = "layout {\n    tab name=\"CLAUDE\" focus=true {\n        pane command=\"/bin/nexus\" size=\"20%\" {\n            args \"dispatch\" \"status\" \"--watch\" \"--compact\"\n        }\n    }\n    tab name=\"GIT\" {\n        pane command=\"lazygit\"\n    }\n}\n";
+        assert!(has_dispatch_pane(focused_tab(dump)));
+        let other = dump
+            .replace("CLAUDE\" focus=true", "CLAUDE\"")
+            .replace("GIT\"", "GIT\" focus=true");
+        assert!(!has_dispatch_pane(focused_tab(&other)));
     }
 
     #[test]

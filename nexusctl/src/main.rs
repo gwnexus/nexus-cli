@@ -522,8 +522,92 @@ pub enum DispatchAction {
         #[arg(long)]
         compact: bool,
 
+        /// Do not run this machine's Dispatch runner in this process. By
+        /// default --watch also runs it (notify mode) when it is registered
+        /// and bound to the project, and otherwise shows why not.
+        #[arg(long)]
+        no_listen: bool,
+
         /// Machine-readable output (`nexus.dispatch-status.v1`); with
         /// --watch one JSON line per refresh.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// This machine's Dispatch runner: register, status, pause, resume,
+    /// revoke, and the Claude Code capability probe.
+    Runner {
+        #[command(subcommand)]
+        action: RunnerAction,
+    },
+
+    /// Run the Dispatch runner in the foreground (notify mode): poll the
+    /// hub feed every --interval seconds, queue short notices and deliver
+    /// them into running sessions of the bound repositories. One runner per
+    /// machine; Ctrl-C stops it.
+    Listen {
+        /// Seconds between polls (at least 10).
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(10..))]
+        interval: u64,
+
+        /// Seconds between heartbeats (at least 30).
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(30..))]
+        heartbeat: u64,
+
+        /// One poll and delivery round, then exit.
+        #[arg(long)]
+        once: bool,
+    },
+}
+
+/// `nexus dispatch runner` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum RunnerAction {
+    /// Register this machine's runner with the personal access token (used
+    /// once) and store the runner token in ~/.config/nexus (mode 0600).
+    /// Binds the linked project unless --project is given; earlier bindings
+    /// are kept unless --replace.
+    Register {
+        /// Project ID to bind (repeatable); default: the linked project.
+        #[arg(long = "project", alias = "project-id")]
+        projects: Vec<String>,
+
+        /// Binding mode; the runner supports notify only for now.
+        #[arg(long, default_value = "notify", value_parser = ["notify", "off"])]
+        mode: String,
+
+        /// Runner name (default: nexus-cli@<host>).
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Days until the runner token expires.
+        #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u32).range(1..=365))]
+        expires_days: u32,
+
+        /// Drop the bindings of an earlier register.
+        #[arg(long)]
+        replace: bool,
+    },
+
+    /// Heartbeat once and show the bindings: effective mode, blocking
+    /// switch, lag and the Claude Code probe.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Pause the runner on the hub (it stays registered).
+    Pause,
+
+    /// Resume a paused runner.
+    Resume,
+
+    /// Revoke the runner on the hub and remove the local token file.
+    Revoke,
+
+    /// Check whether the installed Claude Code takes notices through its
+    /// cross-session inbox (tested version range).
+    Probe {
         #[arg(long)]
         json: bool,
     },
