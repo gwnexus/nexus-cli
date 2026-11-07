@@ -671,6 +671,29 @@ nexus run --dispatch-pane                # the compact view as a pane in the CLA
 - **Outgoing** (this project is the sender): counted as open, waiting on us (`waiting_for_requester`, `needs_review`) and waiting on the peer (every other open status).
 - **Resolved and closed** counts cover the last `--window` days (default 7).
 - **Rows:** one per open Dispatch, with direction, peer project, type, priority, a `!` for blocking, status, age and the time since the last activity. A `>` marks the ones where the next step is ours; they come first.
+- **Options:** `--project <id>` shows another project you can access instead of the linked one. `--window <days>` sets the period for resolved and closed counts.
+
+The compact view reads like this:
+
+```text
+NEXUS-CLI 03:52Z runner none
+in  0 open 1 ours 0 prog 0 blkd
+out 0 open 0 ours 0 peer
+7d  0 resolved 28 closed
+> in  NEXUS-APP  ack   6m nexus dispatch status: …
+NEXUS-APP    1/0, 1 ours
+```
+
+| Mark | Meaning |
+|---|---|
+| `>` | the next step is ours |
+| `!` | blocking Dispatch |
+| `ours` / `peer` | waiting on us / waiting on the peer project |
+| `prog` / `blkd` | in progress / blocked |
+| `ack`, `wait`, `revw` | acknowledged, `waiting_for_requester`, `needs_review` |
+| `1/0` | open Dispatches with that peer: incoming / outgoing |
+
+The time on a row is the time since its last activity.
 
 The backend returns at most 50 Dispatches per list, so a count from a full list is shown as a lower bound (`50+`). With `--watch`, a failed refresh keeps the last state on screen and adds an error line. The command uses your token only as the request's bearer header. It holds no lock, so `pull`, `push` and `run` work while it runs. The runner state in the header is read from `~/.config/nexus/state/dispatch/runner.json` and stays `none` until a runner writes that file.
 

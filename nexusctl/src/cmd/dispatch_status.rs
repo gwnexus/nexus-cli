@@ -739,21 +739,31 @@ pub(crate) fn apply_dispatch_pane(
     workspace: &Path,
     leading_args: &mut [String],
 ) -> anyhow::Result<CheckResult> {
+    let nexus = std::env::current_exe()?.display().to_string();
+    let dir = config::Config::dir()?.join("state").join("layouts");
+    extend_layout_arg(workspace, leading_args, &nexus, &dir)
+}
+
+/// Write the extended layout to `dir` and point `--layout` at it.
+fn extend_layout_arg(
+    workspace: &Path,
+    leading_args: &mut [String],
+    nexus: &str,
+    dir: &Path,
+) -> anyhow::Result<CheckResult> {
     let Some(i) = leading_args.iter().position(|a| a == "--layout") else {
         return Ok(CheckResult::Warn("no zellij layout to extend".into()));
     };
     let Some(layout_path) = leading_args.get(i + 1).cloned() else {
         return Ok(CheckResult::Warn("no zellij layout to extend".into()));
     };
-    let nexus = std::env::current_exe()?.display().to_string();
     let Some(kdl) = fs::read_to_string(&layout_path)
         .ok()
-        .and_then(|l| layout_with_dispatch_pane(&l, &nexus))
+        .and_then(|l| layout_with_dispatch_pane(&l, nexus))
     else {
         return Ok(CheckResult::Warn(format!("could not extend {layout_path}")));
     };
-    let dir = config::Config::dir()?.join("state").join("layouts");
-    fs::create_dir_all(&dir)?;
+    fs::create_dir_all(dir)?;
     let name = nexus_core::hash::sha256_hex(&workspace.display().to_string());
     let path = dir.join(format!("{}-dispatch.kdl", &name[..16]));
     fs::write(&path, kdl)?;
@@ -1011,6 +1021,102 @@ mod tests {
             "                pane command=\"/bin/nexus\" name=\"dispatches\" {\n                    args \"dispatch\" \"status\" \"--watch\" \"--compact\"\n                }\n                pane name=\"terminal\""
         ));
         assert_eq!(out.matches("name=\"dispatches\"").count(), 1);
+    }
+
+    #[test]
+    fn test_compact_totals_keep_the_lower_bound() {
+        let mut lists = sample();
+        lists.outbox_done = (0..DISPATCH_LIST_LIMIT)
+            .map(|n| {
+                let mut c = d(&format!("c{n}"), ME, PEER, "closed");
+                c.closed_at = Some(at(86_400_000));
+                c
+            })
+            .collect();
+        let lines = render_compact(&snap(&lists), NOW);
+        // Both counts come from the full outgoing list, so both are bounds.
+        assert_eq!(lines[3], "7d  1+ resolved 50+ closed");
+    }
+
+    #[test]
+    fn test_compact_shows_error_and_empty_state() {
+        let mut s = snap(&Lists {
+            inbox: vec![],
+            outbox: vec![],
+            inbox_done: vec![],
+            outbox_done: vec![],
+        });
+        s.error = Some("timeout at 10:00:00Z".into());
+        let lines: Vec<String> = render_compact(&s, NOW)
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).to_string())
+            .collect();
+        assert!(lines[4].starts_with("! refresh failed"));
+        assert_eq!(lines.last().unwrap(), "no open Dispatches");
+        let full: Vec<String> = render(&s, NOW)
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).to_string())
+            .collect();
+        assert_eq!(full.last().unwrap(), "  No open Dispatches.");
+    }
+
+    #[test]
+    fn test_self_addressed_dispatch_shows_both_ways() {
+        let lists = Lists {
+            inbox: vec![d("s1", ME, ME, "open")],
+            outbox: vec![d("s1", ME, ME, "open")],
+            inbox_done: vec![],
+            outbox_done: vec![],
+        };
+        let s = snap(&lists);
+        let dirs: Vec<_> = s.dispatches.iter().map(|r| r.direction).collect();
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs.contains(&Direction::In) && dirs.contains(&Direction::Out));
+        assert_eq!(s.peers.len(), 1);
+        assert_eq!(s.peers[0].name, "NEXUS-CLI");
+    }
+
+    #[test]
+    fn test_status_abbreviations() {
+        for (full, short) in [
+            ("open", "open"),
+            ("acknowledged", "ack"),
+            ("in_progress", "prog"),
+            ("waiting_for_requester", "wait"),
+            ("needs_review", "revw"),
+            ("blocked", "blkd"),
+        ] {
+            assert_eq!(status_short(full), short);
+        }
+    }
+
+    #[test]
+    fn test_extend_layout_arg_writes_a_copy() {
+        let dir = std::env::temp_dir().join(format!("nexus-dispatch-pane-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("layout.kdl");
+        fs::write(
+            &src,
+            "layout {\n    tab name=\"MAIN\" {\n        pane\n    }\n}\n",
+        )
+        .unwrap();
+        let mut args = vec!["--layout".to_string(), src.display().to_string()];
+        let out = dir.join("out");
+        let result = extend_layout_arg(Path::new("/ws"), &mut args, "/bin/nexus", &out).unwrap();
+        assert!(matches!(result, CheckResult::Pass(_)));
+        assert!(
+            args[1].ends_with("-dispatch.kdl") && args[1].starts_with(&out.display().to_string())
+        );
+        assert!(fs::read_to_string(&args[1])
+            .unwrap()
+            .contains("name=\"dispatches\""));
+        assert!(!fs::read_to_string(&src).unwrap().contains("dispatches"));
+        let mut none = vec!["--other".to_string()];
+        assert!(matches!(
+            extend_layout_arg(Path::new("/ws"), &mut none, "n", &out).unwrap(),
+            CheckResult::Warn(_)
+        ));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

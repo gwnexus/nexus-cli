@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Tests
+- 5 more tests for `nexus dispatch status` and `--dispatch-pane`: compact totals as a lower bound, the compact error line and empty state, a Dispatch addressed to the own project, status abbreviations, and the layout copy written for `--layout`.
+
+### Documentation
+- `nexus dispatch status`: `--project` and `--window`, a sample of the compact view and a legend for its marks and abbreviations.
+
 ## [0.37.1] - 2026-11-07
 
 ### Fixed
