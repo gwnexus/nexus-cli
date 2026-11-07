@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.1] - 2026-11-07
+
+### Fixed
+- **`nexus run --dispatch-pane` inside the project's running zellij session** only printed "Already running", because the layout applies to new sessions only. It now opens the `dispatches` pane in the running session (`zellij run`, above the focused pane). `--actor-panes` there says that it needs a new session.
+
+### Tests
+- 1 new test (the pane command for the running session); 962/962 pass.
+
 ## [0.37.0] - 2026-11-07
 
 ### Added
