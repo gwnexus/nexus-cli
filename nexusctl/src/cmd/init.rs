@@ -1907,13 +1907,14 @@ mod tests {
     #[tokio::test]
     async fn test_init_with_project_id_stores_uuid() {
         let dir = temp_project_dir("project-id-uuid");
-        // This will attempt server sync but fail (no real token), which is fine.
-        // The local scaffolding should still work and store the project ID.
+        // With a token in the environment this attempts the server sync; a
+        // closed local port makes it fail at once instead of reaching the
+        // real platform. The local scaffolding still stores the project ID.
         run(
             dir.to_str().unwrap(),
             Some("test-project"),
             Some("11111111-2222-4333-8444-555555555555"),
-            "https://nexus.gatewarden.eu",
+            "http://127.0.0.1:9",
             false,
             McpSource::Npm,
             false,
