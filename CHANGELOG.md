@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.2] - 2026-11-08
+
+### Changed
+- **The `dispatches` pane says where the runner listens.** A runner bound only to other projects shows as `elsewhere` in the header, with a line naming the projects it serves, instead of `running` next to "this project is not bound".
+- For a bound project the pane shows the runner's last error, such as a failed heartbeat, which was only in the state file before. The runner clears it once heartbeat and feed read succeed again.
+- `nexus dispatch runner status` shows a notify-mode binding as `read only` instead of `blocked by mode_notify`; notify mode only withholds writes.
+
+### Fixed
+- `nexus run --dispatch-pane` inside a running zellij session reports the pane once instead of twice.
+
+### Tests
+- 2 new tests (runner scope view, read-only binding line); 992/992 pass.
+
 ## [0.39.1] - 2026-11-08
 
 ### Fixed
