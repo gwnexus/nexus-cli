@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.4] - 2026-11-08
+
+### Changed
+- **The `dispatches` pane that `nexus run` adds sits directly below the agent pane**, at 13% of the height, like the hub workspace presets; it was placed in the right column above `terminal`. The agent pane's size moves to the new column, so the sidebar keeps its width. A layout without an agent pane still gets a separate `dispatches` tab.
+
+### Tests
+- The placement test covers a pane with a child block, a quoted brace and a size, and a one-line pane; 993/993 pass.
+
 ## [0.39.3] - 2026-11-08
 
 ### Added
