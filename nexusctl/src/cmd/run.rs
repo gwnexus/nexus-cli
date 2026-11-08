@@ -331,7 +331,11 @@ pub async fn run(
         } else {
             CheckResult::Warn("--dispatch-pane needs the zellij workspace".into())
         };
-        print_check("Dispatch pane", &result);
+        // Inside zellij the layout does not apply; the pane is opened in the
+        // running session further down and reported there.
+        if std::env::var_os("ZELLIJ").is_none() {
+            print_check("Dispatch pane", &result);
+        }
         print_check(
             "Dispatch runner",
             &super::dispatch_status::runner_check(&workspace),
