@@ -891,35 +891,30 @@ fn kdl_string(value: &str) -> String {
 }
 
 /// The layout with a `dispatches` pane running `nexus dispatch status
-/// --watch --compact`: in the right column of the CLAUDE tab, above the
-/// `terminal` pane (else above `usage` or `observer`), otherwise as its own
-/// `dispatches` tab. `None` when the layout has no closing brace.
+/// --watch --compact` directly below the `claude` pane of the CLAUDE tab, at
+/// 13% of the height like the hub workspace presets; the claude pane and its
+/// new neighbour share the claude pane's place and size. A layout without a
+/// claude pane gets a separate `dispatches` tab. `None` when the layout has
+/// no closing brace.
 fn layout_with_dispatch_pane(layout: &str, nexus: &str) -> Option<String> {
     let args = "args \"dispatch\" \"status\" \"--watch\" \"--compact\"";
-    let tab_start = layout.find("tab name=\"CLAUDE\"");
-    let anchor = tab_start.and_then(|start| {
-        let tab = &layout[start..];
-        ["name=\"terminal\"", "name=\"usage\"", "name=\"observer\""]
-            .iter()
-            .find_map(|needle| {
-                let at = tab.find(needle)?;
-                let line_start = tab[..at].rfind('\n').map_or(0, |i| i + 1);
-                tab[line_start..at]
-                    .trim_start()
-                    .starts_with("pane")
-                    .then_some(start + line_start)
-            })
-    });
-    if let Some(at) = anchor {
+    if let Some((at, end)) = claude_pane_span(layout) {
         let indent: String = layout[at..]
             .chars()
             .take_while(|c| *c == ' ' || *c == '\t')
             .collect();
+        let block = &layout[at..end];
+        let header_end = block.find('\n').unwrap_or(block.len());
+        // The size moves to the wrapper, which takes the claude pane's place.
+        let (header, size) = take_size(&block[..header_end]);
+        let claude = format!("{header}{}", &block[header_end..]);
+        let claude: String = claude.lines().map(|l| format!("    {l}\n")).collect();
+        let size = size.map(|s| format!(" size={s}")).unwrap_or_default();
         let pane = format!(
-            "{indent}pane command={} name=\"dispatches\" {{\n{indent}    {args}\n{indent}}}\n",
+            "{indent}pane split_direction=\"horizontal\"{size} {{\n{claude}{indent}    pane command={} name=\"dispatches\" size=\"13%\" {{\n{indent}        {args}\n{indent}    }}\n{indent}}}\n",
             kdl_string(nexus)
         );
-        return Some(format!("{}{pane}{}", &layout[..at], &layout[at..]));
+        return Some(format!("{}{pane}{}", &layout[..at], &layout[end..]));
     }
     let end = layout.rfind('}')?;
     let tab = format!(
@@ -928,6 +923,63 @@ fn layout_with_dispatch_pane(layout: &str, nexus: &str) -> Option<String> {
     );
     let head = layout[..end].trim_end();
     Some(format!("{head}\n{tab}{}", &layout[end..]))
+}
+
+/// Byte span of the `pane ... name="claude"` node in the CLAUDE tab, from
+/// the start of its line to the end of its last line (its child block
+/// included).
+fn claude_pane_span(layout: &str) -> Option<(usize, usize)> {
+    let tab = layout.find("tab name=\"CLAUDE\"")?;
+    let rel = layout[tab..].find("name=\"claude\"")?;
+    let name_at = tab + rel;
+    let at = layout[..name_at].rfind('\n').map_or(0, |i| i + 1);
+    if !layout[at..name_at].trim_start().starts_with("pane") {
+        return None;
+    }
+    let line_end = layout[name_at..]
+        .find('\n')
+        .map_or(layout.len(), |i| name_at + i);
+    if !layout[at..line_end].trim_end().ends_with('{') {
+        return Some((at, (line_end + 1).min(layout.len())));
+    }
+    // Match the child block's braces, skipping quoted strings.
+    let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
+    for (i, c) in layout[at..].char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '{' if !quoted => depth += 1,
+            '}' if !quoted => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    let close = at + i + 1;
+                    let end = layout[close..]
+                        .find('\n')
+                        .map_or(layout.len(), |j| close + j + 1);
+                    return Some((at, end));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The node header without its `size="..."` property, and that value.
+fn take_size(header: &str) -> (String, Option<String>) {
+    let Some(at) = header.find(" size=\"") else {
+        return (header.to_string(), None);
+    };
+    let value_start = at + " size=".len();
+    let Some(close) = header[value_start + 1..].find('"') else {
+        return (header.to_string(), None);
+    };
+    let value_end = value_start + 1 + close + 1;
+    (
+        format!("{}{}", &header[..at], &header[value_end..]),
+        Some(header[value_start..value_end].to_string()),
+    )
 }
 
 /// Whether a layout (or one tab of it) already runs the status view: a pane
@@ -1336,16 +1388,17 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_pane_goes_into_the_claude_tab() {
-        let layout = "layout {\n    tab name=\"CLAUDE\" {\n        pane split_direction=\"vertical\" {\n            pane name=\"claude\"\n            pane split_direction=\"horizontal\" {\n                pane command=\"node\" name=\"usage\" {\n                }\n                pane name=\"terminal\"\n            }\n        }\n    }\n    tab name=\"GIT\" {\n        pane name=\"terminal\"\n    }\n}\n";
+    fn test_dispatch_pane_goes_below_the_claude_pane() {
+        let layout = "layout {\n    tab name=\"CLAUDE\" {\n        pane split_direction=\"vertical\" {\n            pane command=\"sh\" name=\"claude\" focus=true size=\"75%\" {\n                args \"-c\" \"claude; echo \\\"}\\\"\"\n            }\n            pane split_direction=\"horizontal\" {\n                pane name=\"terminal\"\n            }\n        }\n    }\n    tab name=\"GIT\" {\n        pane name=\"terminal\"\n    }\n}\n";
         let out = layout_with_dispatch_pane(layout, "/bin/nexus").unwrap();
-        let pane = out.find("name=\"dispatches\"").unwrap();
-        let term = out.find("pane name=\"terminal\"").unwrap();
-        assert!(pane < term && pane > out.find("name=\"usage\"").unwrap());
-        assert!(out.contains(
-            "                pane command=\"/bin/nexus\" name=\"dispatches\" {\n                    args \"dispatch\" \"status\" \"--watch\" \"--compact\"\n                }\n                pane name=\"terminal\""
-        ));
+        let expected = "            pane split_direction=\"horizontal\" size=\"75%\" {\n                pane command=\"sh\" name=\"claude\" focus=true {\n                    args \"-c\" \"claude; echo \\\"}\\\"\"\n                }\n                pane command=\"/bin/nexus\" name=\"dispatches\" size=\"13%\" {\n                    args \"dispatch\" \"status\" \"--watch\" \"--compact\"\n                }\n            }\n            pane split_direction=\"horizontal\" {\n                pane name=\"terminal\"";
+        assert!(out.contains(expected), "{out}");
         assert_eq!(out.matches("name=\"dispatches\"").count(), 1);
+        assert!(out.ends_with("    tab name=\"GIT\" {\n        pane name=\"terminal\"\n    }\n}\n"));
+        // A one-line claude pane without a size.
+        let one = "layout {\n    tab name=\"CLAUDE\" {\n        pane name=\"claude\"\n        pane name=\"terminal\"\n    }\n}\n";
+        let out = layout_with_dispatch_pane(one, "/bin/nexus").unwrap();
+        assert!(out.contains("        pane split_direction=\"horizontal\" {\n            pane name=\"claude\"\n            pane command=\"/bin/nexus\" name=\"dispatches\" size=\"13%\" {"), "{out}");
     }
 
     #[test]
@@ -1577,7 +1630,7 @@ mod tests {
         let r = extend_layout_arg(&dir, &mut args, "/bin/nexus", &dir.join("out")).unwrap();
         assert!(matches!(r, CheckResult::Pass(_)));
         let out = fs::read_to_string(&args[1]).unwrap();
-        assert_eq!(out.matches("name=\"dispatches\"").count(), 1);
+        assert_eq!(out.matches("args \"dispatch\" \"status\"").count(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

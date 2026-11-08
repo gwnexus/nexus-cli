@@ -437,7 +437,7 @@ pub enum Command {
         actor_panes: bool,
 
         /// Add a Dispatch status pane (`nexus dispatch status --watch
-        /// --compact`) to the right column of the CLAUDE tab. On by default
+        /// --compact`) below the claude pane of the CLAUDE tab. On by default
         /// when the project's dispatch automation is not off.
         #[arg(long)]
         dispatch_pane: bool,
