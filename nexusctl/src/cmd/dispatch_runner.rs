@@ -376,8 +376,11 @@ pub(crate) fn binding_lines(file: &RunnerFile, bindings: &[RunnerBinding]) -> Ve
                 b.mode_effective.as_deref().unwrap_or("?"),
                 b.mode_requested.as_deref().unwrap_or("?"),
             );
-            if let Some(by) = &b.blocked_by {
-                line.push_str(&format!(", blocked by {by}"));
+            match b.blocked_by.as_deref() {
+                // Notify mode only withholds writes; listening is not blocked.
+                Some("mode_notify") => line.push_str(", read only"),
+                Some(by) => line.push_str(&format!(", blocked by {by}")),
+                None => {}
             }
             if let Some(lag) = b.lag {
                 line.push_str(&format!(", lag {lag}"));
@@ -541,6 +544,35 @@ mod tests {
         assert_eq!(shown_prefix(Some("WlnNZnn7")), "nxs_run_WlnNZnn7");
         assert_eq!(shown_prefix(Some("nxs_run_ab")), "nxs_run_ab");
         assert_eq!(shown_prefix(None), "nxs_run_");
+    }
+
+    #[test]
+    fn test_notify_mode_reads_as_read_only() {
+        let file: RunnerFile = serde_json::from_value(serde_json::json!({
+            "runner_id": "r", "token": "t", "api_url": "u", "name": "n",
+            "registered_at": "2026-01-01T00:00:00Z", "projects": [],
+            "project_names": {"p1": "Beta"}
+        }))
+        .unwrap();
+        let binding = |mode: &str, by: &str| RunnerBinding {
+            project_id: "p1".into(),
+            mode_requested: Some("notify".into()),
+            mode_effective: Some(mode.into()),
+            blocked_by: Some(by.into()),
+            ..Default::default()
+        };
+        let lines = binding_lines(
+            &file,
+            &[
+                binding("notify", "mode_notify"),
+                binding("off", "platform_disabled"),
+            ],
+        );
+        assert_eq!(lines[0], "Beta mode notify (requested notify), read only");
+        assert_eq!(
+            lines[1],
+            "Beta mode off (requested notify), blocked by platform_disabled"
+        );
     }
 
     #[test]
