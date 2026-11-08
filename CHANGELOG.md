@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-11-08
+
+### Fixed
+- **A runner started while automation is switched off no longer replays the history later.** It took its start cursor while blocked, which could be 0; switching automation on would then have queued a notice for every old event. The start is now fixed on the first heartbeat that allows reading, and a stored cursor of 0 from such a start is replaced.
+- `nexus dispatch listen` says why it is idle (for example `idle Nexus Showcase Beta blocked by platform_disabled`) instead of printing nothing.
+- The runner token prefix is shown with its `nxs_run_` lead.
+
+### Tests
+- 2 new tests (blocked start, prefix display); 990/990 pass.
+
 ## [0.39.0] - 2026-11-07
 
 ### Added

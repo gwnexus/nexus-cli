@@ -783,7 +783,11 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
                 Ok(hb) => {
                     bindings = hb.projects.clone();
                     state.last_heartbeat_at = Some(rfc3339_now());
-                    if state.cursor.is_none() {
+                    // Fix the start only once the runner may read: a cursor
+                    // taken while blocked could predate the whole history.
+                    let hub_cursor = hb.projects.iter().any(|b| b.cursor.is_some());
+                    let unset = state.cursor.is_none() || (state.cursor == Some(0) && !hub_cursor);
+                    if unset && !active_projects(&bindings).is_empty() {
                         state.cursor = Some(start_cursor(&hb));
                     }
                     for b in &bindings {
@@ -811,7 +815,12 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
         if bindings.is_empty() {
             state.state = "error".into();
         } else if active.is_empty() {
+            let reason = blocked_reason(&file, &bindings);
+            if state.state != "blocked" || state.last_error.as_deref() != Some(reason.as_str()) {
+                log(&format!("{} {reason}", style("idle").yellow()));
+            }
             state.state = "blocked".into();
+            state.last_error = Some(reason);
         } else {
             match poll(&client, &file, &queue, &mut state, &active, &bindings).await {
                 Ok(n) => {
@@ -885,6 +894,21 @@ fn reexec(exe: &Path) -> anyhow::Result<()> {
 #[cfg(not(unix))]
 fn reexec(_exe: &Path) -> anyhow::Result<()> {
     anyhow::bail!("the binary changed; start the runner again")
+}
+
+/// Why every binding is idle, for the log and the state file.
+fn blocked_reason(file: &RunnerFile, bindings: &[RunnerBinding]) -> String {
+    bindings
+        .iter()
+        .map(|b| {
+            format!(
+                "{} blocked by {}",
+                file.name_of(&b.project_id),
+                b.blocked_by.as_deref().unwrap_or("mode off")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Where a fresh runner starts: the hub's cursor when it has one (a restart
@@ -1423,6 +1447,8 @@ mod tests {
         /// Cursor the hub holds for the binding (last one reported).
         cursor: Option<i64>,
         heartbeats: Vec<serde_json::Value>,
+        /// Automation switched off on the platform.
+        off: bool,
     }
 
     type SharedHub = std::sync::Arc<std::sync::Mutex<Hub>>;
@@ -1436,9 +1462,14 @@ mod tests {
                 }
                 h.heartbeats.push(body.clone());
                 let latest = h.events.iter().filter_map(|e| e["id"].as_i64()).max();
-                serde_json::json!({"runner_id": "r1", "paused": false, "platform_enabled": true,
-                    "projects": [{"project_id": P, "mode_requested": "notify", "mode_effective": "notify",
-                        "writes_allowed": false, "cursor": h.cursor, "latest_event_id": latest}]})
+                let (mode, by) = if h.off {
+                    ("off", Some("platform_disabled"))
+                } else {
+                    ("notify", None)
+                };
+                serde_json::json!({"runner_id": "r1", "paused": false, "platform_enabled": !h.off,
+                    "projects": [{"project_id": P, "mode_requested": "notify", "mode_effective": mode,
+                        "blocked_by": by, "writes_allowed": false, "cursor": h.cursor, "latest_event_id": latest}]})
             }
             "dispatch_events" => {
                 let since = body["since"].as_i64().unwrap_or(0);
@@ -1618,6 +1649,71 @@ mod tests {
         hub.lock().unwrap().cursor = Some(1); // even a cursor behind replays safely
         run_loop(once(), env()).await.unwrap();
         assert_eq!(queue.notices(P).len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Started while the platform switch is off: no cursor is fixed, so
+    /// switching it on later does not replay the history.
+    #[tokio::test]
+    async fn test_blocked_start_does_not_replay_history() {
+        let dir = temp("blocked");
+        let hub: SharedHub = Default::default();
+        {
+            let mut h = hub.lock().unwrap();
+            h.off = true;
+            h.events.extend([created(1), created(2)]);
+        }
+        let url = serve(hub.clone()).await;
+        let runner_file = dir.join("dispatch-runner.json");
+        let file = RunnerFile {
+            runner_id: "r1".into(),
+            token: "nxs_run_test".into(),
+            token_prefix: None,
+            token_expires_at: None,
+            api_url: url,
+            name: "test".into(),
+            registered_at: rfc3339_now(),
+            projects: vec![dispatch_runner::BoundProject {
+                project_id: P.into(),
+                mode: "notify".into(),
+                runtime: "claude_code".into(),
+                repo_path_hash: None,
+            }],
+            project_names: Default::default(),
+            runtimes: vec![],
+        };
+        write_private(&runner_file, &serde_json::to_string(&file).unwrap()).unwrap();
+        let state_dir = dir.join("state");
+        let env = || ListenEnv {
+            runner_file: runner_file.clone(),
+            state_dir: state_dir.clone(),
+            home: dir.clone(),
+            claude_inbox: true,
+            desktop: false,
+            embedded: false,
+        };
+        let once = || ListenOptions {
+            interval_secs: 10,
+            heartbeat_secs: 60,
+            once: true,
+        };
+        run_loop(once(), env()).await.unwrap();
+        let state: RunnerState =
+            serde_json::from_str(&fs::read_to_string(state_dir.join("runner.json")).unwrap())
+                .unwrap();
+        assert_eq!(state.state, "blocked");
+        assert_eq!(state.cursor, None);
+        // Switched on, plus a new Dispatch: only that one is a notice.
+        {
+            let mut h = hub.lock().unwrap();
+            h.off = false;
+        }
+        run_loop(once(), env()).await.unwrap();
+        hub.lock().unwrap().events.push(created(3));
+        run_loop(once(), env()).await.unwrap();
+        let queue = Queue::new(state_dir.join("notices"));
+        let ids: Vec<i64> = queue.notices(P).iter().map(|n| n.event_id).collect();
+        assert_eq!(ids, [3]);
         let _ = fs::remove_dir_all(&dir);
     }
 

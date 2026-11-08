@@ -211,6 +211,15 @@ pub(crate) fn probe_from_version(text: &str) -> ClaudeProbe {
     }
 }
 
+/// The token prefix for display: the hub's prefix after `nxs_run_`.
+pub(crate) fn shown_prefix(prefix: Option<&str>) -> String {
+    match prefix {
+        Some(p) if p.starts_with("nxs_run_") => p.to_string(),
+        Some(p) => format!("nxs_run_{p}"),
+        None => "nxs_run_".into(),
+    }
+}
+
 fn host_name() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: the buffer is valid for its length; gethostname writes a
@@ -324,7 +333,7 @@ pub async fn register(api_url: &str, opts: RegisterOptions<'_>) -> anyhow::Resul
         style("Registered").green().bold(),
         file.runner_id,
         file.name,
-        file.token_prefix.as_deref().unwrap_or("nxs_run_"),
+        shown_prefix(file.token_prefix.as_deref()),
         path.display()
     );
     if let Some(exp) = &file.token_expires_at {
@@ -448,7 +457,7 @@ pub async fn status(json: bool) -> anyhow::Result<()> {
     println!(
         "  hub {}, token {}…{}",
         file.api_url,
-        file.token_prefix.as_deref().unwrap_or("nxs_run_"),
+        shown_prefix(file.token_prefix.as_deref()),
         file.token_expires_at
             .as_deref()
             .map(|e| format!(", expires {e}"))
@@ -525,6 +534,13 @@ mod tests {
         assert!(p.runtime().capabilities.is_empty());
         let ok = probe_from_version("2.1.319 (Claude Code)");
         assert_eq!(ok.runtime().capabilities, [CROSS_SESSION_INBOX]);
+    }
+
+    #[test]
+    fn test_prefix_display() {
+        assert_eq!(shown_prefix(Some("WlnNZnn7")), "nxs_run_WlnNZnn7");
+        assert_eq!(shown_prefix(Some("nxs_run_ab")), "nxs_run_ab");
+        assert_eq!(shown_prefix(None), "nxs_run_");
     }
 
     #[test]
