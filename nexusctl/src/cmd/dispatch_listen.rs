@@ -664,17 +664,47 @@ pub async fn listen(opts: ListenOptions) -> anyhow::Result<()> {
     run_loop(opts, env).await
 }
 
+/// How this machine's runner relates to `project_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunnerScope {
+    Unregistered,
+    Unreadable,
+    /// Registered, but bound only to other projects (their names).
+    Unbound(Vec<String>),
+    Bound,
+}
+
+pub(crate) fn runner_scope(project_id: &str) -> RunnerScope {
+    let Ok(path) = runner_file_path() else {
+        return RunnerScope::Unreadable;
+    };
+    match load_runner_file(&path) {
+        Ok(None) => RunnerScope::Unregistered,
+        Err(_) => RunnerScope::Unreadable,
+        Ok(Some(f)) if !f.projects.iter().any(|p| p.project_id == project_id) => {
+            RunnerScope::Unbound(
+                f.projects
+                    .iter()
+                    .map(|p| f.name_of(&p.project_id))
+                    .collect(),
+            )
+        }
+        Ok(Some(_)) => RunnerScope::Bound,
+    }
+}
+
 /// Why the runner cannot listen for `project_id` here, checked before the
 /// loop starts (registered, project bound).
 pub(crate) fn listen_blocker(project_id: &str) -> Option<String> {
-    let path = runner_file_path().ok()?;
-    match load_runner_file(&path) {
-        Ok(None) => Some("not registered (nexus dispatch runner register)".into()),
-        Err(_) => Some("runner file unreadable (nexus dispatch runner register)".into()),
-        Ok(Some(f)) if !f.projects.iter().any(|p| p.project_id == project_id) => {
+    match runner_scope(project_id) {
+        RunnerScope::Unregistered => Some("not registered (nexus dispatch runner register)".into()),
+        RunnerScope::Unreadable => {
+            Some("runner file unreadable (nexus dispatch runner register)".into())
+        }
+        RunnerScope::Unbound(_) => {
             Some("this project is not bound (nexus dispatch runner register)".into())
         }
-        Ok(Some(_)) => None,
+        RunnerScope::Bound => None,
     }
 }
 
@@ -769,6 +799,7 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
     let mut pending = Pending::default();
     let mut bindings: Vec<RunnerBinding> = vec![];
     let mut next_beat = Instant::now();
+    let mut beat_ok = false;
     let embedded = env.embedded;
     let mut stop: std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>> =
         if embedded {
@@ -781,6 +812,7 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
         if Instant::now() >= next_beat {
             match heartbeat(&client, &state, &mut pending, &bindings).await {
                 Ok(hb) => {
+                    beat_ok = true;
                     bindings = hb.projects.clone();
                     state.last_heartbeat_at = Some(rfc3339_now());
                     // Fix the start only once the runner may read: a cursor
@@ -797,6 +829,7 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
                     }
                 }
                 Err(e) => {
+                    beat_ok = false;
                     if matches!(e, nexus_core::Error::Unauthorized(_)) {
                         state.state = "revoked".into();
                         state.last_error = Some("the runner token was rejected".into());
@@ -825,7 +858,8 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
             match poll(&client, &file, &queue, &mut state, &active, &bindings).await {
                 Ok(n) => {
                     state.state = "running".into();
-                    if n > 0 {
+                    // A failed heartbeat keeps its error until a beat succeeds.
+                    if n > 0 || beat_ok {
                         state.last_error = None;
                     }
                 }

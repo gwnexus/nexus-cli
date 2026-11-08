@@ -700,7 +700,7 @@ The time on a row is the time since its last activity.
 
 On a color terminal the counters and statuses are colored: what waits on us (and `>`) yellow and bold, blocked and `!` red, in progress blue, open cyan, resolved green, closed dimmed. A counter of 0 is dimmed. Colors do not change the column widths; `NO_COLOR`, a pipe and `--json` give plain text.
 
-The backend returns at most 50 Dispatches per list, so a count from a full list is shown as a lower bound (`50+`). With `--watch`, a failed refresh keeps the last state on screen and adds an error line. The command uses your token only as the request's bearer header. It holds no lock, so `pull`, `push` and `run` work while it runs. The runner state in the header is read from `~/.config/nexus/state/dispatch/runner.json` and stays `none` until a runner writes that file.
+The backend returns at most 50 Dispatches per list, so a count from a full list is shown as a lower bound (`50+`). With `--watch`, a failed refresh keeps the last state on screen and adds an error line. The command uses your token only as the request's bearer header. It holds no lock, so `pull`, `push` and `run` work while it runs. The runner state in the header is read from `~/.config/nexus/state/dispatch/runner.json` and stays `none` until a runner writes that file. A runner bound only to other projects shows as `elsewhere`, with a line naming the projects it serves; for a bound project the line shows the runner's last error, such as a failed heartbeat.
 
 `--json` prints one object (with `--watch`, one line per refresh):
 

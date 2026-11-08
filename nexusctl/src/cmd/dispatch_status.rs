@@ -136,9 +136,13 @@ struct ProjectRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct Runner {
     state: String,
-    /// Why the runner of a watching view is not listening.
+    /// Why the runner of a watching view is not listening, or what it
+    /// last failed at.
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
+    /// The runner's last error from its state file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
 }
 
 /// The `--json` shape (`nexus.dispatch-status.v1`).
@@ -338,11 +342,16 @@ fn snapshot(
 /// Runner state from `~/.config/nexus/state/dispatch/runner.json`, read
 /// only; `none` while no runner has written it.
 fn runner_state(path: &Path) -> Runner {
+    let mut last_error = None;
     let state = match fs::read_to_string(path) {
         Err(_) => "none".to_string(),
         Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
             Err(_) => "unknown".to_string(),
             Ok(v) => {
+                last_error = v
+                    .get("last_error")
+                    .and_then(|e| e.as_str())
+                    .map(str::to_string);
                 let state = v
                     .get("state")
                     .and_then(|s| s.as_str())
@@ -359,7 +368,36 @@ fn runner_state(path: &Path) -> Runner {
             }
         },
     };
-    Runner { state, note: None }
+    Runner {
+        state,
+        note: None,
+        last_error,
+    }
+}
+
+/// The runner as this project sees it: a runner serving only other
+/// projects reads `elsewhere` and names them; a bound runner shows its last
+/// error unless a stop reason is already noted.
+fn runner_view(mut r: Runner, scope: &super::dispatch_listen::RunnerScope) -> Runner {
+    use super::dispatch_listen::RunnerScope;
+    let live = matches!(
+        r.state.as_str(),
+        "starting" | "running" | "blocked" | "error"
+    );
+    match scope {
+        RunnerScope::Unbound(names) if live => {
+            r.state = "elsewhere".into();
+            r.note = Some(format!(
+                "serves {}, not this project (nexus dispatch runner register)",
+                names.join(", ")
+            ));
+        }
+        RunnerScope::Bound if live && r.note.is_none() => {
+            r.note = r.last_error.as_ref().map(|e| format!("last error: {e}"));
+        }
+        _ => {}
+    }
+    r
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -741,13 +779,14 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
         let mut r = runner_file.as_deref().map(runner_state).unwrap_or(Runner {
             state: "none".into(),
             note: None,
+            last_error: None,
         });
         r.note = blocker.clone().or_else(|| {
             listener
                 .as_ref()
                 .and_then(|slot| slot.lock().ok().and_then(|s| s.clone()))
         });
-        r
+        runner_view(r, &super::dispatch_listen::runner_scope(&project_id))
     };
 
     if !opts.watch {
@@ -1108,6 +1147,7 @@ mod tests {
             Runner {
                 state: "none".into(),
                 note: None,
+                last_error: None,
             },
             7,
             NOW,
@@ -1244,6 +1284,36 @@ mod tests {
         assert_eq!(rfc3339(parse_rfc3339(t).unwrap()), t);
         assert_eq!(age(Some(&at(90_000)), NOW), "1m");
         assert_eq!(age(Some(&at(3 * 86_400_000)), NOW), "3d");
+    }
+
+    #[test]
+    fn test_runner_view_names_the_scope() {
+        use crate::cmd::dispatch_listen::RunnerScope;
+        let r = |state: &str| Runner {
+            state: state.into(),
+            note: None,
+            last_error: Some("API error: Insufficient permissions".into()),
+        };
+        let elsewhere = runner_view(r("running"), &RunnerScope::Unbound(vec!["Beta".into()]));
+        assert_eq!(elsewhere.state, "elsewhere");
+        assert_eq!(
+            elsewhere.note.as_deref(),
+            Some("serves Beta, not this project (nexus dispatch runner register)")
+        );
+        // A stopped runner keeps its state and the caller's note.
+        let stopped = runner_view(r("stopped"), &RunnerScope::Unbound(vec!["Beta".into()]));
+        assert_eq!((stopped.state.as_str(), stopped.note), ("stopped", None));
+        let bound = runner_view(r("running"), &RunnerScope::Bound);
+        assert_eq!(
+            bound.note.as_deref(),
+            Some("last error: API error: Insufficient permissions")
+        );
+        let mut noted = r("running");
+        noted.note = Some("listener stopped".into());
+        assert_eq!(
+            runner_view(noted, &RunnerScope::Bound).note.as_deref(),
+            Some("listener stopped")
+        );
     }
 
     #[test]
