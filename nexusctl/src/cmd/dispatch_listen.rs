@@ -1290,11 +1290,11 @@ mod tests {
             event: m,
         };
         let n = build_notice(&theirs, Some(&d), "notify", &names).unwrap();
-        assert!(n.text.starts_with(
-            "Nexus: NEXUS-APP added a reply on Dispatch d0000020 \"Fix  the  thing\""
-                .replace("  ", " ")
-                .as_str()
-        ));
+        let expected = format!(
+            "Nexus: NEXUS-APP added a reply on Dispatch {} \"Fix the thing\"",
+            &theirs.event.dispatch_id[..8]
+        );
+        assert!(n.text.starts_with(&expected), "{}", n.text);
         assert!(!n.text.contains("SECRET"));
         assert_eq!(n.id, notice_id(P, 20));
 
