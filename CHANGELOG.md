@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.3] - 2026-11-08
+
+### Added
+- **`nexus run` opens the `dispatches` pane when the project's dispatch automation is on.** It reads `policy.dispatch_automation` at start; any value other than `off` adds the pane without `--dispatch-pane` and names the reason in the checks. `--no-dispatch-pane` leaves it out. The default applies only to the zellij workspace.
+
+### Fixed
+- An init test reached the real platform when a token was set in the shell and could hang the test run for minutes; it now uses a closed local port.
+- The README notice example uses a placeholder id.
+
+### Tests
+- 1 new test (pane decision from flag and policy); 993/993 pass.
+
 ## [0.39.2] - 2026-11-08
 
 ### Changed
