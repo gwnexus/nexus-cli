@@ -196,6 +196,29 @@ fn seed_gh_profile(
     })
 }
 
+/// Whether `nexus run` adds the Dispatch status pane, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DispatchPane {
+    /// `--dispatch-pane`.
+    Flag,
+    /// The project's `policy.dispatch_automation` (not `off`).
+    Policy(String),
+    Off,
+}
+
+impl DispatchPane {
+    /// `flag` is `Some` for `--dispatch-pane` / `--no-dispatch-pane`; without
+    /// one the project's dispatch automation decides.
+    fn decide(flag: Option<bool>, automation: Option<&str>) -> Self {
+        match (flag, automation) {
+            (Some(true), _) => Self::Flag,
+            (Some(false), _) => Self::Off,
+            (None, Some(mode)) if !mode.is_empty() && mode != "off" => Self::Policy(mode.into()),
+            _ => Self::Off,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -217,7 +240,7 @@ pub async fn run(
     assume_yes: bool,
     workspace_flag: Option<(&str, WorkspaceSource)>,
     actor_panes: bool,
-    dispatch_pane: bool,
+    dispatch_pane: Option<bool>,
     resume: bool,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
@@ -240,6 +263,7 @@ pub async fn run(
     // per-project `gh` handling can be applied below.
     let mut gh_effective: Option<nexus_core::api::GhEffective> = None;
     let mut git_config: Option<nexus_core::api::GitConfig> = None;
+    let mut automation: Option<String> = None;
     if !no_db {
         if let Some(token) = resolve_token() {
             if let Ok(client) = NexusClient::new(api_url, Some(token)) {
@@ -259,6 +283,15 @@ pub async fn run(
                     if let Ok(detail) = client.get_project(&project_id).await {
                         gh_effective = detail.project.gh_effective;
                         git_config = detail.project.git_config;
+                    }
+                    if dispatch_pane.is_none() {
+                        if let Ok(s) = client.get_project_settings(&project_id).await {
+                            automation = s
+                                .settings
+                                .get("policy.dispatch_automation")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                        }
                     }
                 }
             }
@@ -324,6 +357,23 @@ pub async fn run(
             CheckResult::Warn("--actor-panes needs the zellij workspace".into())
         };
         print_check("Actor panes", &result);
+    }
+    let pane = DispatchPane::decide(dispatch_pane, automation.as_deref());
+    // Only an explicit flag warns outside zellij; the policy default stays quiet.
+    let dispatch_pane = match pane {
+        DispatchPane::Flag => true,
+        DispatchPane::Policy(_) => launch.tool == "zellij",
+        DispatchPane::Off => false,
+    };
+    if let DispatchPane::Policy(mode) = &pane {
+        if dispatch_pane {
+            print_check(
+                "Dispatch automation",
+                &CheckResult::Info(format!(
+                    "{mode}: dispatches pane on (--no-dispatch-pane leaves it out)"
+                )),
+            );
+        }
     }
     if dispatch_pane {
         let result = if launch.tool == "zellij" {
@@ -2572,6 +2622,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_dispatch_pane_follows_flag_then_policy() {
+        assert_eq!(
+            DispatchPane::decide(Some(true), Some("off")),
+            DispatchPane::Flag
+        );
+        assert_eq!(
+            DispatchPane::decide(Some(false), Some("notify")),
+            DispatchPane::Off
+        );
+        assert_eq!(
+            DispatchPane::decide(None, Some("notify")),
+            DispatchPane::Policy("notify".into())
+        );
+        assert_eq!(DispatchPane::decide(None, Some("off")), DispatchPane::Off);
+        assert_eq!(DispatchPane::decide(None, None), DispatchPane::Off);
+    }
+
+    #[test]
     fn test_env_display_value_masks_secrets() {
         let token = format!("nxs_pat_{}9f3c", "x".repeat(24));
         assert_eq!(
@@ -3136,6 +3204,7 @@ mod tests {
                 workspace,
                 actor_panes,
                 dispatch_pane,
+                no_dispatch_pane,
                 resume,
                 account,
                 args,
@@ -3143,6 +3212,7 @@ mod tests {
                 assert!(!plain);
                 assert!(!actor_panes);
                 assert!(!dispatch_pane);
+                assert!(!no_dispatch_pane);
                 assert!(!resume);
                 assert!(workspace.is_none());
                 assert!(tool.is_none());

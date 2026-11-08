@@ -767,6 +767,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             ref workspace,
             actor_panes,
             dispatch_pane,
+            no_dispatch_pane,
             resume,
             ref account,
             ref args,
@@ -797,7 +798,11 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         .map(|w| (w, run::WorkspaceSource::Flag))
                 },
                 actor_panes,
-                dispatch_pane,
+                match (dispatch_pane, no_dispatch_pane) {
+                    (true, _) => Some(true),
+                    (_, true) => Some(false),
+                    _ => None,
+                },
                 resume,
             )
             .await?;

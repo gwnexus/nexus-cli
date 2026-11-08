@@ -82,7 +82,7 @@ nexus classification [show|levels]      Project, customer and effective confiden
 nexus classification set <level>        Change the project level after an impact plan (--reason, --dry-run, --pull)
 nexus run [-- <args>]                   Start the agent environment the backend selects
 nexus run --actor-panes                 Add an actors tab with one pane per local-lane actor (zellij)
-nexus run --dispatch-pane               Add a Dispatch status pane to the CLAUDE tab (zellij)
+nexus run --dispatch-pane               Add a Dispatch status pane to the CLAUDE tab (zellij; default with dispatch automation)
 nexus dispatch status [--watch]         Incoming and outgoing Dispatches of the project (--compact, --json)
 nexus dispatch runner register          Register this machine's Dispatch runner (notify mode) for the project
 nexus dispatch runner status|pause|resume|revoke|probe   Manage the runner; probe checks Claude Code
@@ -721,7 +721,7 @@ The backend returns at most 50 Dispatches per list, so a count from a full list 
 
 `truncated: true` means the count came from a full list of 50 and may be higher. `error` holds the last refresh error in watch mode. `runner.note` appears when a watching view cannot run the runner, with the reason.
 
-`nexus run --dispatch-pane` adds a `dispatches` pane running `nexus dispatch status --watch --compact` to the right column of the CLAUDE tab, above the `terminal` pane. A layout without that column gets a separate `dispatches` tab instead. Run from inside the project's running zellij session, it opens the pane there below the focused pane, at about a fifth of its height, and returns the focus to the pane above, because a layout only applies to a new session. A layout or tab that already has a `dispatches` pane (the hub workspace presets include one) is left as it is.
+`nexus run --dispatch-pane` adds a `dispatches` pane running `nexus dispatch status --watch --compact` to the right column of the CLAUDE tab, above the `terminal` pane. A layout without that column gets a separate `dispatches` tab instead. Run from inside the project's running zellij session, it opens the pane there below the focused pane, at about a fifth of its height, and returns the focus to the pane above, because a layout only applies to a new session. A layout or tab that already has a `dispatches` pane (the hub workspace presets include one) is left as it is. When the project's dispatch automation (`policy.dispatch_automation`) is not `off`, `nexus run` adds the pane without the flag and says so in its checks; `--no-dispatch-pane` leaves it out. The policy default applies only to the zellij workspace.
 
 With `--watch`, the view also runs this machine's Dispatch runner in the same process (see below) when it is registered and bound to the project. Otherwise a yellow `runner:` line says why it is not listening; `--no-listen` turns this off. Only one runner runs per machine: a second view shows the state of the one that listens.
 

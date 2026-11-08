@@ -437,9 +437,15 @@ pub enum Command {
         actor_panes: bool,
 
         /// Add a Dispatch status pane (`nexus dispatch status --watch
-        /// --compact`) to the right column of the CLAUDE tab.
+        /// --compact`) to the right column of the CLAUDE tab. On by default
+        /// when the project's dispatch automation is not off.
         #[arg(long)]
         dispatch_pane: bool,
+
+        /// Leave the Dispatch status pane out, even when the project's
+        /// dispatch automation is on.
+        #[arg(long, conflicts_with = "dispatch_pane")]
+        no_dispatch_pane: bool,
 
         /// Resurrect the project's exited zellij session (its old layout)
         /// instead of removing it and starting the current layout.
