@@ -673,13 +673,13 @@ nexus run --dispatch-pane                # the compact view as a pane in the CLA
 - **Incoming** (this project is the target): counted as open, waiting on us (open, acknowledged or blocked), in progress and blocked.
 - **Outgoing** (this project is the sender): counted as open, waiting on us (`waiting_for_requester`, `needs_review`) and waiting on the peer (every other open status).
 - **Resolved and closed** counts cover the last `--window` days (default 7).
-- **Rows:** one per open Dispatch, with direction, peer project, type, priority, a `!` for blocking, status, age and the time since the last activity. A `>` marks the ones where the next step is ours; they come first.
+- **Rows:** one per open Dispatch, with direction, peer project, type, priority, a `!` for blocking, status, age and the time since the last activity. A `>` marks the ones where the next step is ours; they come first, then blocking ones, then the most recent activity. Closed and resolved Dispatches leave the list and only count in the period line. A Dispatch from the hub's simulation form (title starting with `[Simulation]`) is shown in yellow.
 - **Options:** `--project <id>` shows another project you can access instead of the linked one. `--window <days>` sets the period for resolved and closed counts.
 
 The compact view reads like this:
 
 ```text
-NEXUS-CLI 03:52Z runner none
+NEXUS-CLI 03:52Z manager none
 in  0 open 1 ours 0 prog 0 blkd
 out 0 open 0 ours 0 peer
 7d  0 resolved 28 closed
@@ -696,11 +696,11 @@ NEXUS-APP    1/0, 1 ours
 | `ack`, `wait`, `revw` | acknowledged, `waiting_for_requester`, `needs_review` |
 | `1/0` | open Dispatches with that peer: incoming / outgoing |
 
-The time on a row is the time since its last activity.
+The time on a row is the time since its last activity. When the pane is too short for all rows, the last visible line says how many more there are (`… +3 more`).
 
 On a color terminal the counters and statuses are colored: what waits on us (and `>`) yellow and bold, blocked and `!` red, in progress blue, open cyan, resolved green, closed dimmed. A counter of 0 is dimmed. Colors do not change the column widths; `NO_COLOR`, a pipe and `--json` give plain text.
 
-The backend returns at most 50 Dispatches per list, so a count from a full list is shown as a lower bound (`50+`). With `--watch`, a failed refresh keeps the last state on screen and adds an error line. The command uses your token only as the request's bearer header. It holds no lock, so `pull`, `push` and `run` work while it runs. The runner state in the header is read from `~/.config/nexus/state/dispatch/runner.json` and stays `none` until a runner writes that file. A runner bound only to other projects shows as `elsewhere`, with a line naming the projects it serves; for a bound project the line shows the runner's last error, such as a failed heartbeat.
+The backend returns at most 50 Dispatches per list, so a count from a full list is shown as a lower bound (`50+`). With `--watch`, a failed refresh keeps the last state on screen and adds an error line. The command uses your token only as the request's bearer header. It holds no lock, so `pull`, `push` and `run` work while it runs. The header calls this machine's Dispatch runner the dispatch manager (`manager` in the pane, `Dispatch manager` in the `nexus run` checks); the commands keep `nexus dispatch runner`. Its state is read from `~/.config/nexus/state/dispatch/runner.json` and stays `none` until a runner writes that file. A runner bound only to other projects shows as `elsewhere`, with a line naming the projects it serves; for a bound project the line shows the runner's last error, such as a failed heartbeat.
 
 `--json` prints one object (with `--watch`, one line per refresh):
 

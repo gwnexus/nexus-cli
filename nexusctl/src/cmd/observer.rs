@@ -685,12 +685,13 @@ pub fn watch(file: Option<&str>, json: bool, all: bool) -> anyhow::Result<()> {
 }
 
 /// Redraw in place: home, each line cleared to its end, rest of the screen
-/// cleared. Lines are cut to the terminal size.
+/// cleared. Lines are cut to the terminal size; a cut list ends with how
+/// many lines did not fit.
 pub(crate) fn draw(term: &console::Term, lines: &[String]) -> anyhow::Result<()> {
     let (rows, cols) = term.size();
     let mut out = String::from("\x1b[H");
-    for line in lines.iter().take(rows.saturating_sub(1).max(1) as usize) {
-        out.push_str(&console::truncate_str(line, cols as usize, "…"));
+    for line in fit_rows(lines, rows.saturating_sub(1).max(1) as usize) {
+        out.push_str(&console::truncate_str(&line, cols as usize, "…"));
         out.push_str("\x1b[K\n");
     }
     out.push_str("\x1b[J");
@@ -700,9 +701,35 @@ pub(crate) fn draw(term: &console::Term, lines: &[String]) -> anyhow::Result<()>
     Ok(())
 }
 
+/// The first `max` lines; when some are left out, the last one becomes
+/// `… +N more`.
+fn fit_rows(lines: &[String], max: usize) -> Vec<String> {
+    if lines.len() <= max {
+        return lines.to_vec();
+    }
+    let keep = max.saturating_sub(1);
+    let mut out = lines[..keep].to_vec();
+    out.push(
+        console::style(format!("… +{} more", lines.len() - keep))
+            .dim()
+            .to_string(),
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_fit_rows_counts_the_cut_lines() {
+        let lines: Vec<String> = (0..6).map(|n| format!("l{n}")).collect();
+        assert_eq!(fit_rows(&lines, 6), lines);
+        let cut = fit_rows(&lines, 4);
+        assert_eq!(cut.len(), 4);
+        assert_eq!(cut[2], "l2");
+        assert_eq!(console::strip_ansi_codes(&cut[3]), "… +3 more");
+    }
 
     const T0: &str = "2026-09-26T10:00:00Z";
 

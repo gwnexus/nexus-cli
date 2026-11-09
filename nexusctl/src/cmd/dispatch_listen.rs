@@ -784,7 +784,7 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
     state.claude_inbox = adapter.inbox;
     save_state(&state_path, &mut state);
     log(&format!(
-        "runner {} listening for {} project(s) on {} (claude_code inbox: {})",
+        "dispatch manager {} listening for {} project(s) on {} (claude_code inbox: {})",
         file.name,
         file.projects.len(),
         file.api_url,

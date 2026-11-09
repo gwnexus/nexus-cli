@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The Dispatch runner shows as the dispatch manager**: `manager` in the `dispatches` pane, `Dispatch manager` in the `nexus run` checks, `nexus dispatch runner status` and the `listen` log. Commands, files and the JSON keys keep `runner`.
+- **Simulation Dispatches stand out**: rows whose title starts with `[Simulation]` (the hub's test form) are shown in yellow in `nexus dispatch status`, compact and full.
+- **A cut list says so**: when a watching view has more lines than the pane, the last visible line reads `… +N more`.
+
 ## [0.39.4] - 2026-11-08
 
 ### Changed

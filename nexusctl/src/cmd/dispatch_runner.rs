@@ -448,7 +448,7 @@ pub async fn status(json: bool) -> anyhow::Result<()> {
     }
     println!(
         "{} {} ({}), {}",
-        style("Runner").bold(),
+        style("Dispatch manager").bold(),
         file.runner_id,
         file.name,
         if hb.paused {

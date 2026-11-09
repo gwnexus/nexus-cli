@@ -534,6 +534,25 @@ fn ours_count(n: usize, label: &str) -> String {
     )
 }
 
+/// Test traffic from the hub's simulation form carries this title prefix.
+const SIMULATION_PREFIX: &str = "[Simulation]";
+
+/// The pane's name for the Dispatch runner of this machine.
+const MANAGER: &str = "manager";
+
+fn is_simulation(r: &Row) -> bool {
+    r.title.trim_start().starts_with(SIMULATION_PREFIX)
+}
+
+/// Plain row text, yellow for a simulation Dispatch.
+fn sim(r: &Row, text: String) -> String {
+    if is_simulation(r) {
+        style(text).yellow().to_string()
+    } else {
+        text
+    }
+}
+
 fn marker(r: &Row) -> String {
     if r.waiting_on_us {
         style(">").bold().yellow().to_string()
@@ -566,7 +585,7 @@ fn runner_note_line(snap: &Snapshot) -> Option<String> {
     snap.runner
         .note
         .as_ref()
-        .map(|n| style(format!("runner: {n}")).yellow().to_string())
+        .map(|n| style(format!("{MANAGER}: {n}")).yellow().to_string())
 }
 
 fn error_line(snap: &Snapshot) -> Option<String> {
@@ -581,7 +600,7 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
     let (i, o) = (&snap.incoming, &snap.outgoing);
     let mut lines = vec![
         format!(
-            "{}  {}   refreshed {}Z   runner: {}",
+            "{}  {}   refreshed {}Z   {MANAGER}: {}",
             style("Dispatches").bold(),
             style(&snap.project.name).bold(),
             hhmm(&snap.refreshed_at),
@@ -626,17 +645,17 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
     );
     for r in &snap.dispatches {
         lines.push(format!(
-            "{} {:<3} {} {} {} {}{} {:>4} {:>6}  {}",
+            "{} {} {} {} {} {}{} {:>4} {:>6}  {}",
             marker(r),
-            r.direction.label(),
-            fit(&r.peer, 16),
-            fit(&r.kind, 22),
-            fit(&r.priority, 7),
+            sim(r, format!("{:<3}", r.direction.label())),
+            sim(r, fit(&r.peer, 16)),
+            sim(r, fit(&r.kind, 22)),
+            sim(r, fit(&r.priority, 7)),
             blocking_mark(r),
             tone_style(fit(&r.status, 21), status_tone(r)),
             age(Some(&r.created_at), now),
             age(r.updated_at.as_deref(), now),
-            r.title
+            sim(r, r.title.clone())
         ));
     }
     lines.push(String::new());
@@ -658,7 +677,7 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
     let (i, o) = (&snap.incoming, &snap.outgoing);
     let mut lines = vec![
         format!(
-            "{} {}Z runner {}",
+            "{} {}Z {MANAGER} {}",
             style(console::truncate_str(&snap.project.name, 20, "…")).bold(),
             &hhmm(&snap.refreshed_at)[..5.min(hhmm(&snap.refreshed_at).len())],
             snap.runner.state
@@ -691,14 +710,14 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
     }
     for r in &snap.dispatches {
         lines.push(format!(
-            "{}{}{:<3} {} {} {:>3} {}",
+            "{}{}{} {} {} {:>3} {}",
             marker(r),
             blocking_mark(r),
-            r.direction.label(),
-            fit(&r.peer, 10),
+            sim(r, format!("{:<3}", r.direction.label())),
+            sim(r, fit(&r.peer, 10)),
             tone_style(fit(status_short(&r.status), 4), status_tone(r)),
             age(r.updated_at.as_deref().or(Some(&r.created_at)), now),
-            r.title
+            sim(r, r.title.clone())
         ));
     }
     for p in &snap.peers {
@@ -1313,6 +1332,18 @@ mod tests {
         let plain = console::strip_ansi_codes(row);
         assert!(plain.find("title o1").unwrap() <= 28, "{plain}");
         assert!(console::strip_ansi_codes(&lines[1]).contains("2 ours"));
+    }
+
+    #[test]
+    fn test_simulation_rows_are_recognised() {
+        let mut lists = sample();
+        lists.inbox[0].title = "[Simulation] Which Node version?".into();
+        let s = snap(&lists);
+        let sims: Vec<&Row> = s.dispatches.iter().filter(|r| is_simulation(r)).collect();
+        assert_eq!(sims.len(), 1);
+        assert_eq!(sims[0].title, "[Simulation] Which Node version?");
+        let header = console::strip_ansi_codes(&render_compact(&s, NOW)[0]).to_string();
+        assert!(header.contains("manager none"), "{header}");
     }
 
     #[test]

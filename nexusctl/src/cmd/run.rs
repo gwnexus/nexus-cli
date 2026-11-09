@@ -387,7 +387,7 @@ pub async fn run(
             print_check("Dispatch pane", &result);
         }
         print_check(
-            "Dispatch runner",
+            "Dispatch manager",
             &super::dispatch_status::runner_check(&workspace),
         );
     }
