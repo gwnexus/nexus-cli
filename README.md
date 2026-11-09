@@ -960,7 +960,7 @@ Nexus (e.g. `frontend-design@claude-plugins-official`). They arrive in
 `extraKnownMarketplaces` for non-default marketplaces such as
 `gatewarden-nexus`) and are merged into `.claude/settings.json` by every
 pull. Enabling a plugin there does not install it, so `nexus pull --force`
-and `nexus run` (before every launch) also install them:
+and `nexus run` (before every launch) also install and update them:
 
 1. `claude plugin list --json` decides what is present: installed at user
    scope, or at project/local scope **for this workspace**.
@@ -970,12 +970,22 @@ and `nexus run` (before every launch) also install them:
 3. Each missing plugin: `claude plugin install <id> --scope project --json`.
    Never with `--yes` / `--accept-command`: a plugin that declares an
    install command needs a person to confirm it (`/plugin` in Claude Code).
+4. A managed plugin installed at project scope for this workspace is
+   updated (`claude plugin update <id> --scope project --json`) when the
+   registered marketplace checkout offers a newer version. The marketplace
+   registration is shared by every project on the machine, so the step
+   never re-points it: when it is registered at another ref than the
+   project declares, the plugin shows as `PENDING`. Claude Code moves the
+   registration to the declared ref when a session starts; the next
+   `nexus run` then updates the plugin before the launch.
 
 ```
 Claude Code plugins:
   MARKETPLACE gatewarden-nexus   added (project scope)
   INSTALLED   frontend-design@claude-plugins-official   project scope
   PRESENT     nexus-core@gatewarden-nexus
+  UPDATED     nexus-core@gatewarden-nexus   1.4.1 -> 1.5.0 (project scope; sessions started from now on use it)
+  PENDING     nexus-core@gatewarden-nexus   marketplace registered at nexus-core--v1.4.1, the project declares nexus-core--v1.5.0; ...
   FAILED      foo@claude-plugins-official   Plugin "foo" not found in marketplace ...
 ```
 

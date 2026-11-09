@@ -14,7 +14,14 @@
 //! 3. runs `claude plugin install <id> --scope project --json` per missing
 //!    plugin -- never with `--yes` / `--accept-command`: a plugin that
 //!    declares an install command needs a person to confirm it;
-//! 4. records what it installed in the CCX lock (provenance), and forgets
+//! 4. updates a managed plugin installed at project scope for this
+//!    workspace when the registered marketplace checkout offers a newer
+//!    version (`claude plugin update <id> --scope project --json`). A
+//!    marketplace registered at another ref than the one the project
+//!    declares is left alone: the registration is shared by every project
+//!    on the machine, and Claude Code moves it to the declared ref when a
+//!    session starts, so the next run updates the plugin;
+//! 5. records what it installed in the CCX lock (provenance), and forgets
 //!    lock entries for plugins Nexus no longer manages. Disabling those is
 //!    the settings merge's job: it removes only `enabledPlugins` entries
 //!    Nexus wrote (see [`super::ccx::reconcile_settings_removed_keys`]).
@@ -118,6 +125,7 @@ pub struct InstalledPlugin {
     pub id: String,
     pub scope: Option<String>,
     pub project_path: Option<String>,
+    pub version: Option<String>,
 }
 
 /// What happened to one managed plugin.
@@ -127,6 +135,15 @@ pub enum PluginState {
     Installed,
     /// Already installed (user scope, or project/local scope here).
     Present,
+    /// Updated by this run (project scope): from, to.
+    Updated { from: String, to: String },
+    /// Installed here, but its marketplace is registered at another ref
+    /// than the project declares; Claude Code switches it when a session
+    /// starts, then the next run can update the plugin.
+    Pending {
+        registered: String,
+        declared: String,
+    },
     /// Install failed; the reason is shown, the launch goes on.
     Failed(String),
 }
@@ -249,6 +266,10 @@ pub fn parse_installed(value: &serde_json::Value) -> Option<Vec<InstalledPlugin>
                         .get("projectPath")
                         .and_then(|v| v.as_str())
                         .map(str::to_string),
+                    version: item
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
                 })
             })
             .collect(),
@@ -296,20 +317,178 @@ pub fn list_installed(cli: &dyn ClaudeCli) -> Option<Vec<InstalledPlugin>> {
     parse_installed(&serde_json::from_str(out.stdout.trim()).ok()?)
 }
 
-/// Registered marketplace names (`claude plugin marketplace list --json`).
-fn list_marketplaces(cli: &dyn ClaudeCli) -> Option<BTreeSet<String>> {
+/// An entry of `claude plugin marketplace list --json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegisteredMarketplace {
+    name: String,
+    git_ref: Option<String>,
+    install_location: Option<PathBuf>,
+}
+
+/// Registered marketplaces (`claude plugin marketplace list --json`).
+fn list_marketplace_entries(cli: &dyn ClaudeCli) -> Option<Vec<RegisteredMarketplace>> {
     let out = cli.run(&["plugin", "marketplace", "list", "--json"]).ok()?;
     if !out.success {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(out.stdout.trim()).ok()?;
+    let text = |m: &serde_json::Value, key: &str| {
+        m.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
     Some(
         value
             .as_array()?
             .iter()
-            .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .filter_map(|m| {
+                Some(RegisteredMarketplace {
+                    name: text(m, "name")?,
+                    git_ref: text(m, "ref"),
+                    install_location: text(m, "installLocation").map(PathBuf::from),
+                })
+            })
             .collect(),
     )
+}
+
+/// Registered marketplace names.
+fn list_marketplaces(cli: &dyn ClaudeCli) -> Option<BTreeSet<String>> {
+    list_marketplace_entries(cli).map(|m| m.into_iter().map(|m| m.name).collect())
+}
+
+/// The ref a project declares for a marketplace in `extraKnownMarketplaces`.
+fn declared_ref<'a>(
+    declared: &'a serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Option<&'a str> {
+    declared
+        .get(name)?
+        .get("source")?
+        .get("ref")?
+        .as_str()
+        .filter(|r| !r.is_empty())
+}
+
+/// The version a marketplace checkout offers for `plugin`: the catalog
+/// entry's `version`, else the plugin's own `.claude-plugin/plugin.json`
+/// (relative sources inside the checkout only).
+fn catalog_version(location: &Path, plugin: &str) -> Option<String> {
+    let read = |path: PathBuf| -> Option<serde_json::Value> {
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    };
+    let catalog = read(location.join(".claude-plugin").join("marketplace.json"))?;
+    let entry = catalog
+        .get("plugins")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(plugin))?;
+    if let Some(v) = entry.get("version").and_then(|v| v.as_str()) {
+        return Some(v.to_string());
+    }
+    let source = Path::new(entry.get("source")?.as_str()?);
+    let inside = source.components().all(|c| {
+        matches!(
+            c,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if !inside {
+        return None;
+    }
+    read(
+        location
+            .join(source)
+            .join(".claude-plugin")
+            .join("plugin.json"),
+    )?
+    .get("version")?
+    .as_str()
+    .map(str::to_string)
+}
+
+/// Whether `candidate` is a newer plain `x.y.z` version than `current`;
+/// `None` when either is not one.
+fn is_newer(candidate: &str, current: &str) -> Option<bool> {
+    let parse = |v: &str| {
+        v.trim_start_matches('v')
+            .split('.')
+            .map(|p| p.parse::<u64>().ok())
+            .collect::<Option<Vec<_>>>()
+    };
+    Some(parse(candidate)? > parse(current)?)
+}
+
+/// The install of `id` at project scope for `workspace`, the only one a
+/// run may update.
+fn project_install<'a>(
+    installed: &'a [InstalledPlugin],
+    id: &str,
+    workspace: &Path,
+) -> Option<&'a InstalledPlugin> {
+    installed.iter().find(|p| {
+        p.id == id
+            && p.scope.as_deref() == Some("project")
+            && p.project_path
+                .as_deref()
+                .is_some_and(|pp| same_dir(Path::new(pp), workspace))
+    })
+}
+
+/// Update a present plugin when its marketplace checkout offers a newer
+/// version; see the module docs.
+fn refresh(
+    cli: &dyn ClaudeCli,
+    plugin: &InstalledPlugin,
+    registered: &[RegisteredMarketplace],
+    declared: &serde_json::Map<String, serde_json::Value>,
+) -> PluginState {
+    let Some(market) =
+        marketplace_of(&plugin.id).and_then(|name| registered.iter().find(|m| m.name == name))
+    else {
+        return PluginState::Present;
+    };
+    if let (Some(want), Some(have)) = (
+        declared_ref(declared, &market.name),
+        market.git_ref.as_deref(),
+    ) {
+        if want != have {
+            return PluginState::Pending {
+                registered: have.to_string(),
+                declared: want.to_string(),
+            };
+        }
+    }
+    let name = plugin.id.split('@').next().unwrap_or(&plugin.id);
+    let (Some(from), Some(to)) = (
+        plugin.version.clone(),
+        market
+            .install_location
+            .as_deref()
+            .and_then(|l| catalog_version(l, name)),
+    ) else {
+        return PluginState::Present;
+    };
+    if is_newer(&to, &from) != Some(true) {
+        return PluginState::Present;
+    }
+    match cli.run(&[
+        "plugin", "update", &plugin.id, "--scope", "project", "--json",
+    ]) {
+        Ok(out) if out.success && outcome_ok(&out) => PluginState::Updated { from, to },
+        Ok(out) => PluginState::Failed(failure_reason(&out)),
+        Err(e) => PluginState::Failed(e),
+    }
+}
+
+/// A `--json` result without an `outcome`, or with `outcome: ok`.
+fn outcome_ok(out: &CliOutput) -> bool {
+    json_result(&out.stdout)
+        .as_ref()
+        .and_then(|v| v.get("outcome"))
+        .and_then(|o| o.as_str())
+        .is_none_or(|o| o == "ok")
 }
 
 /// The last JSON object line of a `--json` run (Claude Code prints one
@@ -456,11 +635,28 @@ pub fn sync(
         }
     }
 
+    // Updates only for project-scope installs here; ask for the
+    // registrations only when there is one.
+    let to_refresh: BTreeMap<&String, &InstalledPlugin> = managed
+        .iter()
+        .filter(|id| !missing.contains(id))
+        .filter_map(|id| project_install(&installed, id, workspace).map(|p| (id, p)))
+        .collect();
+    let registered = if to_refresh.is_empty() {
+        Vec::new()
+    } else {
+        list_marketplace_entries(cli).unwrap_or_default()
+    };
+
     for id in &managed {
         if !missing.contains(&id) {
+            let state = match to_refresh.get(id) {
+                Some(p) => refresh(cli, p, &registered, &declared),
+                None => PluginState::Present,
+            };
             report.plugins.push(PluginOutcome {
                 id: id.clone(),
-                state: PluginState::Present,
+                state,
             });
             continue;
         }
@@ -474,12 +670,7 @@ pub fn sync(
         let state = match cli.run(&["plugin", "install", id, "--scope", "project", "--json"]) {
             Ok(out) => {
                 let result = json_result(&out.stdout);
-                let ok = out.success
-                    && result
-                        .as_ref()
-                        .and_then(|v| v.get("outcome"))
-                        .and_then(|o| o.as_str())
-                        .is_none_or(|o| o == "ok");
+                let ok = out.success && outcome_ok(&out);
                 let already = result
                     .as_ref()
                     .and_then(|v| v.get("message"))
@@ -594,6 +785,28 @@ pub fn print_report(report: &SyncReport) {
                 style("project scope").dim()
             ),
             PluginState::Present => println!("  {} {}", style(label("PRESENT")).dim(), p.id),
+            PluginState::Updated { from, to } => println!(
+                "  {} {}   {}",
+                style(label("UPDATED")).green(),
+                p.id,
+                style(format!(
+                    "{from} -> {to} (project scope; sessions started from now on use it)"
+                ))
+                .dim()
+            ),
+            PluginState::Pending {
+                registered,
+                declared,
+            } => println!(
+                "  {} {}   {}",
+                style(label("PENDING")).cyan(),
+                p.id,
+                style(format!(
+                    "marketplace registered at {registered}, the project declares {declared}; \
+                     Claude Code switches it when a session starts, the next nexus run updates the plugin"
+                ))
+                .dim()
+            ),
             PluginState::Failed(reason) => println!(
                 "  {} {}   {}",
                 style(label("FAILED")).yellow(),
@@ -744,21 +957,25 @@ mod tests {
                 id: "user@m".into(),
                 scope: Some("user".into()),
                 project_path: None,
+                version: None,
             },
             InstalledPlugin {
                 id: "here@m".into(),
                 scope: Some("project".into()),
                 project_path: Some(here.display().to_string()),
+                version: None,
             },
             InstalledPlugin {
                 id: "elsewhere@m".into(),
                 scope: Some("project".into()),
                 project_path: Some("/definitely/not/this/workspace".into()),
+                version: None,
             },
             InstalledPlugin {
                 id: "legacy".into(),
                 scope: None,
                 project_path: None,
+                version: None,
             },
         ];
         assert!(is_present(&installed, "user@m", &here));
@@ -864,6 +1081,163 @@ mod tests {
         assert!(report.marketplaces.is_empty());
         assert!(provenance.is_empty());
         assert_eq!(cli.calls(), vec!["plugin list --json"]);
+    }
+
+    /// A marketplace checkout offering `nexus-core` at `version` (from the
+    /// plugin manifest; the catalog entry has none).
+    fn checkout(name: &str, version: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nexus-plugin-checkout-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let manifest = dir.join("plugins/nexus-core/.claude-plugin");
+        std::fs::create_dir_all(&manifest).unwrap();
+        std::fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            dir.join(".claude-plugin/marketplace.json"),
+            r#"{"plugins":[{"name":"nexus-core","source":"./plugins/nexus-core"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            manifest.join("plugin.json"),
+            format!(r#"{{"name":"nexus-core","version":"{version}"}}"#),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn installed_here(version: &str) -> String {
+        serde_json::json!([{
+            "id": "nexus-core@gatewarden-nexus", "version": version,
+            "scope": "project", "projectPath": ws().display().to_string()
+        }])
+        .to_string()
+    }
+
+    fn registered(git_ref: &str, location: &Path) -> String {
+        serde_json::json!([{
+            "name": "gatewarden-nexus", "source": "github",
+            "repo": "gwnexus/nexus-runtime-plugins", "ref": git_ref,
+            "installLocation": location.display().to_string()
+        }])
+        .to_string()
+    }
+
+    #[test]
+    fn test_sync_updates_an_older_project_install() {
+        let dir = checkout("newer", "1.1.2");
+        let cli = FakeClaude::new(vec![
+            ("plugin list --json", ok(&installed_here("1.1.1"))),
+            (
+                "plugin marketplace list --json",
+                ok(&registered("nexus-core--v1.1.1", &dir)),
+            ),
+            (
+                "plugin update nexus-core@gatewarden-nexus --scope project --json",
+                ok(r#"{"command":"update","outcome":"ok"}"#),
+            ),
+        ]);
+        let s = spec(
+            serde_json::json!({"nexus-core@gatewarden-nexus": true}),
+            Some(gatewarden()),
+        );
+        let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
+        assert_eq!(
+            report.plugins[0].state,
+            PluginState::Updated {
+                from: "1.1.1".into(),
+                to: "1.1.2".into()
+            }
+        );
+        assert!(cli.calls().iter().all(|c| !c.contains("-y")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_sync_leaves_a_current_install_alone() {
+        let dir = checkout("same", "1.1.1");
+        let cli = FakeClaude::new(vec![
+            ("plugin list --json", ok(&installed_here("1.1.1"))),
+            (
+                "plugin marketplace list --json",
+                ok(&registered("nexus-core--v1.1.1", &dir)),
+            ),
+        ]);
+        let s = spec(
+            serde_json::json!({"nexus-core@gatewarden-nexus": true}),
+            Some(gatewarden()),
+        );
+        let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
+        assert_eq!(report.plugins[0].state, PluginState::Present);
+        assert!(!cli.calls().iter().any(|c| c.starts_with("plugin update")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_sync_waits_for_the_marketplace_ref() {
+        let dir = checkout("pending", "1.0.0");
+        let cli = FakeClaude::new(vec![
+            ("plugin list --json", ok(&installed_here("1.0.0"))),
+            (
+                "plugin marketplace list --json",
+                ok(&registered("nexus-core--v1.0.0", &dir)),
+            ),
+        ]);
+        let s = spec(
+            serde_json::json!({"nexus-core@gatewarden-nexus": true}),
+            Some(gatewarden()),
+        );
+        let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
+        assert_eq!(
+            report.plugins[0].state,
+            PluginState::Pending {
+                registered: "nexus-core--v1.0.0".into(),
+                declared: "nexus-core--v1.1.1".into()
+            }
+        );
+        // The shared registration is never re-pointed by the sync.
+        assert!(cli
+            .calls()
+            .iter()
+            .all(|c| !c.starts_with("plugin update") && !c.contains("marketplace add")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_sync_never_updates_user_or_other_project_installs() {
+        let cli = FakeClaude::new(vec![(
+            "plugin list --json",
+            ok(r#"[{"id":"nexus-core@gatewarden-nexus","version":"0.1.0","scope":"user"}]"#),
+        )]);
+        let s = spec(
+            serde_json::json!({"nexus-core@gatewarden-nexus": true}),
+            Some(gatewarden()),
+        );
+        let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
+        assert_eq!(report.plugins[0].state, PluginState::Present);
+        assert_eq!(cli.calls(), vec!["plugin list --json"]);
+    }
+
+    #[test]
+    fn test_is_newer_and_catalog_version() {
+        assert_eq!(is_newer("1.5.0", "1.4.1"), Some(true));
+        assert_eq!(is_newer("1.4.1", "1.4.1"), Some(false));
+        assert_eq!(is_newer("1.10.0", "1.9.9"), Some(true));
+        assert_eq!(is_newer("1.5.0-beta", "1.4.1"), None);
+        let dir = checkout("catalog", "2.0.0");
+        assert_eq!(
+            catalog_version(&dir, "nexus-core").as_deref(),
+            Some("2.0.0")
+        );
+        assert_eq!(catalog_version(&dir, "absent"), None);
+        std::fs::write(
+            dir.join(".claude-plugin/marketplace.json"),
+            r#"{"plugins":[{"name":"nexus-core","source":"../outside"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(catalog_version(&dir, "nexus-core"), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

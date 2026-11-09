@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`nexus run` and `nexus pull --force` update managed plugins**: a plugin Nexus manages that is installed at project scope for the workspace is updated when the registered marketplace offers a newer version, before the session starts. When the shared marketplace registration is still at another ref than the project declares, the plugin shows as `PENDING`; Claude Code switches the registration when a session starts, and the next `nexus run` updates the plugin. User- and local-scope plugins and the marketplace registration are never changed.
+
 ## [0.39.5] - 2026-11-09
 
 ### Changed
