@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **`nexus run` and `nexus pull --force` update managed plugins**: a plugin Nexus manages that is installed at project scope for the workspace is updated when the registered marketplace offers a newer version, before the session starts. When the shared marketplace registration is still at another ref than the project declares, the plugin shows as `PENDING`; Claude Code switches the registration when a session starts, and the next `nexus run` updates the plugin. User- and local-scope plugins and the marketplace registration are never changed.
 
+### Security
+- **TLS certificate checks**: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.11 no longer accept the distrusted intermediates of RUSTSEC-2026-0382 and RUSTSEC-2026-0381.
+- **Dispatch notices keep peer text apart**: the title, written by another project, now closes the notice, marked as data and not an instruction, after the action to take; peer name, type and status are cleaned like the title. Readers that match the start of a notice keep working; the title no longer follows the Dispatch id.
+- **Plugin ids and marketplace sources from the project settings are checked** before they reach `claude` as arguments: an id must be a plain `name@marketplace`, and neither may start with `-`. Anything else is reported as failed and skipped.
+- `.gitignore` also ignores `*.pem` and `*.key`.
+
+
 ## [0.39.5] - 2026-11-09
 
 ### Changed

@@ -207,6 +207,20 @@ fn declared_marketplaces(
         .unwrap_or_default()
 }
 
+/// Whether `id` is a plain `name@marketplace` (letters, digits, `.`, `_`,
+/// `-`, neither part starting with `-`): ids come from the project
+/// settings and are passed to `claude` as arguments, where a leading `-`
+/// would read as an option.
+fn valid_plugin_id(id: &str) -> bool {
+    let part = |p: &str| {
+        !p.is_empty()
+            && !p.starts_with('-')
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    id.split_once('@').is_some_and(|(n, m)| part(n) && part(m))
+}
+
 /// The marketplace part of `name@marketplace`.
 fn marketplace_of(id: &str) -> Option<&str> {
     id.split_once('@').map(|(_, m)| m).filter(|m| !m.is_empty())
@@ -221,13 +235,15 @@ pub fn marketplace_source_arg(entry: &serde_json::Value) -> Option<String> {
         Some(r) if !r.is_empty() => format!("{base}#{r}"),
         _ => base.to_string(),
     };
-    match kind {
-        "github" => Some(with_ref(source.get("repo")?.as_str()?)),
-        "git" => Some(with_ref(source.get("url")?.as_str()?)),
-        "url" => Some(source.get("url")?.as_str()?.to_string()),
-        "directory" | "file" => Some(source.get("path")?.as_str()?.to_string()),
-        _ => None,
-    }
+    let arg = match kind {
+        "github" => with_ref(source.get("repo")?.as_str()?),
+        "git" => with_ref(source.get("url")?.as_str()?),
+        "url" => source.get("url")?.as_str()?.to_string(),
+        "directory" | "file" => source.get("path")?.as_str()?.to_string(),
+        _ => return None,
+    };
+    // Passed to `claude` as an argument: never as an option.
+    (!arg.is_empty() && !arg.starts_with('-') && !arg.chars().any(char::is_control)).then_some(arg)
 }
 
 /// Parse `claude plugin list --json` (an array of `{ id, scope,
@@ -577,7 +593,7 @@ pub fn sync(
 
     let missing: Vec<&String> = managed
         .iter()
-        .filter(|id| !is_present(&installed, id, workspace))
+        .filter(|id| valid_plugin_id(id) && !is_present(&installed, id, workspace))
         .collect();
 
     // Marketplaces first: register declared ones, refresh known ones so a
@@ -649,6 +665,13 @@ pub fn sync(
     };
 
     for id in &managed {
+        if !valid_plugin_id(id) {
+            report.plugins.push(PluginOutcome {
+                id: id.clone(),
+                state: PluginState::Failed("not a plain name@marketplace id; skipped".to_string()),
+            });
+            continue;
+        }
         if !missing.contains(&id) {
             let state = match to_refresh.get(id) {
                 Some(p) => refresh(cli, p, &registered, &declared),
@@ -1216,6 +1239,22 @@ mod tests {
         );
         let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
         assert_eq!(report.plugins[0].state, PluginState::Present);
+        assert_eq!(cli.calls(), vec!["plugin list --json"]);
+    }
+
+    #[test]
+    fn test_option_like_ids_and_sources_never_reach_claude() {
+        assert!(valid_plugin_id("nexus-core@gatewarden-nexus"));
+        assert!(!valid_plugin_id("-y@m"));
+        assert!(!valid_plugin_id("a@--accept-command"));
+        assert!(!valid_plugin_id("a b@m"));
+        assert!(!valid_plugin_id("plain"));
+        let flag = serde_json::json!({"source": {"source": "directory", "path": "--yes"}});
+        assert_eq!(marketplace_source_arg(&flag), None);
+        let cli = FakeClaude::new(vec![("plugin list --json", ok("[]"))]);
+        let s = spec(serde_json::json!({"--yes@m": true}), None);
+        let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
+        assert!(matches!(report.plugins[0].state, PluginState::Failed(_)));
         assert_eq!(cli.calls(), vec!["plugin list --json"]);
     }
 
