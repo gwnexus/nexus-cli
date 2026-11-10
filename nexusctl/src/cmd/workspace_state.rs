@@ -60,6 +60,16 @@ pub enum State {
     Adopt,
     /// Files of the runtime this project does not use.
     Stale,
+    /// A workspace file the backend never delivers (a retired script or an
+    /// OS override placeholder); not a pending change.
+    Retired,
+}
+
+impl State {
+    /// A note, not a pending change.
+    pub fn is_note(self) -> bool {
+        matches!(self, State::Stale | State::Retired)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +116,9 @@ impl Entry {
                 format!("nexus push {p} (or nexus reset {p})")
             }
             (FileClass::Content, State::New) => format!("nexus push {p}"),
+            (_, State::Retired) => {
+                format!("Nexus never delivers or accepts this file; remove it with git rm {p}")
+            }
             (FileClass::Content, State::Orphaned) => {
                 "no longer in the workspace; nexus pull removes it".into()
             }
@@ -213,6 +226,35 @@ pub fn is_generated_script(path: &str) -> bool {
     GENERATED_SCRIPTS.contains(&path)
 }
 
+/// Scripts only generators before 0.17.0 shipped; the backend drops them.
+pub const RETIRED_SCRIPTS: &[&str] = &[
+    "scripts/devbox/dbx_tmux_2w.sh",
+    "scripts/devbox/dbx_tmux_3w.sh",
+];
+
+/// Whether the backend never delivers or accepts a workspace file: a retired
+/// script, or `scripts/devbox/init/os_<os>/override.sh` whose lines are all
+/// empty or comments (the placeholder; one command line makes it content).
+pub fn is_retired_script(path: &str, body: &str) -> bool {
+    if RETIRED_SCRIPTS.contains(&path) {
+        return true;
+    }
+    let is_override = path
+        .strip_prefix("scripts/devbox/init/os_")
+        .and_then(|rest| rest.strip_suffix("/override.sh"))
+        .is_some_and(|os| {
+            !os.is_empty()
+                && os
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        });
+    is_override
+        && body.lines().all(|l| {
+            let l = l.trim();
+            l.is_empty() || l.starts_with('#')
+        })
+}
+
 /// Classify one file from its local bytes, the hash recorded when Nexus
 /// last wrote it, and the desired content.
 pub fn classify(
@@ -302,7 +344,7 @@ pub struct WorkspaceState {
 impl WorkspaceState {
     /// Non-clean entries excluding stale-projection warnings.
     pub fn pending(&self) -> impl Iterator<Item = &Entry> {
-        self.entries.iter().filter(|e| e.state != State::Stale)
+        self.entries.iter().filter(|e| !e.state.is_note())
     }
 
     /// Entries whose path equals `path` or lies below it.
@@ -724,9 +766,13 @@ async fn workspace_entries(
                     .is_ok_and(|c| nexus_core::hash::hash_matches_text(r, &c))
         };
         let class = workspace_class(&path);
+        let local = std::fs::read_to_string(workspace.join(&path)).ok();
         let state = match recorded {
             // A generated script the fork does not deliver is not ours.
             None if class == FileClass::Projection => continue,
+            None if is_retired_script(&path, local.as_deref().unwrap_or_default()) => {
+                State::Retired
+            }
             None => State::New,
             Some(r) if exported && unchanged(&r) => State::Orphaned,
             Some(_) if exported => State::Dropped,
@@ -735,7 +781,7 @@ async fn workspace_entries(
             Some(_) => continue,
         };
         entries.push(Entry {
-            local: std::fs::read_to_string(workspace.join(&path)).ok(),
+            local,
             path,
             class,
             state,
@@ -1035,5 +1081,78 @@ mod tests {
         assert_eq!(m, vec![".claude/rules/a.md"]);
         assert_eq!(state.matching(".claude/rules/a.md").count(), 1);
         assert_eq!(state.pending().count(), 2);
+    }
+
+    #[test]
+    fn test_is_retired_script() {
+        let placeholder = "#!/usr/bin/env bash\n# @version 3.0.0\n\n  # local changes\n";
+        assert!(is_retired_script(
+            "scripts/devbox/dbx_tmux_2w.sh",
+            "echo hi\n"
+        ));
+        assert!(is_retired_script("scripts/devbox/dbx_tmux_3w.sh", ""));
+        for os in ["darwin", "linux", "win64", "wsl"] {
+            let path = format!("scripts/devbox/init/os_{os}/override.sh");
+            assert!(is_retired_script(&path, placeholder), "{path}");
+            assert!(!is_retired_script(
+                &path,
+                &format!("{placeholder}export A=1\n")
+            ));
+        }
+        assert!(!is_retired_script(
+            "scripts/devbox/init/os_/override.sh",
+            placeholder
+        ));
+        assert!(!is_retired_script(
+            "scripts/devbox/init/os_Mac/override.sh",
+            placeholder
+        ));
+        assert!(!is_retired_script(
+            "scripts/devbox/init/os_x/y/override.sh",
+            placeholder
+        ));
+        assert!(!is_retired_script("scripts/devbox/own.sh", placeholder));
+        let e = entry(
+            "scripts/devbox/dbx_tmux_2w.sh",
+            FileClass::Content,
+            State::Retired,
+            Kind::Workspace,
+        );
+        assert!(e
+            .next_action()
+            .contains("git rm scripts/devbox/dbx_tmux_2w.sh"));
+    }
+
+    #[tokio::test]
+    async fn test_retired_scripts_are_not_pending() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let write = |path: &str, body: &str| {
+            let p = dir.path().join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write("scripts/devbox/dbx_tmux_2w.sh", "tmux new-session\n");
+        write(
+            "scripts/devbox/init/os_linux/override.sh",
+            "#!/usr/bin/env bash\n# placeholder\n",
+        );
+        write(
+            "scripts/devbox/init/os_darwin/override.sh",
+            "# custom\nexport A=1\n",
+        );
+        // No backend: the local-only view.
+        let client = NexusClient::new("http://127.0.0.1:0", None).unwrap();
+        let entries = workspace_entries(&client, "p", dir.path(), &serde_json::json!({})).await;
+        let states: Vec<(&str, State)> =
+            entries.iter().map(|e| (e.path.as_str(), e.state)).collect();
+        assert_eq!(
+            states,
+            vec![
+                ("scripts/devbox/dbx_tmux_2w.sh", State::Retired),
+                ("scripts/devbox/init/os_darwin/override.sh", State::New),
+                ("scripts/devbox/init/os_linux/override.sh", State::Retired),
+            ]
+        );
+        assert_eq!(entries.iter().filter(|e| !e.state.is_note()).count(), 1);
     }
 }

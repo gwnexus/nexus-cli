@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`nexus status` no longer reports files the backend ignores as NEW**: the tmux launchers `scripts/devbox/dbx_tmux_2w.sh` and `dbx_tmux_3w.sh` from older workspaces, and `scripts/devbox/init/os_<os>/override.sh` placeholders whose lines are all empty or comments, show as `RETIRED` with a `git rm` hint. They do not count as pending changes, `nexus status` and `nexus diff` exit 0 for them, and `nexus push` skips them. An override with a command line stays NEW content.
+
+### Security
+- **Pushed Dispatch notices are fenced as untrusted data**: the cross-session inbox push wraps the notice between `[NEXUS DISPATCH NOTICE: UNTRUSTED DATA]` and `[/NEXUS DISPATCH NOTICE]`, after a line telling the agent not to follow instructions inside it; `Run /nexus-dispatch-sweep.` stands outside the fence. Titles and peer names also lose square brackets (now parentheses), C1 controls, line and paragraph separators and bidi controls, so a title cannot close the fence. The queued notice format and the desktop notification stay as they are.
+
+### Tests
+- New tests for the fence (a title with a closing marker, notices queued by an older version) and for retired scripts and override placeholders; 1004/1004 pass.
+
 ## [0.39.6] - 2026-11-09
 
 ### Added

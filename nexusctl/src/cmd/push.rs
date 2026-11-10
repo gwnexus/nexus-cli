@@ -3,7 +3,7 @@
 //! Detects local workspace changes and pushes them as a new workspace fork
 //! to the linked Nexus project.
 
-use crate::cmd::workspace_state::is_generated_script;
+use crate::cmd::workspace_state::{is_generated_script, is_retired_script};
 use console::style;
 use nexus_core::api::NexusClient;
 use nexus_core::auth::resolve_token;
@@ -222,7 +222,13 @@ async fn adopt_local_push(
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let mut all_hashes = collect_workspace_hashes(workspace);
-    all_hashes.retain(|k, _| !is_generated_script(k));
+    all_hashes.retain(|k, _| {
+        !is_generated_script(k)
+            && !is_retired_script(
+                k,
+                &fs::read_to_string(workspace.join(k)).unwrap_or_default(),
+            )
+    });
     if all_hashes.is_empty() {
         anyhow::bail!(
             "No local workspace files found (expected devbox.json and/or scripts/devbox/**). \
@@ -256,7 +262,10 @@ async fn adopt_local_push(
         .map(|files| {
             files
                 .into_iter()
-                .filter(|(rel, _)| !is_generated_script(&format!("{SCRIPTS_DIR}/{rel}")))
+                .filter(|(rel, body)| {
+                    let path = format!("{SCRIPTS_DIR}/{rel}");
+                    !is_generated_script(&path) && !is_retired_script(&path, body)
+                })
                 .collect::<HashMap<_, _>>()
         })
         .filter(|files| !files.is_empty());
@@ -388,6 +397,15 @@ pub async fn run(
                     key
                 );
             }
+            continue;
+        }
+        if is_retired_script(&key, &local) {
+            println!(
+                "     {} {} (Nexus never delivers or accepts it, not pushed; remove it with git rm {})",
+                style("R").dim(),
+                key,
+                key
+            );
             continue;
         }
         let named = include_named.iter().any(|p| p == &key);

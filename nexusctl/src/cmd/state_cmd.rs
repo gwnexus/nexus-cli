@@ -35,7 +35,7 @@ fn label(text: &str, state: State) -> console::StyledObject<String> {
     let text = format!("{text:<9}");
     match state {
         State::Update | State::Create | State::New | State::Adopt => style(text).green(),
-        State::Stale => style(text).dim(),
+        State::Stale | State::Retired => style(text).dim(),
         _ => style(text).yellow(),
     }
 }
@@ -201,7 +201,7 @@ fn print_entries(state: &WorkspaceState) {
     let pending = state.pending().count();
     if pending == 0 {
         println!(
-            "{} No pending changes (see the stale projection note above).",
+            "{} No pending changes (see the notes above).",
             style("OK").bold().green()
         );
     } else {
@@ -230,7 +230,7 @@ pub async fn diff(api_url: &str, path: Option<&str>) -> anyhow::Result<i32> {
     };
 
     let mut shown = 0;
-    for e in entries.iter().filter(|e| e.state != State::Stale) {
+    for e in entries.iter().filter(|e| !e.state.is_note()) {
         print!("{}", entry_diff(e));
         shown += 1;
     }
@@ -434,7 +434,7 @@ pub async fn reset(
     };
     let selected: Vec<&Entry> = selected
         .into_iter()
-        .filter(|e| !matches!(e.state, State::Stale | State::Adopt))
+        .filter(|e| !matches!(e.state, State::Stale | State::Retired | State::Adopt))
         .collect();
 
     if selected.is_empty() {
@@ -479,6 +479,9 @@ fn reset_entry(state: &WorkspaceState, e: &Entry) -> anyhow::Result<Option<Strin
         )),
         (Kind::Generated, State::Orphaned | State::Dropped) => Ok(Some(
             "skill no longer exported; nexus pull removes it if unchanged, otherwise delete it manually".into(),
+        )),
+        (_, State::Retired) => Ok(Some(
+            "Nexus never delivers or accepts it; remove it with git rm".into(),
         )),
         (Kind::Workspace, State::New) => Ok(Some(
             "not known to the backend; push it with nexus push, or delete it manually".into(),
