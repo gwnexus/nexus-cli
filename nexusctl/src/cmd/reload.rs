@@ -234,19 +234,26 @@ async fn notify_sessions(workspace: &Path, message: &str) -> (usize, usize) {
         return (0, 0);
     };
     let sessions_dir = dir.join("state").join("dispatch").join("sessions");
+    notify_sessions_in(&sessions_dir, &dirs_home(), workspace, message).await
+}
+
+/// [`notify_sessions`] against an explicit sessions directory and home.
+pub(crate) async fn notify_sessions_in(
+    sessions_dir: &Path,
+    home: &Path,
+    workspace: &Path,
+    message: &str,
+) -> (usize, usize) {
     let root = super::shadow_guard::repo_root(workspace).unwrap_or(workspace.to_path_buf());
     let hash = super::dispatch_runner::repo_path_hash(&root);
-    let home = dirs_home();
     let (mut reached, mut skipped) = (0, 0);
-    for s in dispatch_listen::sessions(&sessions_dir) {
+    for s in dispatch_listen::sessions(sessions_dir) {
         let session_root = dispatch_listen::session_root(&s);
         if super::dispatch_runner::repo_path_hash(&session_root) != hash {
             continue;
         }
-        let policy = dispatch_listen::inbound_policy(&dispatch_listen::inbound_sources(
-            &session_root,
-            &home,
-        ));
+        let policy =
+            dispatch_listen::inbound_policy(&dispatch_listen::inbound_sources(&session_root, home));
         if matches!(policy, Inbound::Hold | Inbound::Refuse) {
             skipped += 1;
             continue;
@@ -445,5 +452,70 @@ mod tests {
         assert!(m.contains("/reload-plugins"));
         assert!(m.contains("Project instructions changed: CLAUDE.md. Read these files again now"));
         assert!(!m.contains("devbox.json"));
+    }
+
+    /// A temp dir short enough for a Unix socket path.
+    fn short_temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nxr-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_summary_reaches_only_accepting_sessions_of_this_repo() {
+        let base = short_temp("ns");
+        let (repo, other) = (base.join("repo"), base.join("other"));
+        let sessions = base.join("sessions");
+        for d in [&repo, &other, &sessions] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let listener = tokio::net::UnixListener::bind(base.join("a.sock")).unwrap();
+        let got = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = String::new();
+            s.read_to_string(&mut buf).await.unwrap();
+            buf
+        });
+        let other_sock = tokio::net::UnixListener::bind(base.join("b.sock")).unwrap();
+        let session = |id: &str, cwd: &Path, sock: &str| {
+            std::fs::write(
+                sessions.join(format!("{id}.json")),
+                serde_json::json!({
+                    "session_id": id, "cwd": cwd.display().to_string(),
+                    "socket": base.join(sock).display().to_string(), "token": "tok"
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        session("s-repo", &repo, "a.sock");
+        session("s-other", &other, "b.sock");
+        // A session file whose socket is gone is ignored.
+        session("s-gone", &repo, "gone.sock");
+
+        let home = base.join("home");
+        let (reached, skipped) = notify_sessions_in(&sessions, &home, &repo, "Nexus: hi").await;
+        assert_eq!((reached, skipped), (1, 0));
+        assert_eq!(
+            got.await.unwrap(),
+            dispatch_listen::user_frames("tok", "Nexus: hi")
+        );
+        drop(other_sock);
+
+        // The session holds inbound messages: nothing is pushed.
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::write(
+            repo.join(".claude/settings.local.json"),
+            r#"{"crossSessionInbound":"hold"}"#,
+        )
+        .unwrap();
+        let _again = tokio::net::UnixListener::bind(base.join("c.sock")).unwrap();
+        session("s-repo", &repo, "c.sock");
+        let (reached, skipped) = notify_sessions_in(&sessions, &home, &repo, "Nexus: hi").await;
+        assert_eq!((reached, skipped), (0, 1));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -46,6 +46,7 @@ nexus login              # Authenticate with the Nexus platform
 nexus init               # Initialize a Nexus project workspace
 nexus preflight          # Verify environment readiness
 nexus pull               # Sync skills and agent files from the platform
+nexus reload             # Same, while a session runs; says what it picks up live
 ```
 
 ## Commands
@@ -751,6 +752,16 @@ nexus dispatch runner probe              # can the installed Claude Code take no
 nexus dispatch listen                    # the runner in the foreground (Ctrl-C stops it)
 ```
 
+A production and a staging runner on one machine: register in a workspace
+of each hub (or pass `--api-url`); each workspace's dispatches pane then
+runs its own hub's runner.
+
+```bash
+cd ~/work/app-on-production && nexus dispatch runner register --project <id> --project <id>
+cd ~/work/app-on-staging && nexus dispatch runner register
+nexus dispatch runner status             # lists both, marks the current workspace's hub
+```
+
 - **One runner per hub.** Each hub (API origin) has its own runner, so a production and a staging runner work side by side on one machine. The commands act on the hub of the effective API URL (`--api-url`, `NEXUS_API_URL`, the linked project's `api_url`, else the global one); `runner status` lists every runner and marks the one of the current hub; with `--json` it prints `{"schema": "nexus.dispatch-runners.v1", "claude_code": {...}, "runners": [...]}`.
 - **Register** uses your personal access token once. The hub returns a runner token (`nxs_run_...`) a single time; it is stored in `~/.config/nexus/dispatch-runners/<hub>.json` with mode 0600 and never printed again. `<hub>` is the origin without `https://`, for example `nexus.gatewarden.eu.json`. A binding carries the sha256 of the repository path, never the path itself. A new register replaces the earlier runner of this machine on the same hub only; runners of other hubs are not touched. The single `~/.config/nexus/dispatch-runner.json` of versions before 0.40 is moved to its hub's file on first use, together with the listener's cursor, so nothing has to be registered again.
 - **Listen** runs the runner of the workspace's hub: one listener per hub, each with its own lock. It polls the feed every 30 seconds and sends a heartbeat every 60 seconds with its cursor and delivery counts. It holds an exclusive lock (`~/.config/nexus/state/dispatch/hubs/<hub>/runner.lock`) and writes its state atomically to `runner.json` next to it, without the token. Two workspaces on the same hub share one listener (the second pane only shows it); workspaces on different hubs each run their own. It stays idle while the platform, the project or the runner is switched off on the hub, and it restarts itself when the `nexus` binary is upgraded.
@@ -1223,7 +1234,7 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 > workspace files (devbox.json, scripts/, as a new workspace fork). Generated
 > files are changed through their setting (`nexus env set`) instead.
 
-- Run `nexus pull` periodically (or after skill/agent file changes in the dashboard) to keep your workspace in sync.
+- Run `nexus pull` periodically (or after skill/agent file changes in the dashboard) to keep your workspace in sync. While a Claude Code session runs, `nexus reload` in a second pane does the same and tells the session what changed; leaving the session or the terminal workspace is only needed for `.mcp.json`, devbox and layout changes, and `claude --continue` keeps the conversation across such a restart.
 - Start the agent environment with `nexus run`, then use `/nexus-init` inside OpenCode or Claude Code to bootstrap the agent.
 - Each project uses exactly one runtime (`agent_owner`: OpenCode or Claude Code); `nexus pull` only writes that runtime's files. Run `nexus link` to see which runtime is configured.
 - Switching `agent_owner` is safe at any time: the next `nexus pull` writes the new runtime's projection and then removes what Nexus had put on disk for the old one (OpenCode: `.opencode/` commands, plugins, install artifacts, the Nexus parts of `opencode.json`; Claude Code: CCX files and hooks, rendered skills and agents, the Nexus keys in `.claude/settings.json`, the Nexus servers in `.mcp.json`, the `CLAUDE.md` managed block). Locally modified Nexus files are kept and listed; `nexus pull --force` removes them too (for OpenCode the whole `.opencode/`). Files Nexus never wrote under `.claude/` and `.claude/settings.local.json` are never touched. Switching back recreates everything.

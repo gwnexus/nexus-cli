@@ -173,21 +173,34 @@ pub(crate) fn migrate_legacy(config_dir: &Path) -> anyhow::Result<bool> {
 
 /// Every registered runner on this machine, sorted by hub.
 pub(crate) fn all_runners() -> anyhow::Result<Vec<(HubPaths, RunnerFile)>> {
-    let dir = config::Config::dir()?;
-    let _ = migrate_legacy(&dir);
+    all_runners_in(&config::Config::dir()?)
+}
+
+fn all_runners_in(dir: &Path) -> anyhow::Result<Vec<(HubPaths, RunnerFile)>> {
+    let _ = migrate_legacy(dir);
     let mut out = vec![];
     if let Ok(entries) = fs::read_dir(dir.join(RUNNERS_DIR)) {
         for e in entries.flatten() {
             if e.path().extension().is_some_and(|x| x == "json") {
                 if let Ok(Some(f)) = load_runner_file(&e.path()) {
-                    out.push((hub_paths_in(&dir, &f.api_url), f));
+                    out.push((hub_paths_in(dir, &f.api_url), f));
                 }
             }
         }
     }
+    // The move failed: the earlier file still counts for its hub.
     if out.is_empty() {
-        if let Ok(Some(f)) = load_runner_file(&dir.join(LEGACY_RUNNER_FILE)) {
-            out.push((hub_paths(&f.api_url)?, f));
+        let legacy = dir.join(LEGACY_RUNNER_FILE);
+        if let Ok(Some(f)) = load_runner_file(&legacy) {
+            let paths = hub_paths_in(dir, &f.api_url);
+            out.push((
+                HubPaths {
+                    runner_file: legacy,
+                    hub_dir: paths.state_dir.clone(),
+                    ..paths
+                },
+                f,
+            ));
         }
     }
     out.sort_by(|a, b| a.1.api_url.cmp(&b.1.api_url));
@@ -846,6 +859,27 @@ mod tests {
         let kept = load_runner_file(&paths.runner_file).unwrap().unwrap();
         assert_eq!(kept.runner_id, "r-new");
         assert!(!c.join(LEGACY_RUNNER_FILE).exists());
+    }
+
+    #[test]
+    fn test_all_runners_lists_every_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = dir.path();
+        assert!(all_runners_in(c).unwrap().is_empty());
+        // The single file of an earlier version is migrated and listed.
+        write_private(&c.join(LEGACY_RUNNER_FILE), &runner(STAGING, "r-staging")).unwrap();
+        write_private(&hub_paths_in(c, PROD).runner_file, &runner(PROD, "r-prod")).unwrap();
+        // Not a runner file: ignored.
+        fs::write(c.join(RUNNERS_DIR).join("notes.txt"), "x").unwrap();
+        let ids: Vec<String> = all_runners_in(c)
+            .unwrap()
+            .into_iter()
+            .map(|(paths, f)| {
+                assert_eq!(paths.runner_file, hub_paths_in(c, &f.api_url).runner_file);
+                f.runner_id
+            })
+            .collect();
+        assert_eq!(ids, vec!["r-prod", "r-staging"]);
     }
 
     #[test]

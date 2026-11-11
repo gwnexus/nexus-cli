@@ -1465,6 +1465,18 @@ mod tests {
     }
 
     #[test]
+    fn test_user_frames_send_the_content_as_is() {
+        let frames = user_frames("tok", "Nexus: reload\n- plugins");
+        let user: serde_json::Value = serde_json::from_str(frames.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(user["message"]["content"], "Nexus: reload\n- plugins");
+        // Dispatch notices are fenced on top of the same frames.
+        assert_eq!(
+            inbox_frames("tok", "x"),
+            user_frames("tok", &inbox_message("x"))
+        );
+    }
+
+    #[test]
     fn test_a_title_cannot_close_the_fence() {
         let d: DispatchGetResponse = serde_json::from_value(serde_json::json!({
             "dispatch": {"id": "x", "source_project_id": Q, "target_project_id": P,
