@@ -5,12 +5,15 @@
 //! running Claude Code session picks up by itself and what needs an action:
 //!
 //! - skills, subagents, `.claude/settings*.json`: picked up live;
+//! - hook scripts (`.claude/hooks/`): used from the next hook call;
 //! - plugins: `/reload-plugins` in the session;
 //! - `CLAUDE.md`, `AGENTS.md`, rules, directives: read at session start, so
 //!   the session re-reads them (or `/compact`, or a restart with
 //!   `claude --continue`);
 //! - `.mcp.json`: a restart with `claude --continue`;
-//! - devbox workspace and terminal layout: the next `nexus run`.
+//! - devbox workspace and terminal layout: the next `nexus run`;
+//! - agent files of other tools (`.cursorrules`, Copilot instructions):
+//!   read by those tools on their next start.
 //!
 //! Running Claude Code sessions of this repository get the same summary
 //! through their cross-session inbox, unless they hold or refuse inbound
@@ -31,11 +34,13 @@ pub(crate) enum Area {
     Skills,
     Agents,
     Settings,
+    Hooks,
     Plugins,
     Memory,
     Mcp,
     Workspace,
     Layout,
+    OtherAgents,
 }
 
 impl Area {
@@ -44,18 +49,29 @@ impl Area {
             Area::Skills => "skills and commands",
             Area::Agents => "subagents",
             Area::Settings => "Claude Code settings",
+            Area::Hooks => "hooks",
             Area::Plugins => "plugins",
             Area::Memory => "CLAUDE.md, agent files and rules",
             Area::Mcp => "MCP servers (.mcp.json)",
             Area::Workspace => "devbox workspace",
             Area::Layout => "terminal layout",
+            Area::OtherAgents => "agent files of other tools",
         }
+    }
+
+    /// Whether the running session takes the change without an action.
+    fn is_live(self) -> bool {
+        matches!(
+            self,
+            Area::Skills | Area::Agents | Area::Settings | Area::Hooks
+        )
     }
 
     /// What the operator does for the running session.
     fn action(self) -> &'static str {
         match self {
             Area::Skills | Area::Agents | Area::Settings => "active now",
+            Area::Hooks => "active from the next hook call",
             Area::Plugins => "run /reload-plugins in the Claude Code session",
             Area::Memory => {
                 "read at session start: the session re-reads them, or run /compact, or restart with claude --continue"
@@ -63,6 +79,7 @@ impl Area {
             Area::Mcp => "restart the session: Ctrl-C, then claude --continue",
             Area::Workspace => "takes effect with the next devbox shell (nexus run)",
             Area::Layout => "takes effect with the next nexus run",
+            Area::OtherAgents => "read by those tools (Cursor, Copilot) on their next start",
         }
     }
 }
@@ -82,6 +99,9 @@ pub(crate) fn area_of(path: &str, agentic_root: &str) -> Option<Area> {
     {
         return Some(Area::Settings);
     }
+    if in_dir(".claude/hooks") {
+        return Some(Area::Hooks);
+    }
     if path == "CLAUDE.md"
         || path == "AGENTS.md"
         || in_dir(".claude/rules")
@@ -99,6 +119,9 @@ pub(crate) fn area_of(path: &str, agentic_root: &str) -> Option<Area> {
     if path.starts_with(&format!("{agentic_root}/claude/")) && path.ends_with(".kdl") {
         return Some(Area::Layout);
     }
+    if path == ".cursorrules" || path == ".github/copilot-instructions.md" {
+        return Some(Area::OtherAgents);
+    }
     None
 }
 
@@ -115,6 +138,8 @@ pub(crate) fn snapshot(workspace: &Path, agentic_root: &str) -> BTreeMap<String,
         ".mcp.json",
         "opencode.json",
         "devbox.json",
+        ".cursorrules",
+        ".github/copilot-instructions.md",
     ];
     for root in roots {
         collect(workspace, &workspace.join(root), agentic_root, &mut out);
@@ -164,6 +189,28 @@ pub(crate) fn changed_areas(
     out
 }
 
+/// How the paths of an area changed: the count, split into added, changed
+/// and removed when more than one kind occurs.
+pub(crate) fn change_counts(
+    items: &[String],
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> String {
+    let added = items.iter().filter(|p| !before.contains_key(*p)).count();
+    let removed = items.iter().filter(|p| !after.contains_key(*p)).count();
+    let changed = items.len() - added - removed;
+    let parts: Vec<String> = [(added, "added"), (changed, "changed"), (removed, "removed")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, kind)| format!("{n} {kind}"))
+        .collect();
+    match parts.as_slice() {
+        [] => items.len().to_string(),
+        [one] => one.clone(),
+        _ => format!("{}: {}", items.len(), parts.join(", ")),
+    }
+}
+
 /// Plugin versions this workspace sees: user scope and this project.
 fn plugin_versions(workspace: &Path) -> BTreeMap<String, String> {
     let cli = SystemClaude {
@@ -211,7 +258,8 @@ pub(crate) fn session_message(areas: &BTreeMap<Area, Vec<String>>) -> Option<Str
             ),
             Area::Mcp => "- MCP server configuration changed. It applies after a restart; ask the operator to restart with claude --continue when convenient.".into(),
             Area::Skills | Area::Agents | Area::Settings => format!("- {} changed and are active now.", area.label()),
-            Area::Workspace | Area::Layout => continue,
+            Area::Hooks => "- Hook scripts changed; they apply from the next hook call.".into(),
+            Area::Workspace | Area::Layout | Area::OtherAgents => continue,
         };
         lines.push(line);
     }
@@ -310,7 +358,8 @@ pub async fn run(api_url: &str, opts: ReloadOptions<'_>) -> anyhow::Result<()> {
         claude_plugins::sync_workspace(&workspace, &agentic_root, spec.as_ref());
     }
 
-    let mut areas = changed_areas(&before, &snapshot(&workspace, &agentic_root), &agentic_root);
+    let after = snapshot(&workspace, &agentic_root);
+    let mut areas = changed_areas(&before, &after, &agentic_root);
     let plugins = plugin_changes(&plugins_before, &plugin_versions(&workspace));
     if !plugins.is_empty() {
         areas.insert(Area::Plugins, plugins);
@@ -326,16 +375,16 @@ pub async fn run(api_url: &str, opts: ReloadOptions<'_>) -> anyhow::Result<()> {
         return Ok(());
     }
     for (area, items) in &areas {
-        let marker = match area {
-            Area::Skills | Area::Agents | Area::Settings => style("live").green().bold(),
-            _ => style("todo").yellow().bold(),
+        let marker = if area.is_live() {
+            style("live").green().bold()
+        } else {
+            style("todo").yellow().bold()
         };
-        println!(
-            "  {marker} {} ({}): {}",
-            area.label(),
-            items.len(),
-            area.action()
-        );
+        let counts = match area {
+            Area::Plugins => items.len().to_string(),
+            _ => change_counts(items, &before, &after),
+        };
+        println!("  {marker} {} ({counts}): {}", area.label(), area.action());
     }
 
     if !opts.notify {
@@ -343,10 +392,16 @@ pub async fn run(api_url: &str, opts: ReloadOptions<'_>) -> anyhow::Result<()> {
     }
     if let Some(message) = session_message(&areas) {
         match notify_sessions(&workspace, &message).await {
-            (0, 0) => println!(
-                "  {} no running Claude Code session of this repository took the summary",
-                style("-").dim()
-            ),
+            (0, 0) => {
+                println!(
+                    "  {} no running Claude Code session of this repository is registered for the summary",
+                    style("-").dim()
+                );
+                println!(
+                    "    {}",
+                    style("sessions register at start (nexus-dispatch-inbox hook); for one started before the hook, run: claude --continue").dim()
+                );
+            }
             (reached, skipped) => println!(
                 "  {} summary sent to {reached} running session(s){}",
                 style(">>").cyan().bold(),
@@ -390,6 +445,16 @@ mod tests {
             area_of(".nexus/claude/nexus-claude.kdl", r),
             Some(Area::Layout)
         );
+        assert_eq!(
+            area_of(".claude/hooks/nexus-dispatch-inbox.mjs", r),
+            Some(Area::Hooks)
+        );
+        assert_eq!(area_of(".cursorrules", r), Some(Area::OtherAgents));
+        assert_eq!(
+            area_of(".github/copilot-instructions.md", r),
+            Some(Area::OtherAgents)
+        );
+        assert_eq!(area_of(".github/workflows/ci.yml", r), None);
         assert_eq!(area_of(".nexus/config.toml", r), None);
         assert_eq!(area_of(".nexus/credentials.toml", r), None);
         assert_eq!(area_of("src/main.rs", r), None);
@@ -425,6 +490,28 @@ mod tests {
     }
 
     #[test]
+    fn test_change_counts() {
+        let map = |keys: &[&str]| -> BTreeMap<String, String> {
+            keys.iter()
+                .map(|k| (k.to_string(), "h".to_string()))
+                .collect()
+        };
+        let items = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let before = map(&["a", "b", "c"]);
+        let mut after = map(&["a", "d"]);
+        after.insert("a".into(), "h2".into());
+        assert_eq!(
+            change_counts(&items(&["a", "b", "c", "d"]), &before, &after),
+            "4: 1 added, 1 changed, 2 removed"
+        );
+        assert_eq!(change_counts(&items(&["a"]), &before, &after), "1 changed");
+        assert_eq!(
+            change_counts(&items(&["b", "c"]), &before, &after),
+            "2 removed"
+        );
+    }
+
+    #[test]
     fn test_plugin_changes() {
         let before: BTreeMap<String, String> =
             [("core@nexus".to_string(), "1.5.1".to_string())].into();
@@ -444,14 +531,18 @@ mod tests {
     fn test_session_message() {
         let mut areas = BTreeMap::new();
         areas.insert(Area::Workspace, vec!["devbox.json".to_string()]);
+        areas.insert(Area::OtherAgents, vec![".cursorrules".to_string()]);
         assert_eq!(session_message(&areas), None);
+        areas.insert(Area::Hooks, vec![".claude/hooks/a.mjs".to_string()]);
         areas.insert(Area::Plugins, vec!["core@nexus 1.5.1 -> 1.5.2".to_string()]);
         areas.insert(Area::Memory, vec!["CLAUDE.md".to_string()]);
         let m = session_message(&areas).unwrap();
         assert!(m.starts_with("Nexus: the operator ran `nexus reload`"));
         assert!(m.contains("/reload-plugins"));
         assert!(m.contains("Project instructions changed: CLAUDE.md. Read these files again now"));
+        assert!(m.contains("Hook scripts changed"));
         assert!(!m.contains("devbox.json"));
+        assert!(!m.contains(".cursorrules"));
     }
 
     /// A temp dir short enough for a Unix socket path.

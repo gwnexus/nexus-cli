@@ -995,11 +995,17 @@ session does with the change:
 | --- | --- |
 | Skills, commands, subagents | active now |
 | `.claude/settings.json`, statusline | active now (Claude Code watches the files) |
+| Hook scripts (`.claude/hooks/`) | active from the next hook call (registration lives in `settings.json`) |
 | Plugins (installed or updated) | `/reload-plugins` in the session |
 | `CLAUDE.md`, `AGENTS.md`, rules, directives | read at session start: the session re-reads them, or `/compact`, or a restart |
 | `.mcp.json` | restart: Ctrl-C, then `claude --continue` (the conversation stays) |
 | `devbox.json`, `scripts/devbox/**` | next devbox shell (`nexus run`) |
 | Terminal layout | next `nexus run` |
+| `.cursorrules`, `.github/copilot-instructions.md` | read by those tools on their next start |
+
+Each line counts the files of its area and splits the count into added,
+changed and removed when more than one kind occurs, e.g.
+`devbox workspace (9: 5 changed, 4 removed)`.
 
 Running Claude Code sessions of this repository get the same summary
 through their cross-session inbox (the channel the Dispatch notices use),
@@ -1008,6 +1014,11 @@ steps left to you. Sessions whose `crossSessionInbound` is `hold` or
 `refuse` get nothing; `--no-notify` sends nothing. The message holds area
 names, file paths and plugin ids, never file contents. Credentials and the
 project config are not watched.
+
+A session registers for this summary when it starts, through the
+`nexus-dispatch-inbox` hook. A session started before that hook arrived is
+not registered; reload says so, and a restart with `claude --continue`
+registers it without losing the conversation.
 
 ```bash
 nexus reload                 # pull, update plugins, report, tell running sessions
