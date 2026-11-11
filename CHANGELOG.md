@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.2] - 2026-11-11
+
 ### Changed
+- **`nexus reload` reports hooks and other agent files.** Hook scripts under `.claude/hooks/` show as their own live area (used from the next hook call); `.cursorrules` and `.github/copilot-instructions.md` show as agent files of other tools. Running sessions get a note that hooks changed; the files of other tools stay out of that summary.
+- **`nexus reload` splits its counts.** An area with more than one kind of change reads e.g. `devbox workspace (9: 5 changed, 4 removed)` instead of a bare total.
+- **`nexus reload` explains a missing session.** When no Claude Code session of the repository is registered, it says that sessions register at start through the `nexus-dispatch-inbox` hook and that `claude --continue` registers one started before the hook.
 - **Runner hints name the command as one.** When the runner cannot listen (no runner registered for the hub, runner file unreadable, project not bound, runner serving other projects), the `dispatches` pane and the `nexus run` preflight now end the line with `run: nexus dispatch runner register` instead of the command in parentheses.
 
 ## [0.40.1] - 2026-11-11
