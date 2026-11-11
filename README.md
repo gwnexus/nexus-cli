@@ -189,8 +189,11 @@ One command per activity; each classifies every file itself:
   RETIRED with a `git rm` hint: the tmux launchers `scripts/devbox/dbx_tmux_2w.sh`
   and `dbx_tmux_3w.sh` that older workspaces shipped, and an
   `scripts/devbox/init/os_<os>/override.sh` whose lines are all empty or
-  comments. They are not pending changes, and `nexus push` skips them. An
-  override with at least one command line is NEW content as usual.
+  comments, as long as the workspace fork does not carry them. They are not
+  pending changes, and `nexus push` skips them. An override with at least
+  one command line is NEW content as usual. An override the fork carries
+  and that you reverted to the template is MODIFIED: `nexus push` sends it,
+  and the new fork no longer carries it.
 - `devbox.json` and scripts that differ only in trailing newlines (or, for
   JSON, in key order) count as unchanged (the backend sends some without a final newline, end-of-file
   fixers commit them with one); pull writes them with exactly one.
@@ -209,7 +212,9 @@ nexus env set                             # or pick the setting and value intera
 instead. Devbox changes become a new workspace fork; push compares the local
 files with the same fork export `nexus status` uses, so a freshly pulled
 workspace has nothing to push. New local scripts are pushed when named
-(`nexus push scripts/devbox/<file>`):
+(`nexus push scripts/devbox/<file>`). A fork script you deleted locally
+(`DELETED`) is pushed as a removal (`D`): the new fork is built from the
+pushed files, so it no longer carries the script:
 
 ```bash
 nexus push --name "v3.1 ansible"    # push with custom fork name

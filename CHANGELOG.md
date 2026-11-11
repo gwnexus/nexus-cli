@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`nexus push` agrees with `nexus status` on OS overrides**: an `init/os_<os>/override.sh` that the workspace fork carries and that was reverted to the template is pushed as a change (the new fork no longer carries it) instead of being reported as retired with a `git rm` hint. The retired rule now only applies to files the fork does not carry, in `nexus status` and `nexus push` alike.
+- **Deleted fork scripts can be pushed**: a script the fork carries and that was deleted locally (`DELETED` in `nexus status`) is pushed as a removal (`D`), also when it was the last script; `nexus status` names `nexus push` next to `nexus reset` for it. Before, push reported "Nothing to push" and every pull recreated the file.
+
+### Tests
+- New tests for reverted fork overrides and deleted fork scripts; 1013/1013 pass.
+
 ## [0.39.8] - 2026-11-11
 
 ### Security

@@ -364,9 +364,10 @@ pub async fn push(
         .map(|e| e.path.clone())
         .collect();
     let workspace_changes = !include_named.is_empty()
-        || selected
-            .iter()
-            .any(|e| e.kind == Kind::Workspace && matches!(e.state, State::Modified | State::New));
+        || selected.iter().any(|e| {
+            e.kind == Kind::Workspace
+                && matches!(e.state, State::Modified | State::New | State::Deleted)
+        });
     for e in selected.iter().filter(|e| e.state == State::Conflict) {
         println!(
             "   {} {} changed locally and in the backend; run nexus diff {}, then edit or nexus reset it",

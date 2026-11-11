@@ -141,6 +141,35 @@ fn is_manifest_tracked(key: &str, manifest: &serde_json::Value) -> bool {
 enum Change {
     Modified,
     Added,
+    Deleted,
+}
+
+/// A file the backend never delivers, and the fork does not carry: not
+/// pushed. A fork override reverted to the template is a change instead,
+/// one that drops it from the fork. Without the fork export a tracked file
+/// is assumed to be in the fork.
+fn skip_as_retired(key: &str, local: &str, in_fork: bool, exported: bool, tracked: bool) -> bool {
+    is_retired_script(key, local) && !in_fork && (exported || !tracked)
+}
+
+fn read_or_empty(workspace: &Path, path: &str) -> String {
+    fs::read_to_string(workspace.join(path)).unwrap_or_default()
+}
+
+/// A script of the fork that an earlier pull wrote and that is gone
+/// locally. Generated scripts and files the backend drops anyway do not
+/// count.
+fn is_deleted_fork_file(
+    key: &str,
+    body: &str,
+    manifest: &serde_json::Value,
+    workspace: &Path,
+) -> bool {
+    key != "devbox.json"
+        && !is_generated_script(key)
+        && !is_retired_script(key, body)
+        && is_manifest_tracked(key, manifest)
+        && !workspace.join(key).exists()
 }
 
 /// Compare one local workspace file with the baseline `nexus status` uses:
@@ -399,7 +428,13 @@ pub async fn run(
             }
             continue;
         }
-        if is_retired_script(&key, &local) {
+        if skip_as_retired(
+            &key,
+            &local,
+            desired.contains_key(&key),
+            exported.is_some(),
+            is_manifest_tracked(&key, &manifest),
+        ) {
             println!(
                 "     {} {} (Nexus never delivers or accepts it, not pushed; remove it with git rm {})",
                 style("R").dim(),
@@ -438,7 +473,17 @@ pub async fn run(
         tracked.insert(key);
     }
 
-    if tracked.is_empty() {
+    // Fork files deleted locally: the new fork is built from the pushed
+    // files only, so leaving them out removes them from it.
+    let mut deleted: Vec<String> = desired
+        .iter()
+        .filter(|(key, body)| is_deleted_fork_file(key, body, &manifest, &workspace))
+        .map(|(key, _)| key.clone())
+        .collect();
+    deleted.sort();
+    changes.extend(deleted.iter().map(|k| (Change::Deleted, k.clone())));
+
+    if tracked.is_empty() && deleted.is_empty() {
         anyhow::bail!(
             "No workspace files are tracked in the sync manifest (only agent files were pulled).\n\
              Run 'nexus pull --scope workspace' to track the workspace files, or\n\
@@ -459,8 +504,20 @@ pub async fn run(
     println!("   {} files to push:", style("Files").bold());
     for (change, path) in &changes {
         match change {
+            Change::Modified if is_retired_script(path, &read_or_empty(&workspace, path)) => {
+                println!(
+                    "     {} {} (back to the template; the new fork no longer carries it)",
+                    style("M").yellow().bold(),
+                    path
+                )
+            }
             Change::Modified => println!("     {} {}", style("M").yellow().bold(), path),
             Change::Added => println!("     {} {}", style("A").green().bold(), path),
+            Change::Deleted => println!(
+                "     {} {} (deleted locally; the new fork no longer carries it)",
+                style("D").red().bold(),
+                path
+            ),
         }
     }
     println!();
@@ -486,7 +543,10 @@ pub async fn run(
                 .filter(|(rel, _)| tracked.contains(&format!("{SCRIPTS_DIR}/{rel}")))
                 .collect::<HashMap<_, _>>()
         })
-        .filter(|files| !files.is_empty());
+        // An empty set still replaces the fork's scripts when files were
+        // deleted; without deletions it would push nothing.
+        .filter(|files| !files.is_empty() || !deleted.is_empty())
+        .or_else(|| (!deleted.is_empty()).then(HashMap::new));
 
     let result = client
         .workspace_push(&project_id, devbox_json, script_files, fork_name)
@@ -576,6 +636,74 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_fork_overrides_reverted_to_the_template_are_pushed() {
+        let path = "scripts/devbox/init/os_darwin/override.sh";
+        let template = "#!/usr/bin/env bash\n# local changes go here\n";
+        // In the fork: a change, not retired.
+        assert!(!skip_as_retired(path, template, true, true, true));
+        // Not in the fork, export known: retired.
+        assert!(skip_as_retired(path, template, false, true, true));
+        assert!(skip_as_retired(path, template, false, true, false));
+        // No export: tracked files are assumed to be in the fork.
+        assert!(!skip_as_retired(path, template, false, false, true));
+        assert!(skip_as_retired(path, template, false, false, false));
+        // A custom override is never retired.
+        assert!(!skip_as_retired(path, "export A=1\n", false, true, false));
+    }
+
+    #[test]
+    fn test_deleted_fork_files() {
+        let dir = TempDir::new().unwrap();
+        let manifest = serde_json::json!({
+            "a": {"target_path": "scripts/devbox/init/rust_toolchain.sh", "hash": "x"},
+            "b": {"target_path": "scripts/devbox/init/kept.sh", "hash": "x"},
+            "c": {"target_path": "scripts/devbox/dbx_init.sh", "hash": "x"},
+            "d": {"target_path": "scripts/devbox/init/os_linux/override.sh", "hash": "x"}
+        });
+        fs::create_dir_all(dir.path().join("scripts/devbox/init")).unwrap();
+        fs::write(dir.path().join("scripts/devbox/init/kept.sh"), "x").unwrap();
+        let ws = dir.path();
+        assert!(is_deleted_fork_file(
+            "scripts/devbox/init/rust_toolchain.sh",
+            "echo\n",
+            &manifest,
+            ws
+        ));
+        assert!(!is_deleted_fork_file(
+            "scripts/devbox/init/kept.sh",
+            "x",
+            &manifest,
+            ws
+        ));
+        // Generated, never pulled, or a placeholder the backend drops anyway.
+        assert!(!is_deleted_fork_file(
+            "scripts/devbox/dbx_init.sh",
+            "x",
+            &manifest,
+            ws
+        ));
+        assert!(!is_deleted_fork_file(
+            "scripts/devbox/init/other.sh",
+            "x",
+            &manifest,
+            ws
+        ));
+        assert!(!is_deleted_fork_file(
+            "scripts/devbox/init/os_linux/override.sh",
+            "# t\n",
+            &manifest,
+            ws
+        ));
+        assert!(is_deleted_fork_file(
+            "scripts/devbox/init/os_linux/override.sh",
+            "export A=1\n",
+            &manifest,
+            ws
+        ));
+        assert!(!is_deleted_fork_file("devbox.json", "{}", &manifest, ws));
+    }
 
     #[test]
     fn test_is_dropped() {

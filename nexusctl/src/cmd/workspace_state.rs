@@ -128,6 +128,9 @@ impl Entry {
             (_, State::Dropped) => {
                 format!("no longer in the workspace, edited locally; delete it, or nexus push {p} to add it back")
             }
+            (FileClass::Content, State::Deleted) if self.kind == Kind::Workspace => {
+                format!("nexus push (removes it from the workspace fork), or nexus reset {p}")
+            }
             (FileClass::Content, State::Deleted) => format!("nexus reset {p}"),
             (_, State::Conflict) => {
                 format!(
@@ -774,6 +777,12 @@ async fn workspace_entries(
                 State::Retired
             }
             None => State::New,
+            // Dropped from the fork and never delivered again.
+            Some(_)
+                if exported && is_retired_script(&path, local.as_deref().unwrap_or_default()) =>
+            {
+                State::Retired
+            }
             Some(r) if exported && unchanged(&r) => State::Orphaned,
             Some(_) if exported => State::Dropped,
             Some(r) if !unchanged(&r) && class == FileClass::Projection => State::Drifted,
