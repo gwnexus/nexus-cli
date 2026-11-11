@@ -246,10 +246,12 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         )
                         .await?
                     }
-                    RunnerAction::Status { json } => dispatch_runner::status(*json).await?,
-                    RunnerAction::Pause => dispatch_runner::control("pause").await?,
-                    RunnerAction::Resume => dispatch_runner::control("resume").await?,
-                    RunnerAction::Revoke => dispatch_runner::control("revoke").await?,
+                    RunnerAction::Status { json } => {
+                        dispatch_runner::status(&api_url, *json).await?
+                    }
+                    RunnerAction::Pause => dispatch_runner::control(&api_url, "pause").await?,
+                    RunnerAction::Resume => dispatch_runner::control(&api_url, "resume").await?,
+                    RunnerAction::Revoke => dispatch_runner::control(&api_url, "revoke").await?,
                     RunnerAction::Probe { json } => dispatch_runner::probe(*json)?,
                 },
                 DispatchAction::Listen {
@@ -257,11 +259,14 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     heartbeat,
                     once,
                 } => {
-                    dispatch_listen::listen(dispatch_listen::ListenOptions {
-                        interval_secs: *interval,
-                        heartbeat_secs: *heartbeat,
-                        once: *once,
-                    })
+                    dispatch_listen::listen(
+                        &api_url,
+                        dispatch_listen::ListenOptions {
+                            interval_secs: *interval,
+                            heartbeat_secs: *heartbeat,
+                            once: *once,
+                        },
+                    )
                     .await?
                 }
             }

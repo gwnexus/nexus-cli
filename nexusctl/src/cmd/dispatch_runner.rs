@@ -1,11 +1,17 @@
-//! `nexus dispatch runner`: this machine's Dispatch runner (notify mode).
+//! `nexus dispatch runner`: this machine's Dispatch runners (notify mode),
+//! one per hub.
 //!
 //! `register` uses the personal access token once: the hub returns a runner
 //! token (`nxs_run_...`) a single time, which is kept in
-//! `~/.config/nexus/dispatch-runner.json` (mode 0600) and never printed. All
-//! later calls (`listen`, `status`, `pause`, `resume`, `revoke`) use that
-//! runner token. A project binding carries the sha256 of the repository
-//! path, never the path itself.
+//! `~/.config/nexus/dispatch-runners/<hub>.json` (mode 0600) and never
+//! printed; `<hub>` is the API origin without the scheme (`https`), so a
+//! production and a staging runner live side by side. All later calls
+//! (`listen`, `status`, `pause`, `resume`, `revoke`) use that runner token.
+//! A project binding carries the sha256 of the repository path, never the
+//! path itself.
+//!
+//! The single `dispatch-runner.json` of earlier versions is moved to its
+//! hub's file on first use, together with the listener state (cursor).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -71,14 +77,121 @@ impl RunnerFile {
     }
 }
 
-/// `~/.config/nexus/dispatch-runner.json`.
-pub(crate) fn runner_file_path() -> anyhow::Result<PathBuf> {
-    Ok(config::Config::dir()?.join("dispatch-runner.json"))
+/// The runner file of earlier versions: one runner per machine.
+const LEGACY_RUNNER_FILE: &str = "dispatch-runner.json";
+const RUNNERS_DIR: &str = "dispatch-runners";
+
+/// A file and directory name for a hub: its origin without `https://`
+/// (`http_` kept for plain HTTP), the port joined with `_`.
+pub(crate) fn hub_slug(api_url: &str) -> String {
+    let origin = config::trust::url_origin(api_url).unwrap_or_else(|| api_url.trim().to_string());
+    let rest = origin
+        .strip_prefix("https://")
+        .map(str::to_string)
+        .unwrap_or_else(|| origin.replacen("://", "_", 1));
+    rest.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
-/// `~/.config/nexus/state/dispatch`: runner state, lock, notices, sessions.
-pub(crate) fn state_dir() -> anyhow::Result<PathBuf> {
-    Ok(config::Config::dir()?.join("state").join("dispatch"))
+/// Whether two API URLs name the same hub.
+pub(crate) fn same_hub(a: &str, b: &str) -> bool {
+    hub_slug(a) == hub_slug(b)
+}
+
+/// Where one hub's runner lives.
+#[derive(Debug, Clone)]
+pub(crate) struct HubPaths {
+    /// `~/.config/nexus/dispatch-runners/<hub>.json`: token and bindings.
+    pub runner_file: PathBuf,
+    /// `~/.config/nexus/state/dispatch`: notices and sessions, shared by all
+    /// hubs (project ids are unique across hubs).
+    pub state_dir: PathBuf,
+    /// `<state_dir>/hubs/<hub>`: this hub's listener state and lock.
+    pub hub_dir: PathBuf,
+}
+
+fn hub_paths_in(config_dir: &Path, api_url: &str) -> HubPaths {
+    let slug = hub_slug(api_url);
+    let state_dir = config_dir.join("state").join("dispatch");
+    HubPaths {
+        runner_file: config_dir.join(RUNNERS_DIR).join(format!("{slug}.json")),
+        hub_dir: state_dir.join("hubs").join(&slug),
+        state_dir,
+    }
+}
+
+/// The paths of the hub `api_url` names, after moving an earlier single
+/// runner into place.
+pub(crate) fn hub_paths(api_url: &str) -> anyhow::Result<HubPaths> {
+    let dir = config::Config::dir()?;
+    let _ = migrate_legacy(&dir);
+    let paths = hub_paths_in(&dir, api_url);
+    // The move failed: keep reading the earlier file for its own hub.
+    if !paths.runner_file.exists() {
+        let legacy = dir.join(LEGACY_RUNNER_FILE);
+        if let Ok(Some(f)) = load_runner_file(&legacy) {
+            if same_hub(&f.api_url, api_url) {
+                return Ok(HubPaths {
+                    runner_file: legacy,
+                    hub_dir: paths.state_dir.clone(),
+                    ..paths
+                });
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// Move `dispatch-runner.json` to its hub's file and the listener state
+/// (`state/dispatch/runner.json`, with the cursor) to the hub's directory,
+/// so nothing has to be registered again. Files already in place win.
+pub(crate) fn migrate_legacy(config_dir: &Path) -> anyhow::Result<bool> {
+    let legacy = config_dir.join(LEGACY_RUNNER_FILE);
+    let Some(file) = load_runner_file(&legacy)? else {
+        return Ok(false);
+    };
+    let paths = hub_paths_in(config_dir, &file.api_url);
+    if !paths.runner_file.exists() {
+        write_private(&paths.runner_file, &fs::read_to_string(&legacy)?)?;
+    }
+    let old_state = paths.state_dir.join("runner.json");
+    let new_state = paths.hub_dir.join("runner.json");
+    if old_state.exists() && !new_state.exists() {
+        fs::create_dir_all(&paths.hub_dir)?;
+        fs::rename(&old_state, &new_state)?;
+    }
+    fs::remove_file(&legacy)?;
+    Ok(true)
+}
+
+/// Every registered runner on this machine, sorted by hub.
+pub(crate) fn all_runners() -> anyhow::Result<Vec<(HubPaths, RunnerFile)>> {
+    let dir = config::Config::dir()?;
+    let _ = migrate_legacy(&dir);
+    let mut out = vec![];
+    if let Ok(entries) = fs::read_dir(dir.join(RUNNERS_DIR)) {
+        for e in entries.flatten() {
+            if e.path().extension().is_some_and(|x| x == "json") {
+                if let Ok(Some(f)) = load_runner_file(&e.path()) {
+                    out.push((hub_paths_in(&dir, &f.api_url), f));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Ok(Some(f)) = load_runner_file(&dir.join(LEGACY_RUNNER_FILE)) {
+            out.push((hub_paths(&f.api_url)?, f));
+        }
+    }
+    out.sort_by(|a, b| a.1.api_url.cmp(&b.1.api_url));
+    Ok(out)
 }
 
 pub(crate) fn load_runner_file(path: &Path) -> anyhow::Result<Option<RunnerFile>> {
@@ -250,12 +363,15 @@ pub async fn register(api_url: &str, opts: RegisterOptions<'_>) -> anyhow::Resul
     let pat = resolve_token().ok_or_else(|| {
         anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
     })?;
-    let path = runner_file_path()?;
-    let previous = load_runner_file(&path).ok().flatten();
+    let paths = hub_paths(api_url)?;
+    let previous = load_runner_file(&paths.runner_file).ok().flatten();
+    // Store under the hub's own file, also when it was read from the
+    // earlier single file.
+    let path = hub_paths_in(&config::Config::dir()?, api_url).runner_file;
     let workspace = std::env::current_dir()?;
 
     let mut projects: Vec<BoundProject> = match (&previous, opts.replace) {
-        (Some(p), false) if p.api_url == api_url => p.projects.clone(),
+        (Some(p), false) if same_hub(&p.api_url, api_url) => p.projects.clone(),
         _ => vec![],
     };
     let mut wanted: Vec<(String, Option<String>)> = opts
@@ -327,6 +443,9 @@ pub async fn register(api_url: &str, opts: RegisterOptions<'_>) -> anyhow::Resul
         runtimes: vec![probe.runtime()],
     };
     save_runner_file(&path, &file)?;
+    if paths.runner_file != path {
+        let _ = fs::remove_file(&paths.runner_file);
+    }
 
     println!(
         "{} runner {} ({}), token {}… stored in {} (0600)",
@@ -341,7 +460,7 @@ pub async fn register(api_url: &str, opts: RegisterOptions<'_>) -> anyhow::Resul
     }
     if !resp.replaced.is_empty() {
         println!(
-            "  replaced {} earlier runner(s) on this machine",
+            "  replaced {} earlier runner(s) of this machine on this hub",
             resp.replaced.len()
         );
     }
@@ -405,11 +524,11 @@ fn print_bindings(file: &RunnerFile, bindings: &[RunnerBinding], platform_enable
     }
 }
 
-fn require_runner() -> anyhow::Result<(PathBuf, RunnerFile)> {
-    let path = runner_file_path()?;
+fn require_runner(api_url: &str) -> anyhow::Result<(PathBuf, RunnerFile)> {
+    let path = hub_paths(api_url)?.runner_file;
     let file = load_runner_file(&path)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "No runner registered on this machine. Run 'nexus dispatch runner register'."
+            "No runner registered for {api_url} on this machine. Run 'nexus dispatch runner register'."
         )
     })?;
     Ok((path, file))
@@ -419,61 +538,101 @@ pub(crate) fn runner_client(file: &RunnerFile) -> anyhow::Result<NexusClient> {
     Ok(NexusClient::new(&file.api_url, Some(file.token.clone()))?)
 }
 
-/// `nexus dispatch runner status`: heartbeat once and show the bindings.
-pub async fn status(json: bool) -> anyhow::Result<()> {
-    let (_, file) = require_runner()?;
-    let client = runner_client(&file)?;
-    let hb = client
-        .runner_heartbeat(serde_json::json!({ "cli_version": env!("CARGO_PKG_VERSION") }))
-        .await?;
+/// `nexus dispatch runner status`: every runner on this machine, one
+/// heartbeat each; the runner of `api_url` (this workspace's hub) first.
+pub async fn status(api_url: &str, json: bool) -> anyhow::Result<()> {
+    let mut runners = all_runners()?;
+    if runners.is_empty() {
+        anyhow::bail!(
+            "No runner registered on this machine. Run 'nexus dispatch runner register'."
+        );
+    }
+    runners.sort_by_key(|(_, f)| !same_hub(&f.api_url, api_url));
     let probe = probe_claude();
+    let mut out = vec![];
+    for (i, (_, file)) in runners.iter().enumerate() {
+        let current = same_hub(&file.api_url, api_url);
+        let hb = match runner_client(file) {
+            Ok(client) => client
+                .runner_heartbeat(serde_json::json!({ "cli_version": env!("CARGO_PKG_VERSION") }))
+                .await
+                .map_err(|e| super::dispatch_status::error_text(&e)),
+            Err(e) => Err(e.to_string()),
+        };
+        if json {
+            let mut v = serde_json::json!({
+                "runner_id": file.runner_id,
+                "name": file.name,
+                "api_url": file.api_url,
+                "current_hub": current,
+                "token_prefix": file.token_prefix,
+                "token_expires_at": file.token_expires_at,
+            });
+            match &hb {
+                Ok(hb) => {
+                    v["paused"] = hb.paused.into();
+                    v["platform_enabled"] = hb.platform_enabled.into();
+                    v["projects"] = serde_json::to_value(&hb.projects)?;
+                }
+                Err(e) => v["error"] = e.clone().into(),
+            }
+            out.push(v);
+            continue;
+        }
+        if i > 0 {
+            println!();
+        }
+        let state = match &hb {
+            Ok(hb) if hb.paused => style("paused").yellow().to_string(),
+            Ok(_) => style("active").green().to_string(),
+            Err(_) => style("unreachable").red().to_string(),
+        };
+        println!(
+            "{} {} ({}), {}{}",
+            style("Dispatch manager").bold(),
+            file.runner_id,
+            file.name,
+            state,
+            if current {
+                ", this workspace's hub"
+            } else {
+                ""
+            }
+        );
+        println!(
+            "  hub {}, token {}…{}",
+            file.api_url,
+            shown_prefix(file.token_prefix.as_deref()),
+            file.token_expires_at
+                .as_deref()
+                .map(|e| format!(", expires {e}"))
+                .unwrap_or_default()
+        );
+        match &hb {
+            Ok(hb) => print_bindings(file, &hb.projects, hb.platform_enabled),
+            Err(e) => println!("  {} {e}", style("!").red().bold()),
+        }
+    }
     if json {
-        let out = serde_json::json!({
-            "schema": "nexus.dispatch-runner.v1",
-            "runner_id": file.runner_id,
-            "name": file.name,
-            "api_url": file.api_url,
-            "token_prefix": file.token_prefix,
-            "token_expires_at": file.token_expires_at,
-            "paused": hb.paused,
-            "platform_enabled": hb.platform_enabled,
+        let doc = serde_json::json!({
+            "schema": "nexus.dispatch-runners.v1",
             "claude_code": {
                 "version": probe.version,
                 "cross_session_inbox": probe.inbox.is_ok(),
             },
-            "projects": hb.projects,
+            "runners": out,
         });
-        println!("{}", serde_json::to_string_pretty(&out)?);
-        return Ok(());
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        println!();
+        print_probe(&probe);
     }
-    println!(
-        "{} {} ({}), {}",
-        style("Dispatch manager").bold(),
-        file.runner_id,
-        file.name,
-        if hb.paused {
-            style("paused").yellow().to_string()
-        } else {
-            style("active").green().to_string()
-        }
-    );
-    println!(
-        "  hub {}, token {}…{}",
-        file.api_url,
-        shown_prefix(file.token_prefix.as_deref()),
-        file.token_expires_at
-            .as_deref()
-            .map(|e| format!(", expires {e}"))
-            .unwrap_or_default()
-    );
-    print_probe(&probe);
-    print_bindings(&file, &hb.projects, hb.platform_enabled);
     Ok(())
 }
 
 /// `nexus dispatch runner pause | resume | revoke`.
-pub async fn control(action: &str) -> anyhow::Result<()> {
-    let (path, file) = require_runner()?;
+pub async fn control(api_url: &str, action: &str) -> anyhow::Result<()> {
+    let (path, file) = require_runner(api_url)?;
     let client = runner_client(&file)?;
     client
         .runner_control(&format!("runner_{action}"), None)
@@ -596,5 +755,110 @@ mod tests {
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    const PROD: &str = "https://nexus.example";
+    const STAGING: &str = "https://staging-release-0-20-0--nexus.example.app/";
+
+    fn runner(api_url: &str, id: &str) -> String {
+        serde_json::json!({
+            "runner_id": id, "token": "t", "api_url": api_url, "name": "n",
+            "registered_at": "2026-11-11T00:00:00Z", "projects": []
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_one_runner_file_per_hub() {
+        assert_eq!(hub_slug(PROD), "nexus.example");
+        assert_eq!(hub_slug("https://Nexus.Example:443/api"), "nexus.example");
+        assert_eq!(
+            hub_slug(STAGING),
+            "staging-release-0-20-0--nexus.example.app"
+        );
+        assert_eq!(hub_slug("http://localhost:3000"), "http_localhost_3000");
+        assert!(same_hub(PROD, "https://nexus.example/"));
+        assert!(!same_hub(PROD, STAGING));
+        let dir = Path::new("/c");
+        let prod = hub_paths_in(dir, PROD);
+        let staging = hub_paths_in(dir, STAGING);
+        assert_eq!(
+            prod.runner_file,
+            Path::new("/c/dispatch-runners/nexus.example.json")
+        );
+        assert_eq!(
+            prod.hub_dir,
+            Path::new("/c/state/dispatch/hubs/nexus.example")
+        );
+        assert_ne!(prod.runner_file, staging.runner_file);
+        assert_ne!(prod.hub_dir, staging.hub_dir);
+        // Notices and sessions stay shared.
+        assert_eq!(prod.state_dir, staging.state_dir);
+    }
+
+    #[test]
+    fn test_the_single_runner_file_moves_to_its_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = dir.path();
+        write_private(&c.join(LEGACY_RUNNER_FILE), &runner(STAGING, "r-staging")).unwrap();
+        let old_state = c.join("state/dispatch/runner.json");
+        fs::create_dir_all(old_state.parent().unwrap()).unwrap();
+        fs::write(&old_state, r#"{"runner_id":"r-staging","cursor":42}"#).unwrap();
+
+        assert!(migrate_legacy(c).unwrap());
+        let paths = hub_paths_in(c, STAGING);
+        let moved = load_runner_file(&paths.runner_file).unwrap().unwrap();
+        assert_eq!(moved.runner_id, "r-staging");
+        assert!(fs::read_to_string(paths.hub_dir.join("runner.json"))
+            .unwrap()
+            .contains("\"cursor\":42"));
+        assert!(!c.join(LEGACY_RUNNER_FILE).exists());
+        assert!(!old_state.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&paths.runner_file)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // Nothing left to move; a second hub's runner sits next to it.
+        assert!(!migrate_legacy(c).unwrap());
+        write_private(&hub_paths_in(c, PROD).runner_file, &runner(PROD, "r-prod")).unwrap();
+        let ids: Vec<String> = fs::read_dir(c.join(RUNNERS_DIR))
+            .unwrap()
+            .flatten()
+            .filter_map(|e| load_runner_file(&e.path()).ok().flatten())
+            .map(|f| f.runner_id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn test_migration_keeps_a_runner_already_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = dir.path();
+        let paths = hub_paths_in(c, PROD);
+        write_private(&paths.runner_file, &runner(PROD, "r-new")).unwrap();
+        write_private(&c.join(LEGACY_RUNNER_FILE), &runner(PROD, "r-old")).unwrap();
+        assert!(migrate_legacy(c).unwrap());
+        let kept = load_runner_file(&paths.runner_file).unwrap().unwrap();
+        assert_eq!(kept.runner_id, "r-new");
+        assert!(!c.join(LEGACY_RUNNER_FILE).exists());
+    }
+
+    #[test]
+    fn test_hubs_have_separate_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let prod = hub_paths_in(dir.path(), PROD).hub_dir.join("runner.lock");
+        let staging = hub_paths_in(dir.path(), STAGING)
+            .hub_dir
+            .join("runner.lock");
+        let a = super::super::dispatch_listen::lock(&prod).unwrap();
+        let b = super::super::dispatch_listen::lock(&staging).unwrap();
+        // The same hub still allows one listener only.
+        assert!(super::super::dispatch_listen::lock(&prod).is_err());
+        drop((a, b));
     }
 }

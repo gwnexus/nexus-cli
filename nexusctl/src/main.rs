@@ -569,8 +569,10 @@ pub enum DispatchAction {
 /// `nexus dispatch runner` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum RunnerAction {
-    /// Register this machine's runner with the personal access token (used
-    /// once) and store the runner token in ~/.config/nexus (mode 0600).
+    /// Register this machine's runner for the hub of the effective API URL
+    /// with the personal access token (used once) and store the runner
+    /// token in ~/.config/nexus/dispatch-runners (mode 0600). Runners of
+    /// other hubs are not touched.
     /// Binds the linked project unless --project is given; earlier bindings
     /// are kept unless --replace.
     Register {
@@ -595,8 +597,9 @@ pub enum RunnerAction {
         replace: bool,
     },
 
-    /// Heartbeat once and show the bindings: effective mode, blocking
-    /// switch, lag and the Claude Code probe.
+    /// Heartbeat every runner on this machine (one per hub) and show the
+    /// bindings: effective mode, blocking switch, lag and the Claude Code
+    /// probe.
     Status {
         #[arg(long)]
         json: bool,

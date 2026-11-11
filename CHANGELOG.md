@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **One Dispatch runner per hub**: a production and a staging dispatch manager now coexist on one machine. Runner tokens live in `~/.config/nexus/dispatch-runners/<hub>.json` (0600), listener state and lock in `~/.config/nexus/state/dispatch/hubs/<hub>/`; notices and session files stay shared. `register`, `pause`, `resume`, `revoke`, `listen` and the dispatches pane act on the hub of the effective API URL, and `register` only replaces the runner of that hub. `nexus dispatch runner status` lists every runner and marks the current hub; its JSON is now `nexus.dispatch-runners.v1` with a `runners` array. The single `dispatch-runner.json` of earlier versions moves to its hub on first use, with its cursor, so nothing has to be registered again.
+
 ### Fixed
 - **`nexus push` agrees with `nexus status` on OS overrides**: an `init/os_<os>/override.sh` that the workspace fork carries and that was reverted to the template is pushed as a change (the new fork no longer carries it) instead of being reported as retired with a `git rm` hint. The retired rule now only applies to files the fork does not carry, in `nexus status` and `nexus push` alike.
 - **Deleted fork scripts can be pushed**: a script the fork carries and that was deleted locally (`DELETED` in `nexus status`) is pushed as a removal (`D`), also when it was the last script; `nexus status` names `nexus push` next to `nexus reset` for it. Before, push reported "Nothing to push" and every pull recreated the file.
 
 ### Tests
-- New tests for reverted fork overrides and deleted fork scripts; 1013/1013 pass.
+- New tests for reverted fork overrides and deleted fork scripts, the per-hub runner store, the migration of the single runner file and separate listener locks per hub; 1017/1017 pass.
 
 ## [0.39.8] - 2026-11-11
 

@@ -388,7 +388,7 @@ pub async fn run(
         }
         print_check(
             "Dispatch manager",
-            &super::dispatch_status::runner_check(&workspace),
+            &super::dispatch_status::runner_check(&workspace, api_url),
         );
     }
     let workspace_row = row_check(&launch.row);

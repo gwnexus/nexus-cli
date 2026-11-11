@@ -339,7 +339,7 @@ fn snapshot(
     }
 }
 
-/// Runner state from `~/.config/nexus/state/dispatch/runner.json`, read
+/// Runner state from `~/.config/nexus/state/dispatch/hubs/<hub>/runner.json`, read
 /// only; `none` while no runner has written it.
 fn runner_state(path: &Path) -> Runner {
     let mut last_error = None;
@@ -416,10 +416,11 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-fn runner_path() -> Option<std::path::PathBuf> {
-    config::Config::dir()
+/// The listener state of `api_url`'s hub.
+fn runner_path(api_url: &str) -> Option<std::path::PathBuf> {
+    super::dispatch_runner::hub_paths(api_url)
         .ok()
-        .map(|d| d.join("state").join("dispatch").join("runner.json"))
+        .map(|p| p.hub_dir.join("runner.json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -779,7 +780,7 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
         anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
     })?;
     let client = NexusClient::new(api_url, Some(token))?;
-    let runner_file = runner_path();
+    let runner_file = runner_path(api_url);
     let mut names = project_names(&client).await;
     let project_name = |names: &BTreeMap<String, String>| ProjectRef {
         id: project_id.clone(),
@@ -790,10 +791,10 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
     };
     // With --watch the view also runs the runner, or says why it cannot.
     let blocker = (opts.listen && opts.watch)
-        .then(|| super::dispatch_listen::listen_blocker(&project_id))
+        .then(|| super::dispatch_listen::listen_blocker(&project_id, api_url))
         .flatten();
     let listener = (opts.listen && opts.watch && blocker.is_none())
-        .then(super::dispatch_listen::spawn_embedded);
+        .then(|| super::dispatch_listen::spawn_embedded(api_url));
     let runner = || {
         let mut r = runner_file.as_deref().map(runner_state).unwrap_or(Runner {
             state: "none".into(),
@@ -805,7 +806,10 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
                 .as_ref()
                 .and_then(|slot| slot.lock().ok().and_then(|s| s.clone()))
         });
-        runner_view(r, &super::dispatch_listen::runner_scope(&project_id))
+        runner_view(
+            r,
+            &super::dispatch_listen::runner_scope(&project_id, api_url),
+        )
     };
 
     if !opts.watch {
@@ -1075,11 +1079,11 @@ fn extend_layout_arg(
 /// `nexus run` preflight for the runner in the dispatches pane: registered
 /// and bound here, plus the Claude Code probe. Token and switches are
 /// checked by the first heartbeat; the pane shows the result.
-pub(crate) fn runner_check(workspace: &Path) -> CheckResult {
+pub(crate) fn runner_check(workspace: &Path, api_url: &str) -> CheckResult {
     let Ok(project_id) = config::resolve_project_id(None, Some(workspace)) else {
         return CheckResult::Info("no linked project".into());
     };
-    match super::dispatch_listen::listen_blocker(&project_id) {
+    match super::dispatch_listen::listen_blocker(&project_id, api_url) {
         Some(reason) => CheckResult::Warn(format!("not listening: {reason}")),
         None => {
             let probe = super::dispatch_runner::probe_claude();

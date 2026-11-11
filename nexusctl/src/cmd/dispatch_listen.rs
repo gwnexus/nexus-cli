@@ -5,9 +5,14 @@
 //! queue and delivers them into running sessions (or as a desktop
 //! notification). It starts no agent, claims nothing and writes no status.
 //!
+//! Each hub has its own runner and listener: the loop serves the runner of
+//! the workspace's hub, so a production and a staging manager run side by
+//! side without sharing a lock, a runner file or a cursor.
+//!
 //! Files under `~/.config/nexus/state/dispatch/`:
-//! - `runner.lock`: exclusive lock, one runner per machine;
-//! - `runner.json`: state, written atomically (read by `dispatch status`);
+//! - `hubs/<hub>/runner.lock`: exclusive lock, one listener per hub;
+//! - `hubs/<hub>/runner.json`: state, written atomically (read by
+//!   `dispatch status`);
 //! - `notices/<project>.jsonl`: the notice queue, this loop is its only
 //!   writer;
 //! - `notices/<project>.delivered.runner.jsonl`: which session got which
@@ -32,8 +37,8 @@ use nexus_core::api::{
 use serde::{Deserialize, Serialize};
 
 use super::dispatch_runner::{
-    self, load_runner_file, probe_claude, repo_path_hash, runner_client, runner_file_path,
-    state_dir, write_private, RunnerFile,
+    self, hub_paths, load_runner_file, probe_claude, repo_path_hash, runner_client, write_private,
+    RunnerFile,
 };
 use super::dispatch_status::rfc3339_now;
 use super::observer::now_ms;
@@ -643,7 +648,7 @@ pub(crate) fn lock(path: &Path) -> anyhow::Result<RunnerLock> {
             }
             tries += 1;
             if tries >= 20 {
-                anyhow::bail!("another runner is already listening on this machine");
+                anyhow::bail!("another runner is already listening for this hub on this machine");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -696,11 +701,13 @@ fn exe_stamp() -> Option<(PathBuf, std::time::SystemTime, u64)> {
     Some((exe, meta.modified().ok()?, meta.len()))
 }
 
-/// `nexus dispatch listen`.
-pub async fn listen(opts: ListenOptions) -> anyhow::Result<()> {
+/// `nexus dispatch listen`: the runner of `api_url`'s hub.
+pub async fn listen(api_url: &str, opts: ListenOptions) -> anyhow::Result<()> {
+    let paths = hub_paths(api_url)?;
     let env = ListenEnv {
-        runner_file: runner_file_path()?,
-        state_dir: state_dir()?,
+        runner_file: paths.runner_file,
+        state_dir: paths.state_dir,
+        hub_dir: paths.hub_dir,
         home: dirs_home(),
         claude_inbox: probe_claude().inbox.is_ok(),
         desktop: true,
@@ -709,7 +716,7 @@ pub async fn listen(opts: ListenOptions) -> anyhow::Result<()> {
     run_loop(opts, env).await
 }
 
-/// How this machine's runner relates to `project_id`.
+/// How this machine's runner for the hub relates to `project_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RunnerScope {
     Unregistered,
@@ -719,8 +726,8 @@ pub(crate) enum RunnerScope {
     Bound,
 }
 
-pub(crate) fn runner_scope(project_id: &str) -> RunnerScope {
-    let Ok(path) = runner_file_path() else {
+pub(crate) fn runner_scope(project_id: &str, api_url: &str) -> RunnerScope {
+    let Ok(path) = hub_paths(api_url).map(|p| p.runner_file) else {
         return RunnerScope::Unreadable;
     };
     match load_runner_file(&path) {
@@ -740,9 +747,12 @@ pub(crate) fn runner_scope(project_id: &str) -> RunnerScope {
 
 /// Why the runner cannot listen for `project_id` here, checked before the
 /// loop starts (registered, project bound).
-pub(crate) fn listen_blocker(project_id: &str) -> Option<String> {
-    match runner_scope(project_id) {
-        RunnerScope::Unregistered => Some("not registered (nexus dispatch runner register)".into()),
+pub(crate) fn listen_blocker(project_id: &str, api_url: &str) -> Option<String> {
+    match runner_scope(project_id, api_url) {
+        RunnerScope::Unregistered => Some(format!(
+            "not registered for {} (nexus dispatch runner register)",
+            dispatch_runner::hub_slug(api_url)
+        )),
         RunnerScope::Unreadable => {
             Some("runner file unreadable (nexus dispatch runner register)".into())
         }
@@ -756,21 +766,23 @@ pub(crate) fn listen_blocker(project_id: &str) -> Option<String> {
 /// Start the loop inside the status pane. The returned slot holds the
 /// reason when it stopped (or could not start); another process already
 /// listening is not a failure.
-pub(crate) fn spawn_embedded() -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+pub(crate) fn spawn_embedded(api_url: &str) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
     let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
     let out = slot.clone();
     QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+    let api_url = api_url.to_string();
     tokio::spawn(async move {
-        let env = match (runner_file_path(), state_dir()) {
-            (Ok(runner_file), Ok(state_dir)) => ListenEnv {
-                runner_file,
-                state_dir,
+        let env = match hub_paths(&api_url) {
+            Ok(paths) => ListenEnv {
+                runner_file: paths.runner_file,
+                state_dir: paths.state_dir,
+                hub_dir: paths.hub_dir,
                 home: dirs_home(),
                 claude_inbox: probe_claude().inbox.is_ok(),
                 desktop: true,
                 embedded: true,
             },
-            _ => return,
+            Err(_) => return,
         };
         let opts = ListenOptions {
             interval_secs: 30,
@@ -791,7 +803,10 @@ pub(crate) fn spawn_embedded() -> std::sync::Arc<std::sync::Mutex<Option<String>
 /// a temp directory without desktop notifications.
 pub(crate) struct ListenEnv {
     pub runner_file: PathBuf,
+    /// Shared by all hubs: `notices/`, `sessions/`.
     pub state_dir: PathBuf,
+    /// This hub's `runner.lock` and `runner.json`.
+    pub hub_dir: PathBuf,
     pub home: PathBuf,
     pub claude_inbox: bool,
     pub desktop: bool,
@@ -807,8 +822,9 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
         )
     })?;
     let base = env.state_dir.clone();
-    let _lock = lock(&base.join("runner.lock"))?;
-    let state_path = base.join("runner.json");
+    fs::create_dir_all(&env.hub_dir)?;
+    let _lock = lock(&env.hub_dir.join("runner.lock"))?;
+    let state_path = env.hub_dir.join("runner.json");
     let queue = Queue::new(base.join("notices"));
     let sessions_dir = base.join("sessions");
     let client = runner_client(&file)?;
@@ -1694,6 +1710,7 @@ mod tests {
         let env = || ListenEnv {
             runner_file: runner_file.clone(),
             state_dir: state_dir.clone(),
+            hub_dir: state_dir.clone(),
             home: dir.clone(),
             claude_inbox: true,
             desktop: false,
@@ -1800,6 +1817,7 @@ mod tests {
         let env = || ListenEnv {
             runner_file: runner_file.clone(),
             state_dir: state_dir.clone(),
+            hub_dir: state_dir.clone(),
             home: dir.clone(),
             claude_inbox: true,
             desktop: false,
@@ -1867,6 +1885,7 @@ mod tests {
         let env = || ListenEnv {
             runner_file: runner_file.clone(),
             state_dir: state_dir.clone(),
+            hub_dir: state_dir.clone(),
             home: dir.clone(),
             claude_inbox: true,
             desktop: false,
