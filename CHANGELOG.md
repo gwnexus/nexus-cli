@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.1] - 2026-11-11
+
 ### Added
 - **`nexus reload`**: brings backend changes into a running workspace without leaving the session. It runs `nexus pull` (with the same `--force`, `--force-unmanaged` and `--trust`) and the managed plugin step, compares the watched files and plugin versions, and reports per area what the running Claude Code session picks up live (skills, commands, subagents, settings) and what needs `/reload-plugins` (plugins), a re-read or `/compact` (CLAUDE.md, AGENTS.md, rules, directives), a restart with `claude --continue` (`.mcp.json`) or the next `nexus run` (devbox workspace, layout). Running sessions of the repository get that summary through their cross-session inbox unless they hold or refuse inbound messages; `--no-notify` turns it off.
 
