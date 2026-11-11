@@ -1032,6 +1032,19 @@ The API URL can also be set via the `NEXUS_API_URL` environment variable.
 Resolution order: `--api-url` flag > `NEXUS_API_URL` env var > project-local
 config > global config.toml > default.
 
+A project-local `.nexus/config.toml` that is tracked by git belongs to the
+repository, so its `api_url` was chosen by whoever wrote the repository.
+Before any command sends your token to such a URL, the CLI checks that you
+approved its origin (scheme, host, port): the global `api_url`, the default
+above, or an entry of `NEXUS_TRUSTED_API_URLS` (comma-separated).
+`--api-url` and `NEXUS_API_URL` are your own choice and always count as
+approved. Otherwise the command asks once (`Send your Nexus token to …?`,
+default no) and refuses without a terminal or with `--yes`; `nexus login`
+included. An approval also covers the commands it starts (for example the
+`nexus run` panes). `nexus status` shows such a URL as `(local, tracked by
+git)`. Untracked project configs, as written by `nexus link` and
+`nexus config set --local`, work as before.
+
 ```bash
 # Temporary staging session (no config change needed)
 export NEXUS_API_URL=https://staging.example.com

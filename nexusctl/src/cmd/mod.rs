@@ -1,6 +1,7 @@
 //! Command dispatcher and implementations.
 
 mod actors;
+mod api_trust;
 pub(crate) mod auth;
 pub(crate) mod ccx;
 mod classification;
@@ -50,6 +51,7 @@ use crate::{
 
 /// Dispatch the parsed CLI command to the appropriate handler.
 pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    api_trust::guard(&cli)?;
     match cli.command {
         Command::Init {
             ref path,
@@ -170,13 +172,14 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let effective =
                 nexus_core::config::Config::load_effective_with_provenance(Some(&workspace))?;
             let api_url = cli.resolve_api_url(&effective.config);
-            let api_url_source = cli.resolve_api_url_source(&effective);
+            let api_url_source =
+                api_trust::source_label(cli.resolve_api_url_source(&effective), &effective);
             let json = json
                 || matches!(
                     cli.resolve_output(&effective.config),
                     nexus_core::OutputPreference::Json
                 );
-            exit_with(state_cmd::status(&api_url, api_url_source, json).await?);
+            exit_with(state_cmd::status(&api_url, &api_url_source, json).await?);
         }
         Command::Diff { ref path } => {
             let config = nexus_core::config::Config::load_effective(None)?;

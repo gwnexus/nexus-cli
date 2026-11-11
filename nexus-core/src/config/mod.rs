@@ -11,8 +11,10 @@ use std::str::FromStr;
 
 use crate::Error;
 
+pub mod trust;
+
 /// Default Nexus API base URL.
-const DEFAULT_API_URL: &str = "https://nexus.gatewarden.eu";
+pub const DEFAULT_API_URL: &str = "https://nexus.gatewarden.eu";
 
 /// Tool binary `nexus run` launches when neither `--tool`, an explicit
 /// `run.default_tool`, nor the project's `agent_owner` selects something else.
