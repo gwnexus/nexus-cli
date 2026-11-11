@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-11-11
+
+### Upgrade notes
+- The Dispatch runner file moves on first use (`dispatch-runner.json` to `dispatch-runners/<hub>.json`, listener state to `state/dispatch/hubs/<hub>/`); no new `register` is needed. A running dispatches pane restarts itself after `nexus upgrade` and then uses the new layout.
+- `nexus dispatch runner status --json` changed shape: `nexus.dispatch-runners.v1` with a `runners` array instead of one runner object.
+
 ### Changed
 - **One Dispatch runner per hub**: a production and a staging dispatch manager now coexist on one machine. Runner tokens live in `~/.config/nexus/dispatch-runners/<hub>.json` (0600), listener state and lock in `~/.config/nexus/state/dispatch/hubs/<hub>/`; notices and session files stay shared. `register`, `pause`, `resume`, `revoke`, `listen` and the dispatches pane act on the hub of the effective API URL, and `register` only replaces the runner of that hub. `nexus dispatch runner status` lists every runner and marks the current hub; its JSON is now `nexus.dispatch-runners.v1` with a `runners` array. The single `dispatch-runner.json` of earlier versions moves to its hub on first use, with its cursor, so nothing has to be registered again.
 
