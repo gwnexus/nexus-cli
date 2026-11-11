@@ -31,6 +31,7 @@ pub(crate) mod project;
 pub(crate) mod projection_cleanup;
 pub(crate) mod pull;
 pub(crate) mod push;
+mod reload;
 pub(crate) mod run;
 pub(crate) mod shadow;
 mod shadow_guard;
@@ -369,6 +370,28 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Command::Reload {
+            ref project_id,
+            force,
+            force_unmanaged,
+            trust,
+            no_notify,
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            reload::run(
+                &api_url,
+                reload::ReloadOptions {
+                    project_id: project_id.as_deref(),
+                    force: force || cli.yes,
+                    force_unmanaged,
+                    trust,
+                    notify: !no_notify,
+                    mcp_source: config.mcp_source,
+                },
+            )
+            .await?;
         }
         Command::Pull {
             ref project_id,

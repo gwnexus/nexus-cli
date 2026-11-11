@@ -66,6 +66,7 @@ nexus project unlink                    Revoke the project inference token and c
 nexus project status                    List issued project inference tokens
 nexus pull [--project-id <id>]          Pull skills and config from the Nexus platform
 nexus pull --dry-run                    Preview devbox workspace changes (incl. removals) without writing
+nexus reload [--force] [--trust]        Pull and update plugins while the session runs; says what the session picks up live
 nexus pull --trust                      Accept new or changed executable content without asking
 nexus pull --untrack-shadowed           Untrack excluded paths git still tracks (kept on disk, not committed)
 nexus push [path] [--name "..."]        Push content changes (agent files; devbox changes as a new fork)
@@ -969,6 +970,38 @@ A skill with `invocation: user` (e.g. `nexus-grill-me`) gets
 only when you call `/<skill>`, never on its own. Skills without the field
 (older servers) stay model-invoked. OpenCode has no equivalent; its command
 stub is unchanged.
+
+### Live updates (`nexus reload`)
+
+`nexus reload` brings backend changes into a workspace whose Claude Code
+session and terminal layout keep running, for example from a second pane.
+It runs `nexus pull` (same `--force`, `--force-unmanaged` and `--trust`)
+and the managed plugin step of `nexus run`, compares the watched files and
+plugin versions before and after, and prints per area what the running
+session does with the change:
+
+| Area | Running session |
+| --- | --- |
+| Skills, commands, subagents | active now |
+| `.claude/settings.json`, statusline | active now (Claude Code watches the files) |
+| Plugins (installed or updated) | `/reload-plugins` in the session |
+| `CLAUDE.md`, `AGENTS.md`, rules, directives | read at session start: the session re-reads them, or `/compact`, or a restart |
+| `.mcp.json` | restart: Ctrl-C, then `claude --continue` (the conversation stays) |
+| `devbox.json`, `scripts/devbox/**` | next devbox shell (`nexus run`) |
+| Terminal layout | next `nexus run` |
+
+Running Claude Code sessions of this repository get the same summary
+through their cross-session inbox (the channel the Dispatch notices use),
+so the agent re-reads changed instruction files right away and names the
+steps left to you. Sessions whose `crossSessionInbound` is `hold` or
+`refuse` get nothing; `--no-notify` sends nothing. The message holds area
+names, file paths and plugin ids, never file contents. Credentials and the
+project config are not watched.
+
+```bash
+nexus reload                 # pull, update plugins, report, tell running sessions
+nexus reload --trust         # also accept changed hooks, MCP servers and plugins
+```
 
 ### Claude Code Plugins
 

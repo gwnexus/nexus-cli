@@ -459,14 +459,42 @@ pub(crate) fn inbox_message(text: &str) -> String {
 /// The two frames of one push: the auth line, then the fenced notice as a
 /// user message.
 pub(crate) fn inbox_frames(token: &str, text: &str) -> String {
+    user_frames(token, &inbox_message(text))
+}
+
+/// The auth line and `content` as a user message.
+pub(crate) fn user_frames(token: &str, content: &str) -> String {
     format!(
         "{}\n{}\n",
         serde_json::json!({ "type": "auth", "token": token }),
         serde_json::json!({
             "type": "user",
-            "message": { "role": "user", "content": inbox_message(text) }
+            "message": { "role": "user", "content": content }
         })
     )
+}
+
+/// Write `frames` into a session's cross-session inbox socket.
+pub(crate) async fn push_frames(session: &SessionFile, frames: String) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use tokio::io::AsyncWriteExt;
+        let send = async {
+            let mut sock = tokio::net::UnixStream::connect(&session.socket).await?;
+            sock.write_all(frames.as_bytes()).await?;
+            sock.shutdown().await
+        };
+        match tokio::time::timeout(Duration::from_secs(3), send).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("inbox socket: {}", e.kind())),
+            Err(_) => Err("inbox socket: timed out".into()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (session, frames);
+        Err("cross-session inbox needs a Unix socket".into())
+    }
 }
 
 /// The delivery interface (shaped after ACP v1). Notify mode implements only
@@ -510,26 +538,7 @@ impl RuntimeAdapter for ClaudeAdapter {
         if !self.inbox {
             return Err("cross-session inbox not available".into());
         }
-        #[cfg(unix)]
-        {
-            use tokio::io::AsyncWriteExt;
-            let send = async {
-                let mut sock = tokio::net::UnixStream::connect(&session.socket).await?;
-                sock.write_all(inbox_frames(&session.token, text).as_bytes())
-                    .await?;
-                sock.shutdown().await
-            };
-            match tokio::time::timeout(Duration::from_secs(3), send).await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(format!("inbox socket: {}", e.kind())),
-                Err(_) => Err("inbox socket: timed out".into()),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (session, text);
-            Err("cross-session inbox needs a Unix socket".into())
-        }
+        push_frames(session, inbox_frames(&session.token, text)).await
     }
 }
 
@@ -549,7 +558,7 @@ pub(crate) fn sessions(dir: &Path) -> Vec<SessionFile> {
 }
 
 /// The repository a session runs in, and its hash.
-fn session_root(s: &SessionFile) -> PathBuf {
+pub(crate) fn session_root(s: &SessionFile) -> PathBuf {
     let cwd = PathBuf::from(&s.cwd);
     super::shadow_guard::repo_root(&cwd).unwrap_or(cwd)
 }

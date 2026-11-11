@@ -213,6 +213,33 @@ pub enum Command {
         action: DispatchAction,
     },
 
+    /// Pull and apply backend changes while the session keeps running: runs
+    /// `nexus pull` and the managed plugin step, then shows per area what
+    /// the running Claude Code session picks up live and what needs
+    /// /reload-plugins, a re-read or a restart, and sends that summary to
+    /// the running sessions of this repository.
+    Reload {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// As for nexus pull: overwrite existing files without confirmation.
+        #[arg(short, long)]
+        force: bool,
+
+        /// As for nexus pull: also replace CCX files never managed by Nexus.
+        #[arg(long)]
+        force_unmanaged: bool,
+
+        /// As for nexus pull: accept new or changed executable content.
+        #[arg(long)]
+        trust: bool,
+
+        /// Do not send the summary to running Claude Code sessions.
+        #[arg(long)]
+        no_notify: bool,
+    },
+
     /// Pull skills and configuration from the Nexus platform into this workspace.
     Pull {
         /// Override the linked project ID.
