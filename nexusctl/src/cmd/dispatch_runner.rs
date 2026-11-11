@@ -392,10 +392,17 @@ pub async fn register(api_url: &str, opts: RegisterOptions<'_>) -> anyhow::Resul
         .iter()
         .map(|id| (id.clone(), None))
         .collect();
+    let root = super::shadow_guard::repo_root(&workspace).unwrap_or(workspace.clone());
     if wanted.is_empty() {
         let id = config::resolve_project_id(None, Some(&workspace))?;
-        let root = super::shadow_guard::repo_root(&workspace).unwrap_or(workspace.clone());
         wanted.push((id, Some(repo_path_hash(&root))));
+    } else if let Ok(here) = config::resolve_project_id(None, Some(&workspace)) {
+        // The workspace's own project among `--project`: bind its repository.
+        for (id, hash) in wanted.iter_mut() {
+            if *id == here {
+                *hash = Some(repo_path_hash(&root));
+            }
+        }
     }
     for (id, hash) in wanted {
         let entry = BoundProject {
@@ -532,8 +539,34 @@ fn print_bindings(file: &RunnerFile, bindings: &[RunnerBinding], platform_enable
             style("!").yellow().bold()
         );
     }
-    for line in binding_lines(file, bindings) {
-        println!("  {line}");
+    let running = config::Config::dir()
+        .map(|d| d.join("state").join("dispatch").join("sessions"))
+        .map(|d| super::dispatch_listen::sessions(&d))
+        .unwrap_or_default();
+    for (b, line) in bindings.iter().zip(binding_lines(file, bindings)) {
+        let reach = file
+            .projects
+            .iter()
+            .find(|p| p.project_id == b.project_id)
+            .map(|p| reach_note(p, &running))
+            .unwrap_or_default();
+        println!("  {line}{reach}");
+    }
+}
+
+/// How a binding reaches running sessions, for `runner status`.
+fn reach_note(p: &BoundProject, running: &[super::dispatch_listen::SessionFile]) -> String {
+    let by = if p.repo_path_hash.is_some() {
+        "repository"
+    } else {
+        "project id (no repo hash)"
+    };
+    match super::dispatch_listen::session_targets(p, running).len() {
+        0 => format!(
+            ", {} no running session matched by {by}: notices go to the desktop",
+            style("!").yellow().bold()
+        ),
+        n => format!(", {n} session(s) matched by {by}"),
     }
 }
 

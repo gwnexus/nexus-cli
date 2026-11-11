@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Dispatch notices no longer echo the receiving project's own actions.** A reply, status change or resolution written by the bound project itself raises no notice for that project. A status change carries no author in the event feed, so the listener takes it from the reply or resolution written with it (within five seconds).
+- **Dispatch notices name the real author.** "added a reply", "needs your reply" and "was resolved by" name the project that wrote the event instead of the Dispatch counterpart; when the author is unknown the notice uses a neutral wording (`Nexus: Dispatch <id> was resolved.`).
+- **No resolution notice for a closed Dispatch.** When the Dispatch is already closed as the notice is built, the "was resolved" notice is dropped.
+- **Projects bound with `--project` reach their Claude Code sessions.** A runner binding registered with `nexus dispatch runner register --project <id>` from another workspace has no repository hash and fell back to desktop notifications only. Such a binding now delivers into every running session whose repository is linked to that project; a binding with a repository hash still matches only its repository. Registering with `--project` from inside one of the named projects' workspaces now also binds that repository.
+
+### Changed
+- **`nexus dispatch runner status` shows session reach.** Each binding reports how many running sessions it reaches (by repository or by project id) and flags a binding that reaches none, whose notices go to the desktop. The listener logs the reason when it falls back to a desktop notification although sessions are running.
+
+### Tests
+- New tests for author filtering, author naming, the neutral fallback and closed Dispatches in the notice builder, and for session matching by repository hash or project id.
+
 ## [0.40.2] - 2026-11-11
 
 ### Changed

@@ -1232,6 +1232,8 @@ pub struct DispatchMessageRef {
     pub author_project_id: Option<String>,
     #[serde(default)]
     pub message_type: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 /// Response from `dispatch_get`, reduced to the Dispatch and its message
