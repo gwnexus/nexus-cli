@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.8] - 2026-11-11
+
 ### Security
 - **A repository can no longer route your token to its own API host**: when the effective `api_url` comes from a `.nexus/config.toml` that is tracked by git and its origin is not approved (the global `api_url`, the default, or `NEXUS_TRUSTED_API_URLS`), every command that talks to the API asks before the first request and refuses without a terminal or with `--yes`; this includes `nexus login`. `--api-url` and `NEXUS_API_URL` stay approved, and untracked project configs work as before. `nexus status` marks such a URL as `local, tracked by git`.
+
+### Documentation
+- README: the Security section points to the API URL check; the Configuration section explains approval with `NEXUS_TRUSTED_API_URLS`. `SECURITY.md` lists 0.39.x as the supported line.
 
 ### Tests
 - New tests for origin approval, the tracked-file check, the refusal without a terminal and the commands that skip the check; 1011/1011 pass.

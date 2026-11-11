@@ -770,6 +770,12 @@ prefix plus the last four characters (`nxs_pat_****9f3c`), and mask every
 injected env value whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `KEY`,
 `AUTH` or `CREDENTIAL`.
 
+**Tokens only go to API hosts you chose.** When the API URL comes from a
+`.nexus/config.toml` that the repository tracks in git, and its host is not
+approved by you, every command asks before sending your token there and
+refuses without a terminal or with `--yes` (see "API URL from a tracked
+project config" under Configuration).
+
 **What `nexus pull` and `nexus init` accept from the backend.** Every path the
 server sends (agent files, skills and their resources, OpenCode commands,
 actor profiles and avatars, Claude hook adapters, devbox scripts) must be
@@ -1032,7 +1038,8 @@ The API URL can also be set via the `NEXUS_API_URL` environment variable.
 Resolution order: `--api-url` flag > `NEXUS_API_URL` env var > project-local
 config > global config.toml > default.
 
-A project-local `.nexus/config.toml` that is tracked by git belongs to the
+**API URL from a tracked project config.** A project-local
+`.nexus/config.toml` that is tracked by git belongs to the
 repository, so its `api_url` was chosen by whoever wrote the repository.
 Before any command sends your token to such a URL, the CLI checks that you
 approved its origin (scheme, host, port): the global `api_url`, the default
