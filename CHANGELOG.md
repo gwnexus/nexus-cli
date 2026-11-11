@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Runner hints name the command as one.** When the runner cannot listen (no runner registered for the hub, runner file unreadable, project not bound, runner serving other projects), the `dispatches` pane and the `nexus run` preflight now end the line with `run: nexus dispatch runner register` instead of the command in parentheses.
+
 ## [0.40.1] - 2026-11-11
 
 ### Added

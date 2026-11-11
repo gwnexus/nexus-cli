@@ -388,8 +388,9 @@ fn runner_view(mut r: Runner, scope: &super::dispatch_listen::RunnerScope) -> Ru
         RunnerScope::Unbound(names) if live => {
             r.state = "elsewhere".into();
             r.note = Some(format!(
-                "serves {}, not this project (nexus dispatch runner register)",
-                names.join(", ")
+                "serves {}, not this project; run: {}",
+                names.join(", "),
+                super::dispatch_listen::REGISTER_CMD
             ));
         }
         RunnerScope::Bound if live && r.note.is_none() => {
@@ -1385,7 +1386,7 @@ mod tests {
         assert_eq!(elsewhere.state, "elsewhere");
         assert_eq!(
             elsewhere.note.as_deref(),
-            Some("serves Beta, not this project (nexus dispatch runner register)")
+            Some("serves Beta, not this project; run: nexus dispatch runner register")
         );
         // A stopped runner keeps its state and the caller's note.
         let stopped = runner_view(r("stopped"), &RunnerScope::Unbound(vec!["Beta".into()]));

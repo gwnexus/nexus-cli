@@ -754,20 +754,21 @@ pub(crate) fn runner_scope(project_id: &str, api_url: &str) -> RunnerScope {
     }
 }
 
+/// The command that registers the runner or binds a project to it.
+pub(crate) const REGISTER_CMD: &str = "nexus dispatch runner register";
+
 /// Why the runner cannot listen for `project_id` here, checked before the
 /// loop starts (registered, project bound).
 pub(crate) fn listen_blocker(project_id: &str, api_url: &str) -> Option<String> {
     match runner_scope(project_id, api_url) {
         RunnerScope::Unregistered => Some(format!(
-            "not registered for {} (nexus dispatch runner register)",
+            "no runner registered for {}; run: {REGISTER_CMD}",
             dispatch_runner::hub_slug(api_url)
         )),
-        RunnerScope::Unreadable => {
-            Some("runner file unreadable (nexus dispatch runner register)".into())
-        }
-        RunnerScope::Unbound(_) => {
-            Some("this project is not bound (nexus dispatch runner register)".into())
-        }
+        RunnerScope::Unreadable => Some(format!("runner file unreadable; run: {REGISTER_CMD}")),
+        RunnerScope::Unbound(_) => Some(format!(
+            "runner not bound to this project; run: {REGISTER_CMD}"
+        )),
         RunnerScope::Bound => None,
     }
 }
