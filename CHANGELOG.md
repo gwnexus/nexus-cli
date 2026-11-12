@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.3] - 2026-11-12
+
 ### Fixed
 - **Dispatch notices no longer echo the receiving project's own actions.** A reply, status change or resolution written by the bound project itself raises no notice for that project. A status change carries no author in the event feed, so the listener takes it from the reply or resolution written with it (within five seconds).
 - **Dispatch notices name the real author.** "added a reply", "needs your reply" and "was resolved by" name the project that wrote the event instead of the Dispatch counterpart; when the author is unknown the notice uses a neutral wording (`Nexus: Dispatch <id> was resolved.`).
