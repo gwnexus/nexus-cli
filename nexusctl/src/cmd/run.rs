@@ -264,6 +264,7 @@ pub async fn run(
     let mut gh_effective: Option<nexus_core::api::GhEffective> = None;
     let mut git_config: Option<nexus_core::api::GitConfig> = None;
     let mut automation: Option<String> = None;
+    let mut linked_projects: Option<usize> = None;
     if !no_db {
         if let Some(token) = resolve_token() {
             if let Ok(client) = NexusClient::new(api_url, Some(token)) {
@@ -292,6 +293,14 @@ pub async fn run(
                                 .and_then(|v| v.as_str())
                                 .map(str::to_string);
                         }
+                    }
+                    if dispatch_pane != Some(false) {
+                        linked_projects = client
+                            .linked_project_ids(&project_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|p| p.len());
                     }
                 }
             }
@@ -388,7 +397,7 @@ pub async fn run(
         }
         print_check(
             "Dispatch manager",
-            &super::dispatch_status::runner_check(&workspace, api_url),
+            &super::dispatch_status::runner_check(&workspace, api_url, linked_projects),
         );
     }
     let workspace_row = row_check(&launch.row);

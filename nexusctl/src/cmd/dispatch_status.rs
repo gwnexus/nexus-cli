@@ -159,6 +159,9 @@ struct Snapshot {
     dispatches: Vec<Row>,
     /// The last refresh failed; the rest is the last good state.
     error: Option<String>,
+    /// Projects linked to this one; `None` when the hub does not say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linked_projects: Option<usize>,
 }
 
 /// The four lists one refresh reads.
@@ -336,7 +339,28 @@ fn snapshot(
         peers,
         dispatches: rows,
         error: None,
+        linked_projects: None,
     }
+}
+
+/// Without linked projects no other project can send a Dispatch here, so
+/// the automation has nothing to deliver yet.
+pub(crate) const NO_LINKS_NOTE: &str =
+    "no linked projects yet: no Dispatches from other projects until one is linked in the Hub";
+
+fn links_line(snap: &Snapshot) -> Option<String> {
+    (snap.linked_projects == Some(0))
+        .then(|| style(format!("info: {NO_LINKS_NOTE}")).cyan().to_string())
+}
+
+/// Number of projects linked to `project_id`; `None` when unknown.
+async fn linked_count(client: &NexusClient, project_id: &str) -> Option<usize> {
+    client
+        .linked_project_ids(project_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.len())
 }
 
 /// Runner state from `~/.config/nexus/state/dispatch/hubs/<hub>/runner.json`, read
@@ -631,6 +655,7 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
         ),
     ];
     lines.extend(runner_note_line(snap));
+    lines.extend(links_line(snap));
     lines.extend(error_line(snap));
     lines.push(String::new());
     if snap.dispatches.is_empty() {
@@ -705,6 +730,7 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
         ),
     ];
     lines.extend(runner_note_line(snap));
+    lines.extend(links_line(snap));
     lines.extend(error_line(snap));
     if snap.dispatches.is_empty() {
         lines.push("no open Dispatches".into());
@@ -816,7 +842,7 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
     if !opts.watch {
         let lists = fetch(&client, &project_id).await?;
         let now = now_ms();
-        let snap = snapshot(
+        let mut snap = snapshot(
             project_name(&names),
             &names,
             &lists,
@@ -824,6 +850,7 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
             opts.window_days,
             now,
         );
+        snap.linked_projects = linked_count(&client, &project_id).await;
         if opts.json {
             println!("{}", serde_json::to_string_pretty(&snap)?);
         } else {
@@ -857,14 +884,19 @@ pub async fn status(api_url: &str, opts: StatusOptions<'_>) -> anyhow::Result<()
                         names = fresh;
                     }
                 }
-                last = Some(snapshot(
+                let mut snap = snapshot(
                     project_name(&names),
                     &names,
                     &lists,
                     runner(),
                     opts.window_days,
                     now,
-                ));
+                );
+                // Unknown this round: keep what the last refresh learned.
+                snap.linked_projects = linked_count(&client, &project_id)
+                    .await
+                    .or_else(|| last.as_ref().and_then(|l| l.linked_projects));
+                last = Some(snap);
             }
             Err(e) => {
                 let snap = last.get_or_insert_with(|| {
@@ -1080,12 +1112,23 @@ fn extend_layout_arg(
 /// `nexus run` preflight for the runner in the dispatches pane: registered
 /// and bound here, plus the Claude Code probe. Token and switches are
 /// checked by the first heartbeat; the pane shows the result.
-pub(crate) fn runner_check(workspace: &Path, api_url: &str) -> CheckResult {
+///
+/// `linked_projects` is the number of projects linked to this one (`None`
+/// when unknown). With none, nothing can arrive yet: an unregistered or
+/// unbound runner is then only noted, not a warning.
+pub(crate) fn runner_check(
+    workspace: &Path,
+    api_url: &str,
+    linked_projects: Option<usize>,
+) -> CheckResult {
     let Ok(project_id) = config::resolve_project_id(None, Some(workspace)) else {
         return CheckResult::Info("no linked project".into());
     };
+    let no_links = linked_projects == Some(0);
     match super::dispatch_listen::listen_blocker(&project_id, api_url) {
+        Some(reason) if no_links => CheckResult::Info(format!("{NO_LINKS_NOTE}; then: {reason}")),
         Some(reason) => CheckResult::Warn(format!("not listening: {reason}")),
+        None if no_links => CheckResult::Info(format!("listens, but {NO_LINKS_NOTE}")),
         None => {
             let probe = super::dispatch_runner::probe_claude();
             CheckResult::Pass(format!(
@@ -1475,6 +1518,43 @@ mod tests {
             .map(|l| console::strip_ansi_codes(l).to_string())
             .collect();
         assert_eq!(full.last().unwrap(), "  No open Dispatches.");
+    }
+
+    #[test]
+    fn test_no_linked_projects_shows_an_info_line() {
+        let empty = || Lists {
+            inbox: vec![],
+            outbox: vec![],
+            inbox_done: vec![],
+            outbox_done: vec![],
+        };
+        let plain = |s: &Snapshot, compact: bool| -> Vec<String> {
+            let lines = if compact {
+                render_compact(s, NOW)
+            } else {
+                render(s, NOW)
+            };
+            lines
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).to_string())
+                .collect()
+        };
+        let info = format!("info: {NO_LINKS_NOTE}");
+        let mut s = snap(&empty());
+        s.linked_projects = Some(0);
+        assert!(plain(&s, true).contains(&info));
+        assert!(plain(&s, false).contains(&info));
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["linked_projects"], 0);
+        // Linked projects, or a hub that does not say: no line, no field.
+        s.linked_projects = Some(2);
+        assert!(!plain(&s, true).contains(&info));
+        s.linked_projects = None;
+        assert!(!plain(&s, true).contains(&info));
+        assert!(serde_json::to_value(&s)
+            .unwrap()
+            .get("linked_projects")
+            .is_none());
     }
 
     #[test]

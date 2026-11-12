@@ -13,11 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **No resolution notice for a closed Dispatch.** When the Dispatch is already closed as the notice is built, the "was resolved" notice is dropped.
 - **Projects bound with `--project` reach their Claude Code sessions.** A runner binding registered with `nexus dispatch runner register --project <id>` from another workspace has no repository hash and fell back to desktop notifications only. Such a binding now delivers into every running session whose repository is linked to that project; a binding with a repository hash still matches only its repository. Registering with `--project` from inside one of the named projects' workspaces now also binds that repository.
 
+### Added
+- **Hint for projects without links.** When dispatch automation is on but the project has no linked projects yet, the `nexus run` check `Dispatch manager` says that nothing arrives from other projects until one is linked in the Hub (information, not a warning, and the register step for afterwards), and the `dispatches` pane shows the same as an info line. `nexus dispatch status --json` reports `linked_projects`.
+
 ### Changed
 - **`nexus dispatch runner status` shows session reach.** Each binding reports how many running sessions it reaches (by repository or by project id) and flags a binding that reaches none, whose notices go to the desktop. The listener logs the reason when it falls back to a desktop notification although sessions are running.
 
 ### Tests
-- New tests for author filtering, author naming, the neutral fallback and closed Dispatches in the notice builder, and for session matching by repository hash or project id.
+- New tests for author filtering, author naming, the neutral fallback and closed Dispatches in the notice builder, for session matching by repository hash or project id, and for the info line and JSON field without linked projects.
 
 ## [0.40.2] - 2026-11-11
 

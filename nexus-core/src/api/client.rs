@@ -214,6 +214,31 @@ impl NexusClient {
         }
     }
 
+    /// The projects linked to `project_id` (one hop, readable by the
+    /// caller), from the `projects` list of a linked-scope inbox read.
+    /// `None` when the hub does not report that list.
+    pub async fn linked_project_ids(&self, project_id: &str) -> Result<Option<Vec<String>>, Error> {
+        let body = json!({
+            "action": "dispatch_inbox",
+            "project_id": project_id,
+            "project_scope": "linked",
+            "limit": 1
+        });
+        let resp: DispatchListResponse = match self.post("/api/mcp/dispatches", &body).await {
+            Err(e) if e.is_transport() => self.post("/api/mcp/dispatches", &body).await,
+            other => other,
+        }?;
+        if resp.projects.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            resp.projects
+                .into_iter()
+                .filter(|p| p != project_id)
+                .collect(),
+        ))
+    }
+
     /// One Dispatch with its message authors (`dispatch_get`).
     pub async fn dispatch_get(&self, dispatch_id: &str) -> Result<DispatchGetResponse, Error> {
         let body = json!({ "action": "dispatch_get", "dispatch_id": dispatch_id });
