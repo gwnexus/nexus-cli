@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-11-14
+
 ### Security
 - **Agent-file paths must be canonical.** Paths from the platform are only written in their canonical spelling: `./x`, `a//b`, `a/./b`, a trailing `/` and backslashes are refused, so a runnable file (settings, hooks, MCP configs) can no longer reach disk under another spelling without the consent prompt. Consent classification ignores letter case, matching case-insensitive file systems.
 - **No writes into `.git` in any spelling.** `.git` is recognised in any letter case and in its Windows variants (`.git.`, `GIT~1`), and a symlink inside the workspace that resolves into `.git` is refused.
