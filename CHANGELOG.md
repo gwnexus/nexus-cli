@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-11-14
+
 ### Changed
 - **Dispatch notices without free text.** Runner notices hold only the Dispatch id, the peer project, type, priority and status, each reduced to a fixed character set, and reach the session as one plain line without the "untrusted data" fence. The title is read by the sweep. `nexus dispatch runner titles on` quotes the title again, fenced as before; notices queued by earlier versions stay fenced.
 - The help header reads `Nexus CLI vX.Y.Z: Nexus platform operations` (colon instead of a dash).
