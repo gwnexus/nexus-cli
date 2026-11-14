@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The help header reads `Nexus CLI vX.Y.Z: Nexus platform operations` (colon instead of a dash).
+
 ## [0.41.0] - 2026-11-14
 
 ### Security
