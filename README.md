@@ -153,7 +153,7 @@ nexus man --out-dir ~/.local/share/man/man1   # install all pages: man nexus-run
 | `nexus project rotate` | `--finalize` | Revoke the previously superseded token after overlap |
 | `nexus pull`    | `--project-id`   | Pull from a specific project (skip picker)     |
 | `nexus pull`    | `--dry-run`      | Show devbox workspace changes (create, update, keep, remove) without writing, and the executable items pull would ask about |
-| `nexus pull`, `nexus init` | `--trust` | Accept new or changed executable content without asking (not implied by `--yes` / `--force`) |
+| `nexus pull`, `nexus init` | `--trust` | Accept new or changed executable content and activate the repository git hooks without asking (not implied by `--yes` / `--force`) |
 | `nexus push`    | `--name`         | Custom fork name (default: auto-generated)     |
 | `nexus push`    | `--dry-run`      | Show what would be pushed without sending      |
 | `nexus push`    | `--workspace`    | Only push workspace files (default for now)    |
@@ -1296,7 +1296,7 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 - Each project uses exactly one runtime (`agent_owner`: OpenCode or Claude Code); `nexus pull` only writes that runtime's files. Run `nexus link` to see which runtime is configured.
 - Switching `agent_owner` is safe at any time: the next `nexus pull` writes the new runtime's projection and then removes what Nexus had put on disk for the old one (OpenCode: `.opencode/` commands, plugins, install artifacts, the Nexus parts of `opencode.json`; Claude Code: CCX files and hooks, rendered skills and agents, the Nexus keys in `.claude/settings.json`, the Nexus servers in `.mcp.json`, the `CLAUDE.md` managed block). Locally modified Nexus files are kept and listed; `nexus pull --force` removes them too (for OpenCode the whole `.opencode/`). Files Nexus never wrote under `.claude/` and `.claude/settings.local.json` are never touched. Switching back recreates everything.
 - Committed workspace files are protected: when `devbox.json` or a script equals `HEAD`, differs from what Nexus last delivered and the workspace fork has a different version, `nexus pull` keeps it and suggests `nexus diff`, then `nexus push` (publish the committed version) or `nexus pull --force` (take the fork version, with a warning to review `git diff`).
-- If the repo ships `.githooks/pre-commit`, `nexus pull` sets `git config core.hooksPath .githooks` when it is unset (a value set on purpose is never overridden, only hinted) and warns when the hook needs `gitleaks` but it is not installed.
+- If the repo ships `.githooks/pre-commit`, `nexus pull` offers to set `git config core.hooksPath .githooks` when it is unset (a value set on purpose is never overridden, only hinted) and warns when the hook needs `gitleaks` but it is not installed. Hooks run code on every commit, so they are activated only after a confirmation on a terminal (default no) or with `--trust`; a non-interactive pull leaves them inactive and prints how to enable them.
 
 ## Cost Control Tools
 

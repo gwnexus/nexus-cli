@@ -328,6 +328,22 @@ pub fn is_workspace_shadow_active() -> anyhow::Result<bool> {
 /// owner-only permissions, listed in `.git/info/exclude` of the repository
 /// containing `workspace`, and a warning when git already tracks it (an
 /// exclude does not untrack).
+/// The token value to write into `rel`: the token itself, or `reference`
+/// (an environment reference such as `${NEXUS_PRIVATE_TOKEN}`) when git
+/// tracks the file, so a commit cannot publish the token. Says so once per
+/// call.
+pub fn token_for_file(workspace: &Path, rel: &str, token: &str, reference: &str) -> String {
+    let path = workspace.join(rel);
+    if path.is_file() && nexus_core::config::trust::is_git_tracked(&path) {
+        println!(
+            "   {} {rel} is tracked by git: the API token is not written into it (it reads {reference} instead); untrack it with git rm --cached {rel}, then run nexus pull",
+            style("!").bold().red()
+        );
+        return reference.to_string();
+    }
+    token.to_string()
+}
+
 pub fn protect_token_file(workspace: &Path, rel: &str, excludes: &[&str]) {
     let path = workspace.join(rel);
     #[cfg(unix)]

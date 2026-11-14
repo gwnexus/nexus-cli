@@ -841,6 +841,11 @@ fn sync_mcp_credentials(
         if !path.is_file() {
             continue;
         }
+        // Never refresh the token in a file git tracks: a commit would
+        // publish it (`nexus pull` writes an env reference there instead).
+        if nexus_core::config::trust::is_git_tracked(&path) {
+            continue;
+        }
         let raw = fs::read_to_string(&path)?;
         let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) else {
             continue;
@@ -2765,6 +2770,52 @@ mod tests {
         }
         assert!(super::refused_env_var("HEADROOM_MODE", "a\nNODE_OPTIONS=x", false).is_some());
         assert!(super::refused_env_var("HEADROOM_MODE", "a\rb", true).is_some());
+    }
+
+    #[test]
+    fn test_token_stays_out_of_git_tracked_mcp_configs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        let mcp = r#"{"mcpServers":{"nexus":{"command":"npx","env":{"NEXUS_PRIVATE_TOKEN":"${NEXUS_PRIVATE_TOKEN}"}}}}"#;
+        std::fs::write(dir.path().join(".mcp.json"), mcp).unwrap();
+        git(&["add", ".mcp.json"]);
+        let changed = super::sync_mcp_credentials(
+            dir.path(),
+            "https://api.example",
+            "nxs_pat_synthetic",
+            None,
+        )
+        .unwrap();
+        assert!(changed.is_empty());
+        let on_disk = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        assert!(!on_disk.contains("nxs_pat_synthetic"));
+        assert_eq!(
+            super::super::shadow::token_for_file(
+                dir.path(),
+                ".mcp.json",
+                "nxs_pat_synthetic",
+                "${NEXUS_PRIVATE_TOKEN}"
+            ),
+            "${NEXUS_PRIVATE_TOKEN}"
+        );
+        std::fs::write(dir.path().join("opencode.json"), "{}").unwrap();
+        assert_eq!(
+            super::super::shadow::token_for_file(
+                dir.path(),
+                "opencode.json",
+                "nxs_pat_synthetic",
+                "{env:NEXUS_PRIVATE_TOKEN}"
+            ),
+            "nxs_pat_synthetic"
+        );
     }
 
     #[test]

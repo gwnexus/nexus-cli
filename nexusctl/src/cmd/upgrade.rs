@@ -175,7 +175,7 @@ fn detect_installed_version() -> Option<String> {
 /// Download `url` to `path` with curl; `true` on success.
 fn curl_to_file(url: &str, path: &str) -> bool {
     Command::new("curl")
-        .args(["-fsSL", "-o", path, url])
+        .args(["--proto", "=https", "-fsSL", "-o", path, url])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -183,7 +183,10 @@ fn curl_to_file(url: &str, path: &str) -> bool {
 
 /// Fetch a small text resource with curl; `None` if unavailable.
 fn fetch_text(url: &str) -> Option<String> {
-    let output = Command::new("curl").args(["-fsSL", url]).output().ok()?;
+    let output = Command::new("curl")
+        .args(["--proto", "=https", "-fsSL", url])
+        .output()
+        .ok()?;
     output
         .status
         .success()

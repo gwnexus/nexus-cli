@@ -220,14 +220,48 @@ pub fn resolve_token_with_source() -> Option<(String, TokenSource)> {
         }
     }
     if let Ok(local_path) = Credentials::local_path(None) {
-        if let Ok(Some(creds)) = Credentials::load_from(&local_path) {
-            return Some((creds.token, TokenSource::Local));
+        if local_credentials_usable(&local_path) {
+            if let Ok(Some(creds)) = Credentials::load_from(&local_path) {
+                return Some((creds.token, TokenSource::Local));
+            }
         }
     }
     match Credentials::load() {
         Ok(Some(creds)) => Some((creds.token, TokenSource::Global)),
         _ => None,
     }
+}
+
+/// Whether a project-local credentials file may supply the token. A file
+/// tracked by git is ignored (with a warning): it was chosen by whoever
+/// wrote the repository, and using it would send the operator's sessions,
+/// memory and documents to that account. A file readable by others is
+/// tightened to 0600 (Unix).
+fn local_credentials_usable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    if crate::config::trust::is_git_tracked(path) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!(
+                "warning: ignoring {}: it is tracked by git, so the repository chose it; \
+                 using the global login instead (untrack it with git rm --cached)",
+                path.display()
+            );
+        });
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    true
 }
 
 /// Resolve an authentication token, returning an error if none is found.
@@ -242,6 +276,39 @@ pub fn require_token() -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_local_credentials_tracked_by_git_are_ignored() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        let path = dir.path().join(".nexus").join("credentials.toml");
+        creds("nxs_pat_synthetic").save_to(&path).unwrap();
+        assert!(local_credentials_usable(&path));
+        git(&["add", "-f", ".nexus/credentials.toml"]);
+        assert!(!local_credentials_usable(&path));
+        assert!(!local_credentials_usable(&dir.path().join("missing.toml")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_local_credentials_readable_by_others_are_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("credentials.toml");
+        std::fs::write(&path, "token = \"nxs_pat_synthetic\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(local_credentials_usable(&path));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     #[test]
     fn test_mask_token() {

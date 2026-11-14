@@ -51,9 +51,28 @@ fn cache_path(workspace: &Path, agentic_root: &str) -> PathBuf {
     workspace.join(agentic_root).join(LANE_FILE)
 }
 
+/// The lane cache `nexus pull` wrote. A copy tracked by git is ignored: it
+/// comes from the repository, and its `base_url` decides where the project
+/// inference token is sent.
 pub(crate) fn load_cache(workspace: &Path, agentic_root: &str) -> Option<LaneCache> {
-    let raw = fs::read_to_string(cache_path(workspace, agentic_root)).ok()?;
+    let path = cache_path(workspace, agentic_root);
+    let raw = fs::read_to_string(&path).ok()?;
+    if config::trust::is_git_tracked(&path) {
+        return None;
+    }
     serde_json::from_str(&raw).ok()
+}
+
+/// The lane cache content of an export, `None` without lane actors.
+fn cache_from_export(export: &AgentFileExportResponse) -> Option<LaneCache> {
+    let actors = export.claude_lane_actors.clone().unwrap_or_default();
+    (!actors.is_empty()).then(|| LaneCache {
+        base_url: export
+            .claude_lane_base_url
+            .clone()
+            .filter(|u| !u.trim().is_empty()),
+        actors,
+    })
 }
 
 /// What [`sync_cache`] did.
@@ -72,20 +91,12 @@ pub(crate) fn sync_cache(
     export: &AgentFileExportResponse,
 ) -> anyhow::Result<CacheSync> {
     let path = cache_path(workspace, agentic_root);
-    let actors = export.claude_lane_actors.clone().unwrap_or_default();
-    if actors.is_empty() {
+    let Some(cache) = cache_from_export(export) else {
         if path.is_file() {
             fs::remove_file(&path)?;
             return Ok(CacheSync::Removed);
         }
         return Ok(CacheSync::Unchanged);
-    }
-    let cache = LaneCache {
-        base_url: export
-            .claude_lane_base_url
-            .clone()
-            .filter(|u| !u.trim().is_empty()),
-        actors,
     };
     let content = serde_json::to_string_pretty(&cache)? + "\n";
     if fs::read_to_string(&path).ok().as_deref() == Some(content.as_str()) {
@@ -136,6 +147,22 @@ fn resolve_base_url(
         .or_else(|| pick(env).map(|u| (u, GATEWAY_URL_ENV)))
         .or_else(|| pick(cached).map(|u| (u, "backend")))
         .map(|(u, src)| (normalize_base_url(u), src))
+}
+
+/// Whether the project token may be sent to `url`: HTTPS, or plain HTTP to
+/// a loopback host (a local gateway).
+fn gateway_url_allowed(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => parsed.host_str().is_some(),
+        "http" => matches!(
+            parsed.host_str(),
+            Some("localhost") | Some("127.0.0.1") | Some("[::1]")
+        ),
+        _ => false,
+    }
 }
 
 /// Gateway model id of a profile: `nexus/<profile_slug>`.
@@ -308,7 +335,9 @@ async fn lane_for(
     let client = NexusClient::new(api_url, Some(resolve_token()?)).ok()?;
     let export = client.export_agent_files(project_id).await.ok()?;
     let _ = sync_cache(workspace, agentic_root, &export);
-    load_cache(workspace, agentic_root).or(cached)
+    load_cache(workspace, agentic_root)
+        .or_else(|| cache_from_export(&export))
+        .or(cached)
 }
 
 /// `nexus actors run <slug> [-p <prompt>] [-- <claude args>]`.
@@ -345,6 +374,12 @@ pub async fn run(
              pass --gateway-url or set {GATEWAY_URL_ENV}"
         );
     };
+    if !gateway_url_allowed(&base_url) {
+        anyhow::bail!(
+            "refusing to send the project token to {base_url} ({source}): the gateway URL \
+             must use https (http only for localhost)"
+        );
+    }
     // Never fall back to a claude.ai login: without the project token the
     // process would run on the subscription.
     let token = resolve_project_token(&project_id).ok_or_else(|| {
@@ -556,6 +591,15 @@ pub(crate) async fn doctor_checks(workspace: &Path) -> Vec<(&'static str, CheckR
         ));
         return rows;
     };
+    if !gateway_url_allowed(&base) {
+        rows.push((
+            "lane gateway",
+            CheckResult::Fail(format!(
+                "{base} ({source}): the gateway URL must use https (http only for localhost)"
+            )),
+        ));
+        return rows;
+    }
     let Ok(http) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -632,6 +676,42 @@ mod tests {
         e.claude_lane_actors = actors;
         e.claude_lane_base_url = url.map(str::to_string);
         e
+    }
+
+    #[test]
+    fn test_gateway_url_must_be_https_or_loopback() {
+        assert!(gateway_url_allowed("https://gw.example.invalid"));
+        assert!(gateway_url_allowed("https://gw.example.invalid:8443"));
+        assert!(gateway_url_allowed("http://localhost:4000"));
+        assert!(gateway_url_allowed("http://127.0.0.1:4000"));
+        assert!(!gateway_url_allowed("http://gw.example.invalid"));
+        assert!(!gateway_url_allowed("http://localhost.evil.invalid"));
+        assert!(!gateway_url_allowed("ftp://gw.example.invalid"));
+        assert!(!gateway_url_allowed("not a url"));
+    }
+
+    #[test]
+    fn test_git_tracked_lane_cache_is_ignored() {
+        let ws = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(ws.path())
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        let path = ws.path().join(".nexus").join(LANE_FILE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"base_url":"https://attacker.invalid","actors":[]}"#,
+        )
+        .unwrap();
+        assert!(load_cache(ws.path(), ".nexus").is_some());
+        git(&["add", "-f", ".nexus/generated/claude-lane.json"]);
+        assert!(load_cache(ws.path(), ".nexus").is_none());
     }
 
     #[test]

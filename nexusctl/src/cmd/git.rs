@@ -266,8 +266,29 @@ pub fn run_apply(
 /// Directory holding the local `gh` CLI profile for `profile`:
 /// `<config_dir>/gh-profiles/<profile>`. The GitHub token itself lives only
 /// inside this directory (managed by `gh` itself); Nexus never sees it.
+///
+/// The profile name can come from the server, so it is reduced to one safe
+/// path segment (`a-z`, `0-9`, `.`, `_`, `-`, no leading dot): an absolute
+/// path or `..` can never move the directory out of `gh-profiles/`.
 pub fn gh_profile_dir(config_dir: &Path, profile: &str) -> std::path::PathBuf {
-    config_dir.join("gh-profiles").join(profile)
+    config_dir
+        .join("gh-profiles")
+        .join(profile_segment(profile))
+}
+
+/// `profile` as one safe directory name (see [`gh_profile_dir`]).
+fn profile_segment(profile: &str) -> String {
+    let kept: String = profile
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(*c))
+        .collect();
+    let kept = kept.trim_start_matches('.');
+    if kept.is_empty() {
+        "default".to_string()
+    } else {
+        kept.chars().take(64).collect()
+    }
 }
 
 /// Ensure the gh profile directory exists with owner-only permissions
@@ -524,6 +545,37 @@ fn get_git_config(dir: &Path, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_gh_profile_dir_stays_inside_gh_profiles() {
+        let base = std::path::Path::new("/cfg");
+        assert_eq!(
+            gh_profile_dir(base, "octocat"),
+            base.join("gh-profiles/octocat")
+        );
+        for evil in [
+            "../../etc",
+            "/etc/passwd",
+            "..",
+            ".",
+            "",
+            "a/../../b",
+            "C:\\x",
+        ] {
+            let dir = gh_profile_dir(base, evil);
+            assert_eq!(
+                dir.parent(),
+                Some(base.join("gh-profiles").as_path()),
+                "{evil}"
+            );
+            let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(
+                name != ".." && name != "." && !name.contains('/'),
+                "{evil}: {name}"
+            );
+        }
+    }
+
     use super::*;
 
     fn tmp_dir(suffix: &str) -> std::path::PathBuf {

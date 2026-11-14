@@ -221,15 +221,23 @@ pub fn pop(workspace: &Path) -> anyhow::Result<()> {
         anyhow::bail!("Stash metadata not found: {}", meta_path.display());
     };
 
-    // Restore files
+    // Restore files. The stash list is a file in the workspace: every entry
+    // must be a canonical path inside it (no `..`, not absolute, not into
+    // `.git`), or it is skipped.
     for file in &meta.files {
+        if let Err(e) = super::pull::validate_agent_file_target_path(workspace, file) {
+            println!("   {} skipped: {e}", style("!").bold().yellow());
+            continue;
+        }
         let source = latest.join(file);
         let target = workspace.join(file);
-        if source.exists() {
+        if source.is_file() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&source, &target)?;
+            // Read and write instead of fs::copy: no permission bits are
+            // carried over from the stash.
+            fs::write(&target, fs::read(&source)?)?;
         }
     }
 

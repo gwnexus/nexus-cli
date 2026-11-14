@@ -78,11 +78,14 @@ resolve_bin_dir() {
 }
 
 # ── authenticated curl helper ─────────────────────────────────────
+# The token goes to curl on stdin (--config -), never on its command line,
+# where other users of the machine could read it in the process list.
 auth_curl() {
   if [ -n "${GITHUB_TOKEN:-}" ]; then
-    curl -H "Authorization: token ${GITHUB_TOKEN}" "$@"
+    printf 'header = "Authorization: token %s"\n' "$GITHUB_TOKEN" \
+      | curl --proto '=https' --config - "$@"
   else
-    curl "$@"
+    curl --proto '=https' "$@"
   fi
 }
 

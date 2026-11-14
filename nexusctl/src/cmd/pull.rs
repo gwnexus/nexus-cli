@@ -60,13 +60,16 @@ pub fn validate_download_url(url: &str) -> anyhow::Result<()> {
             url.chars().take(80).collect::<String>()
         );
     }
-    // Extract host from https://host/path
-    let host = url
-        .strip_prefix("https://")
-        .and_then(|s| s.split('/').next())
-        .unwrap_or("");
-    // Strip port if present
-    let host_no_port = host.split(':').next().unwrap_or(host);
+    // The host the HTTP client will connect to: parsed like the client
+    // does (WHATWG URL), so `\`, `?`, `#` or `@` tricks cannot make the
+    // check see a different host than the request.
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| anyhow::anyhow!("refusing download: not a valid URL"))?;
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("refusing download: URL must be plain HTTPS without credentials");
+    }
+    let host_no_port = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    let host_no_port = host_no_port.as_str();
 
     if !ALLOWED_DOWNLOAD_HOSTS
         .iter()
@@ -1949,7 +1952,7 @@ pub async fn run(
     }
 
     // Git hook self-heal (v0.28.4): cheap, never fails the pull.
-    super::githooks::run(&workspace);
+    super::githooks::run(&workspace, trust);
 
     consent.finish();
 
@@ -3499,6 +3502,12 @@ fn write_mcp_configs(
                 }
             };
 
+            let file_token = super::shadow::token_for_file(
+                workspace,
+                "opencode.json",
+                token,
+                "{env:NEXUS_PRIVATE_TOKEN}",
+            );
             mcp_block.insert(
                 "nexus".to_string(),
                 serde_json::json!({
@@ -3506,7 +3515,7 @@ fn write_mcp_configs(
                     "command": nexus_command,
                     "environment": {
                         "NEXUS_API_URL": api_url,
-                        "NEXUS_PRIVATE_TOKEN": token,
+                        "NEXUS_PRIVATE_TOKEN": file_token,
                         "NEXUS_PROJECT_ID": project_id
                     }
                 }),
@@ -3700,6 +3709,12 @@ fn write_mcp_configs(
                 McpSource::Npm => ("npx", vec!["--yes", "@gwdn/nexus-mcp@latest"]),
                 McpSource::Local => ("node", vec!["tools/nexus-mcp/dist/server.js"]),
             };
+            let file_token = super::shadow::token_for_file(
+                workspace,
+                ".mcp.json",
+                token,
+                "${NEXUS_PRIVATE_TOKEN}",
+            );
             servers_block.insert(
                 "nexus".to_string(),
                 serde_json::json!({
@@ -3707,7 +3722,7 @@ fn write_mcp_configs(
                     "args": args,
                     "env": {
                         "NEXUS_API_URL": api_url,
-                        "NEXUS_PRIVATE_TOKEN": token,
+                        "NEXUS_PRIVATE_TOKEN": file_token,
                         "NEXUS_PROJECT_ID": project_id
                     }
                 }),
@@ -3859,7 +3874,9 @@ command_slug: {command_slug}
         name = skill.skill_id,
         description = claude_render::yaml_escape(skill.description.as_deref().unwrap_or("")),
         version = skill.version,
-        command_slug = skill.command_slug.as_deref().unwrap_or("none"),
+        command_slug = super::claude_render::yaml_plain_or_quoted(
+            skill.command_slug.as_deref().unwrap_or("none")
+        ),
         invocation = claude_render::invocation_frontmatter(skill),
         body = body,
     );
@@ -5875,6 +5892,24 @@ mod tests {
     // -- write_agent_file tests --
 
     // -- validate_agent_file_target_path (path hardening) --
+
+    #[test]
+    fn test_validate_download_url_uses_the_real_host() {
+        assert!(validate_download_url("https://raw.githubusercontent.com/o/r/main/p.ts").is_ok());
+        assert!(validate_download_url("https://cdn.gatewarden.eu/x.svg").is_ok());
+        for url in [
+            "http://raw.githubusercontent.com/x",
+            "https://evil.example\\.githubusercontent.com/x",
+            "https://evil.example?.github.com/x",
+            "https://evil.example#.github.com/x",
+            "https://github.com@evil.example/x",
+            "https://user:pw@github.com/x",
+            "https://notgithub.com/x",
+            "not a url",
+        ] {
+            assert!(validate_download_url(url).is_err(), "{url}");
+        }
+    }
 
     #[test]
     fn test_validate_target_path_accepts_plain_relative_path() {

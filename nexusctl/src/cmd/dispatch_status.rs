@@ -478,8 +478,25 @@ fn status_short(status: &str) -> &str {
     }
 }
 
-/// Pad or cut to exactly `width` characters.
+/// Text from the hub or a peer project as printable text: control
+/// characters (escape sequences, line breaks) and bidi controls become
+/// spaces, so a title cannot move the cursor, rewrite rows or set the
+/// clipboard of the terminal.
+fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{2028}' | '\u{2029}' | '\u{200e}' | '\u{200f}' => ' ',
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => ' ',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect()
+}
+
+/// Pad or cut to exactly `width` characters (made [`printable`] first).
 fn fit(s: &str, width: usize) -> String {
+    let s = printable(s);
+    let s = s.as_str();
     // `truncate_str` also cuts a string of exactly `width` characters.
     if console::measure_text_width(s) <= width {
         return format!("{s:<width$}");
@@ -682,7 +699,7 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
             tone_style(fit(&r.status, 21), status_tone(r)),
             age(Some(&r.created_at), now),
             age(r.updated_at.as_deref(), now),
-            sim(r, r.title.clone())
+            sim(r, printable(&r.title))
         ));
     }
     lines.push(String::new());
@@ -745,7 +762,7 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
             sim(r, fit(&r.peer, 10)),
             tone_style(fit(status_short(&r.status), 4), status_tone(r)),
             age(r.updated_at.as_deref().or(Some(&r.created_at)), now),
-            sim(r, r.title.clone())
+            sim(r, printable(&r.title))
         ));
     }
     for p in &snap.peers {
@@ -1664,6 +1681,8 @@ mod tests {
     #[test]
     fn test_fit_keeps_an_exact_width() {
         assert_eq!(fit("prog", 4), "prog");
+        assert_eq!(fit("a\u{1b}]52;c;x\u{7}b", 12), "a ]52;c;x b ");
+        assert_eq!(printable("t\u{1b}[2Jx\ny\u{202e}z"), "t [2Jx y z");
         assert_eq!(fit("ack", 4), "ack ");
         assert_eq!(fit("progress", 4), "pro…");
     }
