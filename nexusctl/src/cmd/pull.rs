@@ -152,9 +152,21 @@ pub fn validate_agent_file_target_path(workspace: &Path, target_path: &str) -> a
     if target_path.trim().is_empty() || target_path.contains(['\0', '\n', '\r']) {
         anyhow::bail!("refusing to write: target_path {target_path:?} is empty or malformed");
     }
+    // Only the canonical spelling is accepted: string-based checks downstream
+    // (consent classification, protected and runtime paths) compare exact
+    // paths, so `./x`, `a//b`, `a/./b`, a trailing `/` or a backslash would
+    // let the same file slip past them under another name.
+    // `..` and absolute paths are refused below with their own message.
+    let non_canonical = target_path.contains('\\')
+        || target_path
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == ".");
+    if non_canonical && !target_path.starts_with('/') {
+        anyhow::bail!("refusing to write: target_path {target_path:?} is not in canonical form");
+    }
     for component in normalized.components() {
         match component {
-            std::path::Component::Normal(seg) if seg == ".git" => {
+            std::path::Component::Normal(seg) if is_git_dir_name(&seg.to_string_lossy()) => {
                 anyhow::bail!(
                     "refusing to write: target_path '{}' points into .git",
                     target_path
@@ -187,7 +199,7 @@ pub fn validate_agent_file_target_path(workspace: &Path, target_path: &str) -> a
     }
     if escapes_via_symlink(workspace, &normalized_joined) {
         anyhow::bail!(
-            "refusing to write: target_path '{}' resolves outside the workspace through a symlink",
+            "refusing to write: target_path '{}' resolves outside the workspace or into .git through a symlink",
             target_path
         );
     }
@@ -195,18 +207,30 @@ pub fn validate_agent_file_target_path(workspace: &Path, target_path: &str) -> a
     Ok(())
 }
 
+/// Whether a path segment names a git directory on any supported file
+/// system: `.git` in any letter case (case-insensitive macOS and Windows),
+/// with the trailing dots or spaces Windows strips, or as its 8.3 short
+/// name `GIT~1`.
+fn is_git_dir_name(seg: &str) -> bool {
+    let trimmed = seg.trim_end_matches(['.', ' ']);
+    let lower = if trimmed.is_empty() { seg } else { trimmed }.to_ascii_lowercase();
+    lower == ".git" || lower == "git~1"
+}
+
 /// Whether the deepest existing ancestor of `joined` (or `joined` itself)
-/// resolves outside `workspace`. A workspace that cannot be resolved is not
-/// checked (nothing to compare against).
+/// resolves outside `workspace`, or into the workspace's `.git` directory
+/// through an in-workspace symlink. A workspace that cannot be resolved is
+/// not checked (nothing to compare against).
 fn escapes_via_symlink(workspace: &Path, joined: &Path) -> bool {
     let Ok(root) = fs::canonicalize(workspace) else {
         return false;
     };
+    let git_dir = root.join(".git");
     let mut probe = Some(joined);
     while let Some(p) = probe {
         if fs::symlink_metadata(p).is_ok() {
             return match fs::canonicalize(p) {
-                Ok(real) => !real.starts_with(&root),
+                Ok(real) => !real.starts_with(&root) || real.starts_with(&git_dir),
                 // A dangling symlink: refuse, its target is unknown.
                 Err(_) => true,
             };
@@ -417,7 +441,15 @@ pub(crate) fn write_plugin_env_file(
     // written (a key like `A=B` or `X;Y` would break both files).
     let mut sorted: Vec<(&String, &String)> = Vec::new();
     for (k, v) in plugin_env {
-        if is_env_key(k) {
+        // Both files are exported into the agent's shell (`nexus run`, the
+        // devbox init hook): the same rules as for `nexus run` apply.
+        if let Some(reason) = super::run::refused_env_var(k, v, false) {
+            println!(
+                "   {} plugin env key {:?} skipped ({reason})",
+                style("!").bold().yellow(),
+                k
+            );
+        } else if is_env_key(k) {
             sorted.push((k, v));
         } else {
             println!(
@@ -5870,9 +5902,46 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_target_path_accepts_dot_slash_prefix() {
+    fn test_validate_target_path_rejects_non_canonical_spellings() {
+        // Consent and protected-path checks compare exact strings, so every
+        // alternative spelling of a path must be refused before it is written.
         let ws = Path::new("/home/user/project");
-        assert!(validate_agent_file_target_path(ws, "./AGENTS.md").is_ok());
+        for p in [
+            "./AGENTS.md",
+            "./.claude/settings.local.json",
+            ".claude//settings.local.json",
+            ".claude/./settings.local.json",
+            ".claude/hooks/",
+            ".claude\\settings.local.json",
+        ] {
+            assert!(validate_agent_file_target_path(ws, p).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn test_validate_target_path_rejects_git_dir_in_any_case() {
+        let ws = Path::new("/home/user/project");
+        for p in [
+            ".GIT/config",
+            "sub/.Git/hooks/x",
+            ".git./config",
+            ".git /config",
+            "GIT~1/config",
+        ] {
+            assert!(validate_agent_file_target_path(ws, p).is_err(), "{p}");
+        }
+        assert!(validate_agent_file_target_path(ws, ".gitignore").is_ok());
+        assert!(validate_agent_file_target_path(ws, ".github/x.yml").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_target_path_rejects_symlink_into_git_dir() {
+        let ws = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(ws.path().join(".git/hooks")).unwrap();
+        std::os::unix::fs::symlink(ws.path().join(".git"), ws.path().join("meta")).unwrap();
+        assert!(validate_agent_file_target_path(ws.path(), "meta/hooks/post-merge").is_err());
+        assert!(validate_agent_file_target_path(ws.path(), "meta").is_err());
     }
 
     #[test]
@@ -8225,7 +8294,12 @@ mod tests {
             .unwrap()
             .split_terminator('\0')
             .collect();
-        let expected: Vec<&str> = hostile.iter().map(|(_, v)| v.as_str()).collect();
+        // Values with a line break are refused (they would add lines to
+        // `.nexus/env`); the variable stays unset, so it prints empty.
+        let expected: Vec<&str> = hostile
+            .iter()
+            .map(|(_, v)| if v.contains('\n') { "" } else { v.as_str() })
+            .collect();
         assert_eq!(values, expected);
         // .nexus/env skips the invalid keys too.
         let env_file = fs::read_to_string(dir.join(".nexus/env")).unwrap();

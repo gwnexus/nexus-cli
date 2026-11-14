@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Agent-file paths must be canonical.** Paths from the platform are only written in their canonical spelling: `./x`, `a//b`, `a/./b`, a trailing `/` and backslashes are refused, so a runnable file (settings, hooks, MCP configs) can no longer reach disk under another spelling without the consent prompt. Consent classification ignores letter case, matching case-insensitive file systems.
+- **No writes into `.git` in any spelling.** `.git` is recognised in any letter case and in its Windows variants (`.git.`, `GIT~1`), and a symlink inside the workspace that resolves into `.git` is refused.
+- **`[plugins]` in `.nexus/config.toml` stay inside the workspace.** A plugin `filename` must be a plain file name (no path), and a `source = "local"` plugin must resolve, after symlinks, to a regular file inside the workspace and outside `.git`. Local plugins are copied without their executable bit.
+- **Environment variables from env files and the platform are filtered.** `nexus run`, `.nexus/env` and `.nexus/plugin.env` never take variables that change how processes load code or which endpoints and certificates they trust (`NODE_OPTIONS`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `PYTHON*`, `PERL5*`, `RUBY*` settings, every `LD_*`, `DYLD_*` and `GIT_*` variable, proxy and CA variables), nor `NEXUS_API_URL`, `NEXUS_TRUSTED_API_URLS`, `NEXUS_PRIVATE_TOKEN` and `NEXUS_GATEWAY_URL`. Values with a line break are refused. Each skipped variable is reported with the reason.
+
+### Changed
+- **Model endpoint variables only from `.env.nexus.local`.** `ANTHROPIC_*` and `*_BASE_URL` variables are taken from the operator's own `.env.nexus.local`, no longer from platform plugin defaults or `.nexus/env`.
+- **Tracked env files are ignored.** When git tracks `.nexus/env` or `.env.nexus.local`, `nexus run` ignores the file with a warning; both files are meant to stay local.
+- **Env file keys are validated.** Lines whose key is not a valid variable name are skipped when an env file is read.
+
+### Tests
+- New tests for non-canonical and case-variant paths, symlinks into `.git`, plugin file names and local sources outside the workspace, the dropped executable bit, the environment variable filter per source, tracked env files and invalid env keys.
+
 ## [0.40.3] - 2026-11-12
 
 ### Fixed

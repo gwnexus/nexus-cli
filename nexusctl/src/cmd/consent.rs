@@ -148,7 +148,15 @@ fn is_script(path: &str, body: &str) -> bool {
 }
 
 /// The kind of an agent file that lands in a runnable location, if any.
+///
+/// Compared case-insensitively: on case-insensitive file systems (macOS,
+/// Windows) `.CLAUDE/settings.json` is the same file as
+/// `.claude/settings.json` and must need the same consent. Non-canonical
+/// spellings (`./x`, `a//b`) are refused by the path validator before any
+/// write.
 fn agent_file_kind(path: &str, body: &str) -> Option<Kind> {
+    let lower = path.to_ascii_lowercase();
+    let path = lower.as_str();
     if path.ends_with(".kdl") {
         return Some(Kind::ZellijLayout);
     }
@@ -1421,6 +1429,18 @@ mod tests {
         assert!(is_script("tool", "#!/bin/sh\n"));
         assert!(!is_script("README.md", "# hi"));
         assert_eq!(agent_file_kind("a/b.kdl", ""), Some(Kind::ZellijLayout));
+        assert_eq!(
+            agent_file_kind(".CLAUDE/Settings.Local.json", "{}"),
+            Some(Kind::AgentScript)
+        );
+        assert_eq!(
+            agent_file_kind(".Claude/hooks/x", ""),
+            Some(Kind::AgentScript)
+        );
+        assert_eq!(
+            agent_file_kind("Opencode.JSON", "{}"),
+            Some(Kind::AgentScript)
+        );
         assert_eq!(
             agent_file_kind(".opencode/plugins/x.ts", ""),
             Some(Kind::OpencodePlugin)

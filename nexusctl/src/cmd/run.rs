@@ -255,8 +255,11 @@ pub async fn run(
     let mut run_target = config::load_run_target(Some(&workspace));
 
     // ── 1. Load .nexus/env (plugin defaults from last pull) ────────────────
+    // Both env files are written locally (by `nexus pull` and by the user);
+    // a copy tracked by git was chosen by whoever wrote the repository and
+    // is ignored.
     let env_file_path = workspace.join(&agentic_root).join("env");
-    let mut plugin_env = parse_env_file(&env_file_path);
+    let mut plugin_env = untracked_env_file(&env_file_path);
 
     // ── 2. If !--no-db, refresh from af_export (fresher than file) ─────────
     // Also fetch the effective gh profile (af_export does not carry it) so
@@ -308,7 +311,7 @@ pub async fn run(
     }
 
     // ── 3. Load .env.nexus.local (secrets override plugin defaults) ─────────
-    let secrets_map = parse_env_file(&workspace.join(".env.nexus.local"));
+    let secrets_map = untracked_env_file(&workspace.join(".env.nexus.local"));
     for (k, v) in &secrets_map {
         plugin_env.insert(k.clone(), v.clone());
     }
@@ -325,11 +328,19 @@ pub async fn run(
         if env::var(key).is_ok() {
             skipped.push(key.clone());
         } else {
-            let source = if secrets_map.contains_key(key) {
+            let from_user = secrets_map.get(key) == Some(value);
+            let source = if from_user {
                 ".env.nexus.local"
             } else {
                 ".nexus/env"
             };
+            if let Some(reason) = refused_env_var(key, value, from_user) {
+                eprintln!(
+                    "  \x1b[33mwarning:\x1b[0m skipping env var '{}' from {}: {}",
+                    key, source, reason
+                );
+                continue;
+            }
             to_inject.push((key.clone(), value.clone(), source));
         }
     }
@@ -642,29 +653,8 @@ pub async fn run(
         );
     }
 
-    // ── 7. Inject env vars (with denylist for dangerous variables) ────────────
-    const DENIED_ENV_VARS: &[&str] = &[
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "PATH",
-        "HOME",
-        "SHELL",
-        "USER",
-        "LOGNAME",
-        "TMPDIR",
-        "XDG_RUNTIME_DIR",
-    ];
-
+    // ── 7. Inject env vars (filtered in step 4 by `refused_env_var`) ─────────
     for (key, value, _) in &to_inject {
-        if DENIED_ENV_VARS.iter().any(|&d| d.eq_ignore_ascii_case(key)) {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m skipping denied env var '{}' from file source",
-                key
-            );
-            continue;
-        }
         env::set_var(key, value);
     }
 
@@ -2577,6 +2567,90 @@ fn iso8601_to_unix_secs(s: &str) -> Option<u64> {
 
 /// Parse a `KEY=value` env file. Skips blank lines and `#` comments.
 /// Strips optional `export ` prefix and surrounding `"` / `'` quotes.
+/// Variables that change how a process loads code, which network endpoints
+/// and certificates it trusts, or where Nexus credentials go. None of them
+/// is taken from an env file or from the platform's plugin env: `nexus run`
+/// exports these into the shell that starts the agent tool, its hooks and
+/// MCP servers.
+const REFUSED_ENV_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "SHELL",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "IFS",
+    "ENV",
+    "BASH_ENV",
+    "ZDOTDIR",
+    "PROMPT_COMMAND",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "NEXUS_API_URL",
+    "NEXUS_TRUSTED_API_URLS",
+    "NEXUS_PRIVATE_TOKEN",
+    "NEXUS_GATEWAY_URL",
+];
+
+/// Prefixes refused for the same reason (dynamic loader, git's own
+/// configuration and command hooks).
+const REFUSED_ENV_PREFIXES: &[&str] = &["LD_", "DYLD_", "GIT_"];
+
+/// Why `key=value` must not be exported, or `None` when it may be.
+///
+/// `from_user` marks a value from the operator's own `.env.nexus.local`:
+/// it may point the model client elsewhere (`ANTHROPIC_*`, `*_BASE_URL`),
+/// which platform defaults in `.nexus/env` may not.
+pub(crate) fn refused_env_var(key: &str, value: &str, from_user: bool) -> Option<&'static str> {
+    if value.contains(['\n', '\r', '\0']) {
+        return Some("value contains a line break or NUL");
+    }
+    let upper = key.to_ascii_uppercase();
+    if REFUSED_ENV_VARS.contains(&upper.as_str())
+        || REFUSED_ENV_PREFIXES.iter().any(|p| upper.starts_with(p))
+    {
+        return Some("variable controls code loading, network trust or credentials");
+    }
+    if !from_user && (upper.starts_with("ANTHROPIC_") || upper.ends_with("_BASE_URL")) {
+        return Some(
+            "model endpoint and credential variables are only taken from .env.nexus.local",
+        );
+    }
+    None
+}
+
+/// [`parse_env_file`], or an empty map with a warning when git tracks the
+/// file (the repository, not the operator, chose its content).
+fn untracked_env_file(path: &Path) -> HashMap<String, String> {
+    if path.is_file() && nexus_core::config::trust::is_git_tracked(path) {
+        eprintln!(
+            "  \x1b[33mwarning:\x1b[0m ignoring {}: it is tracked by git; keep env files local",
+            path.display()
+        );
+        return HashMap::new();
+    }
+    parse_env_file(path)
+}
+
 pub(crate) fn parse_env_file(path: &Path) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let Ok(content) = fs::read_to_string(path) else {
@@ -2596,7 +2670,12 @@ pub(crate) fn parse_env_file(path: &Path) -> HashMap<String, String> {
                 .and_then(|v| v.strip_suffix('"'))
                 .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
                 .unwrap_or(value);
-            if !key.is_empty() {
+            let valid_key = key
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if valid_key {
                 map.insert(key, value.to_string());
             }
         }
@@ -2628,6 +2707,82 @@ fn resolve_project_name(workspace: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_refused_env_var_blocks_code_loading_and_credential_redirects() {
+        for key in [
+            "NODE_OPTIONS",
+            "node_options",
+            "BASH_ENV",
+            "GIT_SSH_COMMAND",
+            "GIT_CONFIG_COUNT",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "NEXUS_API_URL",
+            "NEXUS_TRUSTED_API_URLS",
+            "NEXUS_PRIVATE_TOKEN",
+            "HTTPS_PROXY",
+            "SSL_CERT_FILE",
+            "PATH",
+        ] {
+            assert!(super::refused_env_var(key, "x", true).is_some(), "{key}");
+            assert!(super::refused_env_var(key, "x", false).is_some(), "{key}");
+        }
+    }
+
+    #[test]
+    fn test_refused_env_var_model_endpoints_only_from_user_secrets() {
+        for key in ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"] {
+            assert!(super::refused_env_var(key, "x", false).is_some(), "{key}");
+            assert!(super::refused_env_var(key, "x", true).is_none(), "{key}");
+        }
+    }
+
+    #[test]
+    fn test_refused_env_var_allows_plugin_settings_and_rejects_line_breaks() {
+        for key in [
+            "HEADROOM_MODE",
+            "NEXUS_SEC_OPENAI_API_KEY",
+            "SENTRY_ACCESS_TOKEN",
+            "OPENAI_API_KEY",
+        ] {
+            assert!(
+                super::refused_env_var(key, "transform", false).is_none(),
+                "{key}"
+            );
+        }
+        assert!(super::refused_env_var("HEADROOM_MODE", "a\nNODE_OPTIONS=x", false).is_some());
+        assert!(super::refused_env_var("HEADROOM_MODE", "a\rb", true).is_some());
+    }
+
+    #[test]
+    fn test_untracked_env_file_ignores_a_git_tracked_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        let env = dir.path().join("env");
+        std::fs::write(&env, "HEADROOM_MODE=transform\n").unwrap();
+        assert_eq!(super::untracked_env_file(&env).len(), 1);
+        git(&["add", "env"]);
+        assert!(super::untracked_env_file(&env).is_empty());
+    }
+
+    #[test]
+    fn test_parse_env_file_drops_invalid_keys() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let env = dir.path().join("env");
+        std::fs::write(&env, "GOOD=1\nBAD KEY=2\nA;B=3\n9X=4\n").unwrap();
+        let map = super::parse_env_file(&env);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map["GOOD"], "1");
+    }
+
     use super::*;
 
     #[test]

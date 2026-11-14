@@ -1658,6 +1658,16 @@ pub fn resolve_platform_plugins(slugs: &[String]) -> HashMap<String, PluginDef> 
         .collect()
 }
 
+/// The source file of a `source = "local"` plugin: `path` (relative to
+/// `workspace`, or absolute) must resolve, after following symlinks, to a
+/// regular file inside `workspace` and outside its `.git` directory.
+fn local_plugin_source(workspace: &Path, path: &str) -> Option<PathBuf> {
+    let root = fs::canonicalize(workspace).ok()?;
+    let real = fs::canonicalize(workspace.join(path)).ok()?;
+    (real.starts_with(&root) && !real.starts_with(root.join(".git")) && real.is_file())
+        .then_some(real)
+}
+
 /// Install plugins from `[plugins]` config into `.opencode/plugins/`.
 ///
 /// Supports `source = "github-raw"` (downloads via HTTP) and
@@ -1683,6 +1693,21 @@ async fn install_plugins(
             }
         });
 
+        // `.nexus/config.toml` may be tracked by the repository, so the
+        // filename is untrusted: one plain file name, nothing that could
+        // traverse out of `.opencode/plugins/` (e.g. into `.git/hooks/`).
+        let rel = format!(".opencode/plugins/{filename}");
+        if !super::pull::valid_path_segment(&filename)
+            || super::pull::validate_agent_file_target_path(target, &rel).is_err()
+        {
+            println!(
+                "   {} Plugin '{}' skipped: unsafe file name {:?}",
+                style("!").bold().yellow(),
+                name,
+                filename
+            );
+            continue;
+        }
         let dest = plugins_dir.join(&filename);
 
         match def.source.as_str() {
@@ -1736,9 +1761,21 @@ async fn install_plugins(
             }
             "local" => {
                 if let Some(ref path) = def.path {
-                    let src = PathBuf::from(path);
-                    if src.exists() {
-                        fs::copy(&src, &dest)?;
+                    // Only files inside the workspace: a tracked config must
+                    // not pull e.g. `~/.ssh` keys into the repository.
+                    let Some(src) = local_plugin_source(target, path) else {
+                        println!(
+                            "   {} Plugin '{}' skipped: local path {:?} is not a file inside the workspace",
+                            style("!").bold().yellow(),
+                            name,
+                            path,
+                        );
+                        continue;
+                    };
+                    if src.is_file() {
+                        // Read and write instead of fs::copy, so the source's
+                        // permission bits (an executable bit) are not carried over.
+                        fs::write(&dest, fs::read(&src)?)?;
                         println!(
                             "   {} .opencode/plugins/{} (copied from local)",
                             style("+").bold().green(),
@@ -2724,6 +2761,70 @@ mod tests {
         assert_eq!(content, "// plugin content");
 
         // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_install_plugins_refuses_traversal_and_outside_sources() {
+        let dir = temp_project_dir("install-plugins-unsafe");
+        fs::create_dir_all(dir.join(".git/hooks")).unwrap();
+        fs::write(dir.join("hook.sh"), "#!/bin/sh\necho pwned\n").unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("id_ed25519");
+        fs::write(&secret, "not a real key").unwrap();
+
+        let def = |path: &str, filename: &str| nexus_core::config::PluginDef {
+            source: "local".to_string(),
+            url: None,
+            path: Some(path.to_string()),
+            filename: Some(filename.to_string()),
+        };
+        let mut plugins = HashMap::new();
+        plugins.insert(
+            "hook".to_string(),
+            def("hook.sh", "../../.git/hooks/post-merge"),
+        );
+        plugins.insert("abs".to_string(), def("hook.sh", "/tmp/evil.ts"));
+        plugins.insert(
+            "steal".to_string(),
+            def(secret.to_str().unwrap(), "stolen.ts"),
+        );
+        plugins.insert("rel-out".to_string(), def("../outside.ts", "rel.ts"));
+
+        install_plugins(&dir, &plugins).await.unwrap();
+
+        assert!(!dir.join(".git/hooks/post-merge").exists());
+        assert!(!dir.join(".opencode/plugins/stolen.ts").exists());
+        assert!(!dir.join(".opencode/plugins/rel.ts").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_install_plugins_local_copy_drops_exec_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_project_dir("install-plugins-mode");
+        let src = dir.join("tools/p.ts");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, "// p").unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut plugins = HashMap::new();
+        plugins.insert(
+            "p".to_string(),
+            nexus_core::config::PluginDef {
+                source: "local".to_string(),
+                url: None,
+                path: Some("tools/p.ts".to_string()),
+                filename: Some("p.ts".to_string()),
+            },
+        );
+        install_plugins(&dir, &plugins).await.unwrap();
+        let mode = fs::metadata(dir.join(".opencode/plugins/p.ts"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0);
         let _ = fs::remove_dir_all(&dir);
     }
 
