@@ -255,6 +255,9 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     RunnerAction::Pause => dispatch_runner::control(&api_url, "pause").await?,
                     RunnerAction::Resume => dispatch_runner::control(&api_url, "resume").await?,
                     RunnerAction::Revoke => dispatch_runner::control(&api_url, "revoke").await?,
+                    RunnerAction::Titles { state } => {
+                        dispatch_runner::set_notice_titles(&api_url, state == "on")?
+                    }
                     RunnerAction::Probe { json } => dispatch_runner::probe(*json)?,
                 },
                 DispatchAction::Listen {

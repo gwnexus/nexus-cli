@@ -56,6 +56,11 @@ pub(crate) struct RunnerFile {
     pub project_names: BTreeMap<String, String>,
     #[serde(default)]
     pub runtimes: Vec<RunnerRuntime>,
+    /// Quote the sender's title in notices (fenced as untrusted data). Off
+    /// by default: a notice then holds only checked fields and needs no
+    /// fence.
+    #[serde(default)]
+    pub notice_titles: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,6 +466,10 @@ pub async fn register(api_url: &str, opts: RegisterOptions<'_>) -> anyhow::Resul
         projects,
         project_names: names,
         runtimes: vec![probe.runtime()],
+        notice_titles: previous
+            .as_ref()
+            .filter(|p| same_hub(&p.api_url, api_url))
+            .is_some_and(|p| p.notice_titles),
     };
     save_runner_file(&path, &file)?;
     if paths.runner_file != path {
@@ -703,6 +712,27 @@ pub async fn control(api_url: &str, action: &str) -> anyhow::Result<()> {
             file.runner_id
         ),
     }
+    Ok(())
+}
+
+/// `nexus dispatch runner titles on|off`: whether notices quote the
+/// sender's title. Local only; a running listener picks it up on restart.
+pub fn set_notice_titles(api_url: &str, on: bool) -> anyhow::Result<()> {
+    let (path, mut file) = require_runner(api_url)?;
+    file.notice_titles = on;
+    save_runner_file(&path, &file)?;
+    if on {
+        println!(
+            "{} notices quote the sender's title, fenced as untrusted data",
+            style("On:").yellow().bold()
+        );
+    } else {
+        println!(
+            "{} notices hold only the Dispatch id, peer, type, priority and status",
+            style("Off:").green().bold()
+        );
+    }
+    println!("Restart 'nexus dispatch listen' (or the dispatches pane) to apply it.");
     Ok(())
 }
 

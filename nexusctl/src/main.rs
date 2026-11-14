@@ -658,8 +658,8 @@ pub enum DispatchAction {
 
     /// Manage this machine's Dispatch runner
     ///
-    /// Register, status, pause, resume, revoke, and the Claude Code
-    /// capability probe.
+    /// Register, status, pause, resume, revoke, notice titles and the
+    /// Claude Code capability probe.
     Runner {
         #[command(subcommand)]
         action: RunnerAction,
@@ -737,6 +737,19 @@ pub enum RunnerAction {
 
     /// Revoke the runner on the hub and remove the local token file.
     Revoke,
+
+    /// Quote the sender's title in notices (on) or not (off)
+    ///
+    /// Off by default: a notice then holds only the Dispatch id, the peer
+    /// project, type, priority and status, all reduced to a fixed character
+    /// set, and goes into the session as one plain line. On adds the title
+    /// another project wrote, fenced as untrusted data. Stored in the local
+    /// runner file; restart the listener to apply it.
+    Titles {
+        /// on or off.
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
 
     /// Check whether Claude Code accepts session notices
     ///
