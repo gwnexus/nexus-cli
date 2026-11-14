@@ -334,8 +334,18 @@ pub enum Command {
         action: ConfigAction,
     },
 
-    /// Run preflight checks to verify environment readiness.
-    Preflight,
+    /// Run preflight checks to verify environment readiness
+    ///
+    /// Checks tools, configuration, login and workspace, the environment
+    /// variables and settings the project's plugins need (decided locally;
+    /// no variable names or values are sent to the Nexus API), and, for the
+    /// Sentry developer tool, whether the local token reaches the Sentry
+    /// organization.
+    Preflight {
+        /// Skip the live check against developer tool APIs (Sentry)
+        #[arg(long)]
+        no_live: bool,
+    },
 
     /// Upgrade the Nexus CLI to the latest release version.
     Upgrade,
@@ -2258,7 +2268,7 @@ mod tests {
     #[test]
     fn test_parse_preflight() {
         let cli = Cli::try_parse_from(["nexus", "preflight"]).unwrap();
-        assert!(matches!(cli.command, Command::Preflight));
+        assert!(matches!(cli.command, Command::Preflight { no_live: false }));
     }
 
     #[test]

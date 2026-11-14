@@ -189,6 +189,100 @@ fn tidy_version(tool: &str, raw: &str) -> String {
 
 /// `nexus doctor claude [--fix]`. Returns the exit code: 1 when a required
 /// tool is missing.
+/// An MCP server started from a package runner (`npx`, `bunx`, `pnpm dlx`,
+/// `uvx`), with the package version it pins.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct McpPackage {
+    pub server: String,
+    pub package: String,
+    /// The version after `@` (`0.42.0`, `latest`), `None` without one.
+    pub version: Option<String>,
+    /// Whether `version` is an exact version (starts with a digit).
+    pub pinned: bool,
+    pub file: String,
+}
+
+/// `name@version` or `@scope/name@version` split into name and version.
+fn split_package(spec: &str) -> (String, Option<String>) {
+    let (scope_at, rest) = match spec.strip_prefix('@') {
+        Some(r) => ("@", r),
+        None => ("", spec),
+    };
+    match rest.split_once('@') {
+        Some((name, v)) if !v.is_empty() => (format!("{scope_at}{name}"), Some(v.to_string())),
+        _ => (spec.trim_end_matches('@').to_string(), None),
+    }
+}
+
+/// The package an MCP server's argv runs, if it starts a package runner.
+fn package_of(argv: &[String]) -> Option<(String, Option<String>)> {
+    let runner = argv.first()?.rsplit('/').next()?;
+    let rest: &[String] = match runner {
+        "npx" | "bunx" | "uvx" => &argv[1..],
+        "pnpm" | "yarn" if argv.get(1).map(String::as_str) == Some("dlx") => &argv[2..],
+        _ => return None,
+    };
+    let spec = rest.iter().find(|a| !a.starts_with('-'))?;
+    Some(split_package(spec))
+}
+
+/// MCP servers of `.mcp.json` (`mcpServers`, `command` + `args`) and
+/// `opencode.json` (`mcp`, `command` array) that run a package.
+pub fn mcp_packages(workspace: &Path) -> Vec<McpPackage> {
+    let mut out = Vec::new();
+    for (file, key) in [(".mcp.json", "mcpServers"), ("opencode.json", "mcp")] {
+        let Ok(text) = std::fs::read_to_string(workspace.join(file)) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(servers) = doc.get(key).and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for (name, cfg) in servers {
+            let strings = |v: Option<&serde_json::Value>| -> Vec<String> {
+                match v {
+                    Some(serde_json::Value::String(s)) => vec![s.clone()],
+                    Some(serde_json::Value::Array(a)) => a
+                        .iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            };
+            let mut argv = strings(cfg.get("command"));
+            argv.extend(strings(cfg.get("args")));
+            if let Some((package, version)) = package_of(&argv) {
+                let pinned = version
+                    .as_deref()
+                    .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()));
+                out.push(McpPackage {
+                    server: name.clone(),
+                    package,
+                    version,
+                    pinned,
+                    file: file.to_string(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The doctor line of one package-run MCP server.
+fn mcp_package_row(p: &McpPackage) -> CheckResult {
+    match (&p.version, p.pinned) {
+        (Some(v), true) => CheckResult::Pass(format!("{} {v} ({})", p.package, p.file)),
+        (v, _) => CheckResult::Info(format!(
+            "{} {} ({}): not pinned to a version",
+            p.package,
+            v.as_deref().unwrap_or("(no version)"),
+            p.file
+        )),
+    }
+}
+
 pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> anyhow::Result<i32> {
     let workspace = std::env::current_dir()?;
 
@@ -237,6 +331,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
             (super::zellij_clipboard::check(&t, &host), t, host)
         });
     let lane_rows = super::lane::doctor_checks(&workspace).await;
+    let packages = mcp_packages(&workspace);
     // The project's zellij session and other exited (resurrectable) ones.
     let project_session = run_target
         .as_ref()
@@ -296,6 +391,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                     "other_exited": others,
                 })),
                 "suppressed_delegates": suppressed_delegates,
+                "mcp_servers": packages,
                 "local_lane": lane_rows.iter().map(|(label, r)| serde_json::json!({
                     "check": label,
                     "level": r.level(),
@@ -371,6 +467,13 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
     }
     if let Some(note) = &suppressed_delegates {
         print_check("lane delegates", &CheckResult::Info(note.clone()));
+    }
+    if !packages.is_empty() {
+        println!();
+        println!("{}", style("MCP servers (package versions)").bold());
+        for p in &packages {
+            print_check(&p.server, &mcp_package_row(p));
+        }
     }
     if let Some((c, target, host)) = &clipboard {
         print_clipboard(c, host);
@@ -610,6 +713,55 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_split_package_handles_scopes_and_versions() {
+        assert_eq!(
+            split_package("@sentry/mcp-server@0.42.0"),
+            ("@sentry/mcp-server".into(), Some("0.42.0".into()))
+        );
+        assert_eq!(
+            split_package("@gwdn/nexus-mcp@latest"),
+            ("@gwdn/nexus-mcp".into(), Some("latest".into()))
+        );
+        assert_eq!(split_package("@scope/pkg"), ("@scope/pkg".into(), None));
+        assert_eq!(
+            split_package("ccusage@1.2.3"),
+            ("ccusage".into(), Some("1.2.3".into()))
+        );
+        assert_eq!(split_package("plain"), ("plain".into(), None));
+    }
+
+    #[test]
+    fn test_mcp_packages_reads_both_config_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers":{
+                "sentry":{"command":"npx","args":["-y","@sentry/mcp-server@0.42.0","--skills=inspect"]},
+                "nexus":{"command":"npx","args":["--yes","@gwdn/nexus-mcp@latest"]},
+                "local":{"command":"nexus","args":["mcp-local"]}
+            }}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("opencode.json"),
+            r#"{"mcp":{"sentry":{"type":"local","command":["npx","-y","@sentry/mcp-server@0.42.0"]}}}"#,
+        )
+        .unwrap();
+        let mut found = mcp_packages(dir.path());
+        found.sort_by(|a, b| (&a.file, &a.server).cmp(&(&b.file, &b.server)));
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0].server, "nexus");
+        assert!(!found[0].pinned);
+        assert_eq!(found[1].package, "@sentry/mcp-server");
+        assert_eq!(found[1].version.as_deref(), Some("0.42.0"));
+        assert!(found[1].pinned);
+        assert_eq!(found[2].file, "opencode.json");
+        assert!(matches!(mcp_package_row(&found[1]), CheckResult::Pass(_)));
+        assert!(matches!(mcp_package_row(&found[0]), CheckResult::Info(_)));
+    }
+
     use super::*;
 
     #[test]

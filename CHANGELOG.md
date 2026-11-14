@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Environment variables from env files and the platform are filtered.** `nexus run`, `.nexus/env` and `.nexus/plugin.env` never take variables that change how processes load code or which endpoints and certificates they trust (`NODE_OPTIONS`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `PYTHON*`, `PERL5*`, `RUBY*` settings, every `LD_*`, `DYLD_*` and `GIT_*` variable, proxy and CA variables), nor `NEXUS_API_URL`, `NEXUS_TRUSTED_API_URLS`, `NEXUS_PRIVATE_TOKEN` and `NEXUS_GATEWAY_URL`. Values with a line break are refused. Each skipped variable is reported with the reason.
 
 ### Added
+- **Plugin variable checks.** `nexus preflight` has a `Plugins` section and the `nexus run` pre-launch check `Plugin env` lines: the environment variables and settings the project's plugins need, from the hub's preflight (hub 0.20.0 or later; older hubs give one warning). No local variable name is sent; whether a variable is set is decided locally (shell, untracked `.nexus/env` and `.env.nexus.local`). A missing required variable fails with its name and, for the Sentry token, the scopes it needs; missing or invalid hub settings fail.
+- **Sentry live check.** For the Sentry developer tool, `nexus preflight` checks that the local `SENTRY_ACCESS_TOKEN` reaches the configured organization (HTTPS, 5 seconds, no redirects; `--no-live` skips it). The token is sent only to `sentry.io`, `*.sentry.io` or hosts listed in `NEXUS_TRUSTED_SENTRY_HOSTS`, never to the Nexus API.
+- **Package versions of MCP servers.** `nexus doctor claude` lists MCP servers started with `npx`, `bunx`, `uvx` or `pnpm dlx` with their package version and flags unpinned ones (`mcp_servers` in `--json`).
+- **Sentry host warning in the consent prompt.** An MCP server that passes `--host` outside `sentry.io`, `*.sentry.io` and the local trust list is marked "sends your Sentry token to <host>".
 - **Manual pages.** `nexus man [command]` prints the page of `nexus` or of a command (`nexus man run | man -l -`); `nexus man --out-dir DIR` writes one page per command (`nexus.1`, `nexus-pull.1`, `nexus-dispatch-status.1`, ...). The pages are generated from the same text as `--help`. The installer writes them next to the binary (`~/.local/share/man/man1` for `~/.local/bin`); `NEXUS_MAN_DIR` picks another directory, `NEXUS_NO_MAN=1` skips them.
 
 ### Changed
@@ -23,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Env file keys are validated.** Lines whose key is not a valid variable name are skipped when an env file is read.
 
 ### Tests
+- New tests for the local plugin variable evaluation, scopes in the failure line, invalid hub settings, Sentry host trust and URL validation (an untrusted host is never contacted), MCP package parsing and the consent host warning.
 - A test keeps every command summary and option summary on one line of at most 72 characters; new tests for the manual page set and single pages.
 - New tests for non-canonical and case-variant paths, symlinks into `.git`, plugin file names and local sources outside the workspace, the dropped executable bit, the environment variable filter per source, tracked env files and invalid env keys.
 

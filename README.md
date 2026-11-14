@@ -500,6 +500,26 @@ different `core.sshCommand`, remotes on an SSH host alias, and a local
 | API | Nexus API reachable and token valid |
 | Workspace | `.nexus/` workspace marker present |
 | MCP | Agent MCP configurations reference nexus-mcp |
+| Plugin env | Variables and settings the project's plugins need (hub 0.20.0 or later) |
+| Sentry live | The local Sentry token reaches the configured organization (`--no-live` skips) |
+
+**Plugin variables.** The hub lists the environment variables and settings
+the project's plugins need. The CLI asks without sending any local variable
+name and decides locally whether each variable is set: in the shell, in
+`.nexus/env` or in `.env.nexus.local` (git-tracked copies are ignored). A
+missing required variable fails with its name (for the Sentry token also
+the token scopes it needs), a missing optional one warns, a missing or
+invalid hub setting fails. `nexus run` shows the same lines in its
+pre-launch check.
+
+**Sentry live check.** With the Sentry developer tool selected,
+`nexus preflight` calls `https://<host>/api/0/organizations/<org>/` with the
+local `SENTRY_ACCESS_TOKEN` (5 seconds, no redirects). The token is never
+sent to the Nexus API, and only to `sentry.io`, `*.sentry.io` or hosts you
+list in `NEXUS_TRUSTED_SENTRY_HOSTS` (comma-separated, exact `host[:port]`
+or `*.domain`); for any other host the check is skipped with a warning. An
+MCP server from the hub that passes `--host` outside these hosts is
+highlighted in the consent prompt ("sends your Sentry token to ...").
 
 `nexus run` is the single start command. It starts whatever the backend
 selects for the project (`run_target`): OpenCode, Claude Code, or the Claude
@@ -597,6 +617,11 @@ none exists, backs up an existing one to `config.kdl.bak-<date>` and
 changes nothing else. The project-local config is never written. `nexus
 run` prints a one-line warning while the check fails, at most once per day
 and CLI version.
+
+**MCP servers (package versions).** Servers in `.mcp.json` and
+`opencode.json` that start a package (`npx`, `bunx`, `uvx`, `pnpm dlx`) are
+listed with the package version; servers not pinned to an exact version are
+flagged. `--json` reports them as `mcp_servers`.
 
 `nexus run` embeds the same checks and adds a **launch countdown** after
 they complete. The countdown gives you a moment to review the results before

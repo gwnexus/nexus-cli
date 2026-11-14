@@ -1091,6 +1091,12 @@ pub struct ProjectDetailResponse {
 /// is set locally (a stale/invalid token caused
 /// the plugin to silently downgrade to observe mode while this env-var-only
 /// check kept reporting PASS).
+///
+/// Hubs from 0.20.0 also report the environment variables and settings the
+/// selected plugins need (`checks`, `config_checks`) and developer tool
+/// settings (`dev_tools`). Older hubs leave these out, so they are optional.
+/// The CLI never sends local variable names: it calls the endpoint without
+/// `env_keys` and evaluates `checks[].env_var` locally.
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpPreflightResponse {
     pub project_id: String,
@@ -1098,6 +1104,72 @@ pub struct McpPreflightResponse {
     pub plugins: Vec<String>,
     #[serde(default)]
     pub headroom_enabled: bool,
+    /// Environment variables the selected plugins need; `None` on hubs
+    /// before 0.20.0.
+    #[serde(default)]
+    pub checks: Option<Vec<PluginEnvCheck>>,
+    /// Plugin settings that must be set on the hub.
+    #[serde(default)]
+    pub config_checks: Option<Vec<PluginConfigCheck>>,
+    #[serde(default)]
+    pub all_required_ok: Option<bool>,
+    #[serde(default)]
+    pub dev_tools: Option<DevTools>,
+}
+
+/// One environment variable a plugin needs. `status` is the hub's view and
+/// is always `missing` when no names were sent; the CLI decides locally.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PluginEnvCheck {
+    pub plugin: String,
+    pub env_var: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// One plugin setting on the hub: `ok`, `missing` or `invalid` (with a
+/// message).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PluginConfigCheck {
+    pub plugin: String,
+    pub setting: String,
+    pub status: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Developer tool settings of the project.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DevTools {
+    #[serde(default)]
+    pub sentry: Option<SentryDevTool>,
+}
+
+/// Sentry developer tool settings (read-only MCP server).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SentryDevTool {
+    #[serde(default)]
+    pub organization_slug: Option<String>,
+    #[serde(default)]
+    pub project_slug: Option<String>,
+    #[serde(default = "default_sentry_host")]
+    pub host: String,
+    #[serde(default = "default_sentry_token_env")]
+    pub token_env: String,
+    #[serde(default)]
+    pub required_scopes: Vec<String>,
+}
+
+fn default_sentry_host() -> String {
+    "sentry.io".to_string()
+}
+
+fn default_sentry_token_env() -> String {
+    "SENTRY_ACCESS_TOKEN".to_string()
 }
 
 // ---------------------------------------------------------------------------

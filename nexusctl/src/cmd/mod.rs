@@ -27,6 +27,7 @@ mod link;
 mod man;
 pub(crate) mod mcp_local;
 pub(crate) mod observer;
+mod plugin_env;
 pub(crate) mod preflight;
 pub(crate) mod project;
 pub(crate) mod projection_cleanup;
@@ -474,10 +475,10 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 skills_cmd::export(&api_url, project_id.as_deref()).await?;
             }
         },
-        Command::Preflight => {
+        Command::Preflight { no_live } => {
             let config = nexus_core::config::Config::load_effective(None)?;
             let api_url = cli.resolve_api_url(&config);
-            preflight::run(&api_url).await?;
+            preflight::run(&api_url, !no_live).await?;
         }
         Command::Config { action } => match action {
             ConfigAction::Show => config_cmd::show()?,

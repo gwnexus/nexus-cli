@@ -249,7 +249,7 @@ fn check_mcp_configs() -> CheckResult {
 }
 
 /// Run all preflight checks.
-pub async fn run(api_url: &str) -> anyhow::Result<()> {
+pub async fn run(api_url: &str, live: bool) -> anyhow::Result<()> {
     println!();
     println!("{} Nexus Preflight Check", style(">>").bold().cyan());
     println!();
@@ -278,7 +278,7 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
     print_check("config", &config_check);
     let (creds_check, token) = check_credentials();
     print_check("credentials", &creds_check);
-    let api_check = check_api(api_url, token).await;
+    let api_check = check_api(api_url, token.clone()).await;
     print_check("api", &api_check);
     println!();
 
@@ -288,6 +288,21 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
     print_check("project", &workspace);
     let mcp = check_mcp_configs();
     print_check("mcp-configs", &mcp);
+    println!();
+
+    // ── Plugins ──
+    println!("  {}", style("Plugins").bold().underlined());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let project_id = nexus_core::config::load_linked_project(None)
+        .ok()
+        .flatten()
+        .map(|p| p.id);
+    let plugin_checks =
+        super::plugin_env::checks(api_url, token.as_deref(), project_id.as_deref(), &cwd, live)
+            .await;
+    for (label, c) in &plugin_checks {
+        print_check(label, c);
+    }
     println!();
 
     // ── Summary ──
@@ -305,6 +320,7 @@ pub async fn run(api_url: &str) -> anyhow::Result<()> {
     if let Some(ref c) = claude {
         all_checks.push(c);
     }
+    all_checks.extend(plugin_checks.iter().map(|(_, c)| c));
     let fail_count = all_checks.iter().filter(|c| c.is_fail()).count();
     let warn_count = all_checks
         .iter()

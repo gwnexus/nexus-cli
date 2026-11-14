@@ -1130,6 +1130,33 @@ fn state_label(state: State) -> &'static str {
 // Prompt
 // ---------------------------------------------------------------------------
 
+/// The host an MCP server's argv passes as `--host=<h>` or `--host <h>`,
+/// when it is neither `sentry.io`/`*.sentry.io` nor trusted locally
+/// (`NEXUS_TRUSTED_SENTRY_HOSTS`): such a server sends the Sentry token
+/// there.
+fn untrusted_token_host(item: &Item) -> Option<String> {
+    if item.kind != Kind::McpServer {
+        return None;
+    }
+    let argv: Vec<&str> = item.command.as_deref()?.split_whitespace().collect();
+    let host = argv
+        .iter()
+        .enumerate()
+        .find_map(|(i, a)| match a.strip_prefix("--host=") {
+            Some(h) => Some(h.to_string()),
+            None if *a == "--host" => argv.get(i + 1).map(|h| h.to_string()),
+            None => None,
+        })?;
+    let trusted = std::env::var(super::plugin_env::TRUSTED_SENTRY_HOSTS_ENV).ok();
+    (!super::plugin_env::sentry_host_trusted(&host, trusted.as_deref()))
+        .then(|| super::dispatch_listen::flatten(&host))
+}
+
+/// The warning line for an MCP server with an untrusted token host.
+fn host_warning(item: &Item) -> Option<String> {
+    untrusted_token_host(item).map(|h| format!("sends your Sentry token to {h}"))
+}
+
 fn print_item(item: &Item, state: State) {
     println!();
     println!(
@@ -1141,6 +1168,9 @@ fn print_item(item: &Item, state: State) {
     );
     if let Some(ref command) = item.command {
         println!("     runs: {}", style(command).yellow());
+    }
+    if let Some(w) = host_warning(item) {
+        println!("     {} {}", style("!").bold().red(), style(w).bold().red());
     }
     let old = item.local.as_deref().unwrap_or_default();
     let diff = super::state_cmd::unified_diff(old, &item.content, "local", "nexus");
@@ -1176,6 +1206,9 @@ fn prompt(pending: &[(&Item, State)]) -> Vec<bool> {
             item.label(),
             item.target_path
         );
+        if let Some(w) = host_warning(item) {
+            println!("               {}", style(format!("! {w}")).bold().red());
+        }
     }
     let theme = dialoguer::theme::ColorfulTheme::default();
     let choice = dialoguer::Select::with_theme(&theme)
@@ -1418,6 +1451,36 @@ mod tests {
             "claude_workspace": { "path": ".nexus/claude/workspace.local.kdl", "body": "layout { pane }\n" }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn test_mcp_host_outside_sentry_is_flagged() {
+        let item = |command: &str| Item {
+            kind: Kind::McpServer,
+            id: "sentry".into(),
+            target_path: ".mcp.json".into(),
+            command: Some(command.into()),
+            content: String::new(),
+            installed: false,
+            local: None,
+            fingerprint: String::new(),
+            server_hash: None,
+            slot: Slot::McpServer("sentry".into()),
+        };
+        let base = "npx -y @sentry/mcp-server@0.42.0 --organization-slug=acme";
+        assert_eq!(host_warning(&item(base)), None);
+        assert_eq!(
+            host_warning(&item(&format!("{base} --host=de.sentry.io"))),
+            None
+        );
+        assert_eq!(
+            host_warning(&item(&format!("{base} --host=sentry.evil.example"))).as_deref(),
+            Some("sends your Sentry token to sentry.evil.example")
+        );
+        assert!(host_warning(&item(&format!("{base} --host evil.example"))).is_some());
+        let mut other = item(&format!("{base} --host=evil.example"));
+        other.kind = Kind::AgentScript;
+        assert_eq!(host_warning(&other), None);
     }
 
     #[test]

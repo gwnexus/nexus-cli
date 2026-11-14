@@ -1710,6 +1710,19 @@ async fn run_prelaunch_checks(
     };
     checks.push(("Headroom", headroom_check));
 
+    // Plugin variables and settings (decided locally, no live check here).
+    for (_, c) in super::plugin_env::checks(
+        api_url,
+        resolved_token.as_deref(),
+        linked_project_id.as_deref(),
+        workspace,
+        false,
+    )
+    .await
+    {
+        checks.push(("Plugin env", c));
+    }
+
     // Done collecting — clear spinner and print results
     spinner.finish_and_clear();
 

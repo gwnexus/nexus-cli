@@ -105,7 +105,7 @@ pub(crate) fn trigger(e: &DispatchEvent, project: &str) -> Option<NoticeKind> {
 /// One line of text that cannot break out of a fenced notice: control
 /// characters (C0 and C1), line and paragraph separators, bidi controls and
 /// quotes become spaces, square brackets become parentheses.
-fn flatten(text: &str) -> String {
+pub(crate) fn flatten(text: &str) -> String {
     let flat: String = text
         .chars()
         .map(|c| match c {
