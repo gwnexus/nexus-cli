@@ -13,12 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`[plugins]` in `.nexus/config.toml` stay inside the workspace.** A plugin `filename` must be a plain file name (no path), and a `source = "local"` plugin must resolve, after symlinks, to a regular file inside the workspace and outside `.git`. Local plugins are copied without their executable bit.
 - **Environment variables from env files and the platform are filtered.** `nexus run`, `.nexus/env` and `.nexus/plugin.env` never take variables that change how processes load code or which endpoints and certificates they trust (`NODE_OPTIONS`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `PYTHON*`, `PERL5*`, `RUBY*` settings, every `LD_*`, `DYLD_*` and `GIT_*` variable, proxy and CA variables), nor `NEXUS_API_URL`, `NEXUS_TRUSTED_API_URLS`, `NEXUS_PRIVATE_TOKEN` and `NEXUS_GATEWAY_URL`. Values with a line break are refused. Each skipped variable is reported with the reason.
 
+### Added
+- **Manual pages.** `nexus man [command]` prints the page of `nexus` or of a command (`nexus man run | man -l -`); `nexus man --out-dir DIR` writes one page per command (`nexus.1`, `nexus-pull.1`, `nexus-dispatch-status.1`, ...). The pages are generated from the same text as `--help`. The installer writes them next to the binary (`~/.local/share/man/man1` for `~/.local/bin`); `NEXUS_MAN_DIR` picks another directory, `NEXUS_NO_MAN=1` skips them.
+
 ### Changed
+- **Shorter, Unix-style help.** Every command and option has a one-line summary for the command lists and `-h`; the details moved to `--help`. Long lines wrap at the terminal width, and the global options (`--api-url`, `--output`, `--verbose`, `--yes`) have their own `Global options` section.
 - **Model endpoint variables only from `.env.nexus.local`.** `ANTHROPIC_*` and `*_BASE_URL` variables are taken from the operator's own `.env.nexus.local`, no longer from platform plugin defaults or `.nexus/env`.
 - **Tracked env files are ignored.** When git tracks `.nexus/env` or `.env.nexus.local`, `nexus run` ignores the file with a warning; both files are meant to stay local.
 - **Env file keys are validated.** Lines whose key is not a valid variable name are skipped when an env file is read.
 
 ### Tests
+- A test keeps every command summary and option summary on one line of at most 72 characters; new tests for the manual page set and single pages.
 - New tests for non-canonical and case-variant paths, symlinks into `.git`, plugin file names and local sources outside the workspace, the dropped executable bit, the environment variable filter per source, tracked env files and invalid env keys.
 
 ## [0.40.3] - 2026-11-12

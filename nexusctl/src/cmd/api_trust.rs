@@ -18,7 +18,11 @@ use crate::{Cli, Command};
 fn sends_token(command: &Command) -> bool {
     !matches!(
         command,
-        Command::Unlink | Command::Logout { .. } | Command::Config { .. } | Command::Upgrade
+        Command::Unlink
+            | Command::Logout { .. }
+            | Command::Config { .. }
+            | Command::Upgrade
+            | Command::Man { .. }
     )
 }
 

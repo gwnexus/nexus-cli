@@ -7,6 +7,8 @@
 # Options (via env vars):
 #   NEXUS_VERSION   Pin a specific version tag, e.g. "v0.1.1" (default: latest release)
 #   NEXUS_BIN_DIR   Custom install directory (default: ~/.local/bin or ~/.cargo/bin)
+#   NEXUS_MAN_DIR   Manual page directory (default: <bin dir>/../share/man/man1)
+#   NEXUS_NO_MAN    Set to 1 to skip installing the manual pages
 #   GITHUB_TOKEN    GitHub PAT (optional — only needed for private repo or higher rate limits)
 #
 # The installer tries to download a pre-built binary from GitHub Releases.
@@ -277,6 +279,22 @@ verify_install() {
   fi
 }
 
+# ── manual pages ──────────────────────────────────────────────────
+# Written by the installed binary itself (`nexus man --out-dir`), next to
+# the bin directory, where man finds them through PATH: ~/.local/bin ->
+# ~/.local/share/man. Best effort: an older binary without `man` skips it.
+install_man_pages() {
+  [ "${NEXUS_NO_MAN:-}" = "1" ] && return 0
+  local bin="${BIN_DIR}/${BINARY_NAME}"
+  [ -x "$bin" ] || return 0
+  local man_dir="${NEXUS_MAN_DIR:-$(dirname "$BIN_DIR")/share/man/man1}"
+  if "$bin" man --out-dir "$man_dir" >/dev/null 2>&1; then
+    ok "Manual pages -> ${man_dir} (man nexus)"
+  else
+    warn "Manual pages not installed (run '${BINARY_NAME} man --out-dir <dir>' later)"
+  fi
+}
+
 # ── main ──────────────────────────────────────────────────────────
 main() {
   echo ""
@@ -293,6 +311,7 @@ main() {
   fi
 
   verify_install
+  install_man_pages
 
   echo ""
   ok "Done! Run '${BINARY_NAME} --help' to get started."

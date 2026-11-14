@@ -24,6 +24,7 @@ pub(crate) mod import;
 mod init;
 mod lane;
 mod link;
+mod man;
 pub(crate) mod mcp_local;
 pub(crate) mod observer;
 pub(crate) mod preflight;
@@ -485,6 +486,12 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         },
         Command::Upgrade => {
             upgrade::run()?;
+        }
+        Command::Man {
+            ref command,
+            ref out_dir,
+        } => {
+            man::run(command, out_dir.as_deref())?;
         }
         Command::McpLocal => {
             mcp_local::run().await?;

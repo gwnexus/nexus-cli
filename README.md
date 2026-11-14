@@ -25,6 +25,11 @@ does not install the binary). If no binary exists for your platform it falls
 back to `cargo install --git`. `nexus upgrade` verifies the install script's
 checksum before it runs it, from both sources.
 
+The installer also writes the manual pages next to the binary
+(`~/.local/bin` -> `~/.local/share/man/man1`), where `man` finds them through
+`PATH`. Set `NEXUS_MAN_DIR` for another directory or `NEXUS_NO_MAN=1` to skip
+them.
+
 ### From source
 
 ```bash
@@ -106,6 +111,22 @@ nexus config show                       Display effective configuration (with pr
 nexus config set K=V [--local|--global] Update a configuration value
 nexus config path [--local|--global]    Show a config file path
 nexus upgrade                           Upgrade CLI to latest release version
+nexus man [command] [--out-dir DIR]     Print a manual page, or write all of them
+```
+
+### Help and manual pages
+
+`-h` prints a short summary with one line per option; `--help` adds the
+details. Global options (`--api-url`, `--output`, `--verbose`, `--yes`) are
+listed in their own section, and long lines wrap at the terminal width.
+
+The manual pages are generated from the same text, so they always match the
+binary:
+
+```bash
+nexus man run | man -l -                      # read one page (Linux)
+nexus man run | mandoc -a                     # read one page (macOS)
+nexus man --out-dir ~/.local/share/man/man1   # install all pages: man nexus-run
 ```
 
 ### Global Flags
@@ -114,7 +135,7 @@ nexus upgrade                           Upgrade CLI to latest release version
 | ------------ | ----- | ----------------------------------------------- |
 | `--yes`      | `-y`  | Non-interactive mode (auto-confirm all prompts) |
 | `--verbose`  | `-v`  | Enable verbose output                           |
-| `--help`     | `-h`  | Show help                                       |
+| `--help`     | `-h`  | Show help (`-h` short, `--help` with details)   |
 | `--version`  | `-V`  | Show version                                    |
 
 ### Notable Flags

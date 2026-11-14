@@ -17,19 +17,24 @@ mod cmd;
 )]
 pub struct Cli {
     /// Nexus API base URL (overrides config file).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub api_url: Option<String>,
 
     /// Output format: table, json, plain (overrides config file).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub output: Option<String>,
 
     /// Enable verbose/debug output.
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, help_heading = "Global options")]
     pub verbose: bool,
 
     /// Accept all defaults without prompting (non-interactive mode).
-    #[arg(short = 'y', long = "yes", global = true)]
+    #[arg(
+        short = 'y',
+        long = "yes",
+        global = true,
+        help_heading = "Global options"
+    )]
     pub yes: bool,
 
     #[command(subcommand)]
@@ -49,7 +54,7 @@ pub enum Command {
         #[arg(short, long)]
         name: Option<String>,
 
-        /// Nexus project UUID (enables server-aware init: pulls skills, commands, MCP config).
+        /// Nexus project UUID; pulls skills, commands and MCP config
         #[arg(long)]
         project_id: Option<String>,
 
@@ -57,9 +62,10 @@ pub enum Command {
         #[arg(short, long)]
         force: bool,
 
-        /// Accept executable content from the server (hooks, settings
-        /// commands, plugins, MCP servers, layouts, scripts) without asking.
-        /// Not implied by --force or --yes.
+        /// Accept executable server content without asking
+        ///
+        /// Covers hooks, settings commands, plugins, MCP servers, layouts and
+        /// scripts. Not implied by --force or --yes.
         #[arg(long)]
         trust: bool,
 
@@ -78,8 +84,9 @@ pub enum Command {
     /// Unlink this directory from its Nexus project.
     Unlink,
 
-    /// Manage project inference tokens (nxs_proj_*) for gateway auth.
+    /// Manage project inference tokens for gateway auth
     ///
+    /// Tokens have the form nxs_proj_*.
     /// Provisions a project-scoped inference credential from your PAT and
     /// stores it locally (never committed). Exposed to tools as
     /// NEXUS_PROJECT_TOKEN via the gitignored .env.nexus.local.
@@ -102,13 +109,11 @@ pub enum Command {
     /// scoping it to this project only. Pass `--global` to store it in the
     /// shared `~/.config/nexus/credentials.toml` instead.
     Login {
-        /// Store in the project-local `.nexus/credentials.toml` (default behavior;
-        /// explicit for symmetry with --global).
+        /// Store in the project-local .nexus/credentials.toml (default)
         #[arg(long, conflicts_with = "global")]
         local: bool,
 
-        /// Store in the shared global `~/.config/nexus/credentials.toml`
-        /// instead of the project-local file.
+        /// Store in the global ~/.config/nexus/credentials.toml
         #[arg(long, conflicts_with = "local")]
         global: bool,
     },
@@ -120,18 +125,18 @@ pub enum Command {
     /// store are never touched. Pass `--global` to remove the shared
     /// global credentials instead.
     Logout {
-        /// Remove the project-local `.nexus/credentials.toml` (default
-        /// behavior; explicit for symmetry with --global).
+        /// Remove the project-local .nexus/credentials.toml (default)
         #[arg(long, conflicts_with = "global")]
         local: bool,
 
-        /// Remove the shared global `~/.config/nexus/credentials.toml`
-        /// instead of the project-local file.
+        /// Remove the global ~/.config/nexus/credentials.toml
         #[arg(long, conflicts_with = "local")]
         global: bool,
     },
 
-    /// Show auth/project, the agent environment, git identity, and every
+    /// Show workspace, auth and agent environment state
+    ///
+    /// Shows auth and project, the agent environment, git identity, and every
     /// non-clean workspace file with its class (content/projection), state
     /// and next action. Supports --output json. Exits 1 when changes are
     /// pending.
@@ -148,8 +153,9 @@ pub enum Command {
         #[arg(long, requires = "agents")]
         watch: bool,
 
-        /// Print JSON (same as --output json): the workspace status, or
-        /// with --agents the folded agent list.
+        /// Print JSON (same as --output json)
+        ///
+        /// The workspace status, or with --agents the folded agent list.
         #[arg(long)]
         json: bool,
 
@@ -168,7 +174,9 @@ pub enum Command {
         target: DoctorTarget,
     },
 
-    /// Show unified diffs for non-clean files: content vs. the backend,
+    /// Show diffs for changed workspace files
+    ///
+    /// Unified diffs for non-clean files: content vs. the backend,
     /// projection vs. what the next pull writes (incl. managed settings keys
     /// and the CLAUDE.md block). Read-only. Exits 1 when differences exist.
     Diff {
@@ -176,9 +184,11 @@ pub enum Command {
         path: Option<String>,
     },
 
-    /// Discard local changes: content returns to the backend version,
-    /// projection files to what the next pull writes. Without a path, all
-    /// pending changes are reset after one confirmation (-y skips it).
+    /// Discard local changes to workspace files
+    ///
+    /// Content returns to the backend version, projection files to what the
+    /// next pull writes. Without a path, all pending changes are reset after
+    /// one confirmation (-y skips it).
     Reset {
         /// File or directory to reset.
         path: Option<String>,
@@ -188,33 +198,39 @@ pub enum Command {
         project_id: Option<String>,
     },
 
-    /// Inspect and change the project's backend settings (executioner,
-    /// execution mode, Claude Code experience, git identity). Never writes
-    /// local files except through `set --pull`. Alias: `nexus settings`.
+    /// Show or change the project's backend settings
+    ///
+    /// Settings cover executioner, execution mode, Claude Code experience
+    /// and git identity. Never writes local files except through
+    /// `set --pull`.
     #[command(visible_alias = "settings")]
     Env {
         #[command(subcommand)]
         action: Option<EnvAction>,
     },
 
-    /// Show or change the project's confidentiality classification and what
-    /// it drives (gateway class, lane delegates, blocked external services).
-    /// Without a subcommand: show. Alias: `nexus class`.
+    /// Show or change the project's classification
+    ///
+    /// The confidentiality classification drives the gateway class, lane
+    /// delegates and blocked external services. Without a subcommand: show.
     #[command(visible_alias = "class")]
     Classification {
         #[command(subcommand)]
         action: Option<ClassificationAction>,
     },
 
-    /// Dispatches between projects: `nexus dispatch status` shows the
-    /// linked project's incoming and outgoing traffic (read-only).
+    /// Show and receive Dispatches between projects
+    ///
+    /// `nexus dispatch status` shows the linked project's incoming and
+    /// outgoing traffic (read-only).
     Dispatch {
         #[command(subcommand)]
         action: DispatchAction,
     },
 
-    /// Pull and apply backend changes while the session keeps running: runs
-    /// `nexus pull` and the managed plugin step, then shows per area what
+    /// Pull backend changes into a running session
+    ///
+    /// Runs `nexus pull` and the managed plugin step, then shows per area what
     /// the running Claude Code session picks up live and what needs
     /// /reload-plugins, a re-read or a restart, and sends that summary to
     /// the running sessions of this repository.
@@ -240,25 +256,30 @@ pub enum Command {
         no_notify: bool,
     },
 
-    /// Pull skills and configuration from the Nexus platform into this workspace.
+    /// Pull skills and configuration from the platform
     Pull {
         /// Override the linked project ID.
         #[arg(long)]
         project_id: Option<String>,
 
-        /// Overwrite existing files without confirmation. For Claude Code
-        /// Experience (CCX) files this also overwrites local edits
-        /// (drifted/conflict) and deletes modified orphaned files.
+        /// Overwrite existing files without confirmation
+        ///
+        /// For Claude Code Experience (CCX) files this also overwrites local
+        /// edits (drifted/conflict) and deletes modified orphaned files.
         #[arg(short, long)]
         force: bool,
 
-        /// Like --force for CCX files, and additionally replace CCX files
+        /// Also replace CCX files never managed by Nexus
+        ///
+        /// Like --force for CCX files, and additionally replaces CCX files
         /// that exist locally but were never managed by Nexus.
         #[arg(long)]
         force_unmanaged: bool,
 
-        /// Limit pull to specific scope(s): skills, directives, agents, workspace, tasks.
-        /// Can be specified multiple times. If omitted, pulls everything.
+        /// Limit the pull to scopes (repeatable, comma-separated)
+        ///
+        /// Scopes: skills, directives, agents, workspace, tasks. If omitted,
+        /// pulls everything.
         #[arg(long, value_delimiter = ',')]
         scope: Vec<String>,
 
@@ -270,23 +291,26 @@ pub enum Command {
         #[arg(long)]
         skip_actor_assets: bool,
 
-        /// Show what pull would do with the devbox workspace files
-        /// (devbox.json, scripts), including removals of files the fork no
-        /// longer has, without writing anything. Also lists the executable
-        /// items a pull would ask about.
+        /// Show what the pull would change without writing
+        ///
+        /// Covers the devbox workspace files (devbox.json, scripts), including
+        /// removals of files the fork no longer has. Also lists the
+        /// executable items a pull would ask about.
         #[arg(long)]
         dry_run: bool,
 
-        /// Accept new or changed executable content from the server
-        /// (hooks, settings commands, plugins, MCP servers, layouts,
-        /// scripts) without asking. Without it, pull asks in a terminal and
-        /// keeps the local version otherwise. Not implied by --yes.
+        /// Accept new or changed executable content without asking
+        ///
+        /// Covers hooks, settings commands, plugins, MCP servers, layouts and
+        /// scripts. Without it, pull asks in a terminal and keeps the local
+        /// version otherwise. Not implied by --yes.
         #[arg(long)]
         trust: bool,
 
-        /// Take excluded (shadowed) paths that git still tracks out of the
-        /// index (`git rm -r --cached`); the files stay on disk and nothing
-        /// is committed. Never done without this flag.
+        /// Untrack shadowed paths that git still tracks
+        ///
+        /// Takes them out of the index (`git rm -r --cached`); the files stay
+        /// on disk and nothing is committed. Never done without this flag.
         #[arg(long)]
         untrack_shadowed: bool,
     },
@@ -298,7 +322,7 @@ pub enum Command {
         action: ClaudeAction,
     },
 
-    /// Skills management subcommands.
+    /// List and export skills
     Skills {
         #[command(subcommand)]
         action: SkillsAction,
@@ -316,27 +340,50 @@ pub enum Command {
     /// Upgrade the Nexus CLI to the latest release version.
     Upgrade,
 
-    /// Run a small local MCP server (stdio) exposing Nexus tools that need
-    /// filesystem/session-local access and have no Claude Code custom-tool
+    /// Print or install the manual pages
+    ///
+    /// Without --out-dir, prints the page of `nexus` or of the named command
+    /// to stdout (read it with `nexus man run | man -l -`). With --out-dir,
+    /// writes one page per command (nexus.1, nexus-pull.1, ...), for example
+    /// into ~/.local/share/man/man1 so that `man nexus` finds them.
+    Man {
+        /// Command to show, e.g. `run` or `dispatch status`.
+        command: Vec<String>,
+
+        /// Write the pages of all commands into this directory
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<std::path::PathBuf>,
+    },
+
+    /// Run the local MCP server (stdio)
+    ///
+    /// Exposes Nexus tools that need filesystem/session-local access and
+    /// have no Claude Code custom-tool
     /// equivalent: `nexus_headroom_intercept_retrieve`, `nexus_cost_summary`.
     /// Registered automatically in `.mcp.json` for Claude Code projects;
     /// not intended for direct interactive use.
     #[command(hide = true)]
     McpLocal,
 
-    /// Hide agentic files, the devbox workspace and Nexus internals from Git.
+    /// Hide agentic files, workspace and Nexus internals from Git
     Shadow {
         #[command(subcommand)]
         action: ShadowAction,
     },
 
-    /// Manage workspace shadow mode (exclude devbox files from Git tracking).
+    /// Manage workspace shadow mode (deprecated)
+    ///
+    /// Excludes devbox files from Git tracking. Use
+    /// `nexus shadow on|off --target workspace` instead.
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
 
-    /// Import existing agentic files (CLAUDE.md, AGENTS.md, .cursorrules, etc.) into the linked Nexus project.
+    /// Import existing agentic files into the project
+    ///
+    /// Detects CLAUDE.md, AGENTS.md, .cursorrules and similar files and
+    /// imports them into the linked Nexus project.
     Import {
         /// Only detect files, don't import.
         #[arg(long)]
@@ -350,7 +397,9 @@ pub enum Command {
         action: SyncAction,
     },
 
-    /// Manage per-project git identity settings (user.name, user.email, GPG signing).
+    /// Manage the project's git identity
+    ///
+    /// Per-project user.name, user.email, GPG signing and GitHub account.
     Git {
         #[command(subcommand)]
         action: GitAction,
@@ -389,7 +438,7 @@ pub enum Command {
         #[arg(long, hide = true)]
         workspace: bool,
 
-        /// Publish the current local workspace as a new fork without a prior pull.
+        /// Publish the local workspace as a new fork without a pull
         ///
         /// Bypasses the sync-manifest origin guard and pushes the local
         /// devbox.json and scripts/devbox/** as-is. Use this to bootstrap a
@@ -399,8 +448,10 @@ pub enum Command {
         adopt_local: bool,
     },
 
-    /// Temporarily save modified content files (devbox workspace and agent
-    /// files) and restore them later. Projection files are never stashed.
+    /// Save and restore modified content files
+    ///
+    /// Temporarily saves modified devbox workspace and agent files and
+    /// restores them later. Projection files are never stashed.
     ///
     /// Running `nexus stash` without a subcommand defaults to `nexus stash save`.
     Stash {
@@ -408,18 +459,21 @@ pub enum Command {
         action: Option<StashAction>,
     },
 
-    /// Start the project's agent environment: whatever the backend selects
-    /// (OpenCode, Claude Code, or the Claude Code zellij workspace), with
-    /// platform-managed env vars injected.
+    /// Start the project's agent environment
+    ///
+    /// Starts whatever the backend selects (OpenCode, Claude Code, or the
+    /// Claude Code zellij workspace), with platform-managed env vars injected.
     ///
     /// Resolves env vars from .nexus/env (plugin defaults) and .env.nexus.local
     /// (secrets), runs a pre-launch check, then spawns the tool. After the tool
     /// exits, prints a session summary with duration and git activity.
     /// Shell vars already set are never overwritten.
     Run {
-        /// Tool binary to launch instead of the backend's run target. Without a
-        /// run target (older backends): config run.default_tool, else the
-        /// project's agent_owner (claude-cli -> claude), else opencode.
+        /// Tool binary to launch instead of the run target
+        ///
+        /// Without a run target (older backends): config run.default_tool,
+        /// else the project's agent_owner (claude-cli -> claude), else
+        /// opencode.
         #[arg(short, long)]
         tool: Option<String>,
 
@@ -431,11 +485,14 @@ pub enum Command {
         #[arg(long)]
         show_env: bool,
 
-        /// Skip af_export API call; use only .nexus/env from disk.
+        /// Skip the platform call; use only .nexus/env from disk
         #[arg(long)]
         no_db: bool,
 
-        /// Use exec() instead of spawn+wait (no post-session summary, Unix only).
+        /// Replace this process with the tool (Unix only)
+        ///
+        /// Uses exec() instead of spawn and wait, so there is no post-session
+        /// summary.
         #[arg(long)]
         exec: bool,
 
@@ -443,43 +500,55 @@ pub enum Command {
         #[arg(long)]
         skip_checks: bool,
 
-        /// Skip pre-launch confirmation prompt (non-interactive/CI mode).
+        /// Skip the pre-launch confirmation (non-interactive use)
         #[arg(short, long)]
         force: bool,
 
-        /// Start without the terminal workspace (multiplexer): shorthand for
-        /// `--workspace none`. Everything else nexus run does stays active.
+        /// Start without the terminal workspace (multiplexer)
+        ///
+        /// Shorthand for `--workspace none`. Everything else nexus run does
+        /// stays active.
         #[arg(long, conflicts_with = "workspace")]
         plain: bool,
 
-        /// Terminal workspace for this start (`none` or `zellij`), overriding
-        /// the local `[run] workspace` and the project default.
+        /// Terminal workspace for this start: none or zellij
+        ///
+        /// Overrides the local `[run] workspace` and the project default.
         #[arg(long, value_name = "NAME")]
         workspace: Option<String>,
 
-        /// Add an `actors` tab to the zellij workspace with one pane per
-        /// local-lane actor (`nexus actors run <slug>`). The main pane keeps
-        /// its subscription.
+        /// Add a tab with one pane per local-lane actor
+        ///
+        /// Adds an `actors` tab to the zellij workspace running
+        /// `nexus actors run <slug>` per actor. The main pane keeps its
+        /// subscription.
         #[arg(long)]
         actor_panes: bool,
 
-        /// Add a Dispatch status pane (`nexus dispatch status --watch
-        /// --compact`) below the claude pane of the CLAUDE tab. On by default
-        /// when the project's dispatch automation is not off.
+        /// Add a Dispatch status pane to the CLAUDE tab
+        ///
+        /// Runs `nexus dispatch status --watch --compact` below the claude
+        /// pane. On by default when the project's dispatch automation is not
+        /// off.
         #[arg(long)]
         dispatch_pane: bool,
 
-        /// Leave the Dispatch status pane out, even when the project's
-        /// dispatch automation is on.
+        /// Leave the Dispatch status pane out
+        ///
+        /// Applies even when the project's dispatch automation is on.
         #[arg(long, conflicts_with = "dispatch_pane")]
         no_dispatch_pane: bool,
 
-        /// Resurrect the project's exited zellij session (its old layout)
-        /// instead of removing it and starting the current layout.
+        /// Resurrect the exited zellij session with its old layout
+        ///
+        /// Without it, the exited session is removed and the current layout
+        /// starts.
         #[arg(long)]
         resume: bool,
 
-        /// Named Claude Code account (sets CLAUDE_CONFIG_DIR to an isolated
+        /// Named Claude Code account with its own login
+        ///
+        /// Sets CLAUDE_CONFIG_DIR to an isolated
         /// directory under ~/.config/nexus/claude-accounts/<name>/, giving
         /// this invocation its own Keychain login). Only applies to
         /// claude-cli projects. Explicit only: no automatic switching,
@@ -493,28 +562,34 @@ pub enum Command {
     },
 }
 
-/// Backend settings subcommands. Keys and
-/// values come from the backend schema (`nexus env keys`).
+/// Backend settings subcommands. Keys and values come from the backend
+/// schema (`nexus env keys`).
 #[derive(Debug, Subcommand)]
 pub enum EnvAction {
-    /// Print all settings, or one key's value. Supports --output json.
+    /// Print all settings, or one key's value
+    ///
+    /// Supports --output json.
     Get {
         /// Setting key, e.g. claude.hud.
         key: Option<String>,
     },
 
-    /// List the settable keys with their types and allowed values.
+    /// List the settable keys with types and allowed values
     Keys,
 
-    /// Change a setting in the backend (requires project admin rights).
+    /// Change a setting in the backend
+    ///
+    /// Requires project admin rights.
     /// Takes `<KEY> <VALUE>` or `<KEY>=<VALUE>`; without arguments, pick
     /// the key and value interactively.
     Set {
         /// Setting key, e.g. claude.hud, or `key=value`.
         key: Option<String>,
 
-        /// New value (`true`/`false` for booleans, `unset` clears nullable
-        /// keys). Omit it when the key is given as `key=value`.
+        /// New value; `unset` clears nullable keys
+        ///
+        /// `true`/`false` for booleans. Omit it when the key is given as
+        /// `key=value`.
         value: Option<String>,
 
         /// Preview the change without applying it.
@@ -530,12 +605,14 @@ pub enum EnvAction {
 /// `nexus dispatch` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum DispatchAction {
-    /// Incoming and outgoing Dispatches of the project: counters, one row
-    /// per open Dispatch (highlighted when the next step is ours) and a
-    /// per-peer summary. Read-only.
+    /// Show the project's incoming and outgoing Dispatches
+    ///
+    /// Counters, one row per open Dispatch (highlighted when the next step
+    /// is ours) and a per-peer summary. Read-only.
     Status {
-        /// Redraw at --interval until interrupted; on a network error the
-        /// last state stays with an error marker.
+        /// Redraw every --interval seconds until interrupted
+        ///
+        /// On a network error the last state stays with an error marker.
         #[arg(long)]
         watch: bool,
 
@@ -555,29 +632,34 @@ pub enum DispatchAction {
         #[arg(long)]
         compact: bool,
 
-        /// Do not run this machine's Dispatch runner in this process. By
-        /// default --watch also runs it (notify mode) when it is registered
-        /// and bound to the project, and otherwise shows why not.
+        /// Do not run this machine's Dispatch runner here
+        ///
+        /// By default --watch also runs it (notify mode) when it is
+        /// registered and bound to the project, and otherwise shows why not.
         #[arg(long)]
         no_listen: bool,
 
-        /// Machine-readable output (`nexus.dispatch-status.v1`); with
-        /// --watch one JSON line per refresh.
+        /// Machine-readable output (nexus.dispatch-status.v1)
+        ///
+        /// With --watch one JSON line per refresh.
         #[arg(long)]
         json: bool,
     },
 
-    /// This machine's Dispatch runner: register, status, pause, resume,
-    /// revoke, and the Claude Code capability probe.
+    /// Manage this machine's Dispatch runner
+    ///
+    /// Register, status, pause, resume, revoke, and the Claude Code
+    /// capability probe.
     Runner {
         #[command(subcommand)]
         action: RunnerAction,
     },
 
-    /// Run the Dispatch runner in the foreground (notify mode): poll the
-    /// hub feed every --interval seconds, queue short notices and deliver
-    /// them into running sessions of the bound repositories. One runner per
-    /// machine; Ctrl-C stops it.
+    /// Run the Dispatch runner in the foreground
+    ///
+    /// Notify mode: polls the hub feed every --interval seconds, queues short
+    /// notices and delivers them into running sessions of the bound
+    /// repositories. One runner per machine; Ctrl-C stops it.
     Listen {
         /// Seconds between polls (at least 10).
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(10..))]
@@ -596,10 +678,13 @@ pub enum DispatchAction {
 /// `nexus dispatch runner` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum RunnerAction {
-    /// Register this machine's runner for the hub of the effective API URL
-    /// with the personal access token (used once) and store the runner
-    /// token in ~/.config/nexus/dispatch-runners (mode 0600). Runners of
-    /// other hubs are not touched.
+    /// Register this machine's Dispatch runner
+    ///
+    /// Registers the runner for the hub of the effective API URL with the
+    /// personal access token (used once) and stores the runner token in
+    /// ~/.config/nexus/dispatch-runners (mode 0600). Runners of other hubs
+    /// are not touched.
+    ///
     /// Binds the linked project unless --project is given; earlier bindings
     /// are kept unless --replace.
     Register {
@@ -624,10 +709,12 @@ pub enum RunnerAction {
         replace: bool,
     },
 
-    /// Heartbeat every runner on this machine (one per hub) and show the
-    /// bindings: effective mode, blocking switch, lag and the Claude Code
-    /// probe.
+    /// Show the runners on this machine and their bindings
+    ///
+    /// Heartbeats every runner (one per hub) and shows the bindings:
+    /// effective mode, blocking switch, lag and the Claude Code probe.
     Status {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
@@ -641,9 +728,12 @@ pub enum RunnerAction {
     /// Revoke the runner on the hub and remove the local token file.
     Revoke,
 
-    /// Check whether the installed Claude Code takes notices through its
+    /// Check whether Claude Code accepts session notices
+    ///
+    /// Checks whether the installed Claude Code takes notices through its
     /// cross-session inbox (tested version range).
     Probe {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
@@ -653,6 +743,8 @@ pub enum RunnerAction {
 /// mapping come from the hub.
 #[derive(Debug, Subcommand)]
 pub enum ClassificationAction {
+    /// Show the classification and its consequences
+    ///
     /// Project, customer and effective level, gateway class and
     /// consequences. Supports --output json.
     Show,
@@ -660,14 +752,17 @@ pub enum ClassificationAction {
     /// All levels with group, label and gateway class.
     Levels,
 
-    /// Change the project level. Always prints the impact plan first;
-    /// lowering the gateway class needs --reason and a typed confirmation.
+    /// Change the project's classification level
+    ///
+    /// Always prints the impact plan first; lowering the gateway class
+    /// needs --reason and a typed confirmation.
     Set {
         /// New level, e.g. confidential (see `nexus classification levels`).
         level: String,
 
-        /// Why the level changes (recorded in the audit log; required when
-        /// the gateway class goes down).
+        /// Reason for the change, recorded in the audit log
+        ///
+        /// Required when the gateway class goes down.
         #[arg(long)]
         reason: Option<String>,
 
@@ -688,14 +783,18 @@ pub enum ClassificationAction {
 /// `nexus doctor` targets.
 #[derive(Debug, Subcommand)]
 pub enum DoctorTarget {
-    /// Check the tools the Claude Code workspace needs (claude, zellij,
-    /// lazygit, ccusage, delta), driven by your workspace layout, and
-    /// whether copying from a Zellij pane reaches the system clipboard.
+    /// Check the tools the Claude Code workspace needs
+    ///
+    /// Checks claude, zellij, lazygit, ccusage and delta, driven by your
+    /// workspace layout, and whether copying from a Zellij pane reaches the
+    /// system clipboard.
     /// Exits 1 when a required tool is missing. Supports --output json.
     Claude {
-        /// Print install commands (devbox, brew or npm) and run them after
-        /// confirmation; offer the Zellij `copy_command` line (with a
-        /// backup). Nothing is installed or written without it.
+        /// Offer install commands and run them after confirmation
+        ///
+        /// Prints install commands (devbox, brew or npm) and offers the
+        /// Zellij `copy_command` line (with a backup). Nothing is installed
+        /// or written without it.
         #[arg(long)]
         fix: bool,
     },
@@ -704,16 +803,20 @@ pub enum DoctorTarget {
 /// Deprecated `nexus claude` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ClaudeAction {
-    /// Show the CCX bundle state (per-file state, managed settings, Claude
-    /// Code version, plugins, last headroom summary). Read-only. Exits 1
-    /// when changes are pending or conflicts exist. Supports --output json.
+    /// Show the CCX bundle state
+    ///
+    /// Per-file state, managed settings, Claude Code version, plugins, last
+    /// headroom summary. Read-only. Exits 1 when changes are pending or
+    /// conflicts exist. Supports --output json.
     Status {
         /// Override the linked project ID.
         #[arg(long)]
         project_id: Option<String>,
     },
 
-    /// Show unified diffs (local vs. desired) for every non-clean CCX file,
+    /// Show diffs for changed CCX files
+    ///
+    /// Unified diffs (local vs. desired) for every non-clean CCX file,
     /// managed settings key, and the CLAUDE.md block. Read-only. Exits 1
     /// when differences exist.
     Diff {
@@ -730,7 +833,7 @@ pub enum ClaudeAction {
         #[arg(long)]
         skip_checks: bool,
 
-        /// Skip pre-launch confirmation prompt (non-interactive/CI mode).
+        /// Skip the pre-launch confirmation (non-interactive use)
         #[arg(short, long)]
         force: bool,
 
@@ -743,12 +846,14 @@ pub enum ClaudeAction {
 /// Shadow mode subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ShadowAction {
-    /// Hide the selected targets from Git (all of them without --target):
-    /// agentic files, the devbox workspace and Nexus internals in commit
-    /// messages and tracked files.
+    /// Hide the selected targets from Git
+    ///
+    /// Targets: agentic files, the devbox workspace and Nexus internals in
+    /// commit messages and tracked files (all of them without --target).
     On(ShadowSwitchArgs),
-    /// Reverse of `on`: stop hiding the selected targets (all of them
-    /// without --target).
+    /// Stop hiding the selected targets from Git
+    ///
+    /// Reverse of `on` (all targets without --target).
     Off(ShadowSwitchArgs),
     /// Deprecated: use `nexus shadow on --target agentic`.
     #[command(hide = true)]
@@ -756,12 +861,16 @@ pub enum ShadowAction {
     /// Deprecated: use `nexus shadow on --target nexus`.
     #[command(hide = true)]
     Nexus,
-    /// Show the effective shadow state (level, excluded paths, commit-msg
-    /// hook) with a check summary, and the local exclude blocks.
+    /// Show the effective shadow state
+    ///
+    /// Level, excluded paths and commit-msg hook, with a check summary and
+    /// the local exclude blocks.
     Status,
-    /// Scan tracked files and recent commit messages with the project's
-    /// shadow rules and list excluded paths git still tracks (read-only;
-    /// exit 1 when anything is found). Supports --json / --output json.
+    /// Check tracked files and commits against the shadow rules
+    ///
+    /// Scans tracked files and recent commit messages with the project's
+    /// shadow rules and lists excluded paths git still tracks. Read-only;
+    /// exits 1 when anything is found. Supports --json / --output json.
     Check {
         /// Number of recent commits on the current branch to scan.
         #[arg(long, default_value_t = 50)]
@@ -785,8 +894,10 @@ pub enum ShadowAction {
 /// Targets of `nexus shadow on|off`.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct ShadowSwitchArgs {
-    /// What to switch: agentic (alias: ai, agentic-files), workspace,
-    /// nexus. Repeat or separate with commas; nexus includes agentic.
+    /// Targets to switch (repeatable, comma-separated)
+    ///
+    /// agentic (alias: ai, agentic-files), workspace, nexus; nexus includes
+    /// agentic.
     #[arg(long, value_enum, value_delimiter = ',')]
     pub target: Vec<cmd::shadow::ShadowTarget>,
     /// All targets (the default without --target).
@@ -795,9 +906,10 @@ pub struct ShadowSwitchArgs {
     /// Show what would change without changing anything.
     #[arg(long)]
     pub dry_run: bool,
-    /// With on: also take files git already tracks (with commit history) out
-    /// of the index. They stay on disk; the next commit removes them from the
-    /// repository.
+    /// With on: also untrack files git already tracks
+    ///
+    /// Takes them (with commit history) out of the index. They stay on disk;
+    /// the next commit removes them from the repository.
     #[arg(long)]
     pub untrack: bool,
 }
@@ -805,7 +917,9 @@ pub struct ShadowSwitchArgs {
 /// Workspace shadow subcommands.
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceAction {
-    /// Enable workspace shadow: exclude devbox.json, devbox.lock, .devbox/, scripts/devbox/ from Git.
+    /// Exclude the devbox workspace files from Git
+    ///
+    /// Covers devbox.json, devbox.lock, .devbox/ and scripts/devbox/.
     #[command(name = "shadow")]
     Shadow {
         #[command(subcommand)]
@@ -817,9 +931,13 @@ pub enum WorkspaceAction {
 /// --target workspace`).
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceShadowAction {
-    /// Enable workspace shadow mode (same as nexus shadow on --target workspace).
+    /// Enable workspace shadow mode
+    ///
+    /// Same as `nexus shadow on --target workspace`.
     On,
-    /// Disable workspace shadow mode (same as nexus shadow off --target workspace).
+    /// Disable workspace shadow mode
+    ///
+    /// Same as `nexus shadow off --target workspace`.
     Off,
     /// Show workspace shadow status.
     Status,
@@ -859,17 +977,18 @@ pub enum SyncAction {
 /// Git identity subcommands.
 #[derive(Debug, Subcommand)]
 pub enum GitAction {
-    /// Verify local git config matches the project's expected identity.
+    /// Check the local git config against the project identity
     Verify,
-    /// Apply the project's git identity settings to local .git/config.
+    /// Apply the project's git identity to .git/config
     ///
     /// With a GitHub account on the project path, also writes
     /// `.nexus/gh.env` and sets the transport identity (`core.sshCommand`,
     /// the HTTPS credential helper), the gh default repository and the
     /// account's commit identity in the local git config.
     Apply {
-        /// Rewrite remotes on an SSH host alias to git@<host>:owner/repo.git
-        /// (needs an ssh key on the account; asks per remote unless --yes).
+        /// Rewrite SSH host-alias remotes to git@<host>:owner/repo.git
+        ///
+        /// Needs an ssh key on the account; asks per remote unless --yes.
         #[arg(long)]
         canonical_remotes: bool,
     },
@@ -895,8 +1014,10 @@ pub enum GitAction {
         /// gh profile name (must match the project's account).
         #[arg(long)]
         profile: Option<String>,
-        /// Read a token from stdin (hidden prompt on a terminal) instead of
-        /// the browser login. The token is passed to gh over stdin only.
+        /// Read a token from stdin instead of the browser login
+        ///
+        /// Hidden prompt on a terminal. The token is passed to gh over stdin
+        /// only.
         #[arg(long)]
         with_token: bool,
     },
@@ -923,7 +1044,7 @@ pub enum ProjectAction {
         #[arg(long, value_delimiter = ',')]
         restrict_profiles: Vec<String>,
 
-        /// Token lifetime: relative (e.g. 30d, 12h, 2w) or an ISO 8601 timestamp.
+        /// Token lifetime: 30d, 12h, 2w or an ISO 8601 timestamp
         #[arg(long)]
         expires: Option<String>,
 
@@ -936,13 +1057,15 @@ pub enum ProjectAction {
         status: bool,
     },
 
-    /// Rotate the project inference token (previous stays valid until finalized).
+    /// Rotate the project inference token
+    ///
+    /// The previous token stays valid until the rotation is finalized.
     Rotate {
         /// Nexus project UUID (defaults to the linked project).
         #[arg(long)]
         project_id: Option<String>,
 
-        /// Revoke the previously superseded token to complete rotation.
+        /// Revoke the superseded token to complete the rotation
         #[arg(long)]
         finalize: bool,
     },
@@ -965,8 +1088,9 @@ pub enum ProjectAction {
 /// Configuration subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
-    /// Show the effective configuration, with per-key provenance
-    /// (local / global / default).
+    /// Show the effective configuration
+    ///
+    /// Shows per-key provenance (local / global / default).
     Show,
 
     /// Set a configuration value (KEY=VALUE).
@@ -979,12 +1103,13 @@ pub enum ConfigAction {
         /// Configuration key=value pair.
         pair: String,
 
-        /// Write to the project-local `.nexus/config.toml` instead of the
-        /// global config. Supports api_url, default_output, no_color.
+        /// Write to the project-local .nexus/config.toml
+        ///
+        /// Supports api_url, default_output, no_color.
         #[arg(long, conflicts_with = "global")]
         local: bool,
 
-        /// Write to the global config (default behavior; explicit for symmetry with --local).
+        /// Write to the global config (default)
         #[arg(long, conflicts_with = "local")]
         global: bool,
     },
@@ -994,11 +1119,11 @@ pub enum ConfigAction {
     /// Without flags, prints the global config path (unchanged from
     /// previous versions). Pass `--local` for the project-local path.
     Path {
-        /// Print the project-local `.nexus/config.toml` path instead of the global one.
+        /// Print the project-local .nexus/config.toml path
         #[arg(long, conflicts_with = "global")]
         local: bool,
 
-        /// Print the global config path (default behavior; explicit for symmetry with --local).
+        /// Print the global config path (default)
         #[arg(long, conflicts_with = "local")]
         global: bool,
     },
@@ -1009,11 +1134,11 @@ pub enum ConfigAction {
 pub enum SkillsAction {
     /// List all skills for the current tenant.
     List {
-        /// Filter by status: draft, active, archived (comma-separated, default: draft,active).
+        /// Filter by status: draft, active, archived (default: draft,active)
         #[arg(long)]
         status: Option<String>,
 
-        /// Maximum number of skills to return (default: 50, max: 100).
+        /// Maximum number of skills (default: 50, max: 100)
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -1052,7 +1177,7 @@ pub enum ActorsAction {
         path: String,
     },
 
-    /// Validate actor profile(s) against schema and model route catalog.
+    /// Validate actor profiles against schema and route catalog
     Validate {
         /// Path to actor markdown file.
         path: String,
@@ -1089,9 +1214,11 @@ pub enum ActorsAction {
         action: ActorAvatarAction,
     },
 
-    /// Start a local-lane actor as its own Claude Code session against the
-    /// Nexus gateway, authenticated with the project inference token (never
-    /// a claude.ai login). Exits with claude's exit code.
+    /// Start a local-lane actor as its own Claude Code session
+    ///
+    /// Runs against the Nexus gateway, authenticated with the project
+    /// inference token (never a claude.ai login). Exits with claude's exit
+    /// code.
     Run {
         /// Actor slug (a local-lane actor of the linked project).
         slug: String,
@@ -1100,7 +1227,7 @@ pub enum ActorsAction {
         #[arg(short = 'p', long)]
         prompt: Option<String>,
 
-        /// Gateway base URL (default: NEXUS_GATEWAY_URL, then the backend).
+        /// Gateway base URL (default: NEXUS_GATEWAY_URL, then backend)
         #[arg(long)]
         gateway_url: Option<String>,
 
@@ -2099,6 +2226,33 @@ mod tests {
             }
             _ => panic!("expected Skills Export command"),
         }
+    }
+
+    #[test]
+    fn test_short_help_fits_a_terminal_line() {
+        // `-h` and the command lists show only the first paragraph of each
+        // doc comment; keep it to one short line so they read like the help
+        // of other Unix tools. Details belong in the following paragraphs
+        // (shown by --help and in the manual pages).
+        fn check(cmd: &clap::Command, path: &str, errors: &mut Vec<String>) {
+            for sub in cmd.get_subcommands().filter(|c| !c.is_hide_set()) {
+                let name = format!("{path} {}", sub.get_name());
+                let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+                if about.is_empty() || about.len() > 72 || about.contains('\n') {
+                    errors.push(format!("{name}: about {:?}", about));
+                }
+                check(sub, &name, errors);
+            }
+            for arg in cmd.get_arguments().filter(|a| !a.is_hide_set()) {
+                let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+                if help.len() > 72 || help.contains('\n') {
+                    errors.push(format!("{path} --{}: help {:?}", arg.get_id(), help));
+                }
+            }
+        }
+        let mut errors = Vec::new();
+        check(&Cli::command(), "nexus", &mut errors);
+        assert!(errors.is_empty(), "too long:\n{}", errors.join("\n"));
     }
 
     #[test]
