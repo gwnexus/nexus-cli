@@ -4,14 +4,14 @@
 //! injected into the process environment. Runs a pre-launch check, then spawns
 //! the tool. After the tool exits, prints a session summary.
 //!
-//! Env resolution priority (low → high — later wins for injection, shell is never overwritten):
+//! Env resolution priority (low → high: later wins for injection, shell is never overwritten):
 //!
 //! ```text
 //! .nexus/env (plugin defaults from af_export)
 //!   ↑ override by
 //! .env.nexus.local (project secrets: ANTHROPIC_API_KEY, etc.)
 //!   ↑ do not overwrite
-//! process.env (shell — already-set vars are never overwritten)
+//! process.env (shell: already-set vars are never overwritten)
 //! ```
 
 use anyhow::Context as _;
@@ -448,7 +448,7 @@ pub async fn run(
             }
         };
 
-    // ── 4.6. Per-project gh CLI profile — Phase A ─────
+    // ── 4.6. Per-project gh CLI profile: Phase A ─────
     // ──────────────────────────────────────────────────────────────────────
     //
     // Side-effect-limited preview: ensure the isolated profile directory
@@ -561,7 +561,7 @@ pub async fn run(
         (name, super::zellij_guard::session_start(state, resume))
     });
 
-    // ── 5.6. Per-project gh CLI profile — Phase B ─────
+    // ── 5.6. Per-project gh CLI profile: Phase B ─────
     // ──────────────────────────────────────────────────────────────────────
     //
     // Attempt to seed an empty profile now that we know this is a real
@@ -591,13 +591,13 @@ pub async fn run(
     // NEXUS_API_URL/NEXUS_PRIVATE_TOKEN (not an {env:} reference) so the MCP
     // config is self-sufficient even when the tool is launched without
     // 'nexus run' (e.g. directly from an IDE). That's a deliberate,
-    // tested design (see nexus_core pull tests) — not a bug. The actual gap
+    // tested design (see nexus_core pull tests): not a bug. The actual gap
     // is that the baked copy silently drifts from
     // the global login token whenever 'nexus login' rotates it, with nothing
     // to notice or fix it short of re-running 'nexus init'/'nexus pull'.
     // Since 'nexus run' already resolves the current, live-verified token on
     // every invocation, it's the natural place to keep the baked copy fresh
-    // automatically — the user only ever has to think about one place
+    // automatically: the user only ever has to think about one place
     // (`nexus login`), and every subsequent `nexus run` self-heals the rest.
     if let Some(token) = resolve_token() {
         let project_id = config::resolve_project_id(None, Some(&workspace)).ok();
@@ -665,7 +665,7 @@ pub async fn run(
     if let Some(dir) = &claude_config_dir {
         if env::var("CLAUDE_CONFIG_DIR").is_ok() {
             println!(
-                "   {} CLAUDE_CONFIG_DIR is already set in the shell — \
+                "   {} CLAUDE_CONFIG_DIR is already set in the shell: \
                  --account '{}' ignored to avoid overriding it.",
                 style("!").bold().yellow(),
                 account.unwrap_or_default()
@@ -742,7 +742,7 @@ pub async fn run(
                 .unwrap()
                 .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
         );
-        spinner.set_message("Session ended — collecting summary. Press Ctrl+C to skip.");
+        spinner.set_message("Session ended: collecting summary. Press Ctrl+C to skip.");
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
         // Race: collect stats vs. user pressing Ctrl+C to skip.
@@ -806,7 +806,7 @@ pub async fn run(
 }
 
 // ---------------------------------------------------------------------------
-// Credential sync — keep baked opencode.json / .mcp.json Nexus MCP
+// Credential sync: keep baked opencode.json / .mcp.json Nexus MCP
 // credentials in sync with the current global login
 // ---------------------------------------------------------------------------
 
@@ -816,7 +816,7 @@ pub async fn run(
 /// `NEXUS_PROJECT_ID` when the workspace is linked) and only if they differ
 /// from the currently-resolved values. Returns the list of relative paths
 /// that were actually rewritten (empty if already in sync or the files don't
-/// exist — this is best-effort and silent when there's nothing to do).
+/// exist: this is best-effort and silent when there's nothing to do).
 ///
 /// Deliberately does NOT touch any other keys/formatting beyond those
 /// fields, and does not create either file if absent (that's
@@ -914,7 +914,7 @@ fn print_env_table(
         );
     } else {
         println!(
-            "   Resolved env-vars ({} injected, {} skipped — already in shell):",
+            "   Resolved env-vars ({} injected, {} skipped: already in shell):",
             to_inject.len(),
             skipped.len()
         );
@@ -930,7 +930,7 @@ fn print_env_table(
         if !skipped.is_empty() {
             println!();
             for k in skipped {
-                println!("     {:<36}   (skipped — already in shell)", style(k).dim());
+                println!("     {:<36}   (skipped: already in shell)", style(k).dim());
             }
         }
     }
@@ -1307,12 +1307,12 @@ fn wants_opencode(agent_owner: Option<&str>) -> bool {
 // `CLAUDE_CONFIG_DIR` (verified live against a fresh directory demanding its
 // own `/login`). Pointing different invocations at different directories
 // under `~/.config/nexus/claude-accounts/<name>/` gives each named account
-// its own isolated login and OAuth refresh cycle, entirely client-side —
+// its own isolated login and OAuth refresh cycle, entirely client-side:
 // Nexus never stores or is aware of which account is selected.
 //
 // Hard constraint from the dispatch: explicit only, never automatic. There
 // is deliberately no rotation, no quota/rate-limit detection, and no
-// fallback list here — a single name per invocation, or the existing
+// fallback list here: a single name per invocation, or the existing
 // default (`~/.claude`) when no name is given.
 
 /// Reserved `--account` value meaning "explicitly select the implicit
@@ -1333,7 +1333,7 @@ const DEFAULT_ACCOUNT_ALIAS: &str = "default";
 /// Rejects anything that could escape `~/.config/nexus/claude-accounts/`
 /// (path separators, `..`, empty names) or that is not a plain identifier.
 /// This is a local directory-naming safeguard, not a security boundary
-/// against a hostile filesystem — consistent with the rest of the CLI's
+/// against a hostile filesystem: consistent with the rest of the CLI's
 /// treatment of user-supplied path components.
 fn validate_account_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
@@ -1361,14 +1361,14 @@ fn claude_account_dir(config_dir: &Path, name: &str) -> std::path::PathBuf {
 
 /// Outcome of deciding what `--account <name>` means for this invocation,
 /// before any filesystem I/O. Kept separate from directory creation
-/// (performed by the caller only for `Selected`) so the decision itself —
-/// including the reserved `default` alias and the non-claude-project case —
+/// (performed by the caller only for `Selected`) so the decision itself,
+/// including the reserved `default` alias and the non-claude-project case,
 /// can be unit tested without touching disk.
 #[derive(Debug, PartialEq, Eq)]
 enum AccountResolution {
     /// No `CLAUDE_CONFIG_DIR` override: `~/.claude` is used as-is. Covers no
-    /// `--account`, the `default` alias, and — carrying the name to warn
-    /// about — a real name on a project that is not claude-cli/both.
+    /// `--account`, the `default` alias, and, carrying the name to warn
+    /// about, a real name on a project that is not claude-cli/both.
     NoOverride { warn_ignored: Option<String> },
     /// A validated real account name; the caller creates `dir` before use.
     Selected(std::path::PathBuf),
@@ -1452,7 +1452,7 @@ fn mcp_config_check(workspace: &Path, agent_owner: Option<&str>) -> CheckResult 
 
     if !missing.is_empty() {
         return CheckResult::Warn(format!(
-            "No {} — run 'nexus init' or 'nexus pull'",
+            "No {}: run 'nexus init' or 'nexus pull'",
             missing.join(", ")
         ));
     }
@@ -1521,7 +1521,7 @@ fn billing_auth_check_with(
     }
 
     CheckResult::Fail(format!(
-        "{} is set — Claude Code will use metered API-key billing instead of your \
+        "{} is set: Claude Code will use metered API-key billing instead of your \
          Max subscription. Unset it for this session or remove it from \
          .env.nexus.local before running.",
         offending.join(", ")
@@ -1573,11 +1573,11 @@ async fn run_prelaunch_checks(
                 linked_project_id = Some(p.id.clone());
                 CheckResult::Pass(format!("{} ({})", p.name, &p.id[..8.min(p.id.len())]))
             }
-            Ok(None) => CheckResult::Warn("No project linked — run 'nexus link'".into()),
+            Ok(None) => CheckResult::Warn("No project linked: run 'nexus link'".into()),
             Err(_) => CheckResult::Warn("Could not read project config".into()),
         }
     } else {
-        CheckResult::Fail("No .nexus/ directory — run 'nexus init'".into())
+        CheckResult::Fail("No .nexus/ directory: run 'nexus init'".into())
     };
     checks.push(("Project", ws_check));
     checks.push(("Workspace", workspace_row));
@@ -1592,7 +1592,7 @@ async fn run_prelaunch_checks(
     let resolved_token = resolve_token();
     let auth_check = match &resolved_token {
         Some(t) => CheckResult::Pass(mask_token(t)),
-        None => CheckResult::Fail("Not authenticated — run 'nexus login'".into()),
+        None => CheckResult::Fail("Not authenticated: run 'nexus login'".into()),
     };
     checks.push(("Auth", auth_check));
 
@@ -1608,21 +1608,21 @@ async fn run_prelaunch_checks(
         }
     }
 
-    // MCP Config — which artifact is authoritative depends on the project's
+    // MCP Config: which artifact is authoritative depends on the project's
     // tool flavor: OpenCode reads opencode.json,
     // Claude Code reads the root .mcp.json written by `claude_render`.
     checks.push(("MCP Config", mcp_config_check(workspace, agent_owner)));
 
-    // Billing Auth — hard-stop, not bypassable via --force (see below).
+    // Billing Auth: hard-stop, not bypassable via --force (see below).
     checks.push(("Billing Auth", billing_auth_check(agent_owner)));
 
-    // Account — which named Claude account (if any) is active, so the
+    // Account: which named Claude account (if any) is active, so the
     // operator is not guessing which Keychain identity `claude` will use.
     if let Some(result) = account_check(agent_owner, account) {
         checks.push(("Account", result));
     }
 
-    // gh Auth — reflects the final, post-seeding-attempt outcome from
+    // gh Auth: reflects the final, post-seeding-attempt outcome from
     // steps 4.6/5.6. Never a hard Fail: a session
     // without an isolated gh identity still launches, just with the
     // environment left untouched (see `GhOutcome::Fallback`).
@@ -1645,7 +1645,7 @@ async fn run_prelaunch_checks(
             CheckResult::Pass(format!(".nexus/env ({} vars)", map.len()))
         }
     } else {
-        CheckResult::Warn("No .nexus/env — run 'nexus pull' first".into())
+        CheckResult::Warn("No .nexus/env: run 'nexus pull' first".into())
     };
     checks.push(("Plugin Env", env_check));
 
@@ -1664,7 +1664,7 @@ async fn run_prelaunch_checks(
     };
     checks.push(("Tool", tool_check));
 
-    // Headroom — live-verified, not just env-var presence.
+    // Headroom: live-verified, not just env-var presence.
     //
     // Fix: this check previously only inspected
     // whether HEADROOM_MODE=transform was set locally, which kept reporting
@@ -1683,13 +1683,13 @@ async fn run_prelaunch_checks(
             m
         )),
         (None, _, _) => {
-            CheckResult::Warn("HEADROOM_MODE not set — headroom will use 'observe' mode".into())
+            CheckResult::Warn("HEADROOM_MODE not set: headroom will use 'observe' mode".into())
         }
         (Some(_), None, _) => CheckResult::Warn(
-            "HEADROOM_MODE=transform, but no project linked to verify — run 'nexus link'".into(),
+            "HEADROOM_MODE=transform, but no project linked to verify: run 'nexus link'".into(),
         ),
         (Some(_), _, None) => CheckResult::Warn(
-            "HEADROOM_MODE=transform, but not authenticated — run 'nexus login'".into(),
+            "HEADROOM_MODE=transform, but not authenticated: run 'nexus login'".into(),
         ),
         (Some(m), Some(project_id), Some(token)) => {
             match NexusClient::new(api_url, Some(token.clone())) {
@@ -1703,7 +1703,7 @@ async fn run_prelaunch_checks(
                             .into(),
                     ),
                     Err(e) => CheckResult::Fail(format!(
-                        "HEADROOM_MODE=transform, but live preflight failed: {} — the \
+                        "HEADROOM_MODE=transform, but live preflight failed: {}; the \
                          nexus-headroom-intercept plugin will silently fall back to \
                          'observe' mode (no compression). Run 'nexus status' / 'nexus login'.",
                         e
@@ -1728,7 +1728,7 @@ async fn run_prelaunch_checks(
         checks.push(("Plugin env", c));
     }
 
-    // Done collecting — clear spinner and print results
+    // Done collecting: clear spinner and print results
     spinner.finish_and_clear();
 
     for (label, result) in &checks {
@@ -1741,13 +1741,13 @@ async fn run_prelaunch_checks(
     // ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN cannot be safely stripped here
     // either, since it may be legitimately needed elsewhere in the same
     // shell (a different tool, or a non-Claude-Max project run from the
-    // same terminal) — the user must decide, not us.
+    // same terminal): the user must decide, not us.
     if checks
         .iter()
         .any(|(label, c)| *label == "Billing Auth" && c.is_fail())
     {
         println!(
-            "  {} Billing-auth check failed — this is not bypassable with --force.",
+            "  {} Billing-auth check failed: this is not bypassable with --force.",
             style("ABORT").bold().red()
         );
         println!();
@@ -1834,7 +1834,7 @@ fn launch_countdown(tool: &str, secs: u64) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut buf = [0u8; 1];
-        // Read a single byte from stdin — blocks until keypress
+        // Read a single byte from stdin: blocks until keypress
         if std::io::Read::read(&mut std::io::stdin(), &mut buf).is_ok() {
             let _ = tx.send(());
         }
@@ -1853,7 +1853,7 @@ fn launch_countdown(tool: &str, secs: u64) -> anyhow::Result<()> {
         // Sleep in small increments to check for Enter press
         for _ in 0..20 {
             if rx.try_recv().is_ok() {
-                // User pressed Enter — skip remaining countdown
+                // User pressed Enter: skip remaining countdown
                 print!("\r{}\r", " ".repeat(80));
                 std::io::stdout().flush()?;
                 return Ok(());
@@ -2123,7 +2123,7 @@ fn print_session_summary(
         }
     }
 
-    // Token/Cost stats — only show if data is available
+    // Token/Cost stats: only show if data is available
     if let Some(ts) = token_stats {
         println!();
         print!("  {}:  ", style("Token Usage").bold());
@@ -2469,7 +2469,7 @@ pub(crate) fn read_headroom_stats(
             continue;
         }
 
-        // Parse timestamp — ISO 8601 string ("2026-07-09T15:18:06.407Z") or Unix millis
+        // Parse timestamp: ISO 8601 string ("2026-07-09T15:18:06.407Z") or Unix millis
         let ts_secs = val
             .get("ts")
             .and_then(|v| {
@@ -2481,7 +2481,7 @@ pub(crate) fn read_headroom_stats(
                         ms
                     });
                 }
-                // ISO 8601 string — parse manually (avoid heavy chrono dep)
+                // ISO 8601 string: parse manually (avoid heavy chrono dep)
                 // Format: "2026-07-09T15:18:06.407Z" or "2026-07-09T15:18:06Z"
                 if let Some(s) = v.as_str() {
                     return iso8601_to_unix_secs(s);
@@ -2559,7 +2559,7 @@ fn iso8601_to_unix_secs(s: &str) -> Option<u64> {
     let min: u64 = s[14..16].parse().ok()?;
     let sec: u64 = s[17..19].parse().ok()?;
 
-    // Days from epoch (1970-01-01) to given date — simplified but sufficient for
+    // Days from epoch (1970-01-01) to given date: simplified but sufficient for
     // timestamps in range 2020-2099. Not accounting for leap seconds.
     let days_in_month = [0u64, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let is_leap = |y: u64| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
@@ -2701,7 +2701,7 @@ pub(crate) fn parse_env_file(path: &Path) -> HashMap<String, String> {
     map
 }
 
-/// Resolve agentic root — fall back to `.nexus`.
+/// Resolve agentic root: fall back to `.nexus`.
 pub(crate) fn resolve_agentic_root(_workspace: &Path) -> String {
     ".nexus".to_string()
 }
@@ -3660,7 +3660,7 @@ mod tests {
 
     #[test]
     fn test_iso8601_to_unix_secs() {
-        // 2026-07-09T15:18:06Z — known offset from epoch
+        // 2026-07-09T15:18:06Z: known offset from epoch
         let result = iso8601_to_unix_secs("2026-07-09T15:18:06.407Z");
         assert!(result.is_some());
         let secs = result.unwrap();
@@ -4311,7 +4311,7 @@ mod tests {
 
     #[test]
     fn test_account_check_default_alias_distinct_text_from_no_account() {
-        // Cosmetic distinction only — both represent the identical
+        // Cosmetic distinction only: both represent the identical
         // no-override case, but the operator should see their explicit
         // choice was honored rather than silently ignored.
         let explicit = account_check(Some("claude-cli"), Some("default"));

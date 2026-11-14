@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# .githooks/pre-commit — nexus-cli
+# .githooks/pre-commit: nexus-cli
 #
-# 1. Gitleaks secret scan (staged changes) — fails closed.
+# 1. Gitleaks secret scan (staged changes): fails closed.
 # 2. cargo fmt --check + cargo clippy on staged Rust files.
 #
 # Wired automatically on 'devbox shell' via scripts/devbox/dbx_init.sh

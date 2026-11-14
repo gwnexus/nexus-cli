@@ -80,7 +80,7 @@ const WS_MARKER_START: &str = "# >>> nexus workspace shadow";
 const WS_MARKER_END: &str = "# <<< nexus workspace shadow";
 
 // ---------------------------------------------------------------------------
-// Public entry points — agentic shadow
+// Public entry points: agentic shadow
 // ---------------------------------------------------------------------------
 
 /// Enable shadow mode (agentic files).
@@ -279,7 +279,7 @@ fn local_status(server_level: bool) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Public entry points — workspace shadow
+// Public entry points: workspace shadow
 // ---------------------------------------------------------------------------
 
 /// Enable workspace shadow mode (devbox files excluded from git), as
@@ -1616,14 +1616,14 @@ mod tests {
         assert!(staged.stdout.is_empty());
     }
 
-    /// `untrack_patterns` skips a committed file — tested via the `_in` helpers
+    /// `untrack_patterns` skips a committed file: tested via the `_in` helpers
     /// to avoid set_current_dir (which is process-global and unsafe in parallel tests).
     #[test]
     fn test_guard_skips_committed_file() {
         let dir = make_temp_repo_with_commit("shadow_test.txt", "hello");
         let path = dir.path();
 
-        // Verify the guard functions directly — committed file must be detected
+        // Verify the guard functions directly: committed file must be detected
         let tracked = resolve_tracked_paths_in("shadow_test.txt", Some(path));
         assert_eq!(tracked, vec!["shadow_test.txt"]);
 
@@ -1637,7 +1637,7 @@ mod tests {
         assert!(path.join("shadow_test.txt").exists());
     }
 
-    /// `untrack_patterns` removes a staged-only file — tested via `_in` helpers.
+    /// `untrack_patterns` removes a staged-only file: tested via `_in` helpers.
     #[test]
     fn test_guard_allows_staged_only_file() {
         use std::process::Command;
@@ -1652,14 +1652,14 @@ mod tests {
             .output()
             .unwrap();
 
-        // Staged-only: in index, no history — guard must allow removal
+        // Staged-only (in index, no history): guard must allow removal
         let tracked = resolve_tracked_paths_in("agentic.txt", Some(path));
         assert_eq!(tracked, vec!["agentic.txt"]);
 
         let has_history = is_file_tracked_in_history_in("agentic.txt", Some(path));
         assert!(
             !has_history,
-            "staged-only file must not have history — guard must allow removal"
+            "staged-only file must not have history: guard must allow removal"
         );
     }
 

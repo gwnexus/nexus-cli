@@ -1,4 +1,4 @@
-//! `nexus import` — Import existing agentic files into a Nexus project.
+//! `nexus import`: Import existing agentic files into a Nexus project.
 //!
 //! Scans the workspace for known agentic file types (CLAUDE.md, AGENTS.md,
 //! .cursorrules, copilot-instructions.md, .windsurf/rules/*.md, GEMINI.md,
@@ -206,7 +206,7 @@ pub async fn run(api_url: &str, dry_run: bool, auto_yes: bool) -> anyhow::Result
         response.summary.agentic_files_ingested
     );
     println!(
-        "   {} {} directive(s) created (disabled — review in dashboard)",
+        "   {} {} directive(s) created (disabled: review in dashboard)",
         style("+").bold().green(),
         response.summary.directives_created
     );

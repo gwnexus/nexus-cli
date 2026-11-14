@@ -331,7 +331,7 @@ Multiple stashes can coexist; `pop` always restores the most recent one.
   name/slug matching.
 - **`instructions`** is merged additively from the platform (typically
   `<agentic_root>/AGENTS.md`), so OpenCode loads the project's agent policy
-  deterministically at session start — no dependency on OpenCode's own
+  deterministically at session start: no dependency on OpenCode's own
   upward `AGENTS.md` auto-discovery, which has no awareness of the
   `agentic_root` convention (default `.nexus/`). Pre-existing custom entries
   in `instructions[]` are preserved; re-running `pull` does not duplicate
@@ -421,17 +421,17 @@ visible next to long values such as signing keys (`nexus git verify` uses
 the same layout).
 
 - **API URL** reports which layer supplied it (`flag`, `env`, `local`,
-  `global`, `default`) — see [Configuration](#configuration) below.
+  `global`, `default`): see [Configuration](#configuration) below.
 - **Auth** verifies the token against the API (unchanged).
 - **Project** now makes a real API call to confirm the linked project
   exists and is reachable at the effective `api_url`, instead of just
   echoing back `.nexus/config.toml`. This catches a silent env-mismatch
   (e.g. `api_url` resolved to production while the project only exists on
   staging) that previously reported a false "OK":
-  - `ERR Not found at <api_url>` — the project isn't there; check
+  - `ERR Not found at <api_url>`: the project isn't there; check
     `NEXUS_API_URL` / `--api-url` / `nexus config show`, or re-link.
-  - `ERR Access denied at <api_url>` — reachable, but no permission.
-  - `-- ... unverified` — authentication already failed or no token is
+  - `ERR Access denied at <api_url>`: reachable, but no permission.
+  - `-- ... unverified`: authentication already failed or no token is
     configured, so the project binding cannot be confirmed.
 
 ### GitHub Account per Project Path (`nexus git`)
@@ -1178,9 +1178,9 @@ nexus config set run.launch_countdown_secs=0   # launch immediately
 `nexus config` supports two layers, mirroring git's own `--local` /
 `--global` config precedence:
 
-- **Global** — `~/.config/nexus/config.toml` (machine-wide default, unchanged
+- **Global**: `~/.config/nexus/config.toml` (machine-wide default, unchanged
   from previous versions).
-- **Local** — `.nexus/config.toml` `[config]` section (this project only).
+- **Local**: `.nexus/config.toml` `[config]` section (this project only).
   Supports `api_url`, `default_output`, and `no_color`.
 
 Any command run inside a directory with a `.nexus/config.toml` prefers the
@@ -1188,7 +1188,7 @@ project-local value over the global one, falling back to global (then the
 compiled-in default) for any key the local file doesn't set:
 
 ```bash
-# Scope a staging API URL to this project only — every other project on
+# Scope a staging API URL to this project only: every other project on
 # this machine keeps using the global (e.g. production) api_url.
 nexus config set api_url=https://staging.example.com --local
 
@@ -1302,7 +1302,7 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 
 `nexus pull` automatically configures two token-saving tools when enabled for a project:
 
-### RTK — Runtime Token Killer
+### RTK: Runtime Token Killer
 
 Filters and compresses CLI output before it reaches the agent context (60–90% savings on build/test/lint output).
 
@@ -1324,10 +1324,10 @@ If RTK is not installed when you run `nexus pull`, the CLI prints a warning:
 ```
    ! rtk not found in PATH
      Required by: RTK output filtering (codebase: rust, docker, make)
-     Install: Install RTK: https://www.rtk-ai.app/#install — then run: rtk init -g --opencode
+     Install: Install RTK: https://www.rtk-ai.app/#install, then run: rtk init -g --opencode
 ```
 
-### Headroom — Context Compression MCP
+### Headroom: Context Compression MCP
 
 ML-based context compression via MCP server. Reduces input context by 60–95% for large tool outputs.
 
@@ -1342,8 +1342,8 @@ The Headroom MCP server (`headroom mcp serve`) is configured automatically in `o
 
 ## Related
 
-- [Gatewarden Nexus](https://nexus.gatewarden.eu) — Platform (Next.js/Supabase)
-- [nexus-mcp](https://github.com/gwnexus/nexus-mcp) — MCP server (38 tools, 4 layers)
+- [Gatewarden Nexus](https://nexus.gatewarden.eu): Platform (Next.js/Supabase)
+- [nexus-mcp](https://github.com/gwnexus/nexus-mcp): MCP server (38 tools, 4 layers)
 
 ## License
 

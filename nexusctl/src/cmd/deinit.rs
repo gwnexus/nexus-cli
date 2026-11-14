@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::cmd::pull::is_managed_file;
 
 /// Nexus-owned scaffold entries that are always safe to remove.
-/// NOTE: .nexus/ is handled specially — config.toml is preserved.
+/// NOTE: .nexus/ is handled specially: config.toml is preserved.
 const NEXUS_OWNED_ENTRIES: &[&str] = &[".opencode", "opencode.json", "opencode.jsonc"];
 
 /// Run the `nexus deinit` command.
@@ -37,7 +37,7 @@ pub fn run(force: bool) -> anyhow::Result<()> {
         }
     }
 
-    // .nexus/ — remove all contents EXCEPT config.toml (user-managed project config)
+    // .nexus/: remove all contents EXCEPT config.toml (user-managed project config)
     let nexus_dir = cwd.join(".nexus");
     if nexus_dir.exists() {
         if let Ok(entries) = fs::read_dir(&nexus_dir) {
@@ -52,7 +52,7 @@ pub fn run(force: bool) -> anyhow::Result<()> {
 
     // Handle agentic root directory
     if agentic_root == ".claude" {
-        // Default root: .claude/ is Nexus-managed — remove it entirely
+        // Default root: .claude/ is Nexus-managed: remove it entirely
         let claude_dir = cwd.join(".claude");
         if claude_dir.exists() {
             to_remove.push((claude_dir, RemovalKind::Full));
@@ -65,7 +65,7 @@ pub fn run(force: bool) -> anyhow::Result<()> {
     } else {
         // Alternate root (e.g. ".nexus"): only remove the agentic root dir
         // if it's different from ".nexus" (which is already in NEXUS_OWNED_ENTRIES).
-        // .claude/ is customer-owned — do NOT touch it.
+        // .claude/ is customer-owned: do NOT touch it.
         if agentic_root != ".nexus" {
             let alt_dir = cwd.join(&agentic_root);
             if alt_dir.exists() {
@@ -74,7 +74,7 @@ pub fn run(force: bool) -> anyhow::Result<()> {
         }
         // AGENTS.md inside the agentic root is already covered by
         // removing the agentic root directory. Root-level AGENTS.md
-        // belongs to the customer — do NOT touch it.
+        // belongs to the customer: do NOT touch it.
 
         // Remove only Nexus-managed files from .claude/ if any exist
         let claude_dir = cwd.join(".claude");
@@ -124,7 +124,7 @@ pub fn run(force: bool) -> anyhow::Result<()> {
             if preserved > 0 {
                 println!();
                 println!(
-                    "   {} .claude/ contains {} customer-owned file(s) — preserved",
+                    "   {} .claude/ contains {} customer-owned file(s): preserved",
                     style("i").bold().blue(),
                     preserved
                 );

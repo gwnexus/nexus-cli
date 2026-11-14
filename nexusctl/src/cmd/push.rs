@@ -280,7 +280,7 @@ async fn adopt_local_push(
 
     if dry_run {
         println!(
-            "   {} Dry run — no changes pushed.",
+            "   {} Dry run: no changes pushed.",
             style("--dry-run").dim()
         );
         return Ok(());
@@ -324,7 +324,7 @@ fn print_push_result(result: &nexus_core::api::WorkspacePushResponse) {
     println!();
 }
 
-/// `nexus push` — push local workspace changes to the platform.
+/// `nexus push`: push local workspace changes to the platform.
 ///
 /// Tracked files the current fork no longer contains, and untracked local
 /// scripts, are skipped unless listed in `include_named` (named explicitly,
@@ -525,7 +525,7 @@ pub async fn run(
 
     if dry_run {
         println!(
-            "   {} Dry run — no changes pushed.",
+            "   {} Dry run: no changes pushed.",
             style("--dry-run").dim()
         );
         return Ok(());

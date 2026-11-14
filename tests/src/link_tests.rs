@@ -137,7 +137,7 @@ fn test_remove_project_section() {
     let removed = remove_project_section(Some(&dir)).unwrap();
     assert!(removed, "should return true when project was removed");
 
-    // Load again — project should be gone
+    // Load again: project should be gone
     let loaded = load_project_config(Some(&dir))
         .unwrap()
         .expect("file should still exist");
@@ -215,7 +215,7 @@ fn test_resolve_project_id_from_config() {
     };
     save_project_config(Some(&dir), &config).unwrap();
 
-    // Resolve without CLI override — should read from config
+    // Resolve without CLI override: should read from config
     let resolved = resolve_project_id(None, Some(&dir)).unwrap();
     assert_eq!(resolved, "11111111-2222-4333-8444-555555555555");
 
@@ -324,7 +324,7 @@ fn test_resolve_project_id_skips_empty_config_id() {
     };
     save_project_config(Some(&dir), &config).unwrap();
 
-    // No CLI flag, empty config ID — should error
+    // No CLI flag, empty config ID: should error
     let result = resolve_project_id(None, Some(&dir));
     assert!(result.is_err(), "empty config ID should not resolve");
 

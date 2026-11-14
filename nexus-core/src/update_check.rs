@@ -81,7 +81,7 @@ pub fn mark_as_current(version: &str) {
     });
 }
 
-/// Minimal GitHub release response — we only need the tag name.
+/// Minimal GitHub release response: we only need the tag name.
 #[derive(Deserialize)]
 struct GhRelease {
     tag_name: String,
@@ -136,7 +136,7 @@ pub async fn check_for_update(config: &crate::config::Config) -> Option<UpdateIn
     if let Some(cache) = load_cache() {
         let age = now_secs().saturating_sub(cache.checked_at);
         if age < CACHE_TTL_SECS {
-            // Cache is fresh — return result from cache
+            // Cache is fresh: return result from cache
             if is_newer(&current, &cache.latest_version) {
                 return Some(UpdateInfo {
                     current,
@@ -148,7 +148,7 @@ pub async fn check_for_update(config: &crate::config::Config) -> Option<UpdateIn
         }
     }
 
-    // Cache stale or missing — fetch from GitHub
+    // Cache stale or missing: fetch from GitHub
     let latest = fetch_latest().await?;
 
     // Persist the result

@@ -133,7 +133,7 @@ fn collect_modified_in_dir(
     }
 }
 
-/// `nexus stash` — save local workspace changes to a stash.
+/// `nexus stash`: save local workspace changes to a stash.
 pub fn save(workspace: &Path) -> anyhow::Result<()> {
     let modified = detect_modified_files(workspace);
 
@@ -190,7 +190,7 @@ pub fn save(workspace: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `nexus stash pop` — restore the most recent stash.
+/// `nexus stash pop`: restore the most recent stash.
 pub fn pop(workspace: &Path) -> anyhow::Result<()> {
     let stash_base = workspace.join(STASH_DIR);
     if !stash_base.exists() {
@@ -257,7 +257,7 @@ pub fn pop(workspace: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `nexus stash list` — list all available stashes.
+/// `nexus stash list`: list all available stashes.
 pub fn list(workspace: &Path) -> anyhow::Result<()> {
     let stash_base = workspace.join(STASH_DIR);
     if !stash_base.exists() {
@@ -286,7 +286,7 @@ pub fn list(workspace: &Path) -> anyhow::Result<()> {
             if let Ok(meta) = serde_json::from_str::<StashMeta>(&content) {
                 let label = if i == 0 { " (latest)" } else { "" };
                 println!(
-                    "   {} {}{} — {} file(s)",
+                    "   {} {}{}: {} file(s)",
                     style(format!("[{}]", stashes.len() - 1 - i)).dim(),
                     style(&meta.timestamp).bold(),
                     style(label).green(),

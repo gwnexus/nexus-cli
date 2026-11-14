@@ -46,9 +46,9 @@ pub fn canonical_claude_skill_id(skill_id: &str) -> String {
 /// backend with their own frontmatter block baked in (nexus-app's own
 /// `stripFrontmatter()`, `src/lib/skill-frontmatter.ts`). Every local writer
 /// in this CLI (`write_claude_skill` here, and `write_skill` in
-/// `init.rs`/`pull.rs`) rebuilds its own frontmatter around `body` — using
+/// `init.rs`/`pull.rs`) rebuilds its own frontmatter around `body`, using
 /// this side's canonicalized `skill_id` for Claude Code, plus fields the
-/// backend's copy may not carry — so the backend's block must be removed
+/// backend's copy may not carry, so the backend's block must be removed
 /// first, or it is duplicated verbatim underneath the local one
 /// (confirmed live: a `.nexus/skills/nx-init/
 /// SKILL.md` in this very repo carried two stacked frontmatter blocks
@@ -198,7 +198,7 @@ pub(crate) fn yaml_plain_or_quoted(value: &str) -> String {
 /// Some backend versions deliver actor-based project actors exclusively
 /// through the generic `agent_files` list (with `target_path` already
 /// pointing at `<agentic_root>/actors/<slug>.md`) rather than through the
-/// dedicated `actors` field on the af_export response — the dedicated field
+/// dedicated `actors` field on the af_export response: the dedicated field
 /// can be empty even when actors are assigned (seen with
 /// actor_based + claude-cli projects reported empty
 /// `.claude/agents/` despite `.nexus/actors/*.md` rendering correctly via
@@ -408,7 +408,7 @@ command's output unchanged. If the command fails, report the error and stop.\n",
 
 /// Write the provider/model routing catalog consumed by the Claude Code
 /// `routing-guard` plugin adapter (env var `NEXUS_ROUTING_GUARD_CATALOG_PATH`).
-/// Sourced from `runtime_spec.model_routes` —
+/// Sourced from `runtime_spec.model_routes`:
 /// OpenCode's equivalent adapter reads the same data live from the SDK
 /// (`client.config.providers()`), so Claude Code needs it materialized to
 /// disk instead. Returns the workspace-relative path if written, `None` if
@@ -434,7 +434,7 @@ pub fn write_routing_catalog(
 /// Write the agent-routing table consumed by the Claude Code `routing-guard`
 /// plugin adapter (env var `NEXUS_ROUTING_GUARD_AGENTS_PATH`).
 /// Sourced from `runtime_spec.actors` and
-/// `runtime_spec.primary_agents` — OpenCode's equivalent reads the live
+/// `runtime_spec.primary_agents`: OpenCode's equivalent reads the live
 /// agent-routing table from `client.app.agents()`. Returns the
 /// workspace-relative path if written, `None` if `runtime_spec` had neither
 /// field.
@@ -527,7 +527,7 @@ pub fn write_claude_hook_adapters(
 /// entry's command already references the adapter's `target_path`. Never
 /// replaces or removes an existing entry. Multiple plugins may register
 /// against the same event (e.g. `headroom-intercept` and `cost-control`
-/// both on `Stop`) as independent array entries — confirmed live against a
+/// both on `Stop`) as independent array entries: confirmed live against a
 /// real Claude Code session, per the dispatch's verification notes.
 ///
 /// Returns `(appended, removed_plugin_names)`: the number of new hook
@@ -754,7 +754,7 @@ pub(crate) fn remove_hook_registrations(
 /// A hard operator requirement ("must never appear"), not a cosmetic
 /// preference, so this runs on every init/pull and merges into an
 /// already-existing, operator-customized `settings.json` exactly like
-/// [`merge_claude_hooks`] — unlike the `env` block in
+/// [`merge_claude_hooks`]: unlike the `env` block in
 /// [`write_claude_settings`], which is create-once-only. Every other key,
 /// including the `hooks` block, is preserved verbatim; only
 /// `includeCoAuthoredBy` is touched.
@@ -1065,7 +1065,7 @@ pub fn merge_claude_md_managed_block(
 /// included on the same "expected every session, low risk" basis as the
 /// read-only calls, per the allowlist Claude Code itself had already
 /// accumulated live in a real project's `settings.local.json` before this
-/// change existed) — decision-bearing actions (`adr_create`, `adr_decide`,
+/// change existed): decision-bearing actions (`adr_create`, `adr_decide`,
 /// `task_create`, `dispatch_create`, `dispatch_resolve`, `sk_update`,
 /// `doc_ingest`, `doc_delete`, etc.) stay behind an explicit per-session
 /// approval on purpose.
@@ -1095,7 +1095,7 @@ pub(crate) const BASELINE_MCP_PERMISSIONS: &[&str] = &[
 /// [`BASELINE_MCP_PERMISSIONS`] that aren't already present (by exact
 /// string match) in `permissions.allow`. Never removes or reorders any
 /// existing entry, so an operator who already broadened or narrowed their
-/// own allowlist keeps full control — this only lowers the floor, it never
+/// own allowlist keeps full control: this only lowers the floor, it never
 /// raises it above whatever the operator has already granted.
 ///
 /// Returns the number of new entries appended (0 if nothing changed; the
@@ -1151,7 +1151,7 @@ pub fn merge_claude_baseline_permissions(target: &Path) -> anyhow::Result<usize>
 }
 
 /// Write `.claude/settings.json` if it does not already exist (user-managed
-/// once created, never overwritten). Contains Claude runtime behavior only —
+/// once created, never overwritten). Contains Claude runtime behavior only:
 /// no secrets, no OpenCode-specific statements.
 /// When `routing_catalog_path` / `agent_routing_path` are provided, an `env`
 /// block is included pointing the `routing-guard` plugin adapter at the
@@ -1329,7 +1329,7 @@ servers are configured in `.mcp.json`.
 /// Render the full Claude Code projection for a project: root `CLAUDE.md`,
 /// `.claude/settings.json`, `.claude/skills/`, and `.claude/agents/`.
 ///
-/// Additive only — never touches the OpenCode projection or the
+/// Additive only: never touches the OpenCode projection or the
 /// `agentic_root`-relative canonical paths. `.mcp.json` is written
 /// separately by the shared MCP writer (root path).
 ///
@@ -2546,7 +2546,7 @@ mod tests {
     #[test]
     fn test_merge_co_authored_by_updates_existing_value() {
         // Must overwrite a stale/incorrect value on re-pull, not just skip
-        // because the key already exists — this is a correctness flag, not
+        // because the key already exists: this is a correctness flag, not
         // a create-once default.
         let dir = temp_dir("coauthor-update");
         merge_claude_co_authored_by(&dir, Some(true)).unwrap();

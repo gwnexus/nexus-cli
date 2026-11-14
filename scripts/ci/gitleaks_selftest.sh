@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -------------------------------------------------------------------
-# scripts/ci/gitleaks_selftest.sh — gitleaks config regression check
+# scripts/ci/gitleaks_selftest.sh: gitleaks config regression check
 # @purpose Fail if .gitleaks.toml silently drops the built-in rules
 #          (a synthetic token must be found) or if the synthetic test
 #          tokens in the source tree start triggering.

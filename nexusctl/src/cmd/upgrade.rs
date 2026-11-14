@@ -74,7 +74,7 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Some(false)) => {
             println!(
-                "   {} Checksum mismatch — aborting upgrade for safety",
+                "   {} Checksum mismatch: aborting upgrade for safety",
                 style("✗").bold().red()
             );
             let _ = std::fs::remove_dir_all(&tmp_dir);

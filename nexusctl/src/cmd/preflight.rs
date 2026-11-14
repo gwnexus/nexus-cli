@@ -120,7 +120,7 @@ fn check_npx() -> CheckResult {
 /// Check: Claude Code CLI.
 ///
 /// Only meaningful for projects whose `agent_owner` includes `claude-cli`
-/// — OpenCode-only projects must not be told to
+/// OpenCode-only projects must not be told to
 /// install a binary they never launch, so callers skip the check entirely by
 /// passing a flavor that does not want Claude.
 fn check_claude() -> CheckResult {

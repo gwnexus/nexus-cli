@@ -1,7 +1,7 @@
 // nexusctl/src/cmd/git.rs
 //
-// `nexus git verify` — compare local git config with project git_config
-// `nexus git apply`  — set local git config from project git_config
+// `nexus git verify`: compare local git config with project git_config
+// `nexus git apply`: set local git config from project git_config
 
 use anyhow::{Context, Result};
 use console::{measure_text_width, pad_str, style, Alignment};
@@ -39,7 +39,7 @@ pub fn apply_git_config(dir: &Path, cfg: &GitConfig) -> Result<u32> {
     Ok(applied)
 }
 
-/// Run `nexus git verify` — show local vs expected git identity, plus the
+/// Run `nexus git verify`: show local vs expected git identity, plus the
 /// effective `gh` CLI profile if one is configured.
 pub fn run_verify(dir: &Path, cfg: Option<&GitConfig>, gh: Option<&GhEffective>) {
     println!("{}", style("Git Identity Verification").bold());
@@ -239,7 +239,7 @@ fn verify_values(rows: &[(&str, String, String, String)]) -> Vec<String> {
         .collect()
 }
 
-/// Run `nexus git apply` — set local git config from platform, then apply
+/// Run `nexus git apply`: set local git config from platform, then apply
 /// the project's GitHub account (gh.env, transport and commit identity).
 pub fn run_apply(
     dir: &Path,
@@ -310,7 +310,7 @@ pub fn ensure_gh_profile_dir(config_dir: &Path, profile: &str) -> Result<std::pa
 /// Whether `gh` is authenticated for `host` inside `profile_dir`.
 ///
 /// Checked via `GH_CONFIG_DIR=<profile_dir> gh auth status --hostname
-/// <host>` — lightweight (no network call needed for a cached login), used
+/// <host>`: lightweight (no network call needed for a cached login), used
 /// by `nexus run`'s pre-launch check and to decide whether an empty
 /// profile needs seeding. Only confirms *a* login exists, not which one
 /// (see [`gh_verify_login`] for that, used by `nexus git verify`).

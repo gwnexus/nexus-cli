@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -------------------------------------------------------------------
-# scripts/ci/internal_refs_check.sh — public repo hygiene check
+# scripts/ci/internal_refs_check.sh: public repo hygiene check
 # @purpose Fail if a tracked text file cites internal decision records
 #          or work items (e.g. "ADR-" plus a number, "dispatch" plus an
 #          8-character hex id). This repository is public.

@@ -24,7 +24,7 @@ use nexus_core::config::{self, ProjectConfig, ProjectInfo};
 /// Name of the gitignored workspace secrets file that exposes the token.
 const ENV_LOCAL_FILE: &str = ".env.nexus.local";
 
-/// Run `nexus project link` — issue and store a project inference token.
+/// Run `nexus project link`: issue and store a project inference token.
 pub async fn link(
     api_url: &str,
     project_id: Option<&str>,
@@ -107,7 +107,7 @@ pub async fn link(
     Ok(())
 }
 
-/// Run `nexus project rotate` — issue a replacement token with overlap.
+/// Run `nexus project rotate`: issue a replacement token with overlap.
 ///
 /// Without `--finalize`, the previous token stays valid (zero-downtime).
 /// With `--finalize`, the previously superseded token is revoked.
@@ -185,7 +185,7 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
     Ok(())
 }
 
-/// Run `nexus project unlink` — revoke the token and clear local state.
+/// Run `nexus project unlink`: revoke the token and clear local state.
 pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()> {
     let project_id = resolve_project_id(project_id)?;
     let mut store = ProjectTokenStore::load()?;
@@ -241,7 +241,7 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
     Ok(())
 }
 
-/// Run `nexus project status` — list issued tokens for the linked project.
+/// Run `nexus project status`: list issued tokens for the linked project.
 pub async fn status(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()> {
     let project_id = resolve_project_id(project_id)?;
     let token = require_token()?;
@@ -687,7 +687,7 @@ fn ensure_env_local_ignored(workspace: &Path) {
         use std::io::Write;
         let _ = writeln!(
             file,
-            "\n# Nexus CLI — project token secret\n{}",
+            "\n# Nexus CLI: project token secret\n{}",
             ENV_LOCAL_FILE
         );
     }

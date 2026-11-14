@@ -39,7 +39,7 @@ fn save_manifest(workspace: &Path, manifest: &serde_json::Value) -> anyhow::Resu
     Ok(())
 }
 
-/// `nexus sync push <file>` — upload local agent file changes to the platform.
+/// `nexus sync push <file>`: upload local agent file changes to the platform.
 /// Every failure is returned as an error; the caller prints it.
 pub async fn push(
     api_url: &str,

@@ -230,7 +230,7 @@ fn test_config_set_invalid_countdown_secs() {
 
 #[test]
 fn test_config_backward_compat_no_countdown() {
-    // Old config without [run] section — defaults should fill in
+    // Old config without [run] section: defaults should fill in
     let toml_str = r#"api_url = "https://legacy.nexus.api""#;
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.run.launch_countdown_secs, 5);

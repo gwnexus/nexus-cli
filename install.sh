@@ -9,7 +9,7 @@
 #   NEXUS_BIN_DIR   Custom install directory (default: ~/.local/bin or ~/.cargo/bin)
 #   NEXUS_MAN_DIR   Manual page directory (default: <bin dir>/../share/man/man1)
 #   NEXUS_NO_MAN    Set to 1 to skip installing the manual pages
-#   GITHUB_TOKEN    GitHub PAT (optional — only needed for private repo or higher rate limits)
+#   GITHUB_TOKEN    GitHub PAT (optional: only needed for private repo or higher rate limits)
 #
 # The installer tries to download a pre-built binary from GitHub Releases.
 # If no binary exists for the current platform it falls back to `cargo install`.
@@ -99,9 +99,9 @@ check_github_auth() {
   fi
 
   if [ -n "${GITHUB_TOKEN:-}" ]; then
-    info "GitHub auth: ok (authenticated — higher rate limits)"
+    info "GitHub auth: ok (authenticated: higher rate limits)"
   else
-    info "GitHub auth: anonymous (public repo — no token needed)"
+    info "GitHub auth: anonymous (public repo: no token needed)"
   fi
 }
 

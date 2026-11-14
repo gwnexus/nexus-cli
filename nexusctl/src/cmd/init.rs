@@ -120,7 +120,7 @@ pub async fn run(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 1: Local scaffolding (server-agnostic — only .nexus/ + .opencode/)
+    // Phase 1: Local scaffolding (server-agnostic: only .nexus/ + .opencode/)
     // -----------------------------------------------------------------------
     // NOTE: agentic root directory (.claude/ or .nexus/) is NOT created here.
     // It is deferred to Phase 2 where the server-configured agentic_root is
@@ -364,7 +364,7 @@ pub async fn run(
             // Write MCP server configs (independent of skill export)
             // Skip the interactive URL prompt when the global config file
             // already exists (i.e. the user ran `nexus auth login` at least
-            // once) — the resolved api_url is already correct.
+            // once): the resolved api_url is already correct.
             let has_configured_url = config::Config::path().map(|p| p.exists()).unwrap_or(false);
             let mcp_api_url = if force || has_configured_url {
                 api_url.to_string()
@@ -496,7 +496,7 @@ pub async fn run(
                 }
             }
 
-            // Export workspace files (devbox.json + scripts) — same as `nexus pull`
+            // Export workspace files (devbox.json + scripts): same as `nexus pull`
             match client.export_workspace_mcp(pid).await {
                 Ok(export) => {
                     let mut ws_written = 0;
@@ -541,7 +541,7 @@ pub async fn run(
                 Err(e) => {
                     let msg = format!("{}", e);
                     if msg.contains("No active workspace fork") {
-                        // No workspace configured — surface an advisory prompt so the user
+                        // No workspace configured: surface an advisory prompt so the user
                         // knowingly proceeds without devbox integration.
                         println!(
                             "   {} No workspace (devbox integration) is configured for this project.",
@@ -565,7 +565,7 @@ pub async fn run(
                             style("nexus pull --force").bold().cyan()
                         );
                         println!(
-                            "        — or — re-run {} in this directory.",
+                            "        or re-run {} in this directory.",
                             style("nexus init").bold().cyan()
                         );
                         println!();
@@ -575,7 +575,7 @@ pub async fn run(
                         if std::io::stdin().is_terminal() && !force {
                             print!(
                                 "   {} ",
-                                style("Understood — continue without workspace? [y/N]").dim()
+                                style("Understood: continue without workspace? [y/N]").dim()
                             );
                             use std::io::{self, BufRead, Write};
                             io::stdout().flush()?;
@@ -703,7 +703,7 @@ pub async fn run(
                 server_aware = true;
             }
         } else {
-            // No token — fall back to default .nexus/ scaffold
+            // No token: fall back to default .nexus/ scaffold
             let default_agentic_root = ".nexus";
             create_opencode_dir(&target)?;
             detect_importable_files(&target, false, &serde_json::json!({}));
@@ -720,7 +720,7 @@ pub async fn run(
             );
         }
     } else {
-        // No project linked — create default .nexus/ scaffold so the
+        // No project linked: create default .nexus/ scaffold so the
         // workspace is immediately usable with coding agents (OpenCode is
         // the default runtime).
         let default_agentic_root = ".nexus";
@@ -742,7 +742,7 @@ pub async fn run(
 /// Create .nexus/ directory with project-local config.
 ///
 /// If `config.toml` already exists (e.g. preserved from deinit), it is NOT
-/// overwritten — user-configured `[mcp_extra]` and `[plugins]` sections
+/// overwritten: user-configured `[mcp_extra]` and `[plugins]` sections
 /// would be lost. Only updates `[project]` section if needed.
 fn create_nexus_dir(
     target: &Path,
@@ -754,7 +754,7 @@ fn create_nexus_dir(
 
     let config_path = nexus_dir.join("config.toml");
     if config_path.exists() {
-        // Config exists — preserve it but ensure [project] section is current
+        // Config exists: preserve it but ensure [project] section is current
         if let Some(id) = project_id {
             if let Ok(Some(mut existing)) = config::load_project_config(Some(target)) {
                 let needs_update = existing
@@ -1004,7 +1004,7 @@ You are expected to:
 fn append_gitignore(target: &Path) -> anyhow::Result<()> {
     let git_dir = target.join(".git");
     if !git_dir.is_dir() {
-        // Not a git repo — skip silently
+        // Not a git repo: skip silently
         return Ok(());
     }
 
@@ -1024,7 +1024,7 @@ fn append_gitignore(target: &Path) -> anyhow::Result<()> {
     migrate_gitignore_entries(target);
 
     let ignores = r#"
-# Nexus CLI — local workspace
+# Nexus CLI: local workspace
 .nexus/
 .opencode/
 opencode.json
@@ -1149,7 +1149,7 @@ fn write_directives(
 /// The file body is already template-substituted by the server.
 ///
 /// Returns `Ok(false)` when the file was skipped due to a protected path
-/// (existing secrets/env file) — the caller should `continue` and not
+/// (existing secrets/env file): the caller should `continue` and not
 /// count this as an error. Returns `Ok(true)` on a successful write.
 fn write_agent_file(
     target: &Path,
@@ -1161,7 +1161,7 @@ fn write_agent_file(
     super::pull::validate_agent_file_target_path(target, &af.target_path)?;
 
     // Protected file guard: never overwrite secrets/env files.
-    // This is NOT an error — the workspace init succeeded, the env file is
+    // This is NOT an error: the workspace init succeeded, the env file is
     // intentionally left untouched. Emit a warning and skip silently.
     if super::pull::is_protected_path(&af.target_path) {
         let dest = target.join(&af.target_path);
@@ -1388,7 +1388,7 @@ fn merge_extra_mcp_servers(
                     .find(|(_, v)| v.get("command").is_some_and(|c| *c == cmd_json));
                 if let Some((existing_key, _)) = duplicate_key {
                     println!(
-                        "   {} opencode.json: skipping '{}' — duplicate of existing '{}' (same command)",
+                        "   {} opencode.json: skipping '{}': duplicate of existing '{}' (same command)",
                         style("!").bold().yellow(),
                         name,
                         existing_key,
@@ -1433,7 +1433,7 @@ fn merge_extra_mcp_servers(
                 });
                 if let Some((existing_key, _)) = duplicate_key {
                     println!(
-                        "   {} .mcp.json: skipping '{}' — duplicate of existing '{}' (same command)",
+                        "   {} .mcp.json: skipping '{}': duplicate of existing '{}' (same command)",
                         style("!").bold().yellow(),
                         name,
                         existing_key,
@@ -1856,7 +1856,7 @@ fn print_done(server_aware: bool) {
             "  4. Review {} for agent commands & configs",
             style(".opencode/").bold()
         );
-        println!("  5. Start your coding agent — skills and MCP are ready");
+        println!("  5. Start your coding agent: skills and MCP are ready");
     }
 }
 
@@ -2164,7 +2164,7 @@ mod tests {
             ".env.local must be in .git/info/exclude"
         );
         assert!(
-            exclude.contains("# Nexus CLI — local workspace"),
+            exclude.contains("# Nexus CLI: local workspace"),
             "Nexus CLI marker must be in .git/info/exclude"
         );
 
@@ -2877,7 +2877,7 @@ url = "https://example.com/plugin.ts"
 "#;
         fs::write(nexus_dir.join("config.toml"), config_content).unwrap();
 
-        // Run create_nexus_dir — it should NOT overwrite the config
+        // Run create_nexus_dir: it should NOT overwrite the config
         create_nexus_dir(&dir, "test", Some("11111111-2222-4333-8444-555555555555")).unwrap();
 
         let result = fs::read_to_string(nexus_dir.join("config.toml")).unwrap();

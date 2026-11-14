@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 /// The scaffold entries that `nexus deinit` targets.
 /// Kept in sync with `nexusctl/src/cmd/deinit.rs::NEXUS_OWNED_ENTRIES`.
-/// NOTE: .nexus/ is handled specially — config.toml is preserved.
+/// NOTE: .nexus/ is handled specially: config.toml is preserved.
 /// This test list still includes .nexus for the simplified removal model.
 const SCAFFOLD_ENTRIES: &[&str] = &[
     ".nexus",
@@ -105,7 +105,7 @@ fn test_deinit_removes_nexus_dir() {
 fn test_deinit_handles_missing_files() {
     let dir = temp_dir("handles-missing");
 
-    // Directory is empty — deinit should succeed without error
+    // Directory is empty: deinit should succeed without error
     let result = run_deinit_removal(&dir);
     assert!(result.is_ok(), "deinit on empty dir should not error");
 

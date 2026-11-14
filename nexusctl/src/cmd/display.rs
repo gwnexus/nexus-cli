@@ -4,10 +4,10 @@
 //! `init`, `sync status`, `project status`, etc.) should make two things
 //! visible up front:
 //!
-//! 1. Which API backend it is targeting (`api_url`) — a workspace silently
+//! 1. Which API backend it is targeting (`api_url`): a workspace silently
 //!    pointed at the wrong environment (e.g. staging vs. prod) is otherwise
 //!    only diagnosable via `nexus config show` or `nexus status`.
-//! 2. The project's human-readable name, not just its opaque UUID — the
+//! 2. The project's human-readable name, not just its opaque UUID: the
 //!    UUID remains visible in parentheses for exact identification, but the
 //!    name is what a human actually recognizes at a glance.
 use console::style;

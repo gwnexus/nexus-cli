@@ -323,7 +323,7 @@ pub struct ExportedAgentFile {
 
 /// LLM provider configuration (e.g. DGX Spark local models).
 ///
-/// Stored as opaque JSON — the API delivers the exact opencode.json provider
+/// Stored as opaque JSON: the API delivers the exact opencode.json provider
 /// format, so the CLI passes it through without interpretation.
 pub type ProviderConfig = serde_json::Value;
 
@@ -1511,7 +1511,7 @@ pub struct WorkspaceTemplate {
 }
 
 /// Response from `wf_export` action (POST /api/mcp/workspace-files).
-/// Legacy v1 format — kept for backward compatibility.
+/// Legacy v1 format: kept for backward compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceExportResponse {
     pub action: String,
@@ -1637,7 +1637,7 @@ pub struct WorkspaceForkExportResponse {
 // Workspace Push (POST /api/mcp/agent-files  action=ws_push)
 // ---------------------------------------------------------------------------
 
-/// Response from `ws_push` action — push local workspace changes as a new fork.
+/// Response from `ws_push` action: push local workspace changes as a new fork.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspacePushResponse {
     pub action: String,
@@ -1684,7 +1684,7 @@ pub struct StatusUnchangedFile {
     pub category: String,
 }
 
-/// Response from `af_status` action — compare local vs server file hashes.
+/// Response from `af_status` action: compare local vs server file hashes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileStatusResponse {
     pub action: String,
@@ -2071,7 +2071,7 @@ pub struct InferenceTokenResponse {
 
 /// A single project inference token record as returned by the list endpoint.
 ///
-/// Never contains the raw secret — only metadata.
+/// Never contains the raw secret: only metadata.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InferenceTokenInfo {
     pub token_id: String,

@@ -350,7 +350,7 @@ impl NexusClient {
     ///
     /// Calls the `wf_export` action. Returns the merged devbox.json + scripts
     /// with template variables substituted and S3 content resolved.
-    /// **Legacy v1** — kept for backward compatibility.
+    /// **Legacy v1**: kept for backward compatibility.
     pub async fn export_workspace(
         &self,
         project_id: &str,
@@ -365,7 +365,7 @@ impl NexusClient {
     // -- Workspace v2 (Blueprint + Fork) ------------------------------------
 
     /// Export workspace files via MCP-authenticated `ws_export` action.
-    /// This is the preferred method — uses PAT auth via `/api/mcp/agent-files`.
+    /// This is the preferred method: uses PAT auth via `/api/mcp/agent-files`.
     pub async fn export_workspace_mcp(
         &self,
         project_id: &str,

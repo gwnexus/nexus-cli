@@ -1373,7 +1373,7 @@ async fn main() -> anyhow::Result<()> {
     let config = nexus_core::config::Config::load().unwrap_or_default();
 
     // Spawn update check in background (non-blocking).
-    // Suppressed when the user is already running `nexus upgrade` — the new
+    // Suppressed when the user is already running `nexus upgrade`: the new
     // version is installed by the time the notice would appear, so showing it
     // is misleading.
     let is_upgrade_cmd = matches!(cli.command, Command::Upgrade);

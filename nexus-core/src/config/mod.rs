@@ -603,8 +603,8 @@ pub fn load_linked_project(from: Option<&std::path::Path>) -> Result<Option<Proj
 
 /// Cache the project's `agent_owner` tool flavor in `.nexus/config.toml`.
 ///
-/// Called by `nexus link`, `nexus init`, and `nexus pull` — every command that
-/// already learns the flavor from the backend — so launch-time commands can
+/// Called by `nexus link`, `nexus init`, and `nexus pull`, every command that
+/// already learns the flavor from the backend, so launch-time commands can
 /// read it without a network round-trip. No-op when nothing is linked, when
 /// the backend supplied no value, or when the cached value already matches.
 /// Returns `true` when the file was rewritten.
@@ -663,7 +663,7 @@ pub fn load_run_target(from: Option<&std::path::Path>) -> Option<crate::api::Run
 ///
 /// Reads `[project].agent_owner` from `.nexus/config.toml`. Returns `None`
 /// when no project is linked, the workspace predates the field, or the
-/// backend never supplied a value — in which case callers must fall back to
+/// backend never supplied a value: in which case callers must fall back to
 /// OpenCode behaviour.
 pub fn load_agent_owner(from: Option<&std::path::Path>) -> Option<String> {
     load_linked_project(from)

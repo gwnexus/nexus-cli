@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The help header reads `Nexus CLI vX.Y.Z: Nexus platform operations` (colon instead of a dash).
+- Status, warning and check messages (`nexus run`, `pull`, `init`, `push`, `stash`, `deinit`, `upgrade`, `install.sh`) use colons instead of long dashes; the README and comments follow the same style.
 
 ## [0.41.0] - 2026-11-14
 
