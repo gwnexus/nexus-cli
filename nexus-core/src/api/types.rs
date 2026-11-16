@@ -1889,6 +1889,18 @@ pub struct ActorImportResponse {
     pub imported: usize,
     #[serde(default)]
     pub message: Option<String>,
+    /// Imported actors whose Model Profile matched no active profile; they
+    /// run on the project default.
+    #[serde(default)]
+    pub unbound_profiles: Vec<UnboundProfile>,
+}
+
+/// An imported actor without an active Model Profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnboundProfile {
+    pub slug: String,
+    #[serde(default)]
+    pub model_profile: Option<String>,
 }
 
 /// Response from actor export action.

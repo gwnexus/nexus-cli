@@ -349,8 +349,29 @@ pub async fn import(api_url: &str, path: &str, cli_project_id: Option<&str>) -> 
     if let Some(ref msg) = response.message {
         println!("   {}", msg);
     }
+    for line in unbound_warnings(&response.unbound_profiles) {
+        println!("   {} {}", style("WARN").bold().yellow(), line);
+    }
 
     Ok(())
+}
+
+/// One warning per imported actor whose Model Profile matched no active
+/// profile on the platform.
+fn unbound_warnings(unbound: &[nexus_core::api::UnboundProfile]) -> Vec<String> {
+    unbound
+        .iter()
+        .map(|u| match u.model_profile.as_deref() {
+            Some(p) => format!(
+                "{}: model profile '{}' matches no active profile; the actor runs on the project default",
+                u.slug, p
+            ),
+            None => format!(
+                "{}: no model profile; the actor runs on the project default",
+                u.slug
+            ),
+        })
+        .collect()
 }
 
 /// Errors and warnings for the routing fields of an actor file.
@@ -802,6 +823,25 @@ mod tests {
         assert_eq!(entry.route_alias.as_deref(), Some("fast"));
         let json = serde_json::to_value(&entry).unwrap();
         assert!(json.get("model_profile").is_none());
+    }
+
+    #[test]
+    fn test_import_response_reports_unbound_profiles() {
+        let resp: nexus_core::api::ActorImportResponse = serde_json::from_value(serde_json::json!({
+            "action": "actor_import", "project_id": "p", "imported": 2,
+            "unbound_profiles": [{"slug": "coder", "model_profile": "missing"}, {"slug": "lead"}]
+        }))
+        .unwrap();
+        let lines = unbound_warnings(&resp.unbound_profiles);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("coder: model profile 'missing'"));
+        assert!(lines[1].starts_with("lead: no model profile"));
+
+        let old: nexus_core::api::ActorImportResponse = serde_json::from_value(
+            serde_json::json!({"action": "actor_import", "project_id": "p", "imported": 1}),
+        )
+        .unwrap();
+        assert!(old.unbound_profiles.is_empty());
     }
 
     fn fm(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
