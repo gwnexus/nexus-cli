@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.1] - 2026-11-16
+
 ### Fixed
 - **Actor files keep their Model Profile.** `nexus actors import`, `normalize` and `validate` read `model_profile` (top level or `routing.model_profile`, the format of actor files downloaded from the platform). Import sends it, so re-importing a downloaded file no longer drops the profile binding, and `normalize` keeps it. `route_alias` is still read as a legacy fallback; `validate` reports it as a warning instead of an error, since the platform binds it to the Model Profile with the same slug. Import warns about actors whose profile matches no active profile (they run on the project default).
 - **The Dispatch manager survives a new registration.** `nexus dispatch runner register` replaces this machine's runner; a running manager used to stop on the next heartbeat with "the hub rejected the runner token" and stayed down in every dispatches pane. On a rejected token the manager now re-reads the runner file and continues with the new registration; it still stops when the file holds the same rejected token. Dispatches panes retry while another process listens, so one takes over when that process ends, and after a stop they start again once a new registration is stored.
