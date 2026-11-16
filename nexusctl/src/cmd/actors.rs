@@ -123,7 +123,8 @@ pub async fn show(api_url: &str, slug: &str, cli_project_id: Option<&str>) -> an
 /// Normalize actor markdown to YAML frontmatter format.
 ///
 /// Reads a markdown file, extracts or generates frontmatter fields (slug, name,
-/// role, description, route_alias), and rewrites the file with normalized format.
+/// role, description, model_profile, route_alias), and rewrites the file with
+/// normalized format.
 pub fn normalize(path: &str) -> anyhow::Result<()> {
     let file_path = Path::new(path);
     if !file_path.exists() {
@@ -154,6 +155,7 @@ pub fn normalize(path: &str) -> anyhow::Result<()> {
         .cloned()
         .unwrap_or_else(|| "agent".to_string());
     let description = frontmatter.get("description").cloned();
+    let model_profile = frontmatter.get("model_profile").cloned();
     let route_alias = frontmatter.get("route_alias").cloned();
 
     // Rebuild normalized markdown
@@ -163,6 +165,9 @@ pub fn normalize(path: &str) -> anyhow::Result<()> {
     normalized.push_str(&format!("role: {}\n", role));
     if let Some(ref desc) = description {
         normalized.push_str(&format!("description: {}\n", desc));
+    }
+    if let Some(ref profile) = model_profile {
+        normalized.push_str(&format!("model_profile: {}\n", profile));
     }
     if let Some(ref route) = route_alias {
         normalized.push_str(&format!("route_alias: {}\n", route));
@@ -186,8 +191,9 @@ pub fn normalize(path: &str) -> anyhow::Result<()> {
 
 /// Validate actor profile(s) against the expected schema.
 ///
-/// Checks: required frontmatter fields, route_alias references (if model routes
-/// are available), and markdown structure.
+/// Checks: required frontmatter fields, the `model_profile` slug, legacy
+/// `route_alias` references (if model routes are available), and markdown
+/// structure.
 pub async fn validate(
     api_url: &str,
     path: &str,
@@ -228,49 +234,24 @@ pub async fn validate(
         }
     }
 
-    // Validate route_alias against model routes (if available)
-    if let Some(route_alias) = frontmatter.get("route_alias") {
+    // A legacy route_alias is checked against the hub's route catalog (if
+    // available); a model_profile needs no catalog.
+    let mut routes: Option<serde_json::Value> = None;
+    if frontmatter.contains_key("route_alias") && !frontmatter.contains_key("model_profile") {
         let workspace = std::env::current_dir()?;
         if let Ok(project_id) = config::resolve_project_id(cli_project_id, Some(&workspace)) {
-            if let Ok(token) = resolve_token()
-                .ok_or_else(|| anyhow::anyhow!("no token"))
-                .as_deref()
-                .map(|t| t.to_string())
-            {
+            if let Some(token) = resolve_token() {
                 if let Ok(client) = NexusClient::new(api_url, Some(token)) {
                     if let Ok(af_export) = client.export_agent_files(&project_id).await {
-                        // model_routes is now Option<serde_json::Value> map format
-                        if let Some(ref routes_val) = af_export.model_routes {
-                            let route_exists = routes_val
-                                .as_object()
-                                .map(|m| m.contains_key(route_alias.as_str()))
-                                .unwrap_or(false);
-                            if !route_exists {
-                                errors.push(format!(
-                                    "route_alias '{}' not found in model route catalog",
-                                    route_alias
-                                ));
-                            }
-                            // Check deprecated status in new map format
-                            let is_deprecated = routes_val
-                                .as_object()
-                                .and_then(|m| m.get(route_alias.as_str()))
-                                .and_then(|r| r.get("lifecycle_status"))
-                                .and_then(|s| s.as_str())
-                                .map(|s| s == "deprecated")
-                                .unwrap_or(false);
-                            if is_deprecated {
-                                warnings.push(format!(
-                                    "route_alias '{}' references a deprecated route",
-                                    route_alias
-                                ));
-                            }
-                        }
+                        routes = af_export.model_routes;
                     }
                 }
             }
         }
     }
+    let (routing_errors, routing_warnings) = routing_findings(&frontmatter, routes.as_ref());
+    errors.extend(routing_errors);
+    warnings.extend(routing_warnings);
 
     // Report results
     println!(
@@ -332,30 +313,11 @@ pub async fn import(api_url: &str, path: &str, cli_project_id: Option<&str>) -> 
     let mut import_entries = Vec::new();
     for file in &files {
         let content = fs::read_to_string(file)?;
-        let (frontmatter, body) = parse_frontmatter(&content);
-
-        let slug = frontmatter.get("slug").cloned().unwrap_or_else(|| {
-            file.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
-
-        import_entries.push(nexus_core::api::ActorImportEntry {
-            slug,
-            name: frontmatter
-                .get("name")
-                .cloned()
-                .unwrap_or_else(|| "Unnamed".to_string()),
-            role: frontmatter
-                .get("role")
-                .cloned()
-                .unwrap_or_else(|| "agent".to_string()),
-            description: frontmatter.get("description").cloned(),
-            model_routing: frontmatter.get("model_routing").cloned(),
-            route_alias: frontmatter.get("route_alias").cloned(),
-            profile_body: Some(body.to_string()),
-        });
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        import_entries.push(import_entry(&content, stem));
     }
 
     println!(
@@ -389,6 +351,93 @@ pub async fn import(api_url: &str, path: &str, cli_project_id: Option<&str>) -> 
     }
 
     Ok(())
+}
+
+/// Errors and warnings for the routing fields of an actor file.
+///
+/// Actors route through a Model Profile (`model_profile`). A `route_alias`
+/// is legacy: the hub still accepts it on import but binds the actor to the
+/// Model Profile with the same slug, so it only yields warnings. `routes` is
+/// the hub's `model_routes` map, when it was available.
+fn routing_findings(
+    frontmatter: &std::collections::HashMap<String, String>,
+    routes: Option<&serde_json::Value>,
+) -> (Vec<String>, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let route_alias = frontmatter.get("route_alias");
+
+    if let Some(profile) = frontmatter.get("model_profile") {
+        if profile.is_empty()
+            || !profile
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            errors.push(format!(
+                "Invalid model_profile '{}': only alphanumeric, dash, underscore, dot allowed",
+                profile
+            ));
+        }
+        if route_alias.is_some() {
+            warnings.push(
+                "route_alias is legacy and not stored by the hub; model_profile applies"
+                    .to_string(),
+            );
+        }
+        return (errors, warnings);
+    }
+
+    let Some(route_alias) = route_alias else {
+        return (errors, warnings);
+    };
+    warnings.push(format!(
+        "route_alias '{}' is legacy: the hub binds the actor to the Model Profile \
+         with the same slug; set model_profile instead",
+        route_alias
+    ));
+    if let Some(map) = routes.and_then(|r| r.as_object()) {
+        match map.get(route_alias.as_str()) {
+            None => warnings.push(format!(
+                "route_alias '{}' not found in model route catalog",
+                route_alias
+            )),
+            Some(route)
+                if route.get("lifecycle_status").and_then(|s| s.as_str()) == Some("deprecated") =>
+            {
+                warnings.push(format!(
+                    "route_alias '{}' references a deprecated route",
+                    route_alias
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    (errors, warnings)
+}
+
+/// Build the import entry for one actor file. `fallback_slug` (the file
+/// stem) is used when the frontmatter has no `slug`.
+fn import_entry(content: &str, fallback_slug: &str) -> nexus_core::api::ActorImportEntry {
+    let (frontmatter, body) = parse_frontmatter(content);
+    nexus_core::api::ActorImportEntry {
+        slug: frontmatter
+            .get("slug")
+            .cloned()
+            .unwrap_or_else(|| fallback_slug.to_string()),
+        name: frontmatter
+            .get("name")
+            .cloned()
+            .unwrap_or_else(|| "Unnamed".to_string()),
+        role: frontmatter
+            .get("role")
+            .cloned()
+            .unwrap_or_else(|| "agent".to_string()),
+        description: frontmatter.get("description").cloned(),
+        model_routing: frontmatter.get("model_routing").cloned(),
+        route_alias: frontmatter.get("route_alias").cloned(),
+        model_profile: frontmatter.get("model_profile").cloned(),
+        profile_body: Some(body.to_string()),
+    }
 }
 
 /// Export actor configuration for a target format.
@@ -527,9 +576,9 @@ pub async fn avatar_reset(
 /// Returns a map of key-value pairs and the remaining body text. Nested keys
 /// are stored with their parent path (`routing.route_alias`), list items are
 /// skipped. The hub's export shape (`display_name`, `title`, nested
-/// `routing.route_alias`) is mapped onto the flat fields (`name`, `role`,
-/// `route_alias`) when those are missing, so both shapes validate and
-/// import alike.
+/// `routing.route_alias` and `routing.model_profile`) is mapped onto the flat
+/// fields (`name`, `role`, `route_alias`, `model_profile`) when those are
+/// missing, so both shapes validate and import alike.
 fn parse_frontmatter(content: &str) -> (std::collections::HashMap<String, String>, &str) {
     let mut map = std::collections::HashMap::new();
 
@@ -582,6 +631,7 @@ fn parse_frontmatter(content: &str) -> (std::collections::HashMap<String, String
         ("name", "display_name"),
         ("role", "title"),
         ("route_alias", "routing.route_alias"),
+        ("model_profile", "routing.model_profile"),
     ] {
         if !map.contains_key(flat) {
             if let Some(v) = map.get(alias).cloned() {
@@ -709,6 +759,112 @@ mod tests {
         assert_eq!(fm.get("export_targets.opencode.mode").unwrap(), "primary");
         assert!(!fm.contains_key("provider"));
         assert!(body.starts_with("# Spark Coder"));
+    }
+
+    fn hub_profile_file() -> String {
+        [
+            "---",
+            "slug: spark-coder",
+            "display_name: Spark Coder",
+            "title: Local coder",
+            "routing:",
+            "  model_profile: coding",
+            "---",
+            "",
+            "# Spark Coder",
+            "",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn test_parse_frontmatter_maps_nested_model_profile() {
+        let (fm, _) = parse_frontmatter(&hub_profile_file());
+        assert_eq!(fm.get("model_profile").unwrap(), "coding");
+        assert!(!fm.contains_key("route_alias"));
+    }
+
+    #[test]
+    fn test_import_entry_sends_model_profile() {
+        let entry = import_entry(&hub_profile_file(), "fallback");
+        assert_eq!(entry.slug, "spark-coder");
+        assert_eq!(entry.name, "Spark Coder");
+        assert_eq!(entry.model_profile.as_deref(), Some("coding"));
+        assert!(entry.route_alias.is_none());
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["model_profile"], "coding");
+    }
+
+    #[test]
+    fn test_import_entry_omits_missing_model_profile() {
+        let entry = import_entry("---\nroute_alias: fast\n---\nBody\n", "coder");
+        assert_eq!(entry.slug, "coder");
+        assert_eq!(entry.route_alias.as_deref(), Some("fast"));
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.get("model_profile").is_none());
+    }
+
+    fn fm(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_routing_findings_model_profile_is_valid() {
+        let (errors, warnings) = routing_findings(&fm(&[("model_profile", "coding")]), None);
+        assert!(errors.is_empty());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_routing_findings_rejects_bad_model_profile() {
+        let (errors, _) = routing_findings(&fm(&[("model_profile", "a b")]), None);
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn test_routing_findings_route_alias_only_warns() {
+        let routes = serde_json::json!({"fast": {"lifecycle_status": "deprecated"}});
+        let (errors, warnings) = routing_findings(&fm(&[("route_alias", "fast")]), Some(&routes));
+        assert!(errors.is_empty());
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("legacy"));
+        assert!(warnings[1].contains("deprecated"));
+
+        let (errors, warnings) =
+            routing_findings(&fm(&[("route_alias", "missing")]), Some(&routes));
+        assert!(errors.is_empty());
+        assert!(warnings[1].contains("not found"));
+    }
+
+    #[test]
+    fn test_routing_findings_model_profile_wins_over_route_alias() {
+        let (errors, warnings) = routing_findings(
+            &fm(&[("model_profile", "coding"), ("route_alias", "fast")]),
+            None,
+        );
+        assert!(errors.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("model_profile applies"));
+    }
+
+    #[test]
+    fn test_normalize_keeps_model_profile() {
+        let dir = std::env::temp_dir().join("nexus-actors-test-normalize-profile");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let file = dir.join("spark-coder.md");
+        fs::write(&file, hub_profile_file()).unwrap();
+        normalize(file.to_str().unwrap()).unwrap();
+
+        let result = fs::read_to_string(&file).unwrap();
+        assert!(result.contains("model_profile: coding"));
+        assert!(result.contains("name: Spark Coder"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Actor files keep their Model Profile.** `nexus actors import`, `normalize` and `validate` read `model_profile` (top level or `routing.model_profile`, the format of actor files downloaded from the platform). Import sends it, so re-importing a downloaded file no longer drops the profile binding, and `normalize` keeps it. `route_alias` is still read as a legacy fallback; `validate` reports it as a warning instead of an error, since the platform binds it to the Model Profile with the same slug.
+
 ## [0.42.0] - 2026-11-14
 
 ### Changed

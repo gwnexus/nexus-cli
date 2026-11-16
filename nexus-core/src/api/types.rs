@@ -1860,8 +1860,14 @@ pub struct ActorImportEntry {
     pub description: Option<String>,
     #[serde(default)]
     pub model_routing: Option<String>,
+    /// Legacy routing key. The hub no longer stores it; it binds the actor to
+    /// the Model Profile with the same slug instead.
     #[serde(default)]
     pub route_alias: Option<String>,
+    /// Model Profile slug the actor routes through (preferred over
+    /// `route_alias`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_profile: Option<String>,
     /// Full Markdown profile body.
     #[serde(default)]
     pub profile_body: Option<String>,
