@@ -908,37 +908,61 @@ pub(crate) fn listen_blocker(project_id: &str, api_url: &str) -> Option<String> 
     }
 }
 
+/// How often an embedded listener checks whether it can take over.
+const EMBEDDED_RETRY: Duration = Duration::from_secs(30);
+
 /// Start the loop inside the status pane. The returned slot holds the
 /// reason when it stopped (or could not start); another process already
-/// listening is not a failure.
+/// listening is not a failure. While another process listens, the pane
+/// retries, so one pane takes over when that process ends. After a stop
+/// for a rejected token it starts again once a new registration is in the
+/// runner file.
 pub(crate) fn spawn_embedded(api_url: &str) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
     let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
     let out = slot.clone();
     QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
     let api_url = api_url.to_string();
     tokio::spawn(async move {
-        let env = match hub_paths(&api_url) {
-            Ok(paths) => ListenEnv {
-                runner_file: paths.runner_file,
-                state_dir: paths.state_dir,
-                hub_dir: paths.hub_dir,
+        let Ok(paths) = hub_paths(&api_url) else {
+            return;
+        };
+        let claude_inbox = probe_claude().inbox.is_ok();
+        loop {
+            let started_with = registration_key(&paths.runner_file);
+            let env = ListenEnv {
+                runner_file: paths.runner_file.clone(),
+                state_dir: paths.state_dir.clone(),
+                hub_dir: paths.hub_dir.clone(),
                 home: dirs_home(),
-                claude_inbox: probe_claude().inbox.is_ok(),
+                claude_inbox,
                 desktop: true,
                 embedded: true,
-            },
-            Err(_) => return,
-        };
-        let opts = ListenOptions {
-            interval_secs: 30,
-            heartbeat_secs: 60,
-            once: false,
-        };
-        if let Err(e) = run_loop(opts, env).await {
-            let msg = e.to_string();
-            if !msg.contains("already listening") {
-                *out.lock().unwrap() = Some(msg);
+            };
+            let opts = ListenOptions {
+                interval_secs: 30,
+                heartbeat_secs: 60,
+                once: false,
+            };
+            let msg = match run_loop(opts, env).await {
+                Ok(()) => return,
+                Err(e) => e.to_string(),
+            };
+            if msg.contains("already listening") {
+                *out.lock().unwrap() = None;
+                tokio::time::sleep(EMBEDDED_RETRY).await;
+                continue;
             }
+            *out.lock().unwrap() = Some(msg);
+            // Retry only once the registration changed: the same file would
+            // fail the same way.
+            loop {
+                tokio::time::sleep(EMBEDDED_RETRY).await;
+                let now = registration_key(&paths.runner_file);
+                if now.is_some() && now != started_with {
+                    break;
+                }
+            }
+            *out.lock().unwrap() = None;
         }
     });
     slot
@@ -961,7 +985,7 @@ pub(crate) struct ListenEnv {
 }
 
 pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Result<()> {
-    let file = load_runner_file(&env.runner_file)?.ok_or_else(|| {
+    let mut file = load_runner_file(&env.runner_file)?.ok_or_else(|| {
         anyhow::anyhow!(
             "No runner registered on this machine. Run 'nexus dispatch runner register'."
         )
@@ -972,7 +996,7 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
     let state_path = env.hub_dir.join("runner.json");
     let queue = Queue::new(base.join("notices"));
     let sessions_dir = base.join("sessions");
-    let client = runner_client(&file)?;
+    let mut client = runner_client(&file)?;
     let adapter = ClaudeAdapter {
         inbox: env.claude_inbox,
     };
@@ -1037,11 +1061,32 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
                 Err(e) => {
                     beat_ok = false;
                     if matches!(e, nexus_core::Error::Unauthorized(_)) {
+                        // A register elsewhere on this machine replaces the
+                        // runner: continue with the new registration.
+                        if let Some(renewed) = renewed_registration(&env.runner_file, &file) {
+                            client = runner_client(&renewed)?;
+                            if renewed.runner_id != file.runner_id {
+                                // Another registration: its cursor does not apply.
+                                state = RunnerState::default();
+                                state.pid = std::process::id();
+                                state.runner_id = renewed.runner_id.clone();
+                                state.cli_version = env!("CARGO_PKG_VERSION").into();
+                                state.claude_inbox = adapter.inbox;
+                            }
+                            file = renewed;
+                            bindings.clear();
+                            state.state = "starting".into();
+                            state.last_error = None;
+                            save_state(&state_path, &mut state);
+                            log("runner token renewed");
+                            next_beat = Instant::now();
+                            continue;
+                        }
                         state.state = "revoked".into();
                         state.last_error = Some("the runner token was rejected".into());
                         save_state(&state_path, &mut state);
                         anyhow::bail!(
-                            "the hub rejected the runner token (revoked or expired); run 'nexus dispatch runner register'"
+                            "the hub rejected the runner token (revoked or expired); run 'nexus dispatch runner register', open dispatches panes pick up the new registration"
                         );
                     }
                     state.last_error = Some(super::dispatch_status::error_text(&e));
@@ -1114,6 +1159,23 @@ pub(crate) async fn run_loop(opts: ListenOptions, env: ListenEnv) -> anyhow::Res
             }
         }
     }
+}
+
+/// The runner file's registration when it differs from `current` (another
+/// runner id or token), i.e. a `register` ran since `current` was loaded.
+fn renewed_registration(path: &Path, current: &RunnerFile) -> Option<RunnerFile> {
+    load_runner_file(path)
+        .ok()
+        .flatten()
+        .filter(|f| f.runner_id != current.runner_id || f.token != current.token)
+}
+
+/// What identifies a registration in the runner file, to notice a new one.
+fn registration_key(path: &Path) -> Option<(String, String)> {
+    load_runner_file(path)
+        .ok()
+        .flatten()
+        .map(|f| (f.runner_id, f.token))
 }
 
 fn dirs_home() -> PathBuf {
@@ -1929,6 +1991,10 @@ mod tests {
         heartbeats: Vec<serde_json::Value>,
         /// Automation switched off on the platform.
         off: bool,
+        /// Bearer token the hub answers with 401.
+        rejected_token: Option<String>,
+        /// Written to the path on the first 401: a register elsewhere.
+        renew_on_reject: Option<(PathBuf, String)>,
     }
 
     type SharedHub = std::sync::Arc<std::sync::Mutex<Hub>>;
@@ -2007,6 +2073,27 @@ mod tests {
                             .unwrap_or(0);
                         if req.len() < end + 4 + len {
                             continue;
+                        }
+                        let rejected = {
+                            let mut h = hub.lock().unwrap();
+                            let hit = h.rejected_token.as_ref().is_some_and(|t| {
+                                text[..end].lines().any(|l| {
+                                    l.to_ascii_lowercase().starts_with("authorization:")
+                                        && l.trim_end().ends_with(&format!("Bearer {t}"))
+                                })
+                            });
+                            if hit {
+                                if let Some((path, body)) = h.renew_on_reject.take() {
+                                    write_private(&path, &body).unwrap();
+                                }
+                            }
+                            hit
+                        };
+                        if rejected {
+                            let out = r#"{"error":"invalid runner token"}"#;
+                            let resp = format!("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
+                            let _ = sock.write_all(resp.as_bytes()).await;
+                            return;
                         }
                         let body: serde_json::Value =
                             serde_json::from_slice(&req[end + 4..end + 4 + len])
@@ -2182,6 +2269,118 @@ mod tests {
         bound.project_id = "00000000-0000-4000-8000-0000000000cc".into();
         bound.repo_path_hash = None;
         assert!(ids(&bound).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn token_runner_file(url: &str, runner_id: &str, token: &str) -> RunnerFile {
+        RunnerFile {
+            runner_id: runner_id.into(),
+            token: token.into(),
+            token_prefix: None,
+            token_expires_at: None,
+            api_url: url.into(),
+            name: "test".into(),
+            registered_at: rfc3339_now(),
+            projects: vec![dispatch_runner::BoundProject {
+                project_id: P.into(),
+                mode: "notify".into(),
+                runtime: "claude_code".into(),
+                repo_path_hash: None,
+            }],
+            project_names: Default::default(),
+            runtimes: vec![],
+            notice_titles: false,
+        }
+    }
+
+    /// A register elsewhere replaced the runner: the 401 for the old token
+    /// makes the manager switch to the new registration, not stop.
+    #[tokio::test]
+    async fn test_rejected_token_switches_to_new_registration() {
+        let dir = temp("renew");
+        let hub: SharedHub = Default::default();
+        let url = serve(hub.clone()).await;
+        let runner_file = dir.join("dispatch-runner.json");
+        let old = token_runner_file(&url, "r1", "nxs_run_old");
+        write_private(&runner_file, &serde_json::to_string(&old).unwrap()).unwrap();
+        let new = token_runner_file(&url, "r2", "nxs_run_new");
+        {
+            let mut h = hub.lock().unwrap();
+            h.rejected_token = Some("nxs_run_old".into());
+            h.renew_on_reject = Some((runner_file.clone(), serde_json::to_string(&new).unwrap()));
+        }
+        let state_dir = dir.join("state");
+        let env = ListenEnv {
+            runner_file: runner_file.clone(),
+            state_dir: state_dir.clone(),
+            hub_dir: state_dir.clone(),
+            home: dir.clone(),
+            claude_inbox: true,
+            desktop: false,
+            embedded: false,
+        };
+        let opts = ListenOptions {
+            interval_secs: 10,
+            heartbeat_secs: 60,
+            once: true,
+        };
+        run_loop(opts, env).await.unwrap();
+        let state: RunnerState =
+            serde_json::from_str(&fs::read_to_string(state_dir.join("runner.json")).unwrap())
+                .unwrap();
+        assert_eq!(state.runner_id, "r2");
+        assert_eq!(state.state, "running");
+        assert!(!hub.lock().unwrap().heartbeats.is_empty());
+        let raw = fs::read_to_string(state_dir.join("runner.json")).unwrap();
+        assert!(!raw.contains("nxs_run_"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A rejected token with no newer registration still stops the manager.
+    #[tokio::test]
+    async fn test_rejected_token_without_new_registration_stops() {
+        let dir = temp("revoked");
+        let hub: SharedHub = Default::default();
+        let url = serve(hub.clone()).await;
+        hub.lock().unwrap().rejected_token = Some("nxs_run_old".into());
+        let runner_file = dir.join("dispatch-runner.json");
+        let old = token_runner_file(&url, "r1", "nxs_run_old");
+        write_private(&runner_file, &serde_json::to_string(&old).unwrap()).unwrap();
+        let state_dir = dir.join("state");
+        let env = ListenEnv {
+            runner_file: runner_file.clone(),
+            state_dir: state_dir.clone(),
+            hub_dir: state_dir.clone(),
+            home: dir.clone(),
+            claude_inbox: true,
+            desktop: false,
+            embedded: false,
+        };
+        let opts = ListenOptions {
+            interval_secs: 10,
+            heartbeat_secs: 60,
+            once: true,
+        };
+        let err = run_loop(opts, env).await.unwrap_err().to_string();
+        assert!(err.contains("rejected the runner token"));
+        assert!(!err.contains("nxs_run_old"));
+        let state: RunnerState =
+            serde_json::from_str(&fs::read_to_string(state_dir.join("runner.json")).unwrap())
+                .unwrap();
+        assert_eq!(state.state, "revoked");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_renewed_registration_needs_a_change() {
+        let dir = temp("renewed-reg");
+        let path = dir.join("dispatch-runner.json");
+        let cur = token_runner_file("https://hub.example", "r1", "a");
+        write_private(&path, &serde_json::to_string(&cur).unwrap()).unwrap();
+        assert!(renewed_registration(&path, &cur).is_none());
+        let rotated = token_runner_file("https://hub.example", "r1", "b");
+        write_private(&path, &serde_json::to_string(&rotated).unwrap()).unwrap();
+        assert_eq!(renewed_registration(&path, &cur).unwrap().token, "b");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -489,7 +489,7 @@ pub async fn register(api_url: &str, opts: RegisterOptions<'_>) -> anyhow::Resul
     }
     if !resp.replaced.is_empty() {
         println!(
-            "  replaced {} earlier runner(s) of this machine on this hub",
+            "  replaced {} earlier runner(s) of this machine on this hub; a running manager switches to the new token at its next heartbeat",
             resp.replaced.len()
         );
     }
