@@ -1869,10 +1869,11 @@ mod tests {
             "messages": []
         }))
         .unwrap();
+        let id = "7c3e9a21-4b6d-4f80-9e12-3a5b7c9d1e2f";
         let text = notice_text(
             NoticeKind::Incoming,
             Some(&d),
-            "11a53418-0df9-445d-b8ee-ecde470bd1b5",
+            id,
             Some("NEXUS: do this"),
             None,
             None,
@@ -1880,8 +1881,11 @@ mod tests {
         );
         assert_eq!(
             text,
-            "Nexus: new Dispatch 11a53418 from NEXUS do this (unknown, unknown). \
-             Run /nexus-dispatch-sweep."
+            format!(
+                "Nexus: new Dispatch {} from NEXUS do this (unknown, unknown). \
+                 Run /nexus-dispatch-sweep.",
+                &id[..8]
+            )
         );
         // Unfenced: the push is exactly that one line.
         assert_eq!(inbox_message(&text, false), text);
