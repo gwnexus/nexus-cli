@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-11-17
+
 ### Added
 - **Code signals for project improvements.** `nexus link` and `nexus run` (at most once per 24 hours per project, in the background with a 3-second limit) send the hub a code-free summary of the repository: tracked marker files such as `Cargo.toml`, `package.json` or `Dockerfile` (up to three directories deep), file counts per extension (top 30), the number of tracked files and whether the repository holds anything besides Nexus-managed files. The hub suggests codebase tags, language-server plugins and a devbox blueprint from it. No file contents, other file names, repository paths or remotes are sent. `nexus code-report` sends it on demand, `--dry-run` prints it. A hub without the endpoint is skipped silently; errors are one warning and never fail `link` or `run`. Turn the automatic reports off with `nexus config set code_signals=false` or `NEXUS_NO_CODE_SIGNALS=1`.
 
