@@ -27,6 +27,8 @@ mod project_token_tests;
 #[cfg(test)]
 mod classification_tests;
 #[cfg(test)]
+mod code_signals_tests;
+#[cfg(test)]
 mod settings_tests;
 
 #[cfg(test)]

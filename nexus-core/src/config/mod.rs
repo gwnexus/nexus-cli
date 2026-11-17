@@ -119,6 +119,12 @@ pub struct Config {
     #[serde(default = "default_check_updates")]
     pub check_updates: bool,
 
+    /// Report code signals (marker files, extension counts) to the hub on
+    /// `nexus link` and `nexus run` (default: true). `NEXUS_NO_CODE_SIGNALS=1`
+    /// turns it off as well; `nexus code-report` always sends.
+    #[serde(default = "default_code_signals")]
+    pub code_signals: bool,
+
     /// Configuration for `nexus run`.
     #[serde(default)]
     pub run: RunConfig,
@@ -129,6 +135,10 @@ fn default_api_url() -> String {
 }
 
 fn default_check_updates() -> bool {
+    true
+}
+
+fn default_code_signals() -> bool {
     true
 }
 
@@ -171,6 +181,7 @@ impl Default for Config {
             no_color: false,
             mcp_source: McpSource::default(),
             check_updates: true,
+            code_signals: true,
             run: RunConfig::default(),
         }
     }
@@ -293,6 +304,12 @@ impl Config {
                     .map_err(|_| Error::Config(format!("invalid bool value: '{}'", value)))?;
                 Ok(())
             }
+            "code_signals" => {
+                self.code_signals = value
+                    .parse::<bool>()
+                    .map_err(|_| Error::Config(format!("invalid bool value: '{}'", value)))?;
+                Ok(())
+            }
             "run.default_tool" => {
                 self.run.default_tool = Some(value.to_string());
                 Ok(())
@@ -304,7 +321,7 @@ impl Config {
                 Ok(())
             }
             other => Err(Error::Config(format!(
-                "unknown config key '{}', valid keys: api_url, default_output, no_color, mcp_source, check_updates, run.default_tool, run.launch_countdown_secs",
+                "unknown config key '{}', valid keys: api_url, default_output, no_color, mcp_source, check_updates, code_signals, run.default_tool, run.launch_countdown_secs",
                 other
             ))),
         }

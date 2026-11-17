@@ -122,6 +122,11 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
         selected_project.id
     );
 
+    // Code-free summary of the repository for the hub's improvement
+    // suggestions; never fails the link.
+    let workspace = std::env::current_dir()?;
+    super::code_signals::report_after_link(&client, &selected_project.id, &workspace).await;
+
     Ok(())
 }
 

@@ -84,6 +84,21 @@ pub enum Command {
     /// Unlink this directory from its Nexus project.
     Unlink,
 
+    /// Send the repository's code signals to the hub
+    ///
+    /// Reports which known marker files exist (Cargo.toml, package.json, ...)
+    /// and how many tracked files there are per extension, so the hub can
+    /// suggest codebase tags, language-server plugins and a devbox blueprint.
+    /// Only tracked files count; no file contents, other file names, the
+    /// repository path or remotes are sent. `nexus link` and `nexus run`
+    /// (once per 24 h) send it on their own unless `code_signals = false` or
+    /// NEXUS_NO_CODE_SIGNALS=1.
+    CodeReport {
+        /// Print the report as JSON without sending it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Manage project inference tokens for gateway auth
     ///
     /// Tokens have the form nxs_proj_*.
@@ -1557,6 +1572,17 @@ mod tests {
             }
             _ => panic!("expected Link command"),
         }
+    }
+
+    #[test]
+    fn test_parse_code_report() {
+        let cli = Cli::try_parse_from(["nexus", "code-report"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::CodeReport { dry_run: false }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "code-report", "--dry-run"]).unwrap();
+        assert!(matches!(cli.command, Command::CodeReport { dry_run: true }));
     }
 
     #[test]

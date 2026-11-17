@@ -38,6 +38,7 @@ pub fn show() -> anyhow::Result<()> {
         "  no_color       = {} ({})",
         effective.config.no_color, effective.no_color_source
     );
+    println!("  code_signals   = {}", effective.config.code_signals);
 
     Ok(())
 }

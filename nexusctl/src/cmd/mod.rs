@@ -8,6 +8,7 @@ mod classification;
 mod claude_cmd;
 pub(crate) mod claude_plugins;
 pub(crate) mod claude_render;
+pub(crate) mod code_signals;
 mod config_cmd;
 mod consent;
 mod deinit;
@@ -84,6 +85,11 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Unlink => {
             link::unlink()?;
+        }
+        Command::CodeReport { dry_run } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            code_signals::code_report(&api_url, dry_run).await?;
         }
         Command::Project { ref action } => {
             let config = nexus_core::config::Config::load_effective(None)?;

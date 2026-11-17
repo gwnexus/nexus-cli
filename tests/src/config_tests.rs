@@ -27,6 +27,7 @@ fn test_config_default_values() {
     assert!(!config.no_color);
     assert_eq!(config.mcp_source, McpSource::Npm);
     assert_eq!(config.run.launch_countdown_secs, 5);
+    assert!(config.code_signals);
 }
 
 #[test]
@@ -57,6 +58,7 @@ fn test_config_toml_roundtrip() {
         no_color: true,
         mcp_source: McpSource::Local,
         check_updates: false,
+        code_signals: false,
         run: nexus_core::config::RunConfig::default(),
     };
 
@@ -67,6 +69,7 @@ fn test_config_toml_roundtrip() {
     assert_eq!(deserialized.default_output, config.default_output);
     assert_eq!(deserialized.no_color, config.no_color);
     assert_eq!(deserialized.mcp_source, config.mcp_source);
+    assert_eq!(deserialized.code_signals, config.code_signals);
 }
 
 #[test]
@@ -161,6 +164,10 @@ fn test_config_set_valid_keys() {
 
     config.set("check_updates", "true").unwrap();
     assert!(config.check_updates);
+
+    config.set("code_signals", "false").unwrap();
+    assert!(!config.code_signals);
+    assert!(config.set("code_signals", "maybe").is_err());
 
     config.set("run.launch_countdown_secs", "10").unwrap();
     assert_eq!(config.run.launch_countdown_secs, 10);
@@ -483,4 +490,13 @@ fn test_tool_for_agent_owner() {
     assert_eq!(tool_for_agent_owner(Some("both")), "opencode");
     assert_eq!(tool_for_agent_owner(Some("something-else")), "opencode");
     assert_eq!(tool_for_agent_owner(None), "opencode");
+}
+
+#[test]
+fn test_config_code_signals_defaults_on_for_older_files() {
+    // Config files written before the key existed keep the reports on.
+    let config: Config = toml::from_str("api_url = \"https://nexus.example\"\n").unwrap();
+    assert!(config.code_signals);
+    let config: Config = toml::from_str("code_signals = false\n").unwrap();
+    assert!(!config.code_signals);
 }

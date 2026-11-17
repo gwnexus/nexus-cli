@@ -12,15 +12,15 @@ use tracing::debug;
 use crate::api::types::{
     ActorAvatarResponse, ActorExportResponse, ActorGetResponse, ActorImportPayload,
     ActorImportResponse, ActorListResponse, AgentFileExportResponse, ApiError, AuthStatus,
-    AuthStatusResponse, ClassificationPatchOutcome, ClassificationResponse,
-    DirectiveExportResponse, DispatchEventsResponse, DispatchGetResponse, DispatchListResponse,
-    FileStatusResponse, IdentityResponse, InferenceTokenInfo, InferenceTokenIssueRequest,
-    InferenceTokenResponse, McpPreflightResponse, ProjectDetailResponse, ProjectListResponse,
-    ProjectSettingsResponse, RunnerHeartbeatResponse, RunnerListResponse, RunnerRegisterRequest,
-    RunnerRegisterResponse, SettingsPatchOutcome, SkillExportResponse, SkillListResponse,
-    SyncCheckResponse, SyncFileHash, SyncResponse, SyncStatusResponse, TaskListResponse,
-    WorkspaceExportResponse, WorkspaceForkExportResponse, WorkspaceForksResponse,
-    WorkspacePushResponse,
+    AuthStatusResponse, ClassificationPatchOutcome, ClassificationResponse, CodeSignals,
+    CodeSignalsResponse, DirectiveExportResponse, DispatchEventsResponse, DispatchGetResponse,
+    DispatchListResponse, FileStatusResponse, IdentityResponse, InferenceTokenInfo,
+    InferenceTokenIssueRequest, InferenceTokenResponse, McpPreflightResponse,
+    ProjectDetailResponse, ProjectListResponse, ProjectSettingsResponse, RunnerHeartbeatResponse,
+    RunnerListResponse, RunnerRegisterRequest, RunnerRegisterResponse, SettingsPatchOutcome,
+    SkillExportResponse, SkillListResponse, SyncCheckResponse, SyncFileHash, SyncResponse,
+    SyncStatusResponse, TaskListResponse, WorkspaceExportResponse, WorkspaceForkExportResponse,
+    WorkspaceForksResponse, WorkspacePushResponse,
 };
 use crate::Error;
 
@@ -335,6 +335,17 @@ impl NexusClient {
     pub async fn get_project(&self, project_id: &str) -> Result<ProjectDetailResponse, Error> {
         let path = format!("/api/mcp/projects/{}", project_id);
         self.get(&path).await
+    }
+
+    /// Send the repository's code signals (marker files, extension counts)
+    /// so the hub can suggest project improvements.
+    pub async fn report_code_signals(
+        &self,
+        project_id: &str,
+        signals: &CodeSignals,
+    ) -> Result<CodeSignalsResponse, Error> {
+        let path = format!("/api/mcp/projects/{}/code-signals", project_id);
+        self.post(&path, signals).await
     }
 
     /// Live-verify MCP preflight state for a project: reachability, auth

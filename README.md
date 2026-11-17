@@ -66,6 +66,7 @@ nexus doctor claude [--fix]             Check the host tools and clipboard of th
 nexus diff [path]                       Unified diffs for non-clean files (content and projection)
 nexus link [--project-id <id>]          Bind a project to the current workspace (picker: type to filter, arrow keys)
 nexus unlink                            Remove project binding from the workspace
+nexus code-report [--dry-run]           Send the repo's code signals (marker files, extension counts) to the hub
 nexus project link [--runtime-id <n>]   Issue a project inference token (nxs_proj_*) for gateway auth
 nexus project rotate [--finalize]       Rotate the project inference token (zero-downtime overlap)
 nexus project unlink                    Revoke the project inference token and clear local state
@@ -816,6 +817,54 @@ nexus dispatch runner status             # lists both, marks the current workspa
 - **Delivery to Claude Code** goes through the cross-session inbox of each running session in the bound repository. A project bound from its own workspace is matched by its repository; a project bound with `--project` from another workspace is matched by the project its session's repository is linked to (`.nexus/config.toml`). `runner status` shows per binding how many running sessions it reaches and flags a binding that reaches none. Sessions announce themselves in `~/.config/nexus/state/dispatch/sessions/<session-id>.json` (written by the Nexus runtime plugin). A session whose `crossSessionInbound` setting is `hold` or `refuse` (in managed, user or repository settings) gets nothing pushed; its notices stay queued for the plugin's session-start catch-up. The push arrives as a user message. A notice of checked fields goes as that one line. A notice that quotes a title (titles on, or queued by an earlier version) is fenced as untrusted data: a line telling the agent not to follow instructions inside it, the notice between `[NEXUS DISPATCH NOTICE: UNTRUSTED DATA]` and `[/NEXUS DISPATCH NOTICE]`, then `Run /nexus-dispatch-sweep.` outside the fence. A title cannot close the fence early, since its brackets are replaced. Linking two projects decides who may send Dispatches, not that their text is trusted: Dispatch content is always data for the receiving agent. Keystrokes are never injected. Without a matching session, or with a Claude Code version outside the tested range (2.1.319 to 2.1.x, see `runner probe`), a notice becomes one desktop notification instead. Deliveries are recorded in `notices/<project-id>.delivered.runner.jsonl`.
 
 
+### Code signals (`nexus code-report`)
+
+The hub cannot see the code, so the CLI sends it a small, code-free summary
+of what the repository contains. The hub uses it to suggest codebase tags,
+language-server plugins and a matching devbox blueprint on the project page.
+
+```bash
+nexus code-report --dry-run   # print the report as JSON, send nothing
+nexus code-report             # send it now
+```
+
+- **What is sent.** Built from `git ls-files` in the workspace, so only
+  tracked files count and ignored build output never does. In a repository
+  with several projects only the project's own directory is scanned, and
+  paths are relative to it.
+  - `markers`: paths of known marker files (`Cargo.toml`, `package.json`,
+    `tsconfig.json`, `next.config.*`, `go.mod`, `pyproject.toml`,
+    `requirements.txt`, `setup.py`, `uv.lock`, `poetry.lock`,
+    `composer.json`, `Gemfile`, `pom.xml`, `build.gradle*`, `*.csproj`,
+    `*.sln`, `CMakeLists.txt`, `Makefile`, `meson.build`, `Package.swift`,
+    `Dockerfile`, `docker-compose*.yml`, `compose*.yml`, `*.tf`, `*.tofu`,
+    `ansible.cfg`, `playbook*.yml`, `galaxy.yml`, `Chart.yaml`,
+    `kustomization.yaml`, `devbox.json`, `flake.nix`; the compose and
+    playbook names also as `.yaml`) up to three directories deep, at most
+    200, shallow ones first.
+  - `extensions`: tracked files per lowercase extension, the 30 most
+    frequent (`""` for files without one).
+  - `file_count`: all tracked files; `empty`: true when nothing is tracked
+    besides Nexus-managed files (`.nexus/`, `.claude/`, `CLAUDE.md`,
+    `AGENTS.md`). Managed files never count as markers or extensions.
+  - `source`, `cli_version`, `scanned_at`.
+
+  Never sent: file contents, other file names, the repository path,
+  remotes.
+- **When.** After `nexus link` (also a re-link), and on `nexus run` at most
+  once per 24 hours per project. `nexus run` sends it in the background
+  while it prepares the launch and waits at most 3 seconds for it; the
+  last report time is kept in
+  `~/.config/nexus/state/code-signals/<project-id>.json`. `nexus run
+  --dry-run` and `--no-db` send nothing.
+- **Answer.** When the hub has suggestions, one line says so: `Nexus: <n>
+  project improvements suggested, see the project page.` A hub without the
+  endpoint (404) is skipped silently; any other error is one warning line
+  and never stops `link` or `run`.
+- **Turn it off.** `nexus config set code_signals=false` or
+  `NEXUS_NO_CODE_SIGNALS=1` stops the reports of `link` and `run`;
+  `nexus code-report` always sends when you call it.
+
 ### Directives
 
 Directives are short binding rules: a platform
@@ -1139,6 +1188,7 @@ Global config is stored in `~/.config/nexus/config.toml`.
 | `no_color` | `false` | Disable colored output |
 | `mcp_source` | `npm` | MCP server source: `npm` or `local` |
 | `check_updates` | `true` | Check for CLI updates on startup |
+| `code_signals` | `true` | Send code signals on `nexus link` and `nexus run` (see [Code signals](#code-signals-nexus-code-report)); `NEXUS_NO_CODE_SIGNALS=1` turns them off as well |
 | `run.default_tool` | `opencode` | Tool binary launched by `nexus run` when the backend supplies no `run_target` |
 | `run.launch_countdown_secs` | `5` | Seconds to count down after pre-launch checks before starting the tool. Set to `0` to skip the countdown and launch immediately. |
 

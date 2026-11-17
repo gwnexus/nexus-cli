@@ -2247,3 +2247,35 @@ mod claude_settings_spec_tests {
         assert_eq!(nested.value("model"), None);
     }
 }
+
+/// Code-free summary of a repository, sent to
+/// `POST /api/mcp/projects/{id}/code-signals`.
+///
+/// Holds only marker file paths, extension counts and totals; never file
+/// contents, other file names, the repository root path or remotes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeSignals {
+    /// Always `"cli"`.
+    pub source: String,
+    pub cli_version: String,
+    /// RFC 3339 timestamp (UTC, seconds).
+    pub scanned_at: String,
+    /// Number of tracked files.
+    pub file_count: usize,
+    /// True when no tracked file exists besides Nexus-managed ones.
+    pub empty: bool,
+    /// Workspace-relative paths of known marker files.
+    pub markers: Vec<String>,
+    /// Tracked files per lowercase extension (`""` for none).
+    pub extensions: std::collections::BTreeMap<String, usize>,
+}
+
+/// Response of the code-signals endpoint.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CodeSignalsResponse {
+    #[serde(default)]
+    pub stored: bool,
+    /// Number of project improvements the hub suggests from the signals.
+    #[serde(default)]
+    pub suggestions: u32,
+}

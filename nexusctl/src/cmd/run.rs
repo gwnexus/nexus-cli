@@ -268,12 +268,19 @@ pub async fn run(
     let mut git_config: Option<nexus_core::api::GitConfig> = None;
     let mut automation: Option<String> = None;
     let mut linked_projects: Option<usize> = None;
+    // Code-signal report (at most once per 24 h), sent in the background
+    // while the rest of the launch is prepared; awaited before the checks.
+    let mut code_report = None;
     if !no_db {
         if let Some(token) = resolve_token() {
             if let Ok(client) = NexusClient::new(api_url, Some(token)) {
                 let project_id =
                     config::resolve_project_id(None, Some(&workspace)).unwrap_or_default();
                 if !project_id.is_empty() {
+                    if !dry_run {
+                        code_report =
+                            super::code_signals::spawn_for_run(&client, &project_id, &workspace);
+                    }
                     if let Ok(af_export) = client.export_agent_files(&project_id).await {
                         // Merge: af_export wins (fresher)
                         if let Some(owner) = af_export.agent_owner.filter(|v| !v.is_empty()) {
@@ -620,6 +627,8 @@ pub async fn run(
             }
         }
     }
+
+    super::code_signals::finish_for_run(code_report).await;
 
     // ── 6. Pre-launch checks ─────────────────────────────────────────────────
     if !skip_checks {
