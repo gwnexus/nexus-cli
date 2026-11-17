@@ -174,10 +174,106 @@ fn gateway_model(profile_slug: &str) -> String {
     }
 }
 
+/// Upper bound for a session id sent as `x-nexus-session-id`.
+const SESSION_ID_MAX_LEN: usize = 128;
+
+/// Whether `id` may go into the `x-nexus-session-id` header: the charset
+/// the gateway accepts (ASCII alphanumerics and `-_.:`), bounded length.
+fn session_id_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= SESSION_ID_MAX_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+}
+
+/// `staging/release-1.2.3` -> `1.2.3`; `None` for any other branch.
+fn release_line_of(branch: &str) -> Option<&str> {
+    let line = branch.trim().strip_prefix("staging/release-")?;
+    let parts: Vec<&str> = line.split('.').collect();
+    (parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())))
+    .then_some(line)
+}
+
+/// The checked-out branch of `workspace`, `None` outside git or detached.
+fn current_branch(workspace: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()?;
+    let branch = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (out.status.success() && !branch.is_empty()).then_some(branch)
+}
+
+/// The open session of `user_id` in a `session_list` answer (bare or in a
+/// `data` envelope). With a release line, only a session of that line
+/// counts; without one, a session outside any release line is preferred.
+fn pick_session(
+    list: &serde_json::Value,
+    user_id: &str,
+    release_line: Option<&str>,
+) -> Option<String> {
+    let sessions = list
+        .get("sessions")
+        .or_else(|| list.get("data").and_then(|d| d.get("sessions")))?
+        .as_array()?;
+    let str_of =
+        |s: &serde_json::Value, k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let mine: Vec<&serde_json::Value> = sessions
+        .iter()
+        .filter(|s| str_of(s, "status").is_none_or(|st| st == "open"))
+        .filter(|s| str_of(s, "created_by").as_deref() == Some(user_id))
+        .filter(|s| str_of(s, "id").is_some_and(|id| session_id_valid(&id)))
+        .collect();
+    let line_of = |s: &serde_json::Value| str_of(s, "release_line").filter(|l| !l.is_empty());
+    let chosen = match release_line {
+        Some(line) => mine.iter().find(|s| line_of(s).as_deref() == Some(line)),
+        None => mine
+            .iter()
+            .find(|s| line_of(s).is_none())
+            .or_else(|| mine.first()),
+    };
+    chosen.and_then(|s| str_of(s, "id"))
+}
+
+/// The open Nexus session of the current user for this project (of the
+/// release line on a `staging/release-X.Y.Z` branch). Best effort, bounded
+/// to a few seconds: `None` when there is none or the hub is unreachable.
+async fn resolve_session_id(api_url: &str, workspace: &Path, project_id: &str) -> Option<String> {
+    let lookup = async {
+        let client = NexusClient::new(api_url, Some(resolve_token()?)).ok()?;
+        let branch = current_branch(workspace);
+        let line = branch.as_deref().and_then(release_line_of);
+        let user_id = client.get_identity().await.ok()?.user_id;
+        let list = client.list_sessions(project_id, line).await.ok()?;
+        pick_session(&list, &user_id, line)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), lookup)
+        .await
+        .ok()
+        .flatten()
+}
+
 /// The `env` block of the actor's settings file. Every model tier points
-/// at the actor's profile so background tasks stay on the lane.
-fn lane_env(actor: &ClaudeLaneActor, base_url: &str, token: &str) -> serde_json::Value {
+/// at the actor's profile so background tasks stay on the lane. With a
+/// session id, gateway usage is attributed to that Nexus session; the env
+/// is fixed at process start, so a session opened later is not picked up.
+fn lane_env(
+    actor: &ClaudeLaneActor,
+    base_url: &str,
+    token: &str,
+    session_id: Option<&str>,
+) -> serde_json::Value {
     let model = gateway_model(&actor.profile_slug);
+    let mut headers = format!("x-nexus-actor: {}", actor.slug);
+    if let Some(id) = session_id.filter(|id| session_id_valid(id)) {
+        headers.push_str(&format!("\nx-nexus-session-id: {id}"));
+    }
     let mut env = serde_json::json!({
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": token,
@@ -186,7 +282,7 @@ fn lane_env(actor: &ClaudeLaneActor, base_url: &str, token: &str) -> serde_json:
         "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
         "CLAUDE_CODE_SUBAGENT_MODEL": model,
-        "ANTHROPIC_CUSTOM_HEADERS": format!("x-nexus-actor: {}", actor.slug),
+        "ANTHROPIC_CUSTOM_HEADERS": headers,
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     });
     if let Some(window) = actor.context_window.filter(|w| *w > 0) {
@@ -393,7 +489,16 @@ pub async fn run(
         anyhow::bail!("claude not found on PATH (nexus doctor claude --fix)");
     }
 
-    let settings = write_settings(&settings_dir()?, slug, &lane_env(actor, &base_url, &token))?;
+    let session_id = resolve_session_id(api_url, &workspace, &project_id).await;
+    if session_id.is_none() {
+        eprintln!(
+            "{} no open Nexus session: gateway usage of this run is not attributed to a session \
+             (open one, then restart the actor)",
+            style("Nexus:").dim()
+        );
+    }
+    let env = lane_env(actor, &base_url, &token, session_id.as_deref());
+    let settings = write_settings(&settings_dir()?, slug, &env)?;
     if prompt.is_none() {
         println!(
             "{} Actor {}: model {} via {} ({source}), token {}",
@@ -747,7 +852,7 @@ mod tests {
     #[test]
     fn test_lane_env_points_every_tier_at_the_profile() {
         let mut a = actor("spark-coder", "local-coder-main");
-        let env = lane_env(&a, "https://gw.example.invalid", "nxs_proj_x");
+        let env = lane_env(&a, "https://gw.example.invalid", "nxs_proj_x", None);
         assert_eq!(env["ANTHROPIC_BASE_URL"], "https://gw.example.invalid");
         assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "nxs_proj_x");
         for k in [
@@ -765,8 +870,70 @@ mod tests {
         assert_eq!(env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
         assert!(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW").is_none());
         a.context_window = Some(131_072);
-        let env = lane_env(&a, "u", "t");
+        let env = lane_env(&a, "u", "t", None);
         assert_eq!(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "131072");
+    }
+
+    #[test]
+    fn test_lane_env_adds_the_session_header() {
+        let a = actor("spark-coder", "local-coder-main");
+        let env = lane_env(&a, "u", "t", Some("sess-0001"));
+        assert_eq!(
+            env["ANTHROPIC_CUSTOM_HEADERS"],
+            "x-nexus-actor: spark-coder\nx-nexus-session-id: sess-0001"
+        );
+        // An id the gateway would reject is left out, never mangled.
+        for bad in [
+            "",
+            "a b",
+            "a\nx-evil: 1",
+            &"x".repeat(SESSION_ID_MAX_LEN + 1),
+        ] {
+            let env = lane_env(&a, "u", "t", Some(bad));
+            assert_eq!(
+                env["ANTHROPIC_CUSTOM_HEADERS"], "x-nexus-actor: spark-coder",
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_release_line_of_branch() {
+        assert_eq!(release_line_of("staging/release-0.21.0"), Some("0.21.0"));
+        assert_eq!(release_line_of("main"), None);
+        assert_eq!(release_line_of("staging/release-0.21"), None);
+        assert_eq!(release_line_of("staging/release-0.21.x"), None);
+        assert_eq!(release_line_of("feature/staging/release-1.0.0"), None);
+    }
+
+    #[test]
+    fn test_pick_session_by_user_and_release_line() {
+        let list = serde_json::json!({ "sessions": [
+            {"id": "sess-other-user", "status": "open", "created_by": "user-b", "release_line": null},
+            {"id": "sess-line", "status": "open", "created_by": "user-a", "release_line": "0.21.0"},
+            {"id": "sess-plain", "status": "open", "created_by": "user-a", "release_line": null},
+            {"id": "sess-closed", "status": "closed", "created_by": "user-a", "release_line": null},
+        ]});
+        assert_eq!(
+            pick_session(&list, "user-a", None).as_deref(),
+            Some("sess-plain")
+        );
+        assert_eq!(
+            pick_session(&list, "user-a", Some("0.21.0")).as_deref(),
+            Some("sess-line")
+        );
+        assert_eq!(pick_session(&list, "user-a", Some("0.22.0")), None);
+        assert_eq!(pick_session(&list, "user-c", None), None);
+        // MCP envelope; a session of a release line is used off the line
+        // only when the user has no other one.
+        let enveloped = serde_json::json!({ "data": { "sessions": [
+            {"id": "sess-line", "status": "open", "created_by": "user-a", "release_line": "0.21.0"},
+        ]}});
+        assert_eq!(
+            pick_session(&enveloped, "user-a", None).as_deref(),
+            Some("sess-line")
+        );
+        assert_eq!(pick_session(&serde_json::json!({}), "user-a", None), None);
     }
 
     #[test]

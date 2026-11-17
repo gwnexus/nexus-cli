@@ -590,12 +590,20 @@ impl NexusClient {
         self.post("/api/mcp/agent-files", &body).await
     }
 
-    /// List open sessions for a project via `POST /api/mcp/sessions`.
-    pub async fn list_sessions(&self, project_id: &str) -> Result<serde_json::Value, Error> {
-        let body = json!({
+    /// List open sessions for a project via `POST /api/mcp/sessions`,
+    /// optionally only those of one release line (`X.Y.Z`).
+    pub async fn list_sessions(
+        &self,
+        project_id: &str,
+        release_line: Option<&str>,
+    ) -> Result<serde_json::Value, Error> {
+        let mut body = json!({
             "action": "session_list",
             "project_id": project_id
         });
+        if let Some(line) = release_line {
+            body["release_line"] = json!(line);
+        }
         self.post("/api/mcp/sessions", &body).await
     }
 

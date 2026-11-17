@@ -2330,7 +2330,7 @@ async fn fetch_session_stats(
     }
 
     // 1. Find the open session for this project
-    let session_list = match client.list_sessions(&project_id).await {
+    let session_list = match client.list_sessions(&project_id, None).await {
         Ok(v) => v,
         Err(_) => return (None, None),
     };

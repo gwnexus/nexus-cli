@@ -700,6 +700,14 @@ main-thread `agent`, the lane session starts under a neutral agent instead,
 so that agent's prompt and model do not replace the actor's (pass your own
 `-- --agent <name>` to override).
 
+When you have an open Nexus session for the project at launch (on a
+`staging/release-X.Y.Z` branch: the session of that release line), the
+requests also carry `x-nexus-session-id: <id>`, so the gateway attributes
+their usage to that session. Without one the header is left out, the actor
+starts normally and a one-line hint says so. The header is fixed when the
+actor starts: a session opened later is picked up only after restarting
+the actor.
+
 Two lines Claude Code prints on every lane run are expected and harmless:
 `[claude-code:unrecognized_model]` (the gateway model id `nexus/<profile>`
 is not an Anthropic model name) and the note that claude.ai connectors are
