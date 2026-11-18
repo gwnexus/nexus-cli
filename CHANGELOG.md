@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-11-18
+
 ### Added
 - **Local-lane usage per session.** `nexus actors run` (and the actor panes of `nexus run --actor-panes`) sends `x-nexus-session-id` with the gateway requests when you have an open Nexus session for the project at launch; on a `staging/release-X.Y.Z` branch the session of that release line is used. The gateway attributes the usage to that session. Without an open session the header is left out and a one-line hint is printed; `x-nexus-actor` is unchanged. The header is set when the actor starts, so a session opened later needs an actor restart.
 
