@@ -175,6 +175,18 @@ fn probe_tool(tool: &str) -> Option<Option<String>> {
     )
 }
 
+/// [`collect`]'s view of the Claude Code probe: a binary that does not run
+/// counts as missing.
+fn claude_found(probe: &super::claude_probe::ClaudeProbe) -> Option<Option<String>> {
+    use super::claude_probe::ClaudeProbe;
+    match probe {
+        ClaudeProbe::OnPath { version, .. } | ClaudeProbe::OffPath { version, .. } => {
+            Some(Some(version.clone()))
+        }
+        ClaudeProbe::Broken { .. } | ClaudeProbe::Missing => None,
+    }
+}
+
 /// `lazygit --version` prints `commit=..., version=0.43.1, ...`: keep the
 /// version only.
 fn tidy_version(tool: &str, raw: &str) -> String {
@@ -350,7 +362,16 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
         });
     let required = required_tools(requires.as_deref(), zellij_workspace);
     let preference = installer_preference(&workspace, super::run::on_path);
-    let tools = collect(&required, &preference, probe_tool);
+    // Claude Code is probed like `nexus run` does: PATH, then the native
+    // installer locations, and only a runnable binary counts.
+    let claude_probe = super::claude_probe::probe();
+    let tools = collect(&required, &preference, |tool| {
+        if tool == "claude" {
+            claude_found(&claude_probe)
+        } else {
+            probe_tool(tool)
+        }
+    });
     let missing_required: Vec<&ToolStatus> =
         tools.iter().filter(|t| t.required && !t.found).collect();
     let code = i32::from(!missing_required.is_empty());
@@ -425,6 +446,11 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
             (false, false) => {
                 CheckResult::Info(format!("not installed, optional ({})", purpose(&t.tool)))
             }
+        };
+        let result = if t.tool == "claude" && t.required {
+            claude_probe.check_result()
+        } else {
+            result
         };
         print_check(&t.tool, &result);
         if t.tool == "claude" && claude_compatible == Some(false) {

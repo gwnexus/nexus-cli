@@ -547,6 +547,18 @@ Precedence: flag, then `[run] workspace`, then the project default
 (`run_target.workspace`). The pre-launch check shows the choice and its
 source in a `Workspace` row; the session summary repeats it.
 
+**Claude Code check.** For Claude Code projects (and `--tool claude`),
+`nexus run` checks before anything starts that `claude` is installed and
+runnable: first on `PATH`, then in `~/.local/bin/claude` and
+`~/.claude/local/claude` (native installer), and `claude --version` must
+answer within 10 seconds. Missing or broken, it stops with a non-zero exit,
+the path it tried and the install command
+(`curl -fsSL https://claude.ai/install.sh | bash`); no zellij session is
+opened. Found only outside `PATH`, it warns and puts that directory on
+`PATH` for the session, so the workspace panes find it. Otherwise it prints
+one line with the version. The check also runs with `--skip-checks`; only
+`--skip-claude-check` turns it off (CI or headless use).
+
 Start the zellij workspace from a plain terminal: inside a running zellij
 session `nexus run` refuses, since zellij would add the layout as tabs of
 that session (inside the project's own session it only says so). The
@@ -593,7 +605,9 @@ hook it reports "no observation data".
 
 Checks `claude`, `zellij`, `lazygit`, `ccusage` and `delta`. Which ones are
 required comes from your workspace layout (`claude_workspace.requires`),
-else from the run target (zellij). Missing required tools fail (exit 1),
+else from the run target (zellij). `claude` is looked up like `nexus run`
+does (also in `~/.local/bin` and `~/.claude/local`) and counts only when
+`claude --version` succeeds. Missing required tools fail (exit 1),
 missing optional ones are informational; the Claude Code version is checked
 against the project's CCX compatibility range. For Zellij workspaces the
 **zellij session** row flags the project's session when it is EXITED

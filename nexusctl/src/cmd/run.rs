@@ -242,6 +242,7 @@ pub async fn run(
     actor_panes: bool,
     dispatch_pane: Option<bool>,
     resume: bool,
+    skip_claude_check: bool,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
     let agentic_root = resolve_agentic_root(&workspace);
@@ -629,6 +630,13 @@ pub async fn run(
     }
 
     super::code_signals::finish_for_run(code_report).await;
+
+    // ── 5.9. Claude Code preflight ───────────────────────────────────────────
+    // Runs before the workspace opens, also with --skip-checks: a missing or
+    // broken `claude` would otherwise only show up as failing panes.
+    if wants_claude(agent_owner.as_deref()) || effective_tool == "claude" {
+        claude_preflight(skip_claude_check)?;
+    }
 
     // ── 6. Pre-launch checks ─────────────────────────────────────────────────
     if !skip_checks {
@@ -1295,6 +1303,40 @@ pub(crate) fn on_path(binary: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(binary).is_file()))
         .unwrap_or(false)
+}
+
+/// Stop the launch when Claude Code is missing or not runnable; put an
+/// off-PATH install on `PATH` so the tool (and every workspace pane)
+/// finds it.
+fn claude_preflight(skip: bool) -> anyhow::Result<()> {
+    use super::claude_probe::{self, ClaudeProbe};
+    if skip {
+        print_check(
+            "Claude Code",
+            &CheckResult::Warn("check skipped (--skip-claude-check)".into()),
+        );
+        return Ok(());
+    }
+    let probe = claude_probe::probe();
+    print_check("Claude Code", &probe.check_result());
+    if probe.is_fatal() {
+        anyhow::bail!(
+            "Claude Code is required to start this workspace; install it with `{}` \
+             (or pass --skip-claude-check for headless use)",
+            claude_probe::INSTALL_HINT
+        );
+    }
+    if let ClaudeProbe::OffPath { dir, .. } = &probe {
+        if let Some(path) = claude_probe::path_with(dir, env::var_os("PATH").as_deref()) {
+            env::set_var("PATH", path);
+            println!(
+                "   {} added {} to PATH for this session",
+                style("~").bold().yellow(),
+                dir.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Does this project run Claude Code? See [`config::is_claude_owner`].
@@ -3436,6 +3478,7 @@ mod tests {
                 no_db,
                 exec,
                 skip_checks,
+                skip_claude_check,
                 force,
                 plain,
                 workspace,
@@ -3458,12 +3501,41 @@ mod tests {
                 assert!(!no_db);
                 assert!(!exec);
                 assert!(!skip_checks);
+                assert!(!skip_claude_check);
                 assert!(!force);
                 assert!(account.is_none());
                 assert!(args.is_empty());
             }
             _ => panic!("expected Run"),
         }
+    }
+
+    #[test]
+    fn test_parse_cli_run_skip_claude_check() {
+        use crate::{Cli, Command};
+        use clap::Parser;
+        let cli =
+            Cli::try_parse_from(["nexus", "run", "--skip-checks", "--skip-claude-check"]).unwrap();
+        match cli.command {
+            Command::Run {
+                skip_checks,
+                skip_claude_check,
+                ..
+            } => {
+                assert!(skip_checks);
+                assert!(skip_claude_check);
+            }
+            _ => panic!("expected Run"),
+        }
+        // --skip-checks alone keeps the Claude Code check.
+        let cli = Cli::try_parse_from(["nexus", "run", "--skip-checks"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                skip_claude_check: false,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub(crate) mod ccx;
 mod classification;
 mod claude_cmd;
 pub(crate) mod claude_plugins;
+pub(crate) mod claude_probe;
 pub(crate) mod claude_render;
 pub(crate) mod code_signals;
 mod config_cmd;
@@ -810,6 +811,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             no_db,
             exec,
             skip_checks,
+            skip_claude_check,
             force,
             plain,
             ref workspace,
@@ -852,6 +854,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     _ => None,
                 },
                 resume,
+                skip_claude_check,
             )
             .await?;
         }

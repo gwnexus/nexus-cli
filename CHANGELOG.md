@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`nexus run` checks Claude Code before opening the workspace.** For Claude Code projects (and `--tool claude`) it resolves `claude` from `PATH`, then `~/.local/bin/claude` and `~/.claude/local/claude`, and runs `claude --version` with a 10-second limit. Missing or not runnable, it stops with a non-zero exit and the install command instead of opening a zellij session with failing panes. Found only outside `PATH`, it warns and puts that directory on `PATH` for the session. The check also runs with `--skip-checks`; `--skip-claude-check` turns it off for CI or headless use. `nexus doctor claude` uses the same lookup and reports a `claude` that does not run as missing.
+
 ## [0.44.0] - 2026-11-18
 
 ### Added

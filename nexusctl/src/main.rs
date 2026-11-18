@@ -522,8 +522,17 @@ pub enum Command {
         exec: bool,
 
         /// Skip pre-launch checks.
+        ///
+        /// The Claude Code check still runs; see --skip-claude-check.
         #[arg(long)]
         skip_checks: bool,
+
+        /// Skip the Claude Code check (CI or headless use)
+        ///
+        /// Without it, nexus run stops before opening the workspace when a
+        /// Claude Code project has no runnable `claude`.
+        #[arg(long)]
+        skip_claude_check: bool,
 
         /// Skip the pre-launch confirmation (non-interactive use)
         #[arg(short, long)]
