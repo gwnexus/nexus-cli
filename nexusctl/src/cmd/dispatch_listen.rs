@@ -58,6 +58,10 @@ const DELIVERY_WINDOW_MS: i64 = 24 * 3_600_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum NoticeKind {
+    /// The requester added a reply, clarification or blocker to an incoming
+    /// Dispatch we are working on. Ranks lowest, so the creation of a new
+    /// Dispatch (with its first message) stays one `Incoming` notice.
+    RequesterMessage,
     /// A new incoming Dispatch.
     Incoming,
     /// A reply or clarification on a Dispatch we requested.
@@ -104,6 +108,12 @@ pub(crate) fn trigger(e: &DispatchEvent, project: &str) -> Option<NoticeKind> {
         },
         "message_added" if outgoing => match e.message_type.as_deref() {
             Some("reply" | "clarification" | "blocker") => Some(NoticeKind::Reply),
+            _ => None,
+        },
+        // Who wrote it is only known once the Dispatch is read: see
+        // `build_notice`, which keeps requester messages only.
+        "message_added" if incoming => match e.message_type.as_deref() {
+            Some("reply" | "clarification" | "blocker") => Some(NoticeKind::RequesterMessage),
             _ => None,
         },
         _ => None,
@@ -234,6 +244,17 @@ pub(crate) fn notice_text(
                 ),
             }
         }
+        NoticeKind::RequesterMessage => {
+            let what = enum_word(message_type.unwrap_or("reply"));
+            match peer {
+                Some(peer) => format!(
+                    "Nexus: {peer} added a {what} on Dispatch {short} you are working on. Run /nexus-dispatch-sweep.{title}"
+                ),
+                None => format!(
+                    "Nexus: the requester added a {what} on Dispatch {short} you are working on. Run /nexus-dispatch-sweep.{title}"
+                ),
+            }
+        }
         NoticeKind::Resolved => match peer {
             Some(peer) => format!(
                 "Nexus: Dispatch {short} was resolved by {peer}. Review and close it with /nexus-dispatch-sweep.{title}"
@@ -272,6 +293,30 @@ fn event_author(e: &DispatchEvent, d: Option<&DispatchGetResponse>) -> Option<St
         })
         .min_by_key(|(gap, _)| *gap)
         .map(|(_, author)| author.clone())
+}
+
+/// Whether a message event on an incoming Dispatch is a follow-up of the
+/// requester on a Dispatch that is still open.
+fn requester_message(e: &DispatchEvent, d: &DispatchGetResponse) -> bool {
+    if matches!(d.dispatch.status.as_str(), "closed" | "cancelled") {
+        return false;
+    }
+    let Some(id) = e.message_id.as_deref() else {
+        return false;
+    };
+    let mut authored = d
+        .messages
+        .iter()
+        .filter(|m| m.message_type.as_deref() != Some("system_note"));
+    // The first message is the body the Dispatch was created with.
+    if authored.next().is_some_and(|m| m.id == id) {
+        return false;
+    }
+    let requester = d.dispatch.source_project_id.as_str();
+    d.messages
+        .iter()
+        .find(|m| m.id == id)
+        .is_some_and(|m| m.author_project_id.as_deref() == Some(requester))
 }
 
 /// The bound projects an event concerns: from the combined feed, or by
@@ -344,7 +389,10 @@ pub(crate) fn notice_id(project_id: &str, event_id: i64) -> String {
 
 /// Build the notice; `None` when the project itself wrote the event (its
 /// own reply, status change or resolution), or when a resolution notice
-/// would arrive for a Dispatch that is already closed.
+/// would arrive for a Dispatch that is already closed. A message on an
+/// incoming Dispatch counts only when the Dispatch could be read, the
+/// requester project wrote it, it is not the creation message and the
+/// Dispatch is not closed or cancelled.
 pub(crate) fn build_notice(
     c: &Candidate,
     d: Option<&DispatchGetResponse>,
@@ -363,6 +411,9 @@ pub(crate) fn build_notice(
         author.as_deref().map(name_of)
     };
     if c.kind == NoticeKind::Resolved && d.is_some_and(|d| d.dispatch.status == "closed") {
+        return None;
+    }
+    if c.kind == NoticeKind::RequesterMessage && !requester_message(e, d?) {
         return None;
     }
     Some(Notice {
@@ -1502,10 +1553,108 @@ mod tests {
         assert_eq!(trigger(&m, P), Some(NoticeKind::Reply));
         m.message_type = Some("progress".into());
         assert_eq!(trigger(&m, P), None);
-        // A reply on an incoming Dispatch is our own work, no notice.
+        // A message on an incoming Dispatch is a candidate; whether the
+        // requester wrote it is decided in `build_notice`.
         let mut inc = ev(4, "message_added", Q, P);
-        inc.message_type = Some("reply".into());
+        inc.message_type = Some("clarification".into());
+        assert_eq!(trigger(&inc, P), Some(NoticeKind::RequesterMessage));
+        inc.message_type = Some("progress".into());
         assert_eq!(trigger(&inc, P), None);
+    }
+
+    /// An incoming Dispatch Q requested from P: creation message `m0` by Q,
+    /// then `m1` by P (our progress), `m2` by Q (follow-up).
+    fn incoming(status: &str) -> DispatchGetResponse {
+        serde_json::from_value(serde_json::json!({
+            "dispatch": {"id": "x", "source_project_id": Q, "target_project_id": P,
+                "title": "T", "type": "implementation_request", "priority": "high",
+                "status": status, "created_at": "2026-11-18T10:00:00Z"},
+            "messages": [
+                {"id": "m0", "author_project_id": Q, "message_type": "reply",
+                 "body_markdown": "SECRET BODY", "created_at": "2026-11-18T10:00:00Z"},
+                {"id": "s", "author_project_id": null, "message_type": "system_note",
+                 "created_at": "2026-11-18T10:00:30Z"},
+                {"id": "m1", "author_project_id": P, "message_type": "reply",
+                 "created_at": "2026-11-18T11:00:00Z"},
+                {"id": "m2", "author_project_id": Q, "message_type": "clarification",
+                 "body_markdown": "SECRET BODY", "created_at": "2026-11-18T12:00:00Z"}
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn requester_candidate(message_id: &str, message_type: &str) -> Candidate {
+        let mut m = ev(40, "message_added", Q, P);
+        m.message_type = Some(message_type.into());
+        m.message_id = Some(message_id.into());
+        Candidate {
+            project_id: P.into(),
+            kind: NoticeKind::RequesterMessage,
+            event: m,
+        }
+    }
+
+    #[test]
+    fn test_requester_follow_up_on_running_dispatch_notifies_the_target() {
+        let names = |id: &str| {
+            if id == Q {
+                "NEXUS-Gateway"
+            } else {
+                "NEXUS-CLI"
+            }
+            .to_string()
+        };
+        let d = incoming("in_progress");
+        let c = requester_candidate("m2", "clarification");
+        let n = build_notice(&c, Some(&d), "notify", &names, false).unwrap();
+        let short = &c.event.dispatch_id[..8];
+        assert_eq!(
+            n.text,
+            format!(
+                "Nexus: NEXUS-Gateway added a clarification on Dispatch {short} you are \
+                 working on. Run /nexus-dispatch-sweep."
+            )
+        );
+        assert_eq!(n.kind, NoticeKind::RequesterMessage);
+        assert!(!n.text.contains("SECRET"));
+        // Also on an acknowledged or resolved one (the requester objects).
+        for status in ["acknowledged", "resolved", "blocked"] {
+            assert!(build_notice(&c, Some(&incoming(status)), "notify", &names, false).is_some());
+        }
+    }
+
+    #[test]
+    fn test_requester_message_notice_skips_own_creation_and_finished() {
+        let names = |_: &str| "NEXUS-Gateway".to_string();
+        let d = incoming("in_progress");
+        // Our own reply on the incoming Dispatch.
+        let own = requester_candidate("m1", "reply");
+        assert!(build_notice(&own, Some(&d), "notify", &names, false).is_none());
+        // The body the Dispatch was created with (a later poll than `created`).
+        let first = requester_candidate("m0", "reply");
+        assert!(build_notice(&first, Some(&d), "notify", &names, false).is_none());
+        // Closed or cancelled Dispatches.
+        let c = requester_candidate("m2", "clarification");
+        for status in ["closed", "cancelled"] {
+            assert!(build_notice(&c, Some(&incoming(status)), "notify", &names, false).is_none());
+        }
+        // Unknown author: the Dispatch could not be read.
+        assert!(build_notice(&c, None, "notify", &names, false).is_none());
+        // A message id the Dispatch does not hold.
+        let gone = requester_candidate("zz", "reply");
+        assert!(build_notice(&gone, Some(&d), "notify", &names, false).is_none());
+    }
+
+    #[test]
+    fn test_new_dispatch_with_its_first_message_is_one_incoming_notice() {
+        let created = ev(50, "created", Q, P);
+        let mut first = ev(51, "message_added", Q, P);
+        first.dispatch_id = created.dispatch_id.clone();
+        first.message_type = Some("reply".into());
+        first.message_id = Some("m0".into());
+        let c = candidates(&[created, first], &active());
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].kind, NoticeKind::Incoming);
     }
 
     #[test]

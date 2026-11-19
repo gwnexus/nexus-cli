@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Dispatch runner: follow-ups from the requester reach the receiving session.** A reply, clarification or blocker the requesting project adds to an incoming Dispatch that is already acknowledged or in progress now raises a notice in the receiving project's sessions (`Nexus: <peer> added a <type> on Dispatch <id> you are working on.`). Before, only the requesting side heard about new messages, so new asks on a running Dispatch stayed silent until the next manual sweep. The creation message, the project's own messages and closed or cancelled Dispatches raise no notice.
+
 ## [0.45.0] - 2026-11-18
 
 ### Fixed
