@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-11-20
+
 ### Added
 - **Warnings for missing plugin programs.** When the backend lists programs that the project's enabled agent plugins need (`claude_plugin_requirements`, e.g. the language server of an LSP plugin), `nexus pull`, the `nexus run` preflight and `nexus doctor claude` look each one up on `PATH` and, in a devbox project, in the devbox profile. Each missing program gets one warning with the fix (`devbox add <package>`, or install it / disable the plugin). The start is never blocked; without the field nothing changes. `nexus doctor claude --output json` reports them as `plugin_programs`.
 
