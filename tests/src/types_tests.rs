@@ -1025,6 +1025,19 @@ fn test_inference_token_issue_request_with_ceiling() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
+fn test_run_target_tool_args() {
+    let t: RunTarget = serde_json::from_str(
+        r#"{"tool": "claude", "workspace": "none", "tool_args": ["--chrome"]}"#,
+    )
+    .unwrap();
+    assert_eq!(t.tool_args, vec!["--chrome"]);
+    // Older backends omit the field; it is not written back when empty.
+    let t: RunTarget = serde_json::from_str(r#"{"tool": "claude"}"#).unwrap();
+    assert!(t.tool_args.is_empty());
+    assert!(!serde_json::to_string(&t).unwrap().contains("tool_args"));
+}
+
+#[test]
 fn test_agent_file_export_response_claude_workspace() {
     let json = r#"{
         "project_id": "abc",

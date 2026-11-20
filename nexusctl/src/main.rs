@@ -591,6 +591,9 @@ pub enum Command {
         account: Option<String>,
 
         /// Extra arguments forwarded verbatim to the tool.
+        ///
+        /// Only for a plain start: in the zellij workspace they are ignored
+        /// with a warning (the layout defines the pane commands).
         #[arg(last = true)]
         args: Vec<String>,
     },

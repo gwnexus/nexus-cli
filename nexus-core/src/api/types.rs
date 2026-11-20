@@ -814,7 +814,7 @@ pub enum ClassificationPatchOutcome {
 }
 
 /// `af_export.run_target`: `{ tool: "opencode"|"claude", workspace:
-/// "none"|"zellij", layout?, config? }`.
+/// "none"|"zellij", layout?, config?, tool_args? }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunTarget {
     pub tool: String,
@@ -827,6 +827,10 @@ pub struct RunTarget {
     /// set only together with `workspace: "zellij"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
+    /// Extra arguments for the tool in a plain (non-zellij) launch, e.g.
+    /// `["--chrome"]`. The CLI passes only allow-listed entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_args: Vec<String>,
 }
 
 /// `af_export.ccx`: identifies the CCX bundle revision being delivered.

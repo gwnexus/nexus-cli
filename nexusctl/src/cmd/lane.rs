@@ -1076,6 +1076,16 @@ mod tests {
     }
 
     #[test]
+    fn test_actor_panes_keep_the_claude_pane_args() {
+        let args = "args \"-c\" \"claude --chrome; zellij kill-session $ZELLIJ_SESSION_NAME\"";
+        let layout = format!("layout {{\n    tab name=\"CLAUDE\" {{\n        pane command=\"sh\" name=\"claude\" {{\n            {args}\n        }}\n    }}\n}}\n");
+        let out =
+            layout_with_actor_panes(&layout, &[actor("spark-coder", "a")], "/bin/nexus").unwrap();
+        assert!(out.contains(&format!("            {args}\n")), "{out}");
+        assert_eq!(out.matches("--chrome").count(), 1);
+    }
+
+    #[test]
     fn test_model_ids() {
         let body =
             serde_json::json!({"data": [{"id": "local-coder-main"}, {"id": "local-review"}]});

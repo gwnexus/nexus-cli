@@ -5583,6 +5583,7 @@ mod tests {
             workspace: ws.map(str::to_string),
             layout: None,
             config: None,
+            tool_args: Vec::new(),
         };
         assert_eq!(
             run_start_label(Some(&t("claude", Some("zellij"))), true),

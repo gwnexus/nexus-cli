@@ -489,6 +489,7 @@ fn test_run_target_roundtrip() {
         workspace: Some("zellij".to_string()),
         layout: Some(".nexus/claude/nexus-claude.kdl".to_string()),
         config: None,
+        tool_args: Vec::new(),
     };
     assert!(update_run_target(Some(&dir), Some(&target)).unwrap());
     assert_eq!(load_run_target(Some(&dir)), Some(target.clone()));
@@ -526,6 +527,7 @@ fn test_pull_cache_updates_preserve_local_run_workspace() {
             workspace: Some("zellij".into()),
             layout: None,
             config: None,
+            tool_args: Vec::new(),
         }),
     )
     .unwrap();

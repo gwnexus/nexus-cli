@@ -1498,6 +1498,20 @@ mod tests {
     }
 
     #[test]
+    fn test_dispatch_pane_keeps_the_claude_pane_args() {
+        // The personal layout may start Claude Code with flags (e.g.
+        // `--chrome`); adding the dispatches pane must keep them as written.
+        let args = "args \"-c\" \"claude --chrome; zellij kill-session $ZELLIJ_SESSION_NAME\"";
+        let layout = format!("layout {{\n    tab name=\"CLAUDE\" {{\n        pane split_direction=\"vertical\" {{\n            pane command=\"sh\" name=\"claude\" focus=true size=\"75%\" {{\n                {args}\n            }}\n            pane name=\"terminal\"\n        }}\n    }}\n}}\n");
+        let out = layout_with_dispatch_pane(&layout, "/bin/nexus").unwrap();
+        assert!(
+            out.contains(&format!("                    {args}\n")),
+            "{out}"
+        );
+        assert_eq!(out.matches("--chrome").count(), 1);
+    }
+
+    #[test]
     fn test_compact_totals_keep_the_lower_bound() {
         let mut lists = sample();
         lists.outbox_done = (0..DISPATCH_LIST_LIMIT)

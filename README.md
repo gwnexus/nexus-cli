@@ -547,6 +547,23 @@ Precedence: flag, then `[run] workspace`, then the project default
 (`run_target.workspace`). The pre-launch check shows the choice and its
 source in a `Workspace` row; the session summary repeats it.
 
+**Arguments for the tool.** `nexus run -- <args>` passes `<args>` to the
+tool only in a plain start. In the zellij workspace the layout defines the
+pane commands, so the arguments are ignored with a warning; use `--plain`
+to pass them.
+
+**Claude in Chrome.** Claude Code offers its browser tools only to a session
+started with `claude --chrome`. The hub's per-user workspace setting turns
+this on: in the zellij workspace your personal layout starts the claude pane
+with `--chrome` (`nexus run` keeps the pane command as written, also with
+`--actor-panes` and the dispatches pane); in a plain start the backend sends
+`run_target.tool_args: ["--chrome"]` and `nexus run` adds it to the `claude`
+command line, before your own `-- <args>`. `tool_args` is allow-listed on
+the CLI side: only `--chrome` is passed, any other entry is dropped with a
+`Tool args` warning, so the backend cannot add other Claude Code flags.
+`nexus doctor claude` shows a hint line when the start uses `--chrome`; the
+Chrome extension itself is not checked.
+
 **Claude Code check.** For Claude Code projects (and `--tool claude`),
 `nexus run` checks before anything starts that `claude` is installed and
 runnable: first on `PATH`, then in `~/.local/bin/claude` and

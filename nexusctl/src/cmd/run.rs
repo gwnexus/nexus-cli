@@ -424,6 +424,29 @@ pub async fn run(
         // The row is part of the pre-launch check; keep the warning visible.
         print_check("Workspace", &workspace_row);
     }
+    if !launch.ignored_tool_args.is_empty() {
+        print_check(
+            "Tool args",
+            &CheckResult::Warn(format!(
+                "ignored (not allowed): {}",
+                launch.ignored_tool_args.join(" ")
+            )),
+        );
+    }
+    // In the zellij workspace trailing args would land on the zellij command
+    // line, not on the tool inside its pane: drop them.
+    let args: &[String] = if launch.workspace && !args.is_empty() {
+        print_check(
+            "Arguments",
+            &CheckResult::Warn(format!(
+                "ignored in the zellij workspace: {} (use --plain to pass them to the tool)",
+                args.join(" ")
+            )),
+        );
+        &[]
+    } else {
+        args
+    };
     let effective_tool = launch.tool.as_str();
     let args: &[String] = &[launch.leading_args.as_slice(), args].concat();
 
@@ -1083,13 +1106,43 @@ enum RowLevel {
 
 /// What `nexus run` starts: the binary, arguments placed before the
 /// operator's own `-- <args>`, the preflight "Workspace" row, and the
-/// session-summary line.
+/// session-summary line. `workspace` is true when the tool runs inside the
+/// zellij workspace (the operator's args would reach zellij, not the tool);
+/// `ignored_tool_args` lists `run_target.tool_args` outside the allow-list.
 #[derive(Debug, PartialEq, Eq)]
 struct Launch {
     tool: String,
     leading_args: Vec<String>,
     row: (RowLevel, String),
     summary: String,
+    workspace: bool,
+    ignored_tool_args: Vec<String>,
+}
+
+/// `run_target.tool_args` entries `nexus run` passes to Claude Code. The
+/// list is closed: the backend must not be able to add arbitrary flags
+/// (e.g. ones that loosen permissions) to the operator's session.
+const CLAUDE_TOOL_ARGS: &[&str] = &["--chrome"];
+
+/// Split `run_target.tool_args` into the allow-listed args for a plain
+/// Claude Code launch and the ignored rest. Other tools get none.
+fn split_tool_args(
+    tool: &str,
+    run_target: Option<&nexus_core::api::RunTarget>,
+) -> (Vec<String>, Vec<String>) {
+    let Some(target) = run_target.filter(|t| t.tool == "claude" && tool == "claude") else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut allowed: Vec<String> = Vec::new();
+    let mut ignored = Vec::new();
+    for arg in &target.tool_args {
+        if !CLAUDE_TOOL_ARGS.contains(&arg.as_str()) {
+            ignored.push(arg.clone());
+        } else if !allowed.contains(arg) {
+            allowed.push(arg.clone());
+        }
+    }
+    (allowed, ignored)
 }
 
 fn tool_label(tool: &str) -> String {
@@ -1191,6 +1244,10 @@ pub(crate) fn zellij_config_source(
 /// through `zellij [--config <run_target.config>] --layout <run_target.layout>`;
 /// if zellij or the layout is missing the tool starts directly and the row
 /// is a WARN. A missing project config falls back to the global one (WARN).
+///
+/// A direct Claude Code start gets the allow-listed `run_target.tool_args`
+/// (see [`CLAUDE_TOOL_ARGS`]); in the zellij workspace the layout carries
+/// the pane command instead.
 fn resolve_launch(
     cli_tool: Option<&str>,
     configured_default: Option<&str>,
@@ -1220,11 +1277,16 @@ fn resolve_launch(
     } else {
         RowLevel::Info
     };
-    let direct = |row: (RowLevel, String), summary: String| Launch {
-        tool: tool.clone(),
-        leading_args: Vec::new(),
-        row,
-        summary,
+    let direct = |row: (RowLevel, String), summary: String| {
+        let (leading_args, ignored_tool_args) = split_tool_args(&tool, run_target);
+        Launch {
+            tool: tool.clone(),
+            leading_args,
+            row,
+            summary,
+            workspace: false,
+            ignored_tool_args,
+        }
     };
 
     if name != "zellij" {
@@ -1295,6 +1357,8 @@ fn resolve_launch(
             format!("{label} in zellij ({layout_rel}{fallback_note}{config_note}) [{src}]"),
         ),
         summary: format!("zellij ({src})"),
+        workspace: true,
+        ignored_tool_args: Vec::new(),
     }
 }
 
@@ -3794,6 +3858,7 @@ mod tests {
             workspace: workspace.map(str::to_string),
             layout: layout.map(str::to_string),
             config: None,
+            tool_args: Vec::new(),
         }
     }
 
@@ -4008,6 +4073,85 @@ mod tests {
         );
         assert_eq!(l.tool, "zellij");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── run_target.tool_args ────────────────────────
+
+    fn with_args(t: nexus_core::api::RunTarget, args: &[&str]) -> nexus_core::api::RunTarget {
+        nexus_core::api::RunTarget {
+            tool_args: args.iter().map(|a| a.to_string()).collect(),
+            ..t
+        }
+    }
+
+    #[test]
+    fn test_launch_plain_claude_gets_allowed_tool_args() {
+        let dir = with_layout("tool-args-plain");
+        let t = with_args(target("claude", Some("none"), None), &["--chrome"]);
+        let l = launch(None, Some(&t), &dir, true);
+        assert_eq!(l.tool, "claude");
+        assert_eq!(l.leading_args, vec!["--chrome".to_string()]);
+        assert!(!l.workspace);
+        assert!(l.ignored_tool_args.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_launch_drops_tool_args_outside_the_allow_list() {
+        let dir = with_layout("tool-args-unknown");
+        let t = with_args(
+            target("claude", Some("none"), None),
+            &[
+                "--dangerously-skip-permissions",
+                "--chrome",
+                "--chrome",
+                "--model=x",
+            ],
+        );
+        let l = launch(None, Some(&t), &dir, true);
+        assert_eq!(l.leading_args, vec!["--chrome".to_string()]);
+        assert_eq!(
+            l.ignored_tool_args,
+            vec![
+                "--dangerously-skip-permissions".to_string(),
+                "--model=x".to_string()
+            ]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_launch_zellij_workspace_ignores_tool_args() {
+        let dir = with_layout("tool-args-zellij");
+        let t = with_args(target("claude", Some("zellij"), Some(KDL)), &["--chrome"]);
+        let l = launch(None, Some(&t), &dir, true);
+        assert_eq!(l.tool, "zellij");
+        assert!(l.workspace);
+        assert!(!l.leading_args.contains(&"--chrome".to_string()));
+        assert!(l.ignored_tool_args.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_launch_plain_fallback_keeps_tool_args() {
+        // zellij missing: Claude Code starts directly and keeps the flag.
+        let dir = with_layout("tool-args-fallback");
+        let t = with_args(target("claude", Some("zellij"), Some(KDL)), &["--chrome"]);
+        let l = launch(None, Some(&t), &dir, false);
+        assert_eq!(l.tool, "claude");
+        assert!(!l.workspace);
+        assert_eq!(l.leading_args, vec!["--chrome".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_tool_args_only_for_claude() {
+        let t = with_args(target("opencode", Some("none"), None), &["--chrome"]);
+        assert_eq!(split_tool_args("opencode", Some(&t)), (vec![], vec![]));
+        // --tool opencode over a claude target: no claude flags.
+        let t = with_args(target("claude", Some("none"), None), &["--chrome"]);
+        assert_eq!(split_tool_args("opencode", Some(&t)), (vec![], vec![]));
+        assert_eq!(split_tool_args("claude", None), (vec![], vec![]));
     }
 
     // ── Zellij config ────────────────────────
