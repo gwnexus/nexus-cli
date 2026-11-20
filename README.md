@@ -566,10 +566,12 @@ backend cannot add other Claude Code flags. When the start uses
 
 The support is experimental: whether the browser tools appear depends on
 Chrome, the Claude extension and the local setup, which the CLI does not
-check. Known limit: the backend sends `tool_args` only for projects whose
-run target is `workspace: "none"`. A zellij project started plain
-(`--plain`, `[run] workspace = "none"`, or the fallback when zellij or the
-layout is missing) starts `claude` without `--chrome`.
+check. The backend sends `tool_args` for both workspaces, so a zellij
+project started plain (`--plain`, `[run] workspace = "none"`, or the
+fallback when zellij or the layout is missing) keeps `--chrome`; in the
+zellij workspace `nexus run` ignores `tool_args` and uses the layout. An
+older backend sends `tool_args` only for `workspace: "none"`; a zellij
+project started plain then starts `claude` without `--chrome`.
 
 **Claude Code check.** For Claude Code projects (and `--tool claude`),
 `nexus run` checks before anything starts that `claude` is installed and

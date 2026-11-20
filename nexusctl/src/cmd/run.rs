@@ -4350,8 +4350,8 @@ mod tests {
         fs::write(dir.join(KDL), CHROME_PANE).unwrap();
         let zellij = target("claude", Some("zellij"), Some(KDL));
         assert!(start_uses_chrome(Some(&zellij), None, &dir, &host(true)));
-        // `[run] workspace = "none"`: the layout's flag does not apply and
-        // the hub sends no tool_args for a zellij project.
+        // `[run] workspace = "none"`: the layout's flag does not apply; an
+        // older backend sends no tool_args for a zellij project.
         let plain = Some(("none", WorkspaceSource::LocalConfig));
         assert!(!start_uses_chrome(Some(&zellij), plain, &dir, &host(true)));
         // zellij missing: plain fallback, again without tool_args.
