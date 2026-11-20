@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-11-20
+
 ### Added
 - **Claude in Chrome from the workspace setting.** A plain `nexus run` start (no zellij) passes the backend's `run_target.tool_args` to `claude`, before the operator's own `-- <args>`. The CLI allows only `--chrome`; other entries are dropped with a warning. The zellij workspace keeps the claude pane command of the personal layout, including `--chrome`, when the actors tab or the dispatches pane is added. `nexus doctor claude` shows a hint line when the start uses `--chrome`.
 
