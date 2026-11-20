@@ -327,6 +327,20 @@ pub struct ExportedAgentFile {
 /// format, so the CLI passes it through without interpretation.
 pub type ProviderConfig = serde_json::Value;
 
+/// A program an enabled agent plugin needs (e.g. a language server), from
+/// `af_export.claude_plugin_requirements`. The CLI only warns when it is
+/// missing; it never blocks a start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRequirement {
+    /// Plugin id (e.g. "pyright-lsp").
+    pub plugin: String,
+    /// Program the plugin starts (e.g. "pyright-langserver").
+    pub binary: String,
+    /// nixpkgs package that provides `binary`; absent when none exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devbox_package: Option<String>,
+}
+
 /// A prerequisite tool required by this project's plugin configuration.
 /// Returned by af_export so the CLI can warn or prompt the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -480,6 +494,10 @@ pub struct AgentFileExportResponse {
     /// `run_target.layout` points to `claude_workspace.path`.
     #[serde(default)]
     pub claude_workspace: Option<ClaudeWorkspace>,
+    /// Programs the project's enabled agent plugins need. Absent (empty) on
+    /// older backends and when no enabled plugin needs one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_plugin_requirements: Vec<PluginRequirement>,
     /// Paths the server wants in `.git/info/exclude`: always the personal files; for `shadow`
     /// `ai`/`nexus` also the agentic paths (`.claude/`, `<agentic_root>/`, `AGENTS.md`,
     /// `CLAUDE.md`, `opencode.json`, `.opencode/`); while `shadow_workspace` is true also the

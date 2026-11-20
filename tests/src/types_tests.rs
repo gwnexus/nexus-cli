@@ -1038,6 +1038,45 @@ fn test_run_target_tool_args() {
 }
 
 #[test]
+fn test_agent_file_export_response_plugin_requirements() {
+    let json = r#"{
+        "project_id": "abc",
+        "project_name": "Test",
+        "agent_files": [],
+        "count": 0,
+        "claude_plugin_requirements": [
+            {"plugin": "pyright-lsp", "binary": "pyright-langserver", "devbox_package": "pyright"},
+            {"plugin": "kotlin-lsp", "binary": "kotlin-lsp"}
+        ]
+    }"#;
+    let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        resp.claude_plugin_requirements,
+        vec![
+            PluginRequirement {
+                plugin: "pyright-lsp".into(),
+                binary: "pyright-langserver".into(),
+                devbox_package: Some("pyright".into()),
+            },
+            PluginRequirement {
+                plugin: "kotlin-lsp".into(),
+                binary: "kotlin-lsp".into(),
+                devbox_package: None,
+            },
+        ]
+    );
+    // Older backends omit the field; it is not written back when empty.
+    let resp: AgentFileExportResponse = serde_json::from_str(
+        r#"{"project_id": "abc", "project_name": "Test", "agent_files": [], "count": 0}"#,
+    )
+    .unwrap();
+    assert!(resp.claude_plugin_requirements.is_empty());
+    assert!(!serde_json::to_string(&resp)
+        .unwrap()
+        .contains("claude_plugin_requirements"));
+}
+
+#[test]
 fn test_agent_file_export_response_claude_workspace() {
     let json = r#"{
         "project_id": "abc",

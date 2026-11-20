@@ -306,6 +306,8 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
     let mut run_target = config::load_run_target(Some(&workspace));
     // Lane actors whose delegates the classification suppresses.
     let mut suppressed_delegates: Option<String> = None;
+    // Programs the enabled agent plugins need.
+    let mut plugin_requirements: Vec<nexus_core::api::PluginRequirement> = Vec::new();
     if let (Some(token), Ok(project_id)) = (
         resolve_token(),
         config::resolve_project_id(None, Some(&workspace)),
@@ -319,6 +321,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                     preset = layout.preset;
                 }
                 compat_range = export.ccx.and_then(|c| c.compatibility.claude_code);
+                plugin_requirements = export.claude_plugin_requirements;
                 if export.run_target.is_some() {
                     run_target = export.run_target;
                 }
@@ -328,6 +331,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
     let zellij_workspace =
         run_target.as_ref().and_then(|t| t.workspace.as_deref()) == Some("zellij");
     let chrome = super::run::planned_start_uses_chrome(run_target.as_ref(), &workspace);
+    let plugin_programs = super::plugin_requirements::check(&plugin_requirements, &workspace);
     // Which Zellij config `nexus run` uses.
     let zellij_config = zellij_workspace.then(|| {
         super::run::zellij_config_source(
@@ -402,6 +406,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                 "claude_code_compatibility": compat_range,
                 "claude_code_compatible": claude_compatible,
                 "claude_chrome": chrome,
+                "plugin_programs": plugin_programs,
                 "zellij_config": zellij_config.as_ref().map(|c| serde_json::json!({
                     "source": c.kind(),
                     "label": c.label(),
@@ -467,6 +472,9 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
                 )),
             );
         }
+    }
+    for message in plugin_programs.iter().filter_map(|p| p.message.as_ref()) {
+        print_check("plugin program", &CheckResult::Warn(message.clone()));
     }
     if let Some(c) = &zellij_config {
         let result = match c {

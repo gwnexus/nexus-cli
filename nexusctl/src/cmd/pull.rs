@@ -1625,6 +1625,17 @@ pub async fn run(
         }
     }
 
+    // Programs the enabled agent plugins need (e.g. language servers).
+    // Warnings only, like the prerequisites above.
+    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
+        for row in super::plugin_requirements::missing_rows(
+            &af_export.claude_plugin_requirements,
+            &workspace,
+        ) {
+            println!("   {} {}", style("!").bold().yellow(), row.message());
+        }
+    }
+
     // Export open tasks as TASKS.md
     match client
         .list_tasks(&project_id, Some(&["open", "in_progress", "blocked"]))

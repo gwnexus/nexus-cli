@@ -30,6 +30,7 @@ mod man;
 pub(crate) mod mcp_local;
 pub(crate) mod observer;
 mod plugin_env;
+pub(crate) mod plugin_requirements;
 pub(crate) mod preflight;
 pub(crate) mod project;
 pub(crate) mod projection_cleanup;

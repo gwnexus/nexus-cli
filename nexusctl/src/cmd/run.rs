@@ -269,6 +269,8 @@ pub async fn run(
     let mut git_config: Option<nexus_core::api::GitConfig> = None;
     let mut automation: Option<String> = None;
     let mut linked_projects: Option<usize> = None;
+    // Programs the enabled agent plugins need (warned about before the start).
+    let mut plugin_requirements: Vec<nexus_core::api::PluginRequirement> = Vec::new();
     // Code-signal report (at most once per 24 h), sent in the background
     // while the rest of the launch is prepared; awaited before the checks.
     let mut code_report = None;
@@ -288,6 +290,7 @@ pub async fn run(
                             agent_owner = Some(owner);
                         }
                         run_target = af_export.run_target;
+                        plugin_requirements = af_export.claude_plugin_requirements;
                         for (k, v) in af_export.plugin_env {
                             plugin_env.insert(k, v);
                         }
@@ -640,6 +643,10 @@ pub async fn run(
     // broken `claude` would otherwise only show up as failing panes.
     if wants_claude(agent_owner.as_deref()) || effective_tool == "claude" {
         claude_preflight(skip_claude_check)?;
+        // Never blocks: a missing plugin program only costs that plugin.
+        for row in super::plugin_requirements::missing_rows(&plugin_requirements, &workspace) {
+            print_check("Plugin program", &row);
+        }
     }
 
     // ── 6. Pre-launch checks ─────────────────────────────────────────────────

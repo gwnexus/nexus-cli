@@ -585,6 +585,18 @@ opened. Found only outside `PATH`, it warns and puts that directory on
 one line with the version. The check also runs with `--skip-checks`; only
 `--skip-claude-check` turns it off (CI or headless use).
 
+**Plugin programs.** Some agent plugins the project enables need a program
+on the machine, e.g. an LSP plugin its language server. The backend lists
+them (`claude_plugin_requirements`); `nexus pull`, the `nexus run` preflight
+(after the Claude Code check) and `nexus doctor claude` look each program up
+on `PATH` and, in a devbox project, in the devbox profile
+(`.devbox/nix/profile/default/bin`). Each missing one gets one warning with
+the fix, e.g. `pyright-lsp needs pyright-langserver: devbox add pyright`, or
+`kotlin-lsp needs kotlin-lsp on PATH (install it, or disable the plugin in
+Nexus)` when no package exists. The start is never blocked, and nothing is
+shown while every program is present. Entries with a malformed plugin or
+program name are skipped; nothing is executed.
+
 Start the zellij workspace from a plain terminal: inside a running zellij
 session `nexus run` refuses, since zellij would add the layout as tabs of
 that session (inside the project's own session it only says so). The
@@ -662,12 +674,18 @@ and CLI version.
 **MCP servers (package versions).** Servers in `.mcp.json` and
 `opencode.json` that start a package (`npx`, `bunx`, `uvx`, `pnpm dlx`) are
 listed with the package version; servers not pinned to an exact version are
-flagged. `--json` reports them as `mcp_servers`.
+flagged. `--output json` reports them as `mcp_servers`.
+
+**Plugin programs.** A missing program an enabled plugin needs is a
+`plugin program` warning with the fix (see "Plugin programs" under
+`nexus run`); it does not change the exit code. `--output json` reports every
+listed program as `plugin_programs` (`plugin`, `binary`, `found`, and the
+`message` when missing).
 
 **Claude in Chrome (experimental).** When the start `nexus run` would make
 without flags uses `--chrome` (the claude pane of the layout, or
 `tool_args` in a plain start; the local `[run] workspace` counts), the
-claude row gets an info line. `--json` reports it as `claude_chrome`. The
+claude row gets an info line. `--output json` reports it as `claude_chrome`. The
 Chrome extension itself is not checked.
 
 `nexus run` embeds the same checks and adds a **launch countdown** after
