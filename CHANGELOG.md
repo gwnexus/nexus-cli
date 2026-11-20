@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.1] - 2026-11-20
+
 ### Changed
 - **Claude in Chrome is marked experimental.** `nexus run` shows a `Chrome` info row in the pre-launch check when Claude Code starts with `--chrome`, and `nexus doctor claude` labels its hint line experimental. The browser tools depend on Chrome, the extension and the local setup, which the CLI does not check.
 
