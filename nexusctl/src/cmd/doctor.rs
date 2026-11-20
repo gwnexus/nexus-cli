@@ -175,22 +175,6 @@ fn probe_tool(tool: &str) -> Option<Option<String>> {
     )
 }
 
-/// Whether `nexus run` starts Claude Code with `--chrome`: from the plain
-/// launch's `run_target.tool_args`, or from the claude pane of the layout.
-fn claude_chrome(run_target: Option<&nexus_core::api::RunTarget>, workspace: &Path) -> bool {
-    let Some(t) = run_target.filter(|t| t.tool == "claude") else {
-        return false;
-    };
-    if t.workspace.as_deref() == Some("zellij") {
-        t.layout
-            .as_deref()
-            .and_then(|l| std::fs::read_to_string(workspace.join(l)).ok())
-            .is_some_and(|kdl| kdl.contains("claude --chrome"))
-    } else {
-        t.tool_args.iter().any(|a| a == "--chrome")
-    }
-}
-
 /// [`collect`]'s view of the Claude Code probe: a binary that does not run
 /// counts as missing.
 fn claude_found(probe: &super::claude_probe::ClaudeProbe) -> Option<Option<String>> {
@@ -343,7 +327,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
     }
     let zellij_workspace =
         run_target.as_ref().and_then(|t| t.workspace.as_deref()) == Some("zellij");
-    let chrome = claude_chrome(run_target.as_ref(), &workspace);
+    let chrome = super::run::planned_start_uses_chrome(run_target.as_ref(), &workspace);
     // Which Zellij config `nexus run` uses.
     let zellij_config = zellij_workspace.then(|| {
         super::run::zellij_config_source(
@@ -472,12 +456,7 @@ pub async fn claude(api_url: &str, fix: bool, assume_yes: bool, json: bool) -> a
         };
         print_check(&t.tool, &result);
         if t.tool == "claude" && chrome {
-            print_check(
-                "",
-                &CheckResult::Info(
-                    "starts with --chrome: needs Chrome with the Claude extension running".into(),
-                ),
-            );
+            print_check("", &CheckResult::Info(super::run::CHROME_HINT.into()));
         }
         if t.tool == "claude" && claude_compatible == Some(false) {
             print_check(
@@ -765,40 +744,6 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn test_claude_chrome_from_tool_args_or_layout() {
-        use nexus_core::api::RunTarget;
-        let dir = std::env::temp_dir().join(format!("nexus-doctor-chrome-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let t = |ws: &str, layout: Option<&str>, args: &[&str]| RunTarget {
-            tool: "claude".into(),
-            workspace: Some(ws.into()),
-            layout: layout.map(str::to_string),
-            config: None,
-            tool_args: args.iter().map(|a| a.to_string()).collect(),
-        };
-        assert!(claude_chrome(Some(&t("none", None, &["--chrome"])), &dir));
-        assert!(!claude_chrome(Some(&t("none", None, &[])), &dir));
-        std::fs::write(
-            dir.join("on.kdl"),
-            "args \"-c\" \"claude --chrome; zellij kill-session x\"",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("off.kdl"),
-            "args \"-c\" \"claude; zellij kill-session x\"",
-        )
-        .unwrap();
-        assert!(claude_chrome(Some(&t("zellij", Some("on.kdl"), &[])), &dir));
-        assert!(!claude_chrome(
-            Some(&t("zellij", Some("off.kdl"), &["--chrome"])),
-            &dir
-        ));
-        assert!(!claude_chrome(None, &dir));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn test_split_package_handles_scopes_and_versions() {

@@ -424,31 +424,12 @@ pub async fn run(
         // The row is part of the pre-launch check; keep the warning visible.
         print_check("Workspace", &workspace_row);
     }
-    if !launch.ignored_tool_args.is_empty() {
-        print_check(
-            "Tool args",
-            &CheckResult::Warn(format!(
-                "ignored (not allowed): {}",
-                launch.ignored_tool_args.join(" ")
-            )),
-        );
+    let (command_args, arg_rows) = tool_command_args(&launch, args);
+    for (label, row) in &arg_rows {
+        print_check(label, row);
     }
-    // In the zellij workspace trailing args would land on the zellij command
-    // line, not on the tool inside its pane: drop them.
-    let args: &[String] = if launch.workspace && !args.is_empty() {
-        print_check(
-            "Arguments",
-            &CheckResult::Warn(format!(
-                "ignored in the zellij workspace: {} (use --plain to pass them to the tool)",
-                args.join(" ")
-            )),
-        );
-        &[]
-    } else {
-        args
-    };
     let effective_tool = launch.tool.as_str();
-    let args: &[String] = &[launch.leading_args.as_slice(), args].concat();
+    let args: &[String] = &command_args;
 
     // ── 4.5. Named Claude account (`--account`)
     // ──────────────────────────────────────────────────────────────────────
@@ -1143,6 +1124,125 @@ fn split_tool_args(
         }
     }
     (allowed, ignored)
+}
+
+/// Preflight hint when Claude Code starts with `--chrome`. The flag is
+/// experimental: the browser tools depend on the Chrome extension and the
+/// local setup, which the CLI cannot check.
+pub(crate) const CHROME_HINT: &str =
+    "Claude in Chrome (experimental): starts with --chrome, needs Chrome with the Claude extension running";
+
+fn is_claude_command(word: &str) -> bool {
+    word == "claude" || word.ends_with("/claude")
+}
+
+/// Whether a zellij layout starts Claude Code with `--chrome`: a shell pane
+/// (`sh -c "claude --chrome; ..."`, also with other flags, `exec` or a full
+/// path) or a pane with `command="claude"` whose args list `"--chrome"`.
+pub(crate) fn layout_starts_claude_with_chrome(kdl: &str) -> bool {
+    let shell_form = kdl.split(['"', ';', '&', '|', '\n']).any(|cmd| {
+        let mut words = cmd
+            .split_whitespace()
+            .skip_while(|w| *w == "exec" || w.contains('='));
+        words.next().is_some_and(is_claude_command) && words.any(|w| w == "--chrome")
+    });
+    shell_form
+        || kdl.match_indices("command=\"").any(|(i, m)| {
+            let rest = &kdl[i + m.len()..];
+            let Some(end) = rest.find('"') else {
+                return false;
+            };
+            is_claude_command(&rest[..end])
+                && rest[end..]
+                    .split('}')
+                    .next()
+                    .is_some_and(|block| block.contains("\"--chrome\""))
+        })
+}
+
+/// Whether the start runs Claude Code with `--chrome`: a plain start from
+/// the allow-listed `tool_args`, the zellij workspace from its layout.
+fn launch_uses_chrome(launch: &Launch) -> bool {
+    if !launch.workspace {
+        return launch.tool == "claude" && launch.leading_args.iter().any(|a| a == "--chrome");
+    }
+    launch
+        .leading_args
+        .iter()
+        .position(|a| a == "--layout")
+        .and_then(|i| launch.leading_args.get(i + 1))
+        .and_then(|p| fs::read_to_string(p).ok())
+        .is_some_and(|kdl| layout_starts_claude_with_chrome(&kdl))
+}
+
+/// Whether `nexus run` without flags would start Claude Code with
+/// `--chrome`, honouring the local `[run] workspace` (for `nexus doctor`).
+pub(crate) fn planned_start_uses_chrome(
+    run_target: Option<&nexus_core::api::RunTarget>,
+    workspace: &Path,
+) -> bool {
+    let local = config::load_run_workspace(Some(workspace));
+    let choice = local
+        .as_deref()
+        .filter(|n| SUPPORTED_WORKSPACES.contains(n))
+        .map(|n| (n, WorkspaceSource::LocalConfig));
+    start_uses_chrome(run_target, choice, workspace, &ZellijHost::detect())
+}
+
+fn start_uses_chrome(
+    run_target: Option<&nexus_core::api::RunTarget>,
+    choice: Option<(&str, WorkspaceSource)>,
+    workspace: &Path,
+    zellij: &ZellijHost,
+) -> bool {
+    let Some(target) = run_target.filter(|t| t.tool == "claude") else {
+        return false;
+    };
+    launch_uses_chrome(&resolve_launch(
+        None,
+        None,
+        None,
+        Some(target),
+        choice,
+        workspace,
+        zellij,
+    ))
+}
+
+/// The tool's command line (the launch's own args, then the operator's
+/// `-- <args>`) and the preflight rows about them. In the zellij workspace
+/// the operator's args would reach zellij, not the tool in its pane, so they
+/// are dropped with a warning.
+fn tool_command_args(
+    launch: &Launch,
+    args: &[String],
+) -> (Vec<String>, Vec<(&'static str, CheckResult)>) {
+    let mut rows = Vec::new();
+    if !launch.ignored_tool_args.is_empty() {
+        rows.push((
+            "Tool args",
+            CheckResult::Warn(format!(
+                "ignored (not allowed): {}",
+                launch.ignored_tool_args.join(" ")
+            )),
+        ));
+    }
+    let args: &[String] = if launch.workspace && !args.is_empty() {
+        rows.push((
+            "Arguments",
+            CheckResult::Warn(format!(
+                "ignored in the zellij workspace: {} (use --plain to pass them to the tool)",
+                args.join(" ")
+            )),
+        ));
+        &[]
+    } else {
+        args
+    };
+    if launch_uses_chrome(launch) {
+        rows.push(("Chrome", CheckResult::Info(CHROME_HINT.into())));
+    }
+    ([launch.leading_args.as_slice(), args].concat(), rows)
 }
 
 fn tool_label(tool: &str) -> String {
@@ -4152,6 +4252,116 @@ mod tests {
         let t = with_args(target("claude", Some("none"), None), &["--chrome"]);
         assert_eq!(split_tool_args("opencode", Some(&t)), (vec![], vec![]));
         assert_eq!(split_tool_args("claude", None), (vec![], vec![]));
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    fn row_labels(rows: &[(&'static str, CheckResult)]) -> Vec<&'static str> {
+        rows.iter().map(|(label, _)| *label).collect()
+    }
+
+    const CHROME_PANE: &str = "layout {\n    pane command=\"sh\" name=\"claude\" {\n        args \"-c\" \"claude --chrome; zellij kill-session $ZELLIJ_SESSION_NAME\"\n    }\n}\n";
+
+    #[test]
+    fn test_layout_starts_claude_with_chrome() {
+        assert!(layout_starts_claude_with_chrome(CHROME_PANE));
+        for kdl in [
+            "args \"-c\" \"claude --model x --chrome; zellij kill-session s\"",
+            "args \"-c\" \"exec claude  --chrome\"",
+            "args \"-c\" \"/usr/local/bin/claude --chrome && true\"",
+            "args \"-c\" \"FOO=1 claude --chrome\"",
+            "pane command=\"claude\" name=\"claude\" {\n    args \"--chrome\"\n}",
+        ] {
+            assert!(layout_starts_claude_with_chrome(kdl), "{kdl}");
+        }
+        for kdl in [
+            "args \"-c\" \"claude; zellij kill-session s\"",
+            "args \"-c\" \"claude; zellij --chrome\"",
+            "args \"-c\" \"claudette --chrome\"",
+            "pane command=\"sh\" name=\"claude\" { args \"--chrome\" }",
+            "pane command=\"claude\" { args \"--resume\" }\npane name=\"x\" { args \"--chrome\" }",
+        ] {
+            assert!(!layout_starts_claude_with_chrome(kdl), "{kdl}");
+        }
+    }
+
+    #[test]
+    fn test_command_args_plain_puts_tool_args_before_operator_args() {
+        let dir = with_layout("cmd-args-plain");
+        let t = with_args(
+            target("claude", Some("none"), None),
+            &["--chrome", "--dangerously-skip-permissions"],
+        );
+        let l = launch(None, Some(&t), &dir, true);
+        let (args, rows) = tool_command_args(&l, &strings(&["--resume", "abc"]));
+        assert_eq!(args, strings(&["--chrome", "--resume", "abc"]));
+        assert_eq!(row_labels(&rows), vec!["Tool args", "Chrome"]);
+        assert!(rows[0].1.is_warn());
+        assert!(rows[0]
+            .1
+            .message()
+            .contains("--dangerously-skip-permissions"));
+        assert!(rows[1].1.message().contains("experimental"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_command_args_plain_without_chrome_has_no_rows() {
+        let dir = with_layout("cmd-args-none");
+        let t = target("claude", Some("none"), None);
+        let l = launch(None, Some(&t), &dir, true);
+        let (args, rows) = tool_command_args(&l, &strings(&["--resume"]));
+        assert_eq!(args, strings(&["--resume"]));
+        assert!(rows.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_command_args_zellij_drops_operator_args() {
+        let dir = with_layout("cmd-args-zellij");
+        let t = target("claude", Some("zellij"), Some(KDL));
+        let l = launch(None, Some(&t), &dir, true);
+        let (args, rows) = tool_command_args(&l, &strings(&["--chrome"]));
+        assert_eq!(args, l.leading_args);
+        assert_eq!(row_labels(&rows), vec!["Arguments"]);
+        assert!(rows[0].1.is_warn());
+        assert!(rows[0].1.message().contains("--plain"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_command_args_zellij_chrome_from_layout() {
+        let dir = with_layout("cmd-args-zellij-chrome");
+        fs::write(dir.join(KDL), CHROME_PANE).unwrap();
+        let t = target("claude", Some("zellij"), Some(KDL));
+        let l = launch(None, Some(&t), &dir, true);
+        let (args, rows) = tool_command_args(&l, &[]);
+        assert_eq!(args, l.leading_args);
+        assert_eq!(row_labels(&rows), vec!["Chrome"]);
+        assert_eq!(rows[0].1.message(), CHROME_HINT);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_start_uses_chrome_follows_the_workspace_choice() {
+        let dir = with_layout("chrome-choice");
+        fs::write(dir.join(KDL), CHROME_PANE).unwrap();
+        let zellij = target("claude", Some("zellij"), Some(KDL));
+        assert!(start_uses_chrome(Some(&zellij), None, &dir, &host(true)));
+        // `[run] workspace = "none"`: the layout's flag does not apply and
+        // the hub sends no tool_args for a zellij project.
+        let plain = Some(("none", WorkspaceSource::LocalConfig));
+        assert!(!start_uses_chrome(Some(&zellij), plain, &dir, &host(true)));
+        // zellij missing: plain fallback, again without tool_args.
+        assert!(!start_uses_chrome(Some(&zellij), None, &dir, &host(false)));
+        let none = with_args(target("claude", Some("none"), None), &["--chrome"]);
+        assert!(start_uses_chrome(Some(&none), None, &dir, &host(true)));
+        let opencode = with_args(target("opencode", Some("none"), None), &["--chrome"]);
+        assert!(!start_uses_chrome(Some(&opencode), None, &dir, &host(true)));
+        assert!(!start_uses_chrome(None, None, &dir, &host(true)));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── Zellij config ────────────────────────

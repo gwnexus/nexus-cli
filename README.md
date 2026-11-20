@@ -552,17 +552,24 @@ tool only in a plain start. In the zellij workspace the layout defines the
 pane commands, so the arguments are ignored with a warning; use `--plain`
 to pass them.
 
-**Claude in Chrome.** Claude Code offers its browser tools only to a session
-started with `claude --chrome`. The hub's per-user workspace setting turns
-this on: in the zellij workspace your personal layout starts the claude pane
-with `--chrome` (`nexus run` keeps the pane command as written, also with
-`--actor-panes` and the dispatches pane); in a plain start the backend sends
-`run_target.tool_args: ["--chrome"]` and `nexus run` adds it to the `claude`
-command line, before your own `-- <args>`. `tool_args` is allow-listed on
-the CLI side: only `--chrome` is passed, any other entry is dropped with a
-`Tool args` warning, so the backend cannot add other Claude Code flags.
-`nexus doctor claude` shows a hint line when the start uses `--chrome`; the
-Chrome extension itself is not checked.
+**Claude in Chrome (experimental).** Claude Code offers its browser tools
+only to a session started with `claude --chrome`. The hub's per-user
+workspace setting turns this on: in the zellij workspace your personal
+layout starts the claude pane with `--chrome` (`nexus run` keeps the pane
+command as written, also with `--actor-panes` and the dispatches pane); in
+a plain start the backend sends `run_target.tool_args: ["--chrome"]` and
+`nexus run` adds it to the `claude` command line, before your own
+`-- <args>`. `tool_args` is allow-listed on the CLI side: only `--chrome`
+is passed, any other entry is dropped with a `Tool args` warning, so the
+backend cannot add other Claude Code flags. When the start uses
+`--chrome`, the pre-launch check shows a `Chrome` info row.
+
+The support is experimental: whether the browser tools appear depends on
+Chrome, the Claude extension and the local setup, which the CLI does not
+check. Known limit: the backend sends `tool_args` only for projects whose
+run target is `workspace: "none"`. A zellij project started plain
+(`--plain`, `[run] workspace = "none"`, or the fallback when zellij or the
+layout is missing) starts `claude` without `--chrome`.
 
 **Claude Code check.** For Claude Code projects (and `--tool claude`),
 `nexus run` checks before anything starts that `claude` is installed and
@@ -654,6 +661,12 @@ and CLI version.
 `opencode.json` that start a package (`npx`, `bunx`, `uvx`, `pnpm dlx`) are
 listed with the package version; servers not pinned to an exact version are
 flagged. `--json` reports them as `mcp_servers`.
+
+**Claude in Chrome (experimental).** When the start `nexus run` would make
+without flags uses `--chrome` (the claude pane of the layout, or
+`tool_args` in a plain start; the local `[run] workspace` counts), the
+claude row gets an info line. `--json` reports it as `claude_chrome`. The
+Chrome extension itself is not checked.
 
 `nexus run` embeds the same checks and adds a **launch countdown** after
 they complete. The countdown gives you a moment to review the results before

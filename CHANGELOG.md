@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Claude in Chrome is marked experimental.** `nexus run` shows a `Chrome` info row in the pre-launch check when Claude Code starts with `--chrome`, and `nexus doctor claude` labels its hint line experimental. The browser tools depend on Chrome, the extension and the local setup, which the CLI does not check.
+
+### Fixed
+- **`nexus doctor claude`: Claude in Chrome detection.** The hint now follows the start `nexus run` would make, including the local `[run] workspace` and the plain fallback, and recognises `--chrome` also after other flags, after `exec`, with a full path to `claude` or in a `command="claude"` pane.
+
 ## [0.46.0] - 2026-11-20
 
 ### Added
