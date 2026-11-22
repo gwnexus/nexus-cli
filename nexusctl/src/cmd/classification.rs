@@ -143,8 +143,13 @@ fn show_lines(c: &ClassificationResponse) -> Vec<String> {
     };
     vec![
         format!(
-            "Project level:    {}",
-            opt_level(levels, c.project_level.as_deref())
+            "Project level:    {}{}",
+            opt_level(levels, c.project_level.as_deref()),
+            if c.project_override {
+                " (forced, overrides the customer level)"
+            } else {
+                ""
+            }
         ),
         format!("Customer level:   {customer}"),
         format!(
@@ -276,6 +281,14 @@ fn customer_dominates(plan: &ClassificationPatchResponse) -> bool {
             && plan.before.effective_level == plan.after.effective_level)
 }
 
+/// Whether the change flips the override flag, as the hub reports it or as
+/// the states show it.
+fn override_changes(plan: &ClassificationPatchResponse) -> bool {
+    plan.impact
+        .override_changed
+        .unwrap_or(plan.before.project_override != plan.after.project_override)
+}
+
 /// The impact plan of `nexus classification set`.
 fn plan_lines(
     plan: &ClassificationPatchResponse,
@@ -325,11 +338,24 @@ fn plan_lines(
             action_names(&plan.impact.newly_blocked_actions, actions)
         ),
     ];
+    if override_changes(plan) {
+        let state = |on: bool| if on { "on" } else { "off" };
+        lines.push(format!(
+            "Override:         {} -> {}{}",
+            state(b.project_override),
+            state(a.project_override),
+            if a.project_override {
+                " (the project level overrides the customer level)"
+            } else {
+                " (the customer level is the floor again)"
+            }
+        ));
+    }
     if customer_dominates(plan) {
         lines.push(String::new());
         lines.push(format!(
             "The customer level{} dominates: the effective level does not change. \
-             The customer level is the real lever (customer admins, Nexus dashboard).",
+             Pass --force to make the project level override the customer level.",
             customer_level
                 .map(|l| format!(" ({l})"))
                 .unwrap_or_default()
@@ -357,9 +383,10 @@ fn decide(
     force: bool,
     dry_run: bool,
 ) -> Decision {
-    if plan.impact.project_level_changed == Some(false)
-        || plan.before.project_level == plan.after.project_level
-    {
+    let level_unchanged = plan.impact.project_level_changed == Some(false)
+        || plan.before.project_level == plan.after.project_level;
+    // The same level with or without --force may still flip the override.
+    if level_unchanged && !override_changes(plan) {
         return Decision::NoOp(format!(
             "The project level is already {}.",
             plan.after.project_level.as_deref().unwrap_or("(none)")
@@ -370,7 +397,7 @@ fn decide(
     }
     if customer_dominates(plan) && !force {
         return Decision::NoOp(
-            "Not changed: it would have no effect (pass --force to store the project level anyway)."
+            "Not changed: it would have no effect (pass --force to make the project level override the customer level)."
                 .into(),
         );
     }
@@ -487,7 +514,14 @@ pub async fn set(
     // Always plan first; the hub computes the impact.
     let plan = match expect_done(
         client
-            .patch_project_classification(&project_id, level, reason, true, &current.revision)
+            .patch_project_classification(
+                &project_id,
+                level,
+                reason,
+                true,
+                force,
+                &current.revision,
+            )
             .await?,
     )? {
         Ok(plan) => plan,
@@ -561,7 +595,7 @@ pub async fn set(
     let revision = plan.revision.as_deref().unwrap_or(&current.revision);
     let applied = match expect_done(
         client
-            .patch_project_classification(&project_id, level, reason, false, revision)
+            .patch_project_classification(&project_id, level, reason, false, force, revision)
             .await?,
     )? {
         Ok(resp) => resp,
@@ -683,12 +717,67 @@ mod tests {
         p.warnings = vec!["customer_dominates".into()];
         let lines = plan_lines(&p, Some("geheim"), &[]).join("\n");
         assert!(lines.contains("customer level (geheim) dominates"));
+        assert!(
+            lines.contains("Pass --force to make the project level override the customer level.")
+        );
         assert!(lines.contains("geheim (unchanged)"));
         assert!(matches!(decide(&p, None, false, false), Decision::NoOp(_)));
         assert_eq!(decide(&p, None, true, false), Decision::Confirm);
         // Detected from the states even without the warning.
         p.warnings.clear();
         assert!(customer_dominates(&p));
+    }
+
+    #[test]
+    fn test_forced_override() {
+        // internal under a strictly-confidential customer, forced: only the
+        // override flips, so the same level still applies.
+        let mut before = state("internal", "strictly-confidential", "restricted");
+        before.effective_source = Some("customer".into());
+        let mut after = state("internal", "internal", "internal");
+        after.project_override = true;
+        let mut p = plan(before, after, true);
+        p.impact.project_level_changed = Some(false);
+        p.impact.override_changed = Some(true);
+        assert!(!customer_dominates(&p));
+        let lines = plan_lines(&p, Some("strictly-confidential"), &[]).join("\n");
+        assert!(lines.contains("Override:         off -> on (the project level overrides"));
+        assert!(!lines.contains("dominates"));
+        assert_eq!(decide(&p, None, true, false), Decision::NeedsReason);
+        assert_eq!(
+            decide(&p, Some("lane test"), true, false),
+            Decision::ConfirmDowngrade
+        );
+        // Without the hub's flag the states decide.
+        p.impact.override_changed = None;
+        assert!(override_changes(&p));
+        // Already forced: nothing to do.
+        p.before.project_override = true;
+        assert!(matches!(decide(&p, None, true, false), Decision::NoOp(_)));
+
+        // A later set without --force drops the override.
+        let mut before = state("confidential", "confidential", "confidential");
+        before.project_override = true;
+        let mut p = plan(
+            before,
+            state("confidential", "strictly-confidential", "restricted"),
+            false,
+        );
+        p.impact.override_changed = Some(true);
+        let lines = plan_lines(&p, None, &[]).join("\n");
+        assert!(lines.contains("on -> off (the customer level is the floor again)"));
+        assert_eq!(decide(&p, None, false, false), Decision::Confirm);
+    }
+
+    #[test]
+    fn test_show_marks_a_forced_level() {
+        let mut c = response();
+        assert!(!show_lines(&c).join("\n").contains("forced"));
+        c.project_override = true;
+        assert!(show_lines(&c).join("\n").contains(
+            "strictly-confidential (Strictly confidential) (forced, overrides the customer level)"
+        ));
+        assert_eq!(show_json(&c)["override"], true);
     }
 
     #[test]

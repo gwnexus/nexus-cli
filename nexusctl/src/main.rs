@@ -820,7 +820,11 @@ pub enum ClassificationAction {
         #[arg(long)]
         dry_run: bool,
 
-        /// Store the project level even when the customer level dominates.
+        /// Let the project level override the customer level
+        ///
+        /// The project level becomes the effective level, also below the
+        /// customer level. A later set without --force makes the customer
+        /// level the floor again.
         #[arg(long)]
         force: bool,
 

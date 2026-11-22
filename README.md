@@ -706,7 +706,8 @@ the tool starts. Press `Ctrl+C` at any time to abort.
 ### Classification (`nexus classification`)
 
 A project's confidentiality level drives runtime behaviour. The effective
-level is the higher of the project level and its customer's level; the hub
+level is the higher of the project level and its customer's level, unless
+the project level was set with `--force` (see below); the hub
 maps it to a gateway class (`public`, `internal`, `confidential`,
 `restricted`). That class decides fail-closed gateway routing and whether
 lane delegates are rendered, and the level decides which external services
@@ -729,8 +730,17 @@ even when the gateway class stays the same) needs `--reason`, which goes
 into the audit log, and you type the project slug to confirm; `-y` does
 not skip that. When the
 customer level dominates, the change would have no effect: `set` says so
-and stops unless `--force`; the customer level is changed by customer
-admins in the dashboard. If the classification changed since it was read
+and stops. `--force` makes the project level override the customer level,
+also below it (`nexus classification set internal --force --reason "..."`):
+the hub then takes the project level as the effective level and gateway
+class, the plan shows `Override: off -> on`, and `nexus classification`
+marks the project level as forced. Going below the customer level is a
+downgrade, so `--reason` and the slug confirmation apply. Setting the same
+level again with `--force` only switches the override on; any later `set`
+without `--force` switches it off, so the customer level is the floor
+again. Hubs without override support ignore `--force` and only store the
+project level. The customer level itself is changed by customer admins in
+the dashboard. If the classification changed since it was read
 (409), `set` shows the current state and you re-run it. `--pull` runs
 `nexus pull` afterwards so delegates appear or disappear right away.
 `nexus status` and the `nexus run` pre-launch check show

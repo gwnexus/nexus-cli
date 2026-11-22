@@ -88,7 +88,14 @@ async fn test_patch_classification_plan_sends_level_reason_revision() {
     let (url, req) = stub("200 OK", PLAN).await;
     let client = NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
     let outcome = client
-        .patch_project_classification("p1", "confidential", Some("lane test"), true, "rev-1")
+        .patch_project_classification(
+            "p1",
+            "confidential",
+            Some("lane test"),
+            true,
+            false,
+            "rev-1",
+        )
         .await
         .unwrap();
     let ClassificationPatchOutcome::Done(plan) = outcome else {
@@ -106,13 +113,57 @@ async fn test_patch_classification_plan_sends_level_reason_revision() {
     assert_eq!(body["revision"], "rev-1");
 }
 
+const FORCED_PLAN: &str = r#"{
+  "applied": false,
+  "before": {"project_level": "internal", "effective_level": "strictly-confidential", "effective_source": "customer", "gateway_classification": "restricted", "override": false},
+  "after": {"project_level": "internal", "effective_level": "internal", "effective_source": "project", "gateway_classification": "internal", "override": true},
+  "impact": {"project_level_changed": false, "effective_level_changed": true, "override_changed": true,
+             "gateway_classification_changed": true, "downgrade": true},
+  "warnings": [], "revision": "rev-2"
+}"#;
+
+#[tokio::test]
+async fn test_patch_classification_force_sends_force_and_reads_override() {
+    let (url, req) = stub("200 OK", FORCED_PLAN).await;
+    let client = NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
+    let outcome = client
+        .patch_project_classification("p1", "internal", Some("lane test"), true, true, "rev-1")
+        .await
+        .unwrap();
+    let ClassificationPatchOutcome::Done(plan) = outcome else {
+        panic!("expected a plan, got {outcome:?}");
+    };
+    assert!(!plan.before.project_override);
+    assert!(plan.after.project_override);
+    assert_eq!(plan.impact.override_changed, Some(true));
+    let req = req.await.unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    assert_eq!(body["force"], true);
+    assert_eq!(body["dry_run"], true);
+}
+
+#[tokio::test]
+async fn test_patch_classification_without_force_omits_it() {
+    let (url, req) = stub("200 OK", PLAN).await;
+    let client = NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
+    client
+        .patch_project_classification("p1", "confidential", None, false, false, "rev-1")
+        .await
+        .unwrap();
+    let req = req.await.unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    assert!(body.get("force").is_none(), "{body}");
+}
+
 #[tokio::test]
 async fn test_patch_classification_conflict_and_reason_required() {
     let (url, _) = stub("409 Conflict", r#"{"error": "revision mismatch"}"#).await;
     let client = NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
     assert_eq!(
         client
-            .patch_project_classification("p1", "public", None, false, "rev-1")
+            .patch_project_classification("p1", "public", None, false, false, "rev-1")
             .await
             .unwrap(),
         ClassificationPatchOutcome::Conflict("revision mismatch".into())
@@ -125,7 +176,7 @@ async fn test_patch_classification_conflict_and_reason_required() {
     let client = NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
     assert_eq!(
         client
-            .patch_project_classification("p1", "public", None, false, "rev-1")
+            .patch_project_classification("p1", "public", None, false, false, "rev-1")
             .await
             .unwrap(),
         ClassificationPatchOutcome::ReasonRequired("reason required".into())
@@ -134,7 +185,7 @@ async fn test_patch_classification_conflict_and_reason_required() {
     let client = NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
     assert!(matches!(
         client
-            .patch_project_classification("p1", "public", None, false, "rev-1")
+            .patch_project_classification("p1", "public", None, false, false, "rev-1")
             .await
             .unwrap(),
         ClassificationPatchOutcome::Forbidden(_)

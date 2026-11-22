@@ -706,13 +706,16 @@ impl NexusClient {
 
     /// Plan (`dry_run`) or apply a new project level. `revision` comes from
     /// the read or the plan; 400/403/409/422 are returned as
-    /// [`ClassificationPatchOutcome`] variants.
+    /// [`ClassificationPatchOutcome`] variants. With `force` the project
+    /// level overrides the customer level (sent as `"force": true`; older
+    /// hubs ignore it); without it the customer level is the floor.
     pub async fn patch_project_classification(
         &self,
         project_id: &str,
         level: &str,
         reason: Option<&str>,
         dry_run: bool,
+        force: bool,
         revision: &str,
     ) -> Result<ClassificationPatchOutcome, Error> {
         let url = format!(
@@ -723,6 +726,9 @@ impl NexusClient {
         let mut body = json!({ "level": level, "dry_run": dry_run, "revision": revision });
         if let Some(reason) = reason {
             body["reason"] = serde_json::Value::String(reason.to_string());
+        }
+        if force {
+            body["force"] = serde_json::Value::Bool(true);
         }
         let mut req = self.client.patch(&url).json(&body);
         if let Some(ref token) = self.token {

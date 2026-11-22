@@ -757,6 +757,10 @@ pub struct ClassificationResponse {
     /// Model profiles the gateway may route this project to, when sent.
     #[serde(default)]
     pub allowed_profiles: Option<Vec<String>>,
+    /// The project level was forced (`set --force`) and overrides the
+    /// customer level, also below it. Older hubs do not send it.
+    #[serde(default, rename = "override")]
+    pub project_override: bool,
     pub revision: String,
     #[serde(default)]
     pub levels: Vec<ClassificationLevel>,
@@ -777,6 +781,9 @@ pub struct ClassificationState {
     pub severity: Option<String>,
     #[serde(default)]
     pub blocked_actions: Vec<String>,
+    /// See [`ClassificationResponse::project_override`].
+    #[serde(default, rename = "override")]
+    pub project_override: bool,
 }
 
 /// What a classification change does, as the hub computes it.
@@ -786,6 +793,9 @@ pub struct ClassificationImpact {
     pub project_level_changed: Option<bool>,
     #[serde(default)]
     pub effective_level_changed: Option<bool>,
+    /// The override flag flips (forced on, or back off without `force`).
+    #[serde(default)]
+    pub override_changed: Option<bool>,
     #[serde(default)]
     pub gateway_classification_changed: bool,
     /// The gateway class goes down (e.g. restricted to confidential).
