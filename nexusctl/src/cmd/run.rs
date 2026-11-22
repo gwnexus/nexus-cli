@@ -443,10 +443,18 @@ pub async fn run(
         if std::env::var_os("ZELLIJ").is_none() {
             print_check("Dispatch pane", &result);
         }
-        print_check(
-            "Dispatch manager",
-            &super::dispatch_status::runner_check(&workspace, api_url, linked_projects),
-        );
+        let row = super::dispatch_status::runner_check(&workspace, api_url, linked_projects);
+        print_check("Dispatch manager", &row);
+        let scope = config::resolve_project_id(None, Some(&workspace))
+            .ok()
+            .map(|id| super::dispatch_listen::runner_scope(&id, api_url));
+        if let Some(question) = scope.as_ref().and_then(|scope| {
+            runner_register_offer(scope, row.is_warn(), attended || assume_yes, dry_run)
+        }) {
+            if assume_yes || confirm_default_yes(question)? {
+                register_runner(&workspace, api_url, linked_projects).await;
+            }
+        }
     }
     let workspace_row = row_check(&launch.row);
     if skip_checks && workspace_row.is_warn() {
@@ -1626,6 +1634,52 @@ fn restart_in_devbox(workspace: &Path) -> anyhow::Result<()> {
         let status = cmd.status().context("could not start devbox run")?;
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+/// The question `nexus run` asks to register the dispatch runner, or to
+/// bind this project to it, when the dispatches pane could not listen
+/// otherwise; `None` when there is nothing to offer (bound already, no
+/// linked projects, nobody to ask, or a dry run).
+fn runner_register_offer(
+    scope: &super::dispatch_listen::RunnerScope,
+    warned: bool,
+    attended: bool,
+    dry_run: bool,
+) -> Option<&'static str> {
+    use super::dispatch_listen::RunnerScope;
+    if !warned || !attended || dry_run {
+        return None;
+    }
+    match scope {
+        RunnerScope::Unregistered => Some("Register the dispatch runner on this machine now?"),
+        RunnerScope::Unbound(_) => Some("Bind this project to the dispatch runner now?"),
+        RunnerScope::Unreadable | RunnerScope::Bound => None,
+    }
+}
+
+/// `nexus dispatch runner register` with its defaults (notify mode, the
+/// linked project added to earlier bindings), then the manager row again.
+/// A failure is a warning: the start goes on without the runner.
+async fn register_runner(workspace: &Path, api_url: &str, linked_projects: Option<usize>) {
+    let result = super::dispatch_runner::register(
+        api_url,
+        super::dispatch_runner::RegisterOptions {
+            project_ids: &[],
+            mode: "notify",
+            name: None,
+            expires_days: super::dispatch_runner::DEFAULT_EXPIRES_DAYS,
+            replace: false,
+        },
+    )
+    .await;
+    let row = match result {
+        Ok(()) => super::dispatch_status::runner_check(workspace, api_url, linked_projects),
+        Err(e) => CheckResult::Warn(format!(
+            "registration failed: {e}; run: {}",
+            super::dispatch_listen::REGISTER_CMD
+        )),
+    };
+    print_check("Dispatch manager", &row);
 }
 
 /// Ask a yes/no question; Enter means yes.
@@ -4409,6 +4463,34 @@ mod tests {
         let row = devbox_shell_row(&DevboxShell::OtherProject("/x/other".into()), true).unwrap();
         assert!(row.is_warn());
         assert!(row.message().contains("/x/other"));
+    }
+
+    #[test]
+    fn test_runner_register_offer() {
+        use super::super::dispatch_listen::RunnerScope;
+        let unbound = RunnerScope::Unbound(vec!["Other".into()]);
+        assert_eq!(
+            runner_register_offer(&RunnerScope::Unregistered, true, true, false),
+            Some("Register the dispatch runner on this machine now?")
+        );
+        assert_eq!(
+            runner_register_offer(&unbound, true, true, false),
+            Some("Bind this project to the dispatch runner now?")
+        );
+        // Bound, or a runner file that cannot be read: nothing to offer.
+        assert_eq!(
+            runner_register_offer(&RunnerScope::Bound, true, true, false),
+            None
+        );
+        assert_eq!(
+            runner_register_offer(&RunnerScope::Unreadable, true, true, false),
+            None
+        );
+        // Only a warning row (no linked projects is a note), someone to ask,
+        // and no dry run.
+        assert_eq!(runner_register_offer(&unbound, false, true, false), None);
+        assert_eq!(runner_register_offer(&unbound, true, false, false), None);
+        assert_eq!(runner_register_offer(&unbound, true, true, true), None);
     }
 
     #[test]

@@ -14,7 +14,7 @@ mod config_cmd;
 mod consent;
 mod deinit;
 mod dispatch_listen;
-mod dispatch_runner;
+pub(crate) mod dispatch_runner;
 mod dispatch_status;
 pub(crate) mod display;
 mod doctor;

@@ -738,7 +738,7 @@ pub enum RunnerAction {
         name: Option<String>,
 
         /// Days until the runner token expires.
-        #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u32).range(1..=365))]
+        #[arg(long, default_value_t = cmd::dispatch_runner::DEFAULT_EXPIRES_DAYS, value_parser = clap::value_parser!(u32).range(1..=365))]
         expires_days: u32,
 
         /// Drop the bindings of an earlier register.

@@ -367,6 +367,9 @@ fn now_rfc3339() -> String {
     super::dispatch_status::rfc3339_now()
 }
 
+/// Days until a new runner token expires, unless `--expires-days` says otherwise.
+pub(crate) const DEFAULT_EXPIRES_DAYS: u32 = 90;
+
 pub struct RegisterOptions<'a> {
     pub project_ids: &'a [String],
     pub mode: &'a str,
