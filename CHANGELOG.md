@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-11-22
+
+### Added
+- **Dispatch runner registration from `nexus run`.** When the dispatches pane is on and the `Dispatch manager` check warns that the runner is not registered or not bound to this project, `nexus run` offers to register it: Enter (or `-y`) runs `nexus dispatch runner register` with its defaults and shows the check again. A failed registration is a warning, not a stop; `--dry-run` and runs without a terminal never ask, and a project without linked projects is not asked either.
+
 ## [0.48.0] - 2026-11-22
 
 ### Added
