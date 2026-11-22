@@ -45,6 +45,7 @@ pub(crate) mod stash;
 mod state_cmd;
 pub(crate) mod sync;
 mod upgrade;
+pub(crate) mod vault;
 pub(crate) mod workspace_state;
 mod zellij_clipboard;
 mod zellij_guard;

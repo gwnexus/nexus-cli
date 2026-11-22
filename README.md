@@ -573,6 +573,17 @@ zellij workspace `nexus run` ignores `tool_args` and uses the layout. An
 older backend sends `tool_args` only for `workspace: "none"`; a zellij
 project started plain then starts `claude` without `--chrome`.
 
+**Devbox shell.** In a workspace with `devbox.json`, the pre-launch check
+shows a `Devbox shell` row: active, active for another project (warning),
+or inactive (warning: the devbox packages such as zellij or language
+servers are missing). When no devbox shell is active, devbox is installed
+and someone is at the terminal, `nexus run` first asks
+`Start it and re-run nexus run inside it? [Y/n]`; Enter (or `-y`) replaces
+the process with `devbox run -c <workspace> -- nexus <same arguments>`, which
+runs the devbox init hook and exports the shell's variables. After that run
+ends you are back in your original shell. The restarted run never asks
+again (`NEXUS_DEVBOX_RESTART=1`), and `--dry-run` never asks.
+
 **Claude Code check.** For Claude Code projects (and `--tool claude`),
 `nexus run` checks before anything starts that `claude` is installed and
 runnable: first on `PATH`, then in `~/.local/bin/claude` and
@@ -946,6 +957,16 @@ the server sends them:
 
 ```markdown
 ## Security
+
+**Screenshots stay in the local vault.** `nexus link` and `nexus init`
+create `.vault/` with `.vault/screenshots/`, the default output for browser
+screenshots, which can show customer data. When git does not ignore
+`.vault/` yet, they add `.vault/` to the repository's `.gitignore`; in a
+shadowed project (or when the shadow level is unknown, e.g. offline) to
+`.git/info/exclude` instead, so nothing visible changes. Existing vault
+content is never moved or deleted. When git already tracks files under
+`.vault/`, nothing is changed: a warning names the count and how to untrack
+them (`git rm -r --cached .vault`).
 
 **Tokens are never shown in clear text.** `nexus login` reads the token
 without echo: each typed or pasted character shows as `*`, and once you press

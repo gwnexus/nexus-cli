@@ -127,6 +127,20 @@ pub async fn link(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()>
     let workspace = std::env::current_dir()?;
     super::code_signals::report_after_link(&client, &selected_project.id, &workspace).await;
 
+    // Local vault for screenshots; ignored by git (shadowed projects use
+    // .git/info/exclude so nothing visible changes).
+    let shadow_level = match client.get_project_settings(&selected_project.id).await {
+        Ok(s) => Some(
+            s.settings
+                .get("policy.shadow")
+                .and_then(|v| v.as_str())
+                .unwrap_or("off")
+                .to_string(),
+        ),
+        Err(_) => None,
+    };
+    super::vault::print_report(&super::vault::scaffold(&workspace, shadow_level.as_deref()));
+
     Ok(())
 }
 

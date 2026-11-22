@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Local vault for screenshots.** `nexus link` and `nexus init` create `.vault/` (with `screenshots/`) and make sure git ignores it: through `.gitignore`, or `.git/info/exclude` in shadowed projects and when the shadow level is unknown. Existing content is never touched; when git already tracks files under `.vault/`, nothing changes and a warning explains how to untrack them.
+
 ## [0.47.0] - 2026-11-20
 
 ### Added

@@ -166,6 +166,9 @@ pub async fn run(
     // Phase 2: Server-aware init (when project_id + token are available)
     // -----------------------------------------------------------------------
     let mut server_aware = false;
+    // Shadow level from af_export; `None` (unknown) keeps the vault's
+    // ignore entry in .git/info/exclude.
+    let mut shadow_level: Option<String> = None;
     if let Some(ref pid) = resolved_pid {
         let token = resolve_token();
         if let Some(ref tok) = token {
@@ -207,6 +210,7 @@ pub async fn run(
                     create_claude_dir(&target, project_name, default_agentic_root)?;
                     create_agents_md(&target, project_name, force, default_agentic_root)?;
                     append_gitignore(&target)?;
+                    super::vault::print_report(&super::vault::scaffold(&target, None));
 
                     print_done(false);
                     return Ok(());
@@ -218,6 +222,10 @@ pub async fn run(
             // is used as fallback (it also returns agentic_root on the envelope).
             let project_detail = client.get_project(pid).await.ok();
             let mut af_export_result = client.export_agent_files(pid).await;
+            shadow_level = af_export_result
+                .as_ref()
+                .ok()
+                .map(|af| af.shadow.clone().unwrap_or_else(|| "off".into()));
 
             let tool_flavor = project_detail
                 .as_ref()
@@ -731,6 +739,7 @@ pub async fn run(
         append_gitignore(&target)?;
     }
 
+    super::vault::print_report(&super::vault::scaffold(&target, shadow_level.as_deref()));
     print_done(server_aware);
     Ok(())
 }
