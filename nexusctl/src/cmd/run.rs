@@ -245,6 +245,32 @@ pub async fn run(
     skip_claude_check: bool,
 ) -> anyhow::Result<()> {
     let workspace = env::current_dir()?;
+
+    // ── 0. Devbox shell ──────────────────────────────────────────────────────
+    // A devbox project started outside its shell misses the devbox packages
+    // (zellij, language servers, ...). Offer to restart `nexus run` through
+    // `devbox run` before anything else happens.
+    let devbox_state = super::auth::DevboxShell::detect(&workspace);
+    let devbox_installed = on_path("devbox");
+    let attended = console::user_attended() && console::Term::stdout().is_term();
+    let restarted = env::var_os(DEVBOX_RESTART_ENV).is_some();
+    if offers_devbox_restart(
+        &devbox_state,
+        devbox_installed,
+        attended,
+        restarted,
+        dry_run,
+    ) {
+        println!(
+            "   {} This workspace uses devbox, but no devbox shell is active.",
+            style("!").bold().yellow()
+        );
+        if assume_yes || confirm_default_yes("Start it and re-run nexus run inside it?")? {
+            restart_in_devbox(&workspace)?;
+        }
+    }
+    let devbox_row = devbox_shell_row(&devbox_state, devbox_installed);
+
     let agentic_root = resolve_agentic_root(&workspace);
 
     // Tool flavor this project is owned by ("opencode" / "claude-cli" / "both").
@@ -426,6 +452,9 @@ pub async fn run(
     if skip_checks && workspace_row.is_warn() {
         // The row is part of the pre-launch check; keep the warning visible.
         print_check("Workspace", &workspace_row);
+    }
+    if let Some(row) = devbox_row.as_ref().filter(|r| skip_checks && r.is_warn()) {
+        print_check("Devbox shell", row);
     }
     let (command_args, arg_rows) = tool_command_args(&launch, args);
     for (label, row) in &arg_rows {
@@ -662,6 +691,7 @@ pub async fn run(
             account,
             &gh_outcome,
             workspace_row,
+            devbox_row,
             zellij_session
                 .as_deref()
                 .map(super::zellij_guard::socket_check),
@@ -1510,6 +1540,106 @@ fn claude_preflight(skip: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Marks a `nexus run` restarted through `devbox run`, so it never offers
+/// the restart a second time.
+const DEVBOX_RESTART_ENV: &str = "NEXUS_DEVBOX_RESTART";
+
+/// The preflight "Devbox shell" row; `None` for a workspace without
+/// `devbox.json` outside any devbox shell.
+fn devbox_shell_row(
+    state: &super::auth::DevboxShell,
+    devbox_installed: bool,
+) -> Option<CheckResult> {
+    use super::auth::DevboxShell;
+    match state {
+        DevboxShell::Active => Some(CheckResult::Pass("active".into())),
+        DevboxShell::OtherProject(root) => Some(CheckResult::Warn(format!(
+            "active for {root}, not this workspace: its devbox packages are missing"
+        ))),
+        DevboxShell::Inactive if devbox_installed => Some(CheckResult::Warn(
+            "inactive: devbox packages are missing (start nexus run inside devbox shell)".into(),
+        )),
+        DevboxShell::Inactive => Some(CheckResult::Warn(
+            "inactive and devbox is not installed: devbox packages are missing".into(),
+        )),
+        DevboxShell::NotUsed => None,
+    }
+}
+
+/// Whether `nexus run` offers to restart itself through `devbox run`: a
+/// devbox workspace outside any devbox shell, devbox installed, someone at
+/// the terminal, not already restarted, and not a dry run.
+fn offers_devbox_restart(
+    state: &super::auth::DevboxShell,
+    devbox_installed: bool,
+    attended: bool,
+    restarted: bool,
+    dry_run: bool,
+) -> bool {
+    *state == super::auth::DevboxShell::Inactive
+        && devbox_installed
+        && attended
+        && !restarted
+        && !dry_run
+}
+
+/// `devbox run -c <workspace> -- <exe> <args>` with the restart marker.
+fn devbox_restart_command(
+    workspace: &Path,
+    exe: &Path,
+    args: &[std::ffi::OsString],
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new("devbox");
+    cmd.arg("run")
+        .arg("-c")
+        .arg(workspace)
+        .arg("--")
+        .arg(exe)
+        .args(args)
+        .env(DEVBOX_RESTART_ENV, "1");
+    cmd
+}
+
+/// Replace this process with the same `nexus run` inside the devbox
+/// environment (`devbox run` runs the init hook and exports the shell's
+/// variables). Returns only on failure.
+fn restart_in_devbox(workspace: &Path) -> anyhow::Result<()> {
+    let exe = env::current_exe().context("could not locate the nexus binary")?;
+    let args: Vec<std::ffi::OsString> = env::args_os().skip(1).collect();
+    println!(
+        "   {} devbox run -- nexus {}",
+        style("~").bold().cyan(),
+        args.iter()
+            .map(|a| a.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let mut cmd = devbox_restart_command(workspace, &exe, &args);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let err = cmd.exec();
+        anyhow::bail!("could not start devbox run: {err}");
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd.status().context("could not start devbox run")?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+/// Ask a yes/no question; Enter means yes.
+fn confirm_default_yes(question: &str) -> anyhow::Result<bool> {
+    print!("   {} {} [Y/n] ", style("?").bold().cyan(), question);
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_lowercase().as_str(),
+        "" | "y" | "yes"
+    ))
+}
+
 /// Does this project run Claude Code? See [`config::is_claude_owner`].
 fn wants_claude(agent_owner: Option<&str>) -> bool {
     config::is_claude_owner(agent_owner)
@@ -1767,6 +1897,7 @@ async fn run_prelaunch_checks(
     account: Option<&str>,
     gh_outcome: &GhOutcome,
     workspace_row: CheckResult,
+    devbox_row: Option<CheckResult>,
     zellij_socket_row: Option<CheckResult>,
     zellij_session_row: Option<CheckResult>,
 ) -> anyhow::Result<bool> {
@@ -1803,6 +1934,9 @@ async fn run_prelaunch_checks(
     };
     checks.push(("Project", ws_check));
     checks.push(("Workspace", workspace_row));
+    if let Some(row) = devbox_row {
+        checks.push(("Devbox shell", row));
+    }
     if let Some(row) = zellij_socket_row {
         checks.push(("Zellij socket", row));
     }
@@ -4259,6 +4393,70 @@ mod tests {
         let t = with_args(target("claude", Some("none"), None), &["--chrome"]);
         assert_eq!(split_tool_args("opencode", Some(&t)), (vec![], vec![]));
         assert_eq!(split_tool_args("claude", None), (vec![], vec![]));
+    }
+
+    #[test]
+    fn test_devbox_shell_row() {
+        use super::super::auth::DevboxShell;
+        assert!(devbox_shell_row(&DevboxShell::NotUsed, true).is_none());
+        let row = devbox_shell_row(&DevboxShell::Active, true).unwrap();
+        assert_eq!(row.level(), "pass");
+        let row = devbox_shell_row(&DevboxShell::Inactive, true).unwrap();
+        assert!(row.is_warn());
+        assert!(row.message().contains("devbox shell"));
+        let row = devbox_shell_row(&DevboxShell::Inactive, false).unwrap();
+        assert!(row.message().contains("not installed"));
+        let row = devbox_shell_row(&DevboxShell::OtherProject("/x/other".into()), true).unwrap();
+        assert!(row.is_warn());
+        assert!(row.message().contains("/x/other"));
+    }
+
+    #[test]
+    fn test_offers_devbox_restart_only_when_it_can_help() {
+        use super::super::auth::DevboxShell;
+        let inactive = DevboxShell::Inactive;
+        assert!(offers_devbox_restart(&inactive, true, true, false, false));
+        // devbox missing, nobody at the terminal, already restarted, dry run.
+        assert!(!offers_devbox_restart(&inactive, false, true, false, false));
+        assert!(!offers_devbox_restart(&inactive, true, false, false, false));
+        assert!(!offers_devbox_restart(&inactive, true, true, true, false));
+        assert!(!offers_devbox_restart(&inactive, true, true, false, true));
+        for state in [
+            DevboxShell::Active,
+            DevboxShell::NotUsed,
+            DevboxShell::OtherProject("/x".into()),
+        ] {
+            assert!(!offers_devbox_restart(&state, true, true, false, false));
+        }
+    }
+
+    #[test]
+    fn test_devbox_restart_command() {
+        let args: Vec<std::ffi::OsString> =
+            vec!["run".into(), "--plain".into(), "--".into(), "-c".into()];
+        let cmd = devbox_restart_command(Path::new("/ws"), Path::new("/bin/nexus"), &args);
+        assert_eq!(cmd.get_program(), "devbox");
+        let argv: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            vec![
+                "run",
+                "-c",
+                "/ws",
+                "--",
+                "/bin/nexus",
+                "run",
+                "--plain",
+                "--",
+                "-c"
+            ]
+        );
+        assert!(cmd
+            .get_envs()
+            .any(|(k, v)| k == DEVBOX_RESTART_ENV && v == Some(std::ffi::OsStr::new("1"))));
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
