@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-11-22
+
 ### Added
 - **Local vault for screenshots.** `nexus link` and `nexus init` create `.vault/` (with `screenshots/`) and make sure git ignores it: through `.gitignore`, or `.git/info/exclude` in shadowed projects and when the shadow level is unknown. Existing content is never touched; when git already tracks files under `.vault/`, nothing changes and a warning explains how to untrack them.
 - **Devbox shell in the `nexus run` pre-launch check.** A workspace with `devbox.json` gets a `Devbox shell` row (active, active for another project, inactive). Outside any devbox shell, `nexus run` offers to restart itself inside it: Enter (or `-y`) runs the same command through `devbox run`, which loads the devbox packages and init hook. The restarted run never asks again; `--dry-run` and runs without a terminal never ask.
