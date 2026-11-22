@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-11-22
+
+### Changed
+- **`nexus classification set --force` overrides the customer level.** `--force` is now sent to the hub, which takes the forced project level as the effective level and gateway class, also below the customer level. The plan shows the override switching on or off, `nexus classification` marks a forced project level (`override` in `--output json`), and setting the same level with `--force` still applies because the override changes. A later `set` without `--force` makes the customer level the floor again. Hubs without override support ignore the flag.
+
 ## [0.49.0] - 2026-11-22
 
 ### Added
