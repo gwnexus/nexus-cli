@@ -113,7 +113,12 @@ pub(crate) fn sync_cache(
             "outside the workspace or through a symlink",
         ));
     }
-    if fs::symlink_metadata(&path).is_ok() && config::trust::is_git_tracked(&path) {
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ok(CacheSync::Refused("a symlink"));
+    }
+    // Tracked even when deleted from the working tree; an indeterminate
+    // answer does not block a fresh cache.
+    if config::trust::git_tracking(&path) == Some(true) {
         return Ok(CacheSync::Refused("tracked by git"));
     }
     let Some(cache) = cache_from_export(export) else {
@@ -1187,6 +1192,29 @@ mod tests {
         assert_eq!(
             fs::read_to_string(cache_path(ws, ".nexus")).unwrap(),
             "{}\n"
+        );
+        // Deleted from the working tree but still in the index.
+        fs::remove_file(cache_path(ws, ".nexus")).unwrap();
+        let e = export(Some(vec![actor("spark-coder", "local-coder-main")]), None);
+        assert_eq!(
+            sync_cache(ws, ".nexus", &e).unwrap(),
+            CacheSync::Refused("tracked by git")
+        );
+        assert!(!cache_path(ws, ".nexus").exists());
+
+        // A symlink at the cache path, even to a file inside the workspace.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        fs::write(ws.join("README.md"), "readme\n").unwrap();
+        fs::create_dir_all(cache_path(ws, ".nexus").parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../../README.md", cache_path(ws, ".nexus")).unwrap();
+        assert_eq!(
+            sync_cache(ws, ".nexus", &e).unwrap(),
+            CacheSync::Refused("a symlink")
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("README.md")).unwrap(),
+            "readme\n"
         );
     }
 

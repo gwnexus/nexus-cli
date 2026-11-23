@@ -1533,6 +1533,17 @@ fn hold_entry(spec: &mut ClaudeSettingsSpec, map_key: &str, id: &str, local: Opt
 /// The registrations `.claude/settings.json` holds for the hook script at
 /// `target` (entries whose command names it); `None` when the settings
 /// cannot be read, so a refused hook cannot be reconstructed.
+/// True when `command` runs exactly the script at `target` (the path
+/// as a whole word, so `guard.mjs.backup` does not name `guard.mjs`).
+fn names_script(command: &str, target: &str) -> bool {
+    let boundary = |c: Option<char>| c.is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\''));
+    command.match_indices(target).any(|(i, _)| {
+        let before = command[..i].chars().next_back();
+        let after = command[i + target.len()..].chars().next();
+        (boundary(before) || before == Some('/')) && boundary(after)
+    })
+}
+
 fn local_hook_events(
     settings: &Value,
     target: &str,
@@ -1552,7 +1563,7 @@ fn local_hook_events(
                 .find(|h| {
                     h.get("command")
                         .and_then(Value::as_str)
-                        .is_some_and(|c| c.contains(target))
+                        .is_some_and(|c| names_script(c, target))
                 })
             else {
                 continue;
@@ -2243,6 +2254,21 @@ mod tests {
         let mut gate = Gate::with(store_in(cfg.path(), ws.path()), Answer::Refuse);
         gate.exports(ws.path(), Some(&mut export), None, true, ".nexus");
         assert!(export.claude_hook_adapters.unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn test_names_script_matches_the_whole_path() {
+        let t = ".claude/hooks/guard.mjs";
+        assert!(names_script(
+            "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.mjs\" stop",
+            t
+        ));
+        assert!(names_script("node .claude/hooks/guard.mjs stop", t));
+        assert!(!names_script(
+            "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.mjs.backup\" stop",
+            t
+        ));
+        assert!(!names_script("node x.claude/hooks/guard.mjs stop", t));
     }
 
     #[test]
