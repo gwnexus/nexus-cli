@@ -108,9 +108,20 @@ fn cached_gh_outcome(
 ) -> GhOutcome {
     let active = match gh.user.as_deref() {
         None => None,
-        Some(expected) => match git::gh_verify_login(dir, &gh.host, Some(expected)) {
-            git::GhVerifyStatus::Ok { active } => Some(active),
-            git::GhVerifyStatus::Mismatch { active, .. } => {
+        // Bounded: a stalled `gh api user` must not delay the launch.
+        Some(expected) => match git::gh_verify_login_within(
+            dir,
+            &gh.host,
+            Some(expected),
+            std::time::Duration::from_secs(5),
+        ) {
+            None => {
+                return GhOutcome::Fallback {
+                    warning: gh_login_hint(gh, "the cached login could not be checked in time"),
+                }
+            }
+            Some(git::GhVerifyStatus::Ok { active }) => Some(active),
+            Some(git::GhVerifyStatus::Mismatch { active, .. }) => {
                 return GhOutcome::Fallback {
                     warning: gh_login_hint(
                         gh,
@@ -118,7 +129,7 @@ fn cached_gh_outcome(
                     ),
                 }
             }
-            git::GhVerifyStatus::NotLoggedIn | git::GhVerifyStatus::GhNotFound => {
+            Some(git::GhVerifyStatus::NotLoggedIn | git::GhVerifyStatus::GhNotFound) => {
                 return GhOutcome::Fallback {
                     warning: gh_login_hint(gh, "the cached login could not be verified"),
                 }
@@ -550,8 +561,13 @@ pub async fn run(
         )?),
         None => None,
     };
+    // A profile with a login that was rejected (another account, or not
+    // verifiable) is not "empty": Phase B must not replace its warning by
+    // seeding.
+    let mut gh_cached_login = false;
     let mut gh_outcome: GhOutcome = match (&gh_effective, &gh_profile_dir) {
         (Some(gh), Some(dir)) if git::gh_is_authenticated(dir, &gh.host) => {
+            gh_cached_login = true;
             cached_gh_outcome(&workspace, gh, git_config.as_ref(), dir)
         }
         (Some(gh), Some(_)) => GhOutcome::Fallback {
@@ -655,7 +671,7 @@ pub async fn run(
     // a keyring lookup, an interactive Y/n prompt unless `--yes`, and a
     // `gh auth login --with-token` call. The seed token is never logged.
     if let (Some(gh), Some(dir)) = (&gh_effective, &gh_profile_dir) {
-        if matches!(gh_outcome, GhOutcome::Fallback { .. }) {
+        if !gh_cached_login && matches!(gh_outcome, GhOutcome::Fallback { .. }) {
             gh_outcome = seed_gh_profile(&workspace, gh, git_config.as_ref(), dir, assume_yes)?;
         }
     }

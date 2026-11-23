@@ -359,6 +359,53 @@ pub fn gh_verify_login(
     }
 }
 
+/// [`gh_verify_login`] with a deadline: `None` when `gh` did not answer in
+/// time (the child is killed). For checks that must not delay a launch.
+pub fn gh_verify_login_within(
+    profile_dir: &Path,
+    host: &str,
+    expected_user: Option<&str>,
+    timeout: std::time::Duration,
+) -> Option<GhVerifyStatus> {
+    use std::io::Read as _;
+    let spawned = without_token_env(Command::new("gh"))
+        .env("GH_CONFIG_DIR", profile_dir)
+        .args(["api", "user", "--jq", ".login", "--hostname", host])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Some(GhVerifyStatus::GhNotFound)
+        }
+        Err(_) => return Some(GhVerifyStatus::NotLoggedIn),
+    };
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(_) => return Some(GhVerifyStatus::NotLoggedIn),
+        }
+    };
+    let mut out = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_end(&mut out);
+    }
+    Some(classify_gh_verify_output(
+        status.success(),
+        &out,
+        expected_user,
+    ))
+}
+
 /// Pure core of [`gh_verify_login`]: classify a `gh api user` invocation's
 /// result into a [`GhVerifyStatus`], given its exit success and raw stdout,
 /// without shelling out. Split out so tests can exercise every branch
