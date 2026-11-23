@@ -270,6 +270,7 @@ pub fn write_claude_agents(
         return Ok(0);
     }
 
+    super::pull::validate_agent_file_target_path(target, ".claude/agents")?;
     let agents_dir = target.join(".claude").join("agents");
     fs::create_dir_all(&agents_dir)?;
 
@@ -421,6 +422,10 @@ pub fn write_routing_catalog(
     let Some(routes) = runtime_spec.and_then(|rs| rs.get("model_routes")) else {
         return Ok(None);
     };
+    super::pull::validate_agent_file_target_path(
+        target,
+        &format!("{agentic_root}/generated/routing-catalog.json"),
+    )?;
     let generated_dir = target.join(agentic_root).join("generated");
     fs::create_dir_all(&generated_dir)?;
     let content = serde_json::to_string_pretty(&serde_json::json!({ "model_routes": routes }))?;
@@ -452,6 +457,10 @@ pub fn write_agent_routing(
         return Ok(None);
     }
 
+    super::pull::validate_agent_file_target_path(
+        target,
+        &format!("{agentic_root}/generated/agent-routing.json"),
+    )?;
     let generated_dir = target.join(agentic_root).join("generated");
     fs::create_dir_all(&generated_dir)?;
     let content = serde_json::to_string_pretty(&serde_json::json!({
@@ -563,6 +572,7 @@ pub fn merge_claude_hooks(
     }
 
     let settings_path = target.join(".claude").join("settings.json");
+    super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
     let mut settings: serde_json::Value = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)?;
         serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
@@ -772,6 +782,7 @@ pub(crate) fn remove_hook_registrations(
 pub fn merge_claude_co_authored_by(target: &Path, include: Option<bool>) -> anyhow::Result<bool> {
     let resolved = include.unwrap_or(false);
     let settings_path = target.join(".claude").join("settings.json");
+    super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
     let mut settings: serde_json::Value = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)?;
         serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
@@ -830,6 +841,7 @@ pub fn merge_claude_generic_settings(
     }
 
     let settings_path = target.join(".claude").join("settings.json");
+    super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
     let mut settings: serde_json::Value = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)?;
         serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
@@ -1002,6 +1014,7 @@ pub fn merge_claude_md_managed_block(
         return Ok(ClaudeMdOutcome::Skipped);
     };
     let path = target.join("CLAUDE.md");
+    super::pull::validate_agent_file_target_path(target, "CLAUDE.md")?;
     let existing = if path.exists() {
         fs::read_to_string(&path)?
     } else {
@@ -1102,6 +1115,7 @@ pub(crate) const BASELINE_MCP_PERMISSIONS: &[&str] = &[
 /// file is only rewritten when this is non-zero).
 pub fn merge_claude_baseline_permissions(target: &Path) -> anyhow::Result<usize> {
     let settings_path = target.join(".claude").join("settings.json");
+    super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
     let mut settings: serde_json::Value = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)?;
         serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
@@ -1163,6 +1177,7 @@ pub fn write_claude_settings(
     agent_routing_path: Option<&str>,
 ) -> anyhow::Result<bool> {
     let path = target.join(".claude").join("settings.json");
+    super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
     if path.exists() {
         return Ok(false);
     }
@@ -1221,6 +1236,7 @@ pub fn merge_claude_routing_env(
     agent_routing_path: Option<&str>,
 ) -> anyhow::Result<bool> {
     let path = target.join(".claude").join("settings.json");
+    super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
     let Ok(raw) = fs::read_to_string(&path) else {
         return Ok(false);
     };
@@ -1269,6 +1285,7 @@ pub fn write_claude_root_md(
     rules_file: bool,
 ) -> anyhow::Result<bool> {
     let path = target.join("CLAUDE.md");
+    super::pull::validate_agent_file_target_path(target, "CLAUDE.md")?;
     if path.exists() {
         return Ok(false);
     }
@@ -1639,6 +1656,33 @@ mod tests {
     }
 
     // ── strip_frontmatter / yaml_escape ──────
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fixed_destinations_refuse_symlinks_out_of_the_workspace() {
+        let outside = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let t = ws.path();
+        std::os::unix::fs::symlink(outside.path(), t.join(".claude")).unwrap();
+        assert!(merge_claude_baseline_permissions(t).is_err());
+        assert!(write_claude_settings(t, None, None).is_err());
+        assert!(!outside.path().join("settings.json").exists());
+        std::os::unix::fs::symlink(outside.path(), t.join(".nexus")).unwrap();
+        let spec = serde_json::json!({"model_routes": {}});
+        assert!(write_routing_catalog(t, ".nexus", Some(&spec)).is_err());
+        assert!(!outside.path().join("generated").exists());
+        // A nested repository's .git is off limits too.
+        let nested = tempfile::tempdir().unwrap();
+        let n = nested.path();
+        fs::create_dir_all(n.join("vendor/lib/.git")).unwrap();
+        fs::create_dir_all(n.join(".nexus")).unwrap();
+        std::os::unix::fs::symlink(n.join("vendor/lib/.git"), n.join(".nexus/generated")).unwrap();
+        assert!(write_routing_catalog(n, ".nexus", Some(&spec)).is_err());
+        assert!(!n.join("vendor/lib/.git/routing-catalog.json").exists());
+        std::os::unix::fs::symlink(outside.path().join("CLAUDE.md"), t.join("CLAUDE.md")).unwrap();
+        assert!(write_claude_root_md(t, "p", ".nexus", false).is_err());
+        assert!(!outside.path().join("CLAUDE.md").exists());
+    }
 
     #[test]
     fn test_strip_frontmatter_removes_leading_block() {
