@@ -113,34 +113,12 @@ impl Credentials {
         Self::load_from(&Self::global_path()?)
     }
 
-    /// Save credentials to an explicit file path with restrictive file
-    /// permissions (0600 on Unix). Creates the parent directory if needed.
+    /// Save credentials to an explicit file path, atomically and owner-only
+    /// (0600 on Unix), also when the file already exists with wider
+    /// permissions. Creates the parent directory if needed.
     pub fn save_to(&self, path: &Path) -> Result<(), Error> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let content = toml::to_string_pretty(self)?;
-
-        #[cfg(unix)]
-        {
-            use std::fs::OpenOptions;
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)?;
-            file.write_all(content.as_bytes())?;
-        }
-
-        #[cfg(not(unix))]
-        {
-            std::fs::write(path, &content)?;
-        }
-
+        crate::fsutil::write_private_atomic(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -256,8 +234,15 @@ fn local_credentials_usable(path: &Path) -> bool {
     {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(meta) = std::fs::metadata(path) {
-            if meta.permissions().mode() & 0o077 != 0 {
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            if meta.permissions().mode() & 0o077 != 0
+                && std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).is_err()
+            {
+                eprintln!(
+                    "warning: ignoring {}: it is readable by others and its permissions \
+                     could not be restricted to 0600",
+                    path.display()
+                );
+                return false;
             }
         }
     }

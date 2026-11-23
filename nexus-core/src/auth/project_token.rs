@@ -106,31 +106,10 @@ impl ProjectTokenStore {
     /// Save the store to disk with restrictive file permissions (0600 on Unix).
     pub fn save(&self) -> Result<(), Error> {
         let path = Self::path()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let content = toml::to_string_pretty(self)?;
-
-        #[cfg(unix)]
-        {
-            use std::fs::OpenOptions;
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)?;
-            file.write_all(content.as_bytes())?;
-        }
-
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&path, &content)?;
-        }
-
+        // Atomic and owner-only: a failed save keeps the previous store, and
+        // an existing file with wider permissions is replaced, not reused.
+        crate::fsutil::write_private_atomic(&path, content.as_bytes())?;
         Ok(())
     }
 

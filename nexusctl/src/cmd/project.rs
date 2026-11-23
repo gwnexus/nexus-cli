@@ -90,7 +90,7 @@ pub async fn link(
     // Persist to the canonical store and expose to the workspace.
     persist_token(&project.id, &issued, &runtime, None)?;
     let workspace = std::env::current_dir()?;
-    sync_env_token(&workspace, &issued.token)?;
+    sync_env_token(&workspace, issued.token.expose())?;
 
     println!();
     println!(
@@ -171,7 +171,7 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
         Some(current.token_id.clone()),
     )?;
     let workspace = std::env::current_dir()?;
-    sync_env_token(&workspace, &issued.token)?;
+    sync_env_token(&workspace, issued.token.expose())?;
 
     println!();
     println!("{} Token rotated.", style("OK").bold().green());
@@ -431,7 +431,7 @@ fn persist_token(
     store.set(
         project_id,
         ProjectTokenEntry {
-            token: issued.token.clone(),
+            token: issued.token.expose().to_string(),
             token_id: issued.token_id.clone(),
             token_prefix: issued.token_prefix.clone(),
             runtime_id: runtime_id.to_string(),

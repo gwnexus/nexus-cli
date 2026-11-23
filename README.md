@@ -987,6 +987,13 @@ prefix plus the last four characters (`nxs_pat_****9f3c`), and mask every
 injected env value whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `KEY`,
 `AUTH` or `CREDENTIAL`.
 
+**Credential files are private and written in one step.** Credentials,
+project tokens, the global config and the Dispatch runner files are written
+to a new owner-only (0600) temporary file that then replaces the old one, so
+an interrupted save keeps the previous file and older, wider permissions do
+not carry over. `nexus login` without `--global` refuses to store the token
+when `.nexus/credentials.toml` is tracked by git or `.nexus` is a symlink.
+
 **Tokens only go to API hosts you chose.** When the API URL comes from a
 `.nexus/config.toml` that the repository tracks in git, and its host is not
 approved by you, every command asks before sending your token there and

@@ -37,16 +37,36 @@ pub fn approved_origins<'a>(
 }
 
 /// Whether `path` is tracked by the git repository it lives in. Outside a
-/// repository, or when git is unavailable, it is not.
+/// repository, or when git is unavailable, it is not. Parent directories
+/// that do not exist (yet) are fine: git runs in the nearest existing
+/// ancestor and checks the path relative to it, so an index entry for a
+/// file whose directory was removed still counts as tracked. A relative
+/// `path` is resolved against the current directory.
 pub fn is_git_tracked(path: &Path) -> bool {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+    let Ok(path) = std::path::absolute(path) else {
         return false;
     };
+    let Some(mut dir) = path.parent() else {
+        return false;
+    };
+    while !dir.is_dir() {
+        match dir.parent() {
+            Some(p) => dir = p,
+            None => return false,
+        }
+    }
+    let Ok(rel) = path.strip_prefix(dir) else {
+        return false;
+    };
+    if rel.as_os_str().is_empty() {
+        return false;
+    }
     std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(["ls-files", "--error-unmatch", "--"])
-        .arg(name)
+        .arg(rel)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -167,5 +187,19 @@ mod tests {
         assert!(!is_git_tracked(&file), "untracked");
         git(&["add", ".nexus/config.toml"]);
         assert!(is_git_tracked(&file), "tracked");
+        // A relative path to the same file (resolved against the current
+        // directory, which the test does not change) is detected too.
+        let cwd = std::env::current_dir().unwrap();
+        let mut rel = std::path::PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            rel.push("..");
+        }
+        let abs = std::fs::canonicalize(&file).unwrap();
+        rel.push(abs.strip_prefix("/").unwrap());
+        assert!(rel.is_relative());
+        assert!(is_git_tracked(&rel), "tracked, relative path");
+        // Tracked in the index after its directory was removed.
+        std::fs::remove_dir_all(dir.path().join(".nexus")).unwrap();
+        assert!(is_git_tracked(&file), "tracked, directory missing");
     }
 }

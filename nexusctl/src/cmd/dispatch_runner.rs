@@ -222,8 +222,8 @@ pub(crate) fn load_runner_file(path: &Path) -> anyhow::Result<Option<RunnerFile>
     }
 }
 
-/// Write `body` to `path` through a temp file, with mode 0600 (directory
-/// 0700) before the content lands.
+/// Write `body` to `path` atomically with mode 0600 (directory 0700). Each
+/// write uses its own temporary file, so concurrent writers never share one.
 pub(crate) fn write_private(path: &Path, body: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -233,22 +233,7 @@ pub(crate) fn write_private(path: &Path, body: &str) -> std::io::Result<()> {
             let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
         }
     }
-    let tmp = path.with_extension("tmp");
-    let _ = fs::remove_file(&tmp);
-    {
-        use std::io::Write;
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)
+    nexus_core::fsutil::write_private_atomic(path, body.as_bytes())
 }
 
 fn save_runner_file(path: &Path, file: &RunnerFile) -> anyhow::Result<()> {
@@ -460,7 +445,7 @@ pub async fn register(api_url: &str, opts: RegisterOptions<'_>) -> anyhow::Resul
     let resp = client.runner_register(&request).await?;
     let file = RunnerFile {
         runner_id: resp.runner_id.clone(),
-        token: resp.token,
+        token: resp.token.into_inner(),
         token_prefix: resp.token_prefix.clone(),
         token_expires_at: resp.token_expires_at.clone(),
         api_url: api_url.to_string(),

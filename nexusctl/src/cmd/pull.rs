@@ -1217,7 +1217,7 @@ pub async fn run(
     let effective_token = af_export_result
         .as_ref()
         .ok()
-        .and_then(|r| r.auth_token.clone())
+        .and_then(|r| r.auth_token.as_ref().map(|t| t.expose().to_string()))
         .unwrap_or_else(|| token.to_string());
 
     // Resolve opencode_agents, default model, and model_routes from af_export response

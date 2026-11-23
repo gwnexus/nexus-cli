@@ -29,6 +29,16 @@ pub async fn login(api_url: &str, global: bool) -> anyhow::Result<()> {
     println!("You can generate one at: {}/dashboard/settings", api_url);
     println!();
 
+    // Store credentials at the requested scope only; check the local
+    // destination before asking for the token.
+    let path = if global {
+        Credentials::global_path()?
+    } else {
+        let path = Credentials::local_path(None)?;
+        check_local_credentials_target(&path)?;
+        path
+    };
+
     let token = read_token()?;
 
     // Validate format
@@ -43,12 +53,6 @@ pub async fn login(api_url: &str, global: bool) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
 
-    // Store credentials at the requested scope only.
-    let path = if global {
-        Credentials::global_path()?
-    } else {
-        Credentials::local_path(None)?
-    };
     let creds = Credentials {
         token,
         expires_at: None,
@@ -68,6 +72,31 @@ pub async fn login(api_url: &str, global: bool) -> anyhow::Result<()> {
         style(path.display()).dim()
     );
 
+    Ok(())
+}
+
+/// Refuse a project-local credentials file that git tracks (the token
+/// would end up in a commit, and the reader ignores such a file anyway) or
+/// whose `.nexus` directory is a symlink (the token would land outside this
+/// workspace).
+fn check_local_credentials_target(path: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            anyhow::bail!(
+                "{} is a symlink; refusing to store the token outside this workspace \
+                 (replace it with a directory, or use nexus login --global)",
+                dir.display()
+            );
+        }
+    }
+    if nexus_core::config::trust::is_git_tracked(path) {
+        anyhow::bail!(
+            "{} is tracked by git, so the token would be committed; untrack it with \
+             git rm --cached {} (and ignore it), or use nexus login --global",
+            path.display(),
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -485,6 +514,59 @@ impl DevboxShell {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn test_local_credentials_target_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(ws.join(".nexus")).unwrap();
+        git(&ws, &["init", "-q"]);
+        let path = ws.join(".nexus/credentials.toml");
+        // Untracked (or missing): fine.
+        assert!(check_local_credentials_target(&path).is_ok());
+        // Tracked: refused, with the fix in the message.
+        std::fs::write(&path, "token = \"x\"\n").unwrap();
+        git(&ws, &["add", "-f", ".nexus/credentials.toml"]);
+        let err = check_local_credentials_target(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("git rm --cached"), "{err}");
+        // Still tracked in the index after `.nexus` was removed: refused.
+        std::fs::remove_dir_all(ws.join(".nexus")).unwrap();
+        let err = check_local_credentials_target(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("git rm --cached"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_local_credentials_target_refuses_a_symlinked_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other/.nexus");
+        std::fs::create_dir_all(&other).unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::os::unix::fs::symlink(&other, ws.join(".nexus")).unwrap();
+        let err = check_local_credentials_target(&ws.join(".nexus/credentials.toml"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink"), "{err}");
+    }
 
     #[test]
     fn test_masked_prompt() {
