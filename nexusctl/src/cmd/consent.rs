@@ -198,9 +198,11 @@ fn get_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(value, |v, part| v.get(part))
 }
 
-fn read_json(path: &Path) -> Value {
-    fs::read_to_string(path)
-        .ok()
+/// A workspace JSON file, through [`read_file`]'s path check: a file
+/// outside the workspace or behind a symlink reads as `Null`, like an
+/// unreadable one.
+fn read_json(workspace: &Path, rel: &str) -> Value {
+    read_file(workspace, rel)
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(Value::Null)
 }
@@ -315,7 +317,7 @@ pub fn collect_agent_export(
         return items;
     }
 
-    let settings = read_json(&workspace.join(".claude").join("settings.json"));
+    let settings = read_json(workspace, ".claude/settings.json");
     for (i, a) in af.claude_hook_adapters.iter().flatten().enumerate() {
         let content = hook_content(&a.body, adapter_events(a));
         let local = read_file(workspace, &a.target_path)
@@ -722,7 +724,7 @@ fn local_mcp(workspace: &Path, is_claude: bool, name: &str) -> Option<McpServerC
     } else {
         ("opencode.json", "mcp")
     };
-    let root = read_json(&workspace.join(file));
+    let root = read_json(workspace, file);
     let entry = root.get(block)?.get(name)?;
     let strings = |v: Option<&Value>| -> Vec<String> {
         v.and_then(Value::as_array)
@@ -1330,7 +1332,7 @@ fn hold_agent_export(
     refused: &[&Item],
     is_claude: bool,
 ) {
-    let settings = read_json(&workspace.join(".claude").join("settings.json"));
+    let settings = read_json(workspace, ".claude/settings.json");
     let mut drop_files = Vec::new();
     let mut drop_hooks = Vec::new();
     for item in refused {
@@ -1995,6 +1997,13 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), ws.path().join(".claude/hooks")).unwrap();
         assert_eq!(read_file(ws.path(), ".claude/hooks/secret.txt"), None);
         assert_eq!(read_file(ws.path(), "../secret.txt"), None);
+        std::fs::write(outside.path().join("settings.json"), r#"{"hooks":{}}"#).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("settings.json"),
+            ws.path().join(".claude/settings.json"),
+        )
+        .unwrap();
+        assert_eq!(read_json(ws.path(), ".claude/settings.json"), Value::Null);
     }
 
     #[test]
