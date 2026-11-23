@@ -1671,6 +1671,14 @@ mod tests {
         let spec = serde_json::json!({"model_routes": {}});
         assert!(write_routing_catalog(t, ".nexus", Some(&spec)).is_err());
         assert!(!outside.path().join("generated").exists());
+        // A nested repository's .git is off limits too.
+        let nested = tempfile::tempdir().unwrap();
+        let n = nested.path();
+        fs::create_dir_all(n.join("vendor/lib/.git")).unwrap();
+        fs::create_dir_all(n.join(".nexus")).unwrap();
+        std::os::unix::fs::symlink(n.join("vendor/lib/.git"), n.join(".nexus/generated")).unwrap();
+        assert!(write_routing_catalog(n, ".nexus", Some(&spec)).is_err());
+        assert!(!n.join("vendor/lib/.git/routing-catalog.json").exists());
         std::os::unix::fs::symlink(outside.path().join("CLAUDE.md"), t.join("CLAUDE.md")).unwrap();
         assert!(write_claude_root_md(t, "p", ".nexus", false).is_err());
         assert!(!outside.path().join("CLAUDE.md").exists());

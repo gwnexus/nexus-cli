@@ -863,6 +863,10 @@ id = "{id}"
 /// CLAUDE.md is only written if it does not already exist (it is user-managed
 /// and excluded from version control via .git/info/exclude).
 fn create_claude_dir(target: &Path, project_name: &str, agentic_root: &str) -> anyhow::Result<()> {
+    // Checked before `exists()`, which a dangling symlink would pass.
+    for name in ["skills", "CLAUDE.md"] {
+        super::pull::validate_agent_file_target_path(target, &format!("{agentic_root}/{name}"))?;
+    }
     let claude_dir = target.join(agentic_root);
     fs::create_dir_all(claude_dir.join("skills"))?;
 
@@ -1072,8 +1076,18 @@ opencode.json
 
     // Migrate: only once the local excludes are in place, remove the
     // shared .gitignore entries (a failed write above keeps them, so a
-    // previously ignored file never becomes stageable).
-    migrate_gitignore_entries(target);
+    // previously ignored file never becomes stageable). An exclude that
+    // is the shared .gitignore under another name keeps them too.
+    let same_file = match (
+        fs::canonicalize(&exclude_path),
+        fs::canonicalize(target.join(".gitignore")),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if !same_file {
+        migrate_gitignore_entries(target);
+    }
 
     Ok(())
 }
@@ -2468,17 +2482,50 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_gitignore_entries_stay_when_the_exclude_cannot_be_written() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = temp_project_dir("exclude-fails");
         fs::write(dir.join(".gitignore"), "target/\n.env.local\n").unwrap();
-        // An exclude path that cannot be opened for appending.
-        let _ = fs::remove_file(dir.join(".git/info/exclude"));
-        fs::create_dir_all(dir.join(".git/info/exclude")).unwrap();
-        assert!(append_gitignore(&dir).is_err());
+        // Readable, but not writable: the append fails after the read.
+        let exclude = dir.join(".git/info/exclude");
+        fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        fs::write(&exclude, "# local\n").unwrap();
+        fs::set_permissions(&exclude, fs::Permissions::from_mode(0o444)).unwrap();
+        let result = append_gitignore(&dir);
+        fs::set_permissions(&exclude, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(result.is_err());
         let gi = fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert!(gi.lines().any(|l| l == ".env.local"), "{gi}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exclude_aliasing_gitignore_keeps_the_rules() {
+        let dir = temp_project_dir("exclude-alias");
+        fs::write(dir.join(".gitignore"), "target/\n").unwrap();
+        let exclude = dir.join(".git/info/exclude");
+        fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        let _ = fs::remove_file(&exclude);
+        std::os::unix::fs::symlink("../../.gitignore", &exclude).unwrap();
+        append_gitignore(&dir).unwrap();
+        let gi = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert!(gi.lines().any(|l| l == ".env.local"), "{gi}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_create_claude_dir_refuses_a_dangling_claude_md_symlink() {
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("CLAUDE.md");
+        let ws = tempfile::tempdir().unwrap();
+        fs::create_dir_all(ws.path().join(".nexus")).unwrap();
+        std::os::unix::fs::symlink(&victim, ws.path().join(".nexus/CLAUDE.md")).unwrap();
+        assert!(create_claude_dir(ws.path(), "p", ".nexus").is_err());
+        assert!(!victim.exists());
     }
 
     #[test]

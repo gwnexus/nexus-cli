@@ -246,12 +246,18 @@ fn escapes_via_symlink(workspace: &Path, joined: &Path) -> bool {
     let Ok(root) = fs::canonicalize(workspace) else {
         return false;
     };
-    let git_dir = root.join(".git");
     let mut probe = Some(joined);
     while let Some(p) = probe {
         if fs::symlink_metadata(p).is_ok() {
             return match fs::canonicalize(p) {
-                Ok(real) => !real.starts_with(&root) || real.starts_with(&git_dir),
+                // Outside the workspace, or into any `.git` below it
+                // (nested repositories included).
+                Ok(real) => match real.strip_prefix(&root) {
+                    Ok(rel) => rel
+                        .components()
+                        .any(|c| is_git_dir_name(&c.as_os_str().to_string_lossy())),
+                    Err(_) => true,
+                },
                 // A dangling symlink: refuse, its target is unknown.
                 Err(_) => true,
             };
@@ -421,7 +427,13 @@ pub(crate) fn write_plugin_env_file(
     // Fixed names under the agentic root: each must stay inside the
     // workspace (no symlinked root or file leading out or into .git).
     for name in ["env", PLUGIN_DOTENV, ".gitignore"] {
-        validate_agent_file_target_path(workspace, &format!("{agentic_root}/{name}"))?;
+        let rel = format!("{agentic_root}/{name}");
+        validate_agent_file_target_path(workspace, &rel)?;
+        // None of these names is protected: a match means a symlink
+        // aliasing a protected file such as `.env.local`.
+        if is_protected_target(workspace, &rel) && workspace.join(&rel).exists() {
+            anyhow::bail!("refusing to write: {rel} resolves to a protected file");
+        }
     }
 
     if plugin_env.is_empty() {
@@ -6342,6 +6354,22 @@ mod tests {
         let env = std::collections::HashMap::from([("A".to_string(), "1".to_string())]);
         assert!(write_plugin_env_file(tmp.path(), &env, "p", ".nexus").is_err());
         assert!(!outside.path().join("env").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plugin_env_refuses_an_alias_of_a_protected_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::write(ws.join(".env.local"), "SECRET=value").unwrap();
+        fs::create_dir_all(ws.join(".nexus")).unwrap();
+        std::os::unix::fs::symlink("../.env.local", ws.join(".nexus/env")).unwrap();
+        let env = std::collections::HashMap::from([("A".to_string(), "1".to_string())]);
+        assert!(write_plugin_env_file(ws, &env, "p", ".nexus").is_err());
+        assert_eq!(
+            fs::read_to_string(ws.join(".env.local")).unwrap(),
+            "SECRET=value"
+        );
     }
 
     #[test]
