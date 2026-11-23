@@ -564,7 +564,20 @@ pub fn apply_file_plans(
         // Checked again right before the change: the tree may have moved
         // since planning (a directory replaced by a symlink). A refused
         // path is left alone and keeps its previous lock entry.
-        if let Err(e) = super::pull::validate_agent_file_target_path(workspace, &plan.target_path) {
+        // A write never goes through a symlink at the target itself, even
+        // one inside the workspace (it would overwrite another file).
+        // Deleting an orphan only unlinks, so that stays allowed.
+        let linked_target = plan.state != FileState::Orphaned
+            && std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+        let checked = if linked_target {
+            Err(anyhow::anyhow!(
+                "{} is a symlink; left alone (replace it with a regular file)",
+                plan.target_path
+            ))
+        } else {
+            super::pull::validate_agent_file_target_path(workspace, &plan.target_path)
+        };
+        if let Err(e) = checked {
             println!("   {} {e}", console::style("!").bold().yellow());
             if let Some(locked) = &plan.locked {
                 files.insert(plan.target_path.clone(), entry(plan, locked.clone()));
@@ -1436,6 +1449,32 @@ mod tests {
         assert_eq!(out[0].action, FileAction::Kept);
         assert!(lock_files.is_empty());
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_apply_keeps_a_target_linked_inside_the_workspace() {
+        let dir = tmp_dir("apply-inner-link");
+        let files = [ccx_file(RULE, "v1\n")];
+        let desired: Vec<&ExportedAgentFile> = files.iter().collect();
+        let plans = plan_files(&dir, &desired, None, &serde_json::json!({})).unwrap();
+        // After planning, the absent target becomes a link to user data.
+        std::fs::create_dir_all(dir.join("user-data")).unwrap();
+        std::fs::write(dir.join("user-data/mine.md"), "operator content").unwrap();
+        let target = dir.join(RULE);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(dir.join("user-data/mine.md"), &target).unwrap();
+        let (out, _) = apply_file_plans(&dir, &plans, ForceMode::None).unwrap();
+        assert_eq!(out[0].action, FileAction::Kept);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("user-data/mine.md")).unwrap(),
+            "operator content"
+        );
+        // An ordinary absent target is still written.
+        std::fs::remove_file(&target).unwrap();
+        let (out, _) = apply_file_plans(&dir, &plans, ForceMode::None).unwrap();
+        assert_eq!(out[0].action, FileAction::Written);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

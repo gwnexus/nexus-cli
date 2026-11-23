@@ -1057,7 +1057,13 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
                 content,
                 note,
             } => {
-                fs::write(workspace.join(path), content)?;
+                // Never write through a symlink at the file itself.
+                let target = workspace.join(path);
+                if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+                    report.kept.push((path.clone(), KeepReason::Linked));
+                    continue;
+                }
+                fs::write(&target, content)?;
                 report.rewritten.push((path.clone(), note));
             }
             Action::Keep { path, reason } => report.kept.push((path.clone(), *reason)),
@@ -1475,6 +1481,34 @@ mod tests {
             .iter()
             .any(|(p, r)| p == ".nexus/claude/manifest.lock.json" && *r == KeepReason::Linked));
         assert!(outside.path().join("manifest.lock.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_does_not_rewrite_a_linked_file() {
+        let dir = temp_dir("linked-rewrite");
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("mcp.json"), "{\"mcpServers\":{}}").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("mcp.json"), dir.join(".mcp.json")).unwrap();
+        let plan = Plan {
+            projection: Projection::Claude,
+            actions: vec![Action::Rewrite {
+                path: ".mcp.json".into(),
+                content: "{}".into(),
+                note: "test",
+            }],
+            lock_after: LockAfter::Untouched,
+        };
+        let report = apply(&dir, &plan, &ctx(true)).unwrap();
+        assert!(report
+            .kept
+            .iter()
+            .any(|(p, r)| p == ".mcp.json" && *r == KeepReason::Linked));
+        assert_eq!(
+            fs::read_to_string(outside.path().join("mcp.json")).unwrap(),
+            "{\"mcpServers\":{}}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
