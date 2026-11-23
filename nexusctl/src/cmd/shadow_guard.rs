@@ -614,16 +614,41 @@ fn print_hook_action(root: &Path, action: &HookAction) {
 
 /// Apply the export's guard after `nexus pull` (or a level change): cache it
 /// for the hook and install or remove the hook. Never fails the caller.
-pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>) {
+/// The consent item for the `commit-msg` hook `sync` would install, or
+/// `None` outside a repository.
+pub fn hook_consent_item(workspace: &Path, agentic_root: &str) -> Option<super::consent::Item> {
+    let root = repo_root(workspace)?;
+    let hook = hooks_dir(&root)?.join("commit-msg");
+    let script = hook_script(&guard_rel_for(workspace, &root, agentic_root));
+    let shown = hook
+        .strip_prefix(&root)
+        .unwrap_or(&hook)
+        .to_string_lossy()
+        .into_owned();
+    Some(super::consent::git_hook_item(
+        &shown,
+        &script,
+        fs::read_to_string(&hook).ok(),
+    ))
+}
+
+fn guard_rel_for(workspace: &Path, root: &Path, agentic_root: &str) -> String {
+    let rel = cache_rel_path(agentic_root);
+    workspace
+        .strip_prefix(root)
+        .map(|p| p.join(&rel).to_string_lossy().into_owned())
+        .unwrap_or(rel)
+}
+
+/// Cache the guard and install or remove the `commit-msg` hook.
+/// `allow_hook`: the hook may be installed (consent, `--trust`, or an
+/// explicit `nexus shadow` command); removing it needs no consent.
+pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>, allow_hook: bool) {
     let Some(root) = repo_root(workspace) else {
         return;
     };
-    let rel = cache_rel_path(agentic_root);
-    let cache = workspace.join(&rel);
-    let guard_rel = workspace
-        .strip_prefix(&root)
-        .map(|p| p.join(&rel).to_string_lossy().into_owned())
-        .unwrap_or(rel);
+    let cache = workspace.join(cache_rel_path(agentic_root));
+    let guard_rel = guard_rel_for(workspace, &root, agentic_root);
     let result = match guard {
         Some(g) => {
             let json = serde_json::to_string_pretty(g).unwrap_or_default() + "\n";
@@ -632,6 +657,13 @@ pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>) {
                     let _ = fs::create_dir_all(parent);
                 }
                 let _ = fs::write(&cache, json);
+            }
+            if g.commit_msg_hook && !allow_hook {
+                println!(
+                    "   {} shadow guard commit-msg hook not installed: not approved (run nexus pull on a terminal or with --trust)",
+                    style("!").bold().yellow()
+                );
+                return;
             }
             if g.commit_msg_hook {
                 install_hook(&root, &guard_rel)
@@ -910,6 +942,22 @@ mod tests {
         fs::write(&msg, "fix(api): handle null ids\n").unwrap();
         assert_eq!(check_message_file(&cache, &msg).unwrap(), 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sync_installs_the_hook_only_when_allowed() {
+        let dir = repo("hook-consent");
+        let hook = dir.join(".git/hooks/commit-msg");
+        let mut g = guard(vec![]);
+        g.commit_msg_hook = true;
+        sync(&dir, ".nexus", Some(&g), false);
+        assert!(!hook.exists(), "installed without consent");
+        let item = hook_consent_item(&dir, ".nexus").unwrap();
+        assert!(!item.installed);
+        sync(&dir, ".nexus", Some(&g), true);
+        assert_eq!(fs::read_to_string(&hook).unwrap(), item.content);
+        // Installed as approved: the item now reads as installed.
+        assert!(hook_consent_item(&dir, ".nexus").unwrap().installed);
     }
 
     #[test]

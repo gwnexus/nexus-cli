@@ -1448,8 +1448,21 @@ pub async fn run(
 
     // Shadow guard: cache the rules for the commit-msg hook and install or
     // remove the hook (only when the export was read).
+    // The hook is executable content: it needs consent or --trust.
     if let Ok(ref af_export) = af_export_result {
-        super::shadow_guard::sync(&workspace, &agentic_root, af_export.shadow_guard.as_ref());
+        let wants_hook = af_export
+            .shadow_guard
+            .as_ref()
+            .is_some_and(|g| g.commit_msg_hook);
+        let allow_hook = !wants_hook
+            || super::shadow_guard::hook_consent_item(&workspace, &agentic_root)
+                .is_none_or(|item| consent.local(&item));
+        super::shadow_guard::sync(
+            &workspace,
+            &agentic_root,
+            af_export.shadow_guard.as_ref(),
+            allow_hook,
+        );
     }
 
     // Personal, git-excluded workspace files: the layout and

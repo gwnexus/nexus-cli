@@ -825,7 +825,14 @@ pub async fn set_level(api_url: &str, action: &str, assume_yes: bool) -> anyhow:
     // The guard follows the level right away (cache and commit-msg hook),
     // then the effective state, also when the level did not change.
     let agentic_root = agentic_root_of(&export);
-    super::shadow_guard::sync(&workspace, &agentic_root, export.shadow_guard.as_ref());
+    // An explicit `nexus shadow` command by the operator: the hook is part
+    // of what was asked for.
+    super::shadow_guard::sync(
+        &workspace,
+        &agentic_root,
+        export.shadow_guard.as_ref(),
+        true,
+    );
     super::shadow_guard::print_state(
         super::shadow_guard::repo_root(&workspace).as_deref(),
         export.shadow.as_deref().unwrap_or(level),

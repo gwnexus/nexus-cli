@@ -403,11 +403,15 @@ pub async fn run(
             // Apply extra MCP servers and plugins from .nexus/config.toml
             // (plugins are OpenCode plugins: OpenCode projects only).
             if let Ok(Some(proj_config)) = config::load_project_config(Some(&target)) {
+                // The project config may be tracked by the repository: its
+                // servers and plugins need consent or --trust like exports.
                 if let Some(ref extras) = proj_config.mcp_extra {
-                    merge_extra_mcp_servers(&target, extras, &agentic_root)?;
+                    let extras = approved_extra_mcp(&mut consent, extras);
+                    merge_extra_mcp_servers(&target, &extras, &agentic_root)?;
                 }
                 if let (false, Some(ref plugins)) = (is_claude, &proj_config.plugins) {
-                    install_plugins(&target, plugins).await?;
+                    let plugins = approved_config_plugins(&mut consent, plugins);
+                    install_plugins(&target, &plugins).await?;
                 }
             }
 
@@ -523,6 +527,14 @@ pub async fn run(
                             continue;
                         }
                         let script_target = target.join(&script.path);
+                        // An identical file is adopted without a prompt, so
+                        // it keeps its mode: a non-executable file never
+                        // becomes executable without consent (as in pull).
+                        if fs::read_to_string(&script_target).ok().as_deref()
+                            == Some(script.body.as_str())
+                        {
+                            continue;
+                        }
                         if let Some(parent) = script_target.parent() {
                             fs::create_dir_all(parent)?;
                         }
@@ -1356,6 +1368,93 @@ fn write_mcp_configs(
 /// environment first, then from `.env.local` in the project root as a
 /// fallback.  Unresolvable references are replaced with an empty string and
 /// a warning is printed.
+const PROJECT_CONFIG: &str = ".nexus/config.toml";
+
+/// `[mcp_extra]` servers that may be written: refused environment variables
+/// are dropped first, then each server needs consent (or `--trust`).
+fn approved_extra_mcp(
+    consent: &mut super::consent::Gate,
+    extras: &HashMap<String, ExtraMcpServer>,
+) -> HashMap<String, ExtraMcpServer> {
+    let mut names: Vec<&String> = extras.keys().collect();
+    names.sort();
+    let mut out = HashMap::new();
+    for name in names {
+        let mut server = extras[name].clone();
+        if let Some(env) = server.environment.as_mut() {
+            env.retain(|k, v| match super::run::refused_env_var(k, v, false) {
+                Some(why) => {
+                    println!(
+                        "   {} mcp_extra {name}: {k} not set ({why})",
+                        style("!").bold().yellow()
+                    );
+                    false
+                }
+                None => true,
+            });
+        }
+        let item = super::consent::config_item(
+            super::consent::Kind::McpServer,
+            name,
+            PROJECT_CONFIG,
+            extra_mcp_content(&server),
+        );
+        if consent.local(&item) {
+            out.insert(name.clone(), server);
+        }
+    }
+    out
+}
+
+/// What a `[mcp_extra]` server runs, for the prompt: the argv and each
+/// variable; a literal value is shown by a short hash, so a changed value
+/// asks again without being printed.
+fn extra_mcp_content(server: &ExtraMcpServer) -> String {
+    let mut out = format!("command: {}\n", server.command.join(" "));
+    let mut env: Vec<(&String, &String)> = server.environment.iter().flatten().collect();
+    env.sort();
+    for (k, v) in env {
+        let shown = if v.starts_with("${env:") && v.ends_with('}') {
+            v.clone()
+        } else {
+            let digest = nexus_core::hash::sha256_hex(v);
+            format!("<value sha256:{}>", &digest[..12])
+        };
+        out.push_str(&format!("env {k}={shown}\n"));
+    }
+    out
+}
+
+/// `[plugins]` entries that may be installed (consent or `--trust`).
+fn approved_config_plugins(
+    consent: &mut super::consent::Gate,
+    plugins: &HashMap<String, PluginDef>,
+) -> HashMap<String, PluginDef> {
+    let mut names: Vec<&String> = plugins.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .filter(|name| {
+            let def = &plugins[*name];
+            let content = format!(
+                "source: {}\nurl: {}\npath: {}\nfilename: {}\n",
+                def.source,
+                def.url.as_deref().unwrap_or("-"),
+                def.path.as_deref().unwrap_or("-"),
+                def.filename.as_deref().unwrap_or("-"),
+            );
+            let item = super::consent::config_item(
+                super::consent::Kind::OpencodePlugin,
+                name,
+                PROJECT_CONFIG,
+                content,
+            );
+            consent.local(&item)
+        })
+        .map(|name| (name.clone(), plugins[name].clone()))
+        .collect()
+}
+
 fn merge_extra_mcp_servers(
     target: &Path,
     extras: &HashMap<String, ExtraMcpServer>,
@@ -1870,6 +1969,29 @@ fn print_done(server_aware: bool) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_extra_mcp_content_hides_literal_values() {
+        let server = ExtraMcpServer {
+            command: vec!["npx".into(), "-y".into(), "tool".into()],
+            environment: Some(HashMap::from([
+                ("API_KEY".to_string(), "literal-value".to_string()),
+                ("REF".to_string(), "${env:REF}".to_string()),
+            ])),
+        };
+        let shown = extra_mcp_content(&server);
+        assert!(shown.contains("command: npx -y tool"));
+        assert!(shown.contains("env REF=${env:REF}"));
+        assert!(!shown.contains("literal-value"), "{shown}");
+        let mut changed = server.clone();
+        changed
+            .environment
+            .as_mut()
+            .unwrap()
+            .insert("API_KEY".into(), "other".into());
+        assert_ne!(shown, extra_mcp_content(&changed));
+    }
+
     use super::*;
 
     /// Test shims for the former init writers, now backed by the shared
