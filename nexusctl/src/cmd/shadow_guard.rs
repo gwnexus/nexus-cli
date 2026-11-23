@@ -625,11 +625,12 @@ pub fn hook_consent_item(workspace: &Path, agentic_root: &str) -> Option<super::
         .unwrap_or(&hook)
         .to_string_lossy()
         .into_owned();
-    Some(super::consent::git_hook_item(
-        &shown,
-        &script,
-        fs::read_to_string(&hook).ok(),
-    ))
+    // A symlinked hook is never read into the prompt.
+    let local = match fs::symlink_metadata(&hook) {
+        Ok(meta) if meta.file_type().is_symlink() => None,
+        _ => fs::read_to_string(&hook).ok(),
+    };
+    Some(super::consent::git_hook_item(&shown, &script, local))
 }
 
 fn guard_rel_for(workspace: &Path, root: &Path, agentic_root: &str) -> String {
@@ -944,6 +945,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sync_installs_the_hook_only_when_allowed() {
         let dir = repo("hook-consent");
@@ -958,6 +960,12 @@ mod tests {
         assert_eq!(fs::read_to_string(&hook).unwrap(), item.content);
         // Installed as approved: the item now reads as installed.
         assert!(hook_consent_item(&dir, ".nexus").unwrap().installed);
+        // A symlinked hook is never read into the prompt.
+        let outside = dir.join("outside-hook");
+        fs::write(&outside, "private\n").unwrap();
+        fs::remove_file(&hook).unwrap();
+        std::os::unix::fs::symlink(&outside, &hook).unwrap();
+        assert_eq!(hook_consent_item(&dir, ".nexus").unwrap().local, None);
     }
 
     #[test]

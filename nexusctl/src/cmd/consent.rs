@@ -1103,10 +1103,16 @@ impl Gate {
                 .collect();
             if matched.is_empty() {
                 // Not in the agent export (workspace files, rendered skill
-                // files): a script is gated by its content.
-                if let Some(body) = desired.as_deref().filter(|b| is_script(target, b)) {
+                // files): a script, or Markdown with inline shell (a skill
+                // body or command), is gated by its content.
+                if let Some(body) = desired
+                    .as_deref()
+                    .filter(|b| is_script(target, b) || has_inline_shell(b))
+                {
                     let kind = if target == "devbox.json" {
                         Kind::DevboxConfig
+                    } else if has_inline_shell(body) {
+                        Kind::SkillScript
                     } else {
                         Kind::DevboxScript
                     };
@@ -2186,6 +2192,10 @@ mod tests {
             ),
             ("docs/notes.md".to_string(), Some("# notes\n".to_string())),
             (
+                ".claude/skills/x/SKILL.md".to_string(),
+                Some("---\nname: x\n---\nRun !`date`\n".to_string()),
+            ),
+            (
                 "devbox.json".to_string(),
                 Some("{\"shell\":{}}\n".to_string()),
             ),
@@ -2195,6 +2205,7 @@ mod tests {
         assert!(held.contains("scripts/setup.sh"));
         assert!(held.contains("devbox.json"));
         assert!(!held.contains("docs/notes.md"));
+        assert!(held.contains(".claude/skills/x/SKILL.md"));
     }
 
     #[test]
