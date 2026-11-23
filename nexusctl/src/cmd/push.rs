@@ -58,6 +58,10 @@ fn collect_script_hashes(workspace: &Path, dir: &Path, hashes: &mut HashMap<Stri
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            // Git metadata of a nested repository is never content.
+            if super::pull::is_git_dir_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
@@ -118,6 +122,10 @@ fn read_scripts_recursive(base: &Path, dir: &Path, files: &mut HashMap<String, S
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            // Git metadata of a nested repository is never content.
+            if super::pull::is_git_dir_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
@@ -653,6 +661,24 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), ws2.path().join(SCRIPTS_DIR)).unwrap();
         assert!(collect_workspace_hashes(ws2.path()).is_empty());
         assert!(read_workspace_files(ws2.path()).1.is_none());
+    }
+
+    #[test]
+    fn test_push_scans_skip_nested_git_metadata() {
+        let ws = tempfile::tempdir().unwrap();
+        let scripts = ws.path().join(SCRIPTS_DIR);
+        fs::create_dir_all(scripts.join("vendor/.git")).unwrap();
+        fs::write(scripts.join("vendor/.git/config"), "secret").unwrap();
+        fs::create_dir_all(scripts.join("other/.GIT")).unwrap();
+        fs::write(scripts.join("other/.GIT/config"), "secret").unwrap();
+        fs::write(scripts.join("vendor/run.sh"), "ok").unwrap();
+        let hashes = collect_workspace_hashes(ws.path());
+        assert_eq!(
+            hashes.keys().collect::<Vec<_>>(),
+            vec!["scripts/devbox/vendor/run.sh"]
+        );
+        let scripts = read_workspace_files(ws.path()).1.unwrap();
+        assert_eq!(scripts.keys().collect::<Vec<_>>(), vec!["vendor/run.sh"]);
     }
 
     #[test]

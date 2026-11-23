@@ -274,6 +274,22 @@ pub(crate) fn readable_inside(workspace: &Path, rel: &str) -> bool {
     validate_agent_file_target_path(workspace, rel).is_ok()
 }
 
+/// [`readable_inside`] for a read the user expects to happen: prints why
+/// the file is skipped.
+pub(crate) fn readable_or_report(workspace: &Path, rel: &str) -> bool {
+    match validate_agent_file_target_path(workspace, rel) {
+        Ok(()) => true,
+        Err(e) => {
+            let reason = e.to_string();
+            let reason = reason
+                .strip_prefix("refusing to write: ")
+                .unwrap_or(&reason);
+            println!("   {} {rel} not read: {reason}", style("!").bold().yellow());
+            false
+        }
+    }
+}
+
 /// [`validate_agent_file_target_path`] for a write site that skips the file
 /// instead of failing: prints why and returns `false`.
 pub(crate) fn safe_target(workspace: &Path, rel: &str) -> bool {

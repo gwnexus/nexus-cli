@@ -247,7 +247,10 @@ pub fn scan_agentic_files(workspace: &Path) -> Vec<ImportAgenticFile> {
             }
 
             let full_path = workspace.join(rel_path);
-            if !super::pull::readable_inside(workspace, rel_path) {
+            // Only existing entries are reported (absent ones are normal).
+            if fs::symlink_metadata(&full_path).is_err()
+                || !super::pull::readable_or_report(workspace, rel_path)
+            {
                 continue;
             }
             if full_path.exists() && full_path.is_file() {
@@ -274,8 +277,17 @@ pub fn scan_agentic_files(workspace: &Path) -> Vec<ImportAgenticFile> {
         if let Ok(entries) = fs::read_dir(&windsurf_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                let rel = format!(".windsurf/rules/{}", entry.file_name().to_string_lossy());
-                if !super::pull::readable_inside(workspace, &rel) {
+                // The name as it is on disk: a name that is not valid
+                // UTF-8 cannot be checked losslessly and is skipped.
+                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                    println!(
+                        "   {} .windsurf/rules entry with a non-UTF-8 name not read",
+                        style("!").bold().yellow()
+                    );
+                    continue;
+                };
+                let rel = format!(".windsurf/rules/{name}");
+                if !super::pull::readable_or_report(workspace, &rel) {
                     continue;
                 }
                 if path.extension().is_some_and(|ext| ext == "md") {
@@ -424,6 +436,25 @@ fn prioritize_directive(text: &str) -> String {
 // Markdown link resolution
 // ---------------------------------------------------------------------------
 
+/// A relative link target as a canonical workspace path: `.` segments
+/// dropped, `..` applied; `None` when it is absolute or leaves the root.
+fn normalize_link(link: &str) -> Option<String> {
+    if link.starts_with('/') || link.contains('\\') {
+        return None;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in link.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            seg => parts.push(seg),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
 /// Extract and resolve local Markdown links from file content.
 ///
 /// Parses `[text](path)` links, filters to local `.md`/`.txt` files,
@@ -446,21 +477,16 @@ fn extract_markdown_links(body: &str, workspace: &Path) -> Vec<ImportReferencedD
             continue;
         }
 
-        let resolved = workspace.join(path);
+        // Lexically normalized (`./a.md`, `docs/../a.md`), then the same
+        // containment and `.git` rules as the scan targets.
+        let Some(rel) = normalize_link(path) else {
+            continue;
+        };
+        let resolved = workspace.join(&rel);
         if !resolved.exists() || !resolved.is_file() {
             continue;
         }
-
-        // Path traversal guard: ensure resolved path stays within workspace
-        let canonical = match resolved.canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let workspace_canonical = match workspace.canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if !canonical.starts_with(&workspace_canonical) {
+        if !super::pull::readable_or_report(workspace, &rel) {
             continue;
         }
 
@@ -515,6 +541,47 @@ mod tests {
         assert_eq!(detected[0].category, "agent");
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_normalize_link() {
+        assert_eq!(normalize_link("./guide.md").as_deref(), Some("guide.md"));
+        assert_eq!(normalize_link("docs/../a.md").as_deref(), Some("a.md"));
+        assert_eq!(normalize_link("docs//x.md").as_deref(), Some("docs/x.md"));
+        assert_eq!(normalize_link("../x.md"), None);
+        assert_eq!(normalize_link("/etc/x.md"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_markdown_links_skip_targets_linked_into_git() {
+        let ws = tempfile::tempdir().unwrap();
+        fs::create_dir_all(ws.path().join(".git")).unwrap();
+        fs::write(ws.path().join(".git/config"), "token=secret").unwrap();
+        std::os::unix::fs::symlink(".git/config", ws.path().join("config.txt")).unwrap();
+        fs::write(ws.path().join("guide.md"), "guide").unwrap();
+        let docs = extract_markdown_links("[cfg](config.txt) [g](./guide.md)", ws.path());
+        assert_eq!(docs.len(), 1, "{docs:?}");
+        assert_eq!(docs[0].body, "guide");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_scan_skips_a_windsurf_rule_with_a_non_utf8_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("x.md"), "external").unwrap();
+        fs::create_dir_all(ws.path().join(".windsurf/rules")).unwrap();
+        let name = std::ffi::OsStr::from_bytes(b"bad\xFF.md");
+        std::os::unix::fs::symlink(
+            outside.path().join("x.md"),
+            ws.path().join(".windsurf/rules").join(name),
+        )
+        .unwrap();
+        assert!(scan_agentic_files(ws.path())
+            .iter()
+            .all(|f| f.body != "external"));
     }
 
     #[cfg(unix)]
