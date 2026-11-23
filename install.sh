@@ -182,8 +182,7 @@ for a in data.get('assets', []):
 " 2>/dev/null || echo "")"
 
   if [ -z "$sha_id" ]; then
-    warn "No checksum '${asset_name}.sha256' in release -- falling back to source build"
-    return 1
+    die "No checksum '${asset_name}.sha256' in release; nothing was installed"
   fi
   auth_curl -fsSL \
     -H "Accept: application/octet-stream" \
