@@ -169,9 +169,9 @@ fn gh_status_line(
     )
 }
 
-/// The answer to the import prompt: Enter (an empty line) or y/yes. EOF
+/// The answer to a `[Y/n]` prompt: Enter (an empty line) or y/yes. EOF
 /// (`read == 0`) is no answer and declines.
-fn import_confirmed(read: usize, line: &str) -> bool {
+fn default_yes_answer(read: usize, line: &str) -> bool {
     let answer = line.trim().to_lowercase();
     read > 0 && (answer.is_empty() || answer == "y" || answer == "yes")
 }
@@ -234,7 +234,7 @@ fn seed_gh_profile(
         );
         let mut buf = String::new();
         let read = std::io::stdin().read_line(&mut buf)?;
-        if !import_confirmed(read, &buf) {
+        if !default_yes_answer(read, &buf) {
             return Ok(fallback("import declined"));
         }
     }
@@ -1861,11 +1861,9 @@ fn confirm_default_yes(question: &str) -> anyhow::Result<bool> {
     print!("   {} {} [Y/n] ", style("?").bold().cyan(), question);
     std::io::stdout().flush()?;
     let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    Ok(matches!(
-        answer.trim().to_lowercase().as_str(),
-        "" | "y" | "yes"
-    ))
+    // EOF (closed stdin) is no answer: it never confirms.
+    let read = std::io::stdin().read_line(&mut answer)?;
+    Ok(default_yes_answer(read, &answer))
 }
 
 /// Does this project run Claude Code? See [`config::is_claude_owner`].
@@ -3368,11 +3366,11 @@ mod tests {
     }
 
     #[test]
-    fn test_import_prompt_eof_declines() {
-        assert!(!import_confirmed(0, ""));
-        assert!(import_confirmed(1, "\n"));
-        assert!(import_confirmed(2, "y\n"));
-        assert!(!import_confirmed(2, "n\n"));
+    fn test_default_yes_prompt_eof_declines() {
+        assert!(!default_yes_answer(0, ""));
+        assert!(default_yes_answer(1, "\n"));
+        assert!(default_yes_answer(2, "y\n"));
+        assert!(!default_yes_answer(2, "n\n"));
     }
 
     #[test]

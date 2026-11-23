@@ -334,12 +334,11 @@ fn approved_in(store: &Store, workspace: &Path, rel: &str) -> bool {
         return false;
     };
     let (plain, normalized) = (sha256_hex(&body), sha256_hex_normalized(&body));
-    let suffix = format!(":{rel}");
-    store
-        .data
-        .items
-        .iter()
-        .any(|(key, r)| key.ends_with(&suffix) && (r.sha256 == plain || r.sha256 == normalized))
+    // The id after the kind must be the path itself (`kind:path`).
+    store.data.items.iter().any(|(key, r)| {
+        key.split_once(':').is_some_and(|(_, id)| id == rel)
+            && (r.sha256 == plain || r.sha256 == normalized)
+    })
 }
 
 /// An item for a whole file written as is.
@@ -2164,6 +2163,18 @@ mod tests {
         write(ws.path(), "layout.kdl", "layout { pane command=\"sh\" }\n");
         assert!(!approved_in(&store, ws.path(), "layout.kdl"));
         assert!(!approved_in(&store, ws.path(), "missing.kdl"));
+        // A record for another id that merely ends in the path does not count.
+        write(ws.path(), "other.kdl", "layout {}\n");
+        let item = file_item(
+            ws.path(),
+            Kind::ZellijLayout,
+            "archive:other.kdl",
+            "other.kdl",
+            "layout {}\n",
+            Slot::Layout,
+        );
+        store.record(&item, None);
+        assert!(!approved_in(&store, ws.path(), "other.kdl"));
     }
 
     #[test]

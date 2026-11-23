@@ -397,7 +397,13 @@ fn location_key(source: &serde_json::Value) -> Option<String> {
         .iter()
         .find_map(|k| source.get(*k).and_then(|v| v.as_str()))?;
     let loc = loc.trim().trim_end_matches('/');
-    let loc = loc.strip_suffix(".git").unwrap_or(loc);
+    // `.git` is a repository suffix only for remote sources; in a local
+    // path it names another directory.
+    let loc = if matches!(kind, "directory" | "file") {
+        loc
+    } else {
+        loc.strip_suffix(".git").unwrap_or(loc)
+    };
     let loc = if kind == "github" {
         loc.to_ascii_lowercase()
     } else {
@@ -469,9 +475,10 @@ fn declared_ref<'a>(
         .filter(|r| !r.is_empty())
 }
 
-/// The version a marketplace checkout offers for `plugin`: the catalog
-/// entry's `version`, else the plugin's own `.claude-plugin/plugin.json`
-/// (relative sources inside the checkout only).
+/// The version a marketplace checkout offers for `plugin`, resolved as
+/// Claude Code does: the plugin's own `.claude-plugin/plugin.json` first
+/// (relative sources inside the checkout only), else the catalog entry's
+/// `version`.
 fn catalog_version(location: &Path, plugin: &str) -> Option<String> {
     let read = |path: PathBuf| -> Option<serde_json::Value> {
         serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
@@ -482,28 +489,35 @@ fn catalog_version(location: &Path, plugin: &str) -> Option<String> {
         .as_array()?
         .iter()
         .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(plugin))?;
-    if let Some(v) = entry.get("version").and_then(|v| v.as_str()) {
-        return Some(v.to_string());
-    }
-    let source = Path::new(entry.get("source")?.as_str()?);
-    let inside = source.components().all(|c| {
-        matches!(
-            c,
-            std::path::Component::Normal(_) | std::path::Component::CurDir
-        )
-    });
-    if !inside {
-        return None;
-    }
-    read(
-        location
-            .join(source)
-            .join(".claude-plugin")
-            .join("plugin.json"),
-    )?
-    .get("version")?
-    .as_str()
-    .map(str::to_string)
+    // Claude Code takes the plugin's own manifest first: the version
+    // approved must be the version installed.
+    let manifest = entry
+        .get("source")
+        .and_then(|s| s.as_str())
+        .map(Path::new)
+        .filter(|source| {
+            source.components().all(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        })
+        .and_then(|source| {
+            read(
+                location
+                    .join(source)
+                    .join(".claude-plugin")
+                    .join("plugin.json"),
+            )
+        })
+        .and_then(|m| m.get("version")?.as_str().map(str::to_string));
+    manifest.or_else(|| {
+        entry
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    })
 }
 
 /// Whether `candidate` is a newer plain `x.y.z` version than `current`;
@@ -550,6 +564,12 @@ fn refresh(
     };
     if let Some(why) = registration_mismatch(market, declared) {
         return PluginState::Deferred(why);
+    }
+    if let (Some(want), None) = (declared_ref(declared, &market.name), &market.git_ref) {
+        return PluginState::Deferred(format!(
+            "marketplace {} is registered without a ref, the project declares {want}",
+            market.name
+        ));
     }
     if let (Some(want), Some(have)) = (
         declared_ref(declared, &market.name),
@@ -725,6 +745,9 @@ pub fn sync_with(
                     match (declared_ref(&declared, name), m.git_ref.as_deref()) {
                         (Some(want), Some(have)) if want != have => Some(format!(
                             "marketplace {name} is registered at {have}, the project declares {want}"
+                        )),
+                        (Some(want), None) => Some(format!(
+                            "marketplace {name} is registered without a ref, the project declares {want}"
                         )),
                         _ => None,
                     }
@@ -1418,6 +1441,64 @@ mod tests {
     }
 
     #[test]
+    fn test_catalog_version_prefers_the_manifest() {
+        let dir = checkout("manifest-first", "1.1.3");
+        std::fs::write(
+            dir.join(".claude-plugin/marketplace.json"),
+            r#"{"plugins":[{"name":"nexus-core","version":"1.1.2","source":"./plugins/nexus-core"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog_version(&dir, "nexus-core").as_deref(),
+            Some("1.1.3")
+        );
+        // Without a manifest version the catalog entry counts.
+        std::fs::write(
+            dir.join("plugins/nexus-core/.claude-plugin/plugin.json"),
+            r#"{"name":"nexus-core"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog_version(&dir, "nexus-core").as_deref(),
+            Some("1.1.2")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_sync_rejects_an_unpinned_registration_for_a_pinned_declaration() {
+        let dir = checkout("unpinned", "1.1.2");
+        let unpinned = serde_json::json!([{
+            "name": "gatewarden-nexus", "source": "github",
+            "repo": "gwnexus/nexus-runtime-plugins",
+            "installLocation": dir.display().to_string()
+        }])
+        .to_string();
+        let s = spec(
+            serde_json::json!({"nexus-core@gatewarden-nexus": true}),
+            Some(gatewarden()),
+        );
+        let cli = FakeClaude::new(vec![
+            ("plugin list --json", ok(&installed_here("1.1.1"))),
+            ("plugin marketplace list --json", ok(&unpinned)),
+        ]);
+        let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
+        assert!(matches!(report.plugins[0].state, PluginState::Deferred(_)));
+        assert!(!cli.calls().iter().any(|c| c.starts_with("plugin update")));
+        let cli = FakeClaude::new(vec![
+            ("plugin list --json", ok("[]")),
+            ("plugin marketplace list --json", ok(&unpinned)),
+        ]);
+        let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
+        assert!(matches!(report.plugins[0].state, PluginState::Failed(_)));
+        assert!(cli
+            .calls()
+            .iter()
+            .all(|c| !c.starts_with("plugin install") && !c.contains("marketplace update")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn test_location_key_normalizes() {
         let key = |v: serde_json::Value| location_key(&v);
         assert_eq!(
@@ -1431,6 +1512,10 @@ mod tests {
         assert_ne!(
             key(serde_json::json!({"source": "github", "repo": "a/b"})),
             key(serde_json::json!({"source": "git", "url": "a/b"}))
+        );
+        assert_ne!(
+            key(serde_json::json!({"source": "directory", "path": "/srv/market"})),
+            key(serde_json::json!({"source": "directory", "path": "/srv/market.git"}))
         );
     }
 
