@@ -145,8 +145,9 @@ for a in data.get('assets', []):
     if a['name'] == '${asset_name}':
         print(a['id'])
         break
-" 2>/dev/null || echo "")"
+")" || die "Cannot read the release metadata (python3 is required)"
 
+  # Only a lookup that worked and found no binary falls back to a build.
   if [ -z "$asset_id" ]; then
     warn "No asset '${asset_name}' in release -- falling back to source build"
     return 1
@@ -179,7 +180,7 @@ for a in data.get('assets', []):
     if a['name'] == '${asset_name}.sha256':
         print(a['id'])
         break
-" 2>/dev/null || echo "")"
+")" || die "Cannot read the release metadata (python3 is required)"
 
   if [ -z "$sha_id" ]; then
     die "No checksum '${asset_name}.sha256' in release; nothing was installed"
@@ -191,6 +192,12 @@ for a in data.get('assets', []):
     || die "Download of ${asset_name}.sha256 failed"
 
   info "Verifying SHA256 checksum..."
+  # The checksum tools only check the files the list names: it must name
+  # this archive.
+  awk -v name="${asset_name}" \
+    '$2 == name || $2 == "*" name { found = 1 } END { exit !found }' \
+    "${tmp_dir}/${asset_name}.sha256" \
+    || die "Checksum file does not list ${asset_name}; nothing was installed"
   cd "$tmp_dir" || die "Cannot enter ${tmp_dir}"
   if command -v sha256sum &>/dev/null; then
     sha256sum -c "${asset_name}.sha256" \
