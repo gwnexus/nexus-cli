@@ -192,15 +192,17 @@ async fn headroom_intercept_retrieve(
     let cache_path: PathBuf = cache_dir.join(format!("{}.json", hash));
     // Only the linked project's own cache: no symlink out of it (into
     // another project's cache or elsewhere).
+    // The cache root itself is anchored in the workspace (not linked out
+    // of it or into .git).
     let confined = match (
+        std::fs::canonicalize(workspace),
+        std::fs::canonicalize(&cache_root),
         std::fs::canonicalize(&cache_dir),
         std::fs::canonicalize(&cache_path),
     ) {
-        (Ok(dir), Ok(file)) => {
-            dir == cache_root
-                .canonicalize()
-                .unwrap_or_default()
-                .join(&project_id)
+        (Ok(ws), Ok(root), Ok(dir), Ok(file)) => {
+            root == ws.join(".nexus").join("headroom-cache")
+                && dir == root.join(&project_id)
                 && file.parent() == Some(dir.as_path())
         }
         _ => false,
@@ -521,6 +523,25 @@ mod tests {
             root.join("mine").join("abc123.json"),
         )
         .unwrap();
+        assert!(get().await.is_err());
+        // A regular entry is readable; a cache root linked out of the
+        // workspace is not.
+        std::fs::remove_file(root.join("mine").join("abc123.json")).unwrap();
+        std::fs::copy(
+            root.join("other").join("abc123.json"),
+            root.join("mine").join("abc123.json"),
+        )
+        .unwrap();
+        assert_eq!(get().await.unwrap(), "foreign");
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("mine")).unwrap();
+        std::fs::copy(
+            root.join("mine").join("abc123.json"),
+            outside.path().join("mine").join("abc123.json"),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &root).unwrap();
         assert!(get().await.is_err());
         let _ = std::fs::remove_dir_all(&tmp);
     }

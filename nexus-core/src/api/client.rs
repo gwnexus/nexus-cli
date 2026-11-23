@@ -60,10 +60,12 @@ impl std::fmt::Debug for NexusClient {
 /// Whether an avatar may be downloaded from `url`: the API host, one of
 /// its subdomains, or the storage CDN.
 fn avatar_host_allowed(url: &Url, api_host: &str) -> bool {
-    if !matches!(url.scheme(), "https" | "http") {
+    let host = url.host_str().unwrap_or("");
+    // HTTPS only; plain HTTP for a local development server.
+    let local = matches!(host, "localhost" | "127.0.0.1");
+    if !(url.scheme() == "https" || (url.scheme() == "http" && local)) {
         return false;
     }
-    let host = url.host_str().unwrap_or("");
     !host.is_empty()
         && (host == api_host
             || host.ends_with(&format!(".{api_host}"))
@@ -518,7 +520,8 @@ impl NexusClient {
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-                if attempt.previous().len() >= 5 {
+                // `previous()` already holds the current URL: five hops.
+                if attempt.previous().len() > 5 {
                     attempt.error("too many avatar redirects")
                 } else if avatar_host_allowed(attempt.url(), &api_host) {
                     attempt.follow()

@@ -88,14 +88,54 @@ fn svg_ok() -> String {
 #[tokio::test]
 async fn test_avatar_redirect_to_another_host_is_refused() {
     let (private, private_hits) = sequence_stub(|_| vec![svg_ok()]).await;
-    let (api, _) =
+    let (api, api_hits) =
         sequence_stub(|_| vec![redirect_to(&format!("http://127.0.0.1:{private}/private"))]).await;
     let client = NexusClient::new(&format!("http://localhost:{api}"), None).unwrap();
     let got = client
         .download_actor_avatar(&format!("http://localhost:{api}/a.svg"))
         .await;
-    assert!(got.is_err(), "{got:?}");
+    let err = format!("{:?}", got.unwrap_err());
+    assert!(err.contains("not allowed"), "{err}");
+    assert_eq!(api_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(private_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// `n` same-host redirects, then the SVG.
+async fn redirect_chain(n: usize) -> Result<Vec<u8>, nexus_core::error::Error> {
+    let (api, _) = sequence_stub(|port| {
+        let mut r: Vec<String> = (0..n)
+            .map(|i| redirect_to(&format!("http://localhost:{port}/r{i}")))
+            .collect();
+        r.push(svg_ok());
+        r
+    })
+    .await;
+    let client = NexusClient::new(&format!("http://localhost:{api}"), None).unwrap();
+    client
+        .download_actor_avatar(&format!("http://localhost:{api}/a.svg"))
+        .await
+}
+
+#[tokio::test]
+async fn test_avatar_follows_five_redirects_and_refuses_six() {
+    assert_eq!(redirect_chain(5).await.unwrap(), b"<svg/>");
+    let err = format!("{:?}", redirect_chain(6).await.unwrap_err());
+    assert!(err.contains("too many"), "{err}");
+}
+
+#[tokio::test]
+async fn test_avatar_redirect_to_plain_http_elsewhere_is_refused() {
+    // Not reachable: the policy refuses before connecting.
+    let (api, _) = sequence_stub(|_| vec![redirect_to("http://cdn.supabase.co/a.svg")]).await;
+    let client = NexusClient::new(&format!("http://localhost:{api}"), None).unwrap();
+    let err = format!(
+        "{:?}",
+        client
+            .download_actor_avatar(&format!("http://localhost:{api}/a.svg"))
+            .await
+            .unwrap_err()
+    );
+    assert!(err.contains("not allowed"), "{err}");
 }
 
 #[tokio::test]

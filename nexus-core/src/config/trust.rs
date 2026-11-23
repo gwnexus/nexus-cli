@@ -53,13 +53,31 @@ pub fn git_tracking(path: &Path) -> Option<bool> {
     if rel.as_os_str().is_empty() {
         return None;
     }
-    // No repository around the path: nothing can track it. Only when git
-    // is not pointed elsewhere by the environment.
-    let in_repo = dir.ancestors().any(|d| d.join(".git").exists());
-    if !in_repo && std::env::var_os("GIT_DIR").is_none() {
+    // No `.git` entry anywhere above the path: nothing can track it. Any
+    // entry, even a dangling or unreadable one, lets git decide.
+    let has_git_entry = |d: &Path| match std::fs::symlink_metadata(d.join(".git")) {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    };
+    if !dir.ancestors().any(has_git_entry) {
         return Some(false);
     }
-    let status = std::process::Command::new("git")
+    let mut git = std::process::Command::new("git");
+    // The repository around the path answers, not one the environment
+    // points to (another index or git directory could miss the path).
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ] {
+        git.env_remove(var);
+    }
+    let status = git
         .arg("-C")
         .arg(dir)
         .args(["ls-files", "--error-unmatch", "--"])
@@ -247,5 +265,12 @@ mod tests {
             is_git_tracked(&file),
             "an indeterminate check takes the safe side"
         );
+        // A dangling `.git` symlink is not proof of "no repository".
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(dir.path().join(".git")).unwrap();
+            std::os::unix::fs::symlink("/nonexistent/repo", dir.path().join(".git")).unwrap();
+            assert_eq!(git_tracking(&file), None);
+        }
     }
 }

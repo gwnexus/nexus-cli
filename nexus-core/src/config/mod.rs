@@ -575,7 +575,7 @@ pub fn is_path_component_id(id: &str) -> bool {
 /// symlink that resolves outside the workspace or into `.git`: reads and
 /// the cache writes would otherwise follow it to a file the repository
 /// picked.
-fn confined_project_config_path(from: Option<&std::path::Path>) -> Result<PathBuf, Error> {
+pub fn confined_project_config_path(from: Option<&std::path::Path>) -> Result<PathBuf, Error> {
     let path = project_config_path(from)?;
     let Some(base) = path.parent().and_then(|p| p.parent()) else {
         return Ok(path);
