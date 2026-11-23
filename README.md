@@ -1272,7 +1272,10 @@ and `nexus run` (before every launch) also install and update them:
    is approved: each new version is asked once on a terminal and shows as
    `DEFERRED` without a terminal. A marketplace registered from another
    source than the project declares is never refreshed, installed from or
-   updated from (`DEFERRED`, with the command to remove it). The marketplace
+   updated from (`DEFERRED`, with the command to remove it). A `github` or
+   `git` marketplace declared with a custom catalog `path` is not used yet:
+   the marketplace listing does not report that path, so the registration
+   cannot be verified. The marketplace
    registration is shared by every project on the machine, so the step
    never re-points it: when it is registered at another ref than the
    project declares, the plugin shows as `PENDING`. Claude Code moves the
