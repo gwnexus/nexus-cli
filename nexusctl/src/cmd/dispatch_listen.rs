@@ -2018,7 +2018,7 @@ mod tests {
             "messages": []
         }))
         .unwrap();
-        let id = "7c3e9a21-4b6d-4f80-9e12-3a5b7c9d1e2f";
+        let id = "55555555-6666-4777-8888-999999999999";
         let text = notice_text(
             NoticeKind::Incoming,
             Some(&d),
