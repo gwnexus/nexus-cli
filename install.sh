@@ -146,7 +146,10 @@ try_binary_download() {
     | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-for a in data['assets']:
+assets = data['assets']
+if not isinstance(assets, list):
+    sys.exit('release metadata has no asset list')
+for a in assets:
     if a['name'] == '${asset_name}':
         print(a['id'])
         break
@@ -181,7 +184,10 @@ for a in data['assets']:
     | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-for a in data['assets']:
+assets = data['assets']
+if not isinstance(assets, list):
+    sys.exit('release metadata has no asset list')
+for a in assets:
     if a['name'] == '${asset_name}.sha256':
         print(a['id'])
         break
@@ -205,7 +211,10 @@ for a in data['assets']:
     '!/^#/ && ($2 == name || $2 == "*" name) { print tolower($1); exit }' \
     "${tmp_dir}/${asset_name}.sha256")" \
     || die "Cannot read the checksum file"
-  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] \
+  case "$expected" in
+    *[!0-9a-f]* | "") die "Checksum file does not list ${asset_name}; nothing was installed" ;;
+  esac
+  [ "${#expected}" -eq 64 ] \
     || die "Checksum file does not list ${asset_name}; nothing was installed"
   if command -v sha256sum &>/dev/null; then
     actual="$(sha256sum "${tmp_dir}/${asset_name}" | awk '{ print tolower($1) }')" \
