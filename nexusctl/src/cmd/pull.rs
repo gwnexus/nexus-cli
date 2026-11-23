@@ -267,6 +267,13 @@ fn escapes_via_symlink(workspace: &Path, joined: &Path) -> bool {
     false
 }
 
+/// Whether `rel` may be read as workspace content: the same rules as a
+/// write target, so a symlink out of the workspace or into `.git` never
+/// feeds an upload, a diff or a scan.
+pub(crate) fn readable_inside(workspace: &Path, rel: &str) -> bool {
+    validate_agent_file_target_path(workspace, rel).is_ok()
+}
+
 /// [`validate_agent_file_target_path`] for a write site that skips the file
 /// instead of failing: prints why and returns `false`.
 pub(crate) fn safe_target(workspace: &Path, rel: &str) -> bool {

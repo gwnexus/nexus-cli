@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ids from the hub and the project config stay single path components.** The dispatch runner skips project ids that are not a plain name, and the local MCP cache tool reads only the linked project's own cache (no symlinks out of it).
 - **`.vault/` is checked as a directory.** A rule set that ignores files in `.vault/` but reopens a subdirectory no longer counts as ignored; `nexus init` adds the directory exclusion.
 - **Removals stay in the workspace.** `nexus pull` checks each CCX file again right before writing or deleting it; a path that changed into a symlink since planning is left alone. The projection cleanup never removes a directory holding a nested git repository, keeps paths through symlinks, and leaves a CCX lock reached through a symlink untouched (all reported). `nexus deinit` does not follow linked directories, removes a linked root as a link only, and skips paths through a symlink.
+- **Scans and uploads read only workspace files.** `nexus import`, `nexus push`, `nexus diff` and the shadow guard scan skip files and directories that lead out of the workspace or into `.git` (symlinks included); push hashes and uploads the same set. The shadow guard reads tracked files without following symlinks and with the size limit enforced on the read, and caches the guard only inside the workspace. `nexus push` uploads an agent file only when its manifest path is the one shown.
 
 ## [0.50.0] - 2026-11-22
 

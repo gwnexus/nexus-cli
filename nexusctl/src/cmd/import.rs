@@ -247,6 +247,9 @@ pub fn scan_agentic_files(workspace: &Path) -> Vec<ImportAgenticFile> {
             }
 
             let full_path = workspace.join(rel_path);
+            if !super::pull::readable_inside(workspace, rel_path) {
+                continue;
+            }
             if full_path.exists() && full_path.is_file() {
                 if let Ok(body) = fs::read_to_string(&full_path) {
                     // Skip empty files
@@ -271,6 +274,10 @@ pub fn scan_agentic_files(workspace: &Path) -> Vec<ImportAgenticFile> {
         if let Ok(entries) = fs::read_dir(&windsurf_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
+                let rel = format!(".windsurf/rules/{}", entry.file_name().to_string_lossy());
+                if !super::pull::readable_inside(workspace, &rel) {
+                    continue;
+                }
                 if path.extension().is_some_and(|ext| ext == "md") {
                     if let Ok(body) = fs::read_to_string(&path) {
                         if body.trim().is_empty() {
@@ -508,6 +515,33 @@ mod tests {
         assert_eq!(detected[0].category, "agent");
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_skips_files_and_directories_linked_outside() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.md"), "external content").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.md"),
+            ws.path().join("CLAUDE.md"),
+        )
+        .unwrap();
+        fs::create_dir_all(ws.path().join(".windsurf")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.path().join(".windsurf/rules")).unwrap();
+        let found = scan_agentic_files(ws.path());
+        assert!(
+            found.iter().all(|f| !f.body.contains("external")),
+            "{found:?}"
+        );
+        // A link that stays inside the workspace still counts.
+        fs::remove_file(ws.path().join("CLAUDE.md")).unwrap();
+        fs::write(ws.path().join("real.md"), "inside").unwrap();
+        std::os::unix::fs::symlink("real.md", ws.path().join("CLAUDE.md")).unwrap();
+        assert!(scan_agentic_files(ws.path())
+            .iter()
+            .any(|f| f.target_path == "CLAUDE.md" && f.body == "inside"));
     }
 
     #[test]
