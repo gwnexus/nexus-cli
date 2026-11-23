@@ -590,10 +590,10 @@ pub fn confined_project_config_path(from: Option<&std::path::Path>) -> Result<Pa
         std::fs::read_to_string(&git_entry)
             .ok()
             .and_then(|c| {
-                // Git keeps the path as written: only the `gitdir: `
-                // syntax and the line ending go (`lines` drops CR/LF).
-                c.lines()
-                    .find_map(|l| l.strip_prefix("gitdir: "))
+                // As git reads it: terminal CR/LF bytes removed, then the
+                // `gitdir: ` prefix; spaces in the path are kept.
+                c.trim_end_matches(['\r', '\n'])
+                    .strip_prefix("gitdir: ")
                     .map(|p| base.join(p))
             })
             .and_then(|p| std::fs::canonicalize(p).ok())

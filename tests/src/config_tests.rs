@@ -577,4 +577,12 @@ fn test_project_config_into_a_gitfile_directory_is_refused() {
     std::fs::create_dir_all(ws2.path().join(".nexus")).unwrap();
     std::os::unix::fs::symlink("../admin /config", ws2.path().join(".nexus/config.toml")).unwrap();
     assert!(load_project_config(Some(ws2.path())).is_err());
+    // A gitfile ending in a bare CR names `admin`.
+    let ws3 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws3.path().join("admin")).unwrap();
+    std::fs::write(ws3.path().join("admin/config"), "").unwrap();
+    std::fs::write(ws3.path().join(".git"), "gitdir: admin\r").unwrap();
+    std::fs::create_dir_all(ws3.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink("../admin/config", ws3.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws3.path())).is_err());
 }
