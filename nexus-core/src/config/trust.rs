@@ -37,16 +37,33 @@ pub fn approved_origins<'a>(
 }
 
 /// Whether `path` is tracked by the git repository it lives in. Outside a
-/// repository, or when git is unavailable, it is not.
+/// repository, or when git is unavailable, it is not. Parent directories
+/// that do not exist (yet) are fine: git runs in the nearest existing
+/// ancestor and checks the path relative to it, so an index entry for a
+/// file whose directory was removed still counts as tracked.
 pub fn is_git_tracked(path: &Path) -> bool {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+    let mut dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    while !dir.is_dir() {
+        match dir.parent() {
+            Some(p) if !p.as_os_str().is_empty() => dir = p,
+            _ => return false,
+        }
+    }
+    let Ok(rel) = path.strip_prefix(dir) else {
         return false;
     };
+    if rel.as_os_str().is_empty() {
+        return false;
+    }
     std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(["ls-files", "--error-unmatch", "--"])
-        .arg(name)
+        .arg(rel)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

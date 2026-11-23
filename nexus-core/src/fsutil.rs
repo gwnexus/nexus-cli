@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 /// byte is written), is synced, and then renamed over `path`. An existing
 /// file is replaced as a whole, so its old permissions do not carry over,
 /// and a failed write leaves it untouched. The parent directory is created
-/// when missing; its permissions are left to the caller.
+/// when missing; its permissions are left to the caller. After the rename
+/// the directory is synced (Unix) so the new entry survives a crash; that
+/// sync is best effort, because the replacement has already happened.
 pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -29,8 +31,20 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         });
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
+        return result;
     }
-    result
+    sync_dir(dir);
+    Ok(())
+}
+
+/// Flush a directory entry change (rename, create) to disk.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// A new, exclusively created temp file in `dir` named after `target`.

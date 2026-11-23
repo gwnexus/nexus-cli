@@ -545,6 +545,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("git rm --cached"), "{err}");
+        // Still tracked in the index after `.nexus` was removed: refused.
+        std::fs::remove_dir_all(ws.join(".nexus")).unwrap();
+        let err = check_local_credentials_target(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("git rm --cached"), "{err}");
     }
 
     #[cfg(unix)]
