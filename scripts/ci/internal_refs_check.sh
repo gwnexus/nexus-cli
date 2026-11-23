@@ -16,7 +16,7 @@ ROOT=$PWD
 ALLOW="$ROOT/scripts/ci/internal_refs_allow.txt"
 PATTERN='ADR-C?[0-9]{2,4}|[Dd]ispatch(es)? [0-9a-f]{8}'
 # Private IPv4 ranges (10/8, 172.16/12, 192.168/16) as a whole address.
-PATTERN+='|(^|[^0-9.])(10\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9]{1,3}\.[0-9]{1,3}([^0-9.]|$)'
+PATTERN+='|(^|[^0-9.])(10\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9]{1,3}\.[0-9]{1,3}([^0-9.]|\.([^0-9]|$)|$)'
 
 # Print the offending lines of the git repository in $1 (path:line:text),
 # minus exact lines listed in the allowlist. Exit status 1 when any remain.
@@ -40,11 +40,12 @@ if [ "${1:-}" = "--selftest" ]; then
   printf '// %s %s\n' "dispatch" "deadbeef" > "$tmp/b.rs"
   printf 'url = "http://%s.%s/v1"\n' "10.1" "2.3" > "$tmp/c.toml"
   printf 'host: %s.%s\n' "192.168" "0.7" > "$tmp/d.yml"
+  printf 'Endpoint: %s.%s.\n' "172.16" "4.2" > "$tmp/e.md"
   # Must pass: documentation range and a four-part version number.
   printf 'url = "http://%s/v1"\nversion 1.10.2.3\n' "192.0.2.10" > "$tmp/ok.txt"
-  git -C "$tmp" add a.md b.rs c.toml d.yml ok.txt
+  git -C "$tmp" add a.md b.rs c.toml d.yml e.md ok.txt
   found=$(scan "$tmp" || true)
-  for f in a.md b.rs c.toml d.yml; do
+  for f in a.md b.rs c.toml d.yml e.md; do
     if ! grep -q "^$f:" <<<"$found"; then
       echo "FAIL: planted reference in $f was not detected."
       exit 1
