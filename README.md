@@ -538,7 +538,11 @@ selects for the project (`run_target`): OpenCode, Claude Code, or the Claude
 Code workspace (zellij with the CCX layout; if zellij or the layout is
 missing, Claude Code starts directly with a hint). `--tool <bin>` overrides
 this. Backends without `run_target` fall back to `run.default_tool` and the
-project's `agent_owner`.
+project's `agent_owner`. From `run_target`, only the known tools (`claude`,
+`opencode`) are started; any other program needs `--tool`. A
+`run_target.layout` or `run_target.config` file is used only while it is on
+disk as approved by `nexus pull` (consent or `--trust`); otherwise the team
+layout and the default Zellij config are used, with a note.
 
 The terminal workspace (multiplexer) can be chosen per start or locally,
 without affecting the Claude Code extensions (HUD, rules, hooks, plugins):
@@ -589,9 +593,11 @@ shows a `Devbox shell` row: active, active for another project (warning),
 or inactive (warning: the devbox packages such as zellij or language
 servers are missing). When no devbox shell is active, devbox is installed
 and someone is at the terminal, `nexus run` first asks
-`Start it and re-run nexus run inside it? [Y/n]`; Enter (or `-y`) replaces
+`Start it and re-run nexus run inside it? [Y/n]`; Enter replaces
 the process with `devbox run -c <workspace> -- nexus <same arguments>`, which
-runs the devbox init hook and exports the shell's variables. After that run
+runs the devbox init hook and exports the shell's variables. `-y` answers
+only when `devbox.json` is on disk as approved by `nexus pull`; otherwise
+the question is asked, since its init hooks run in the new shell. After that run
 ends you are back in your original shell. The restarted run never asks
 again (`NEXUS_DEVBOX_RESTART=1`), and `--dry-run` never asks.
 
@@ -1262,7 +1268,14 @@ and `nexus run` (before every launch) also install and update them:
    install command needs a person to confirm it (`/plugin` in Claude Code).
 4. A managed plugin installed at project scope for this workspace is
    updated (`claude plugin update <id> --scope project --json`) when the
-   registered marketplace checkout offers a newer version. The marketplace
+   registered marketplace checkout offers a newer version and that version
+   is approved: each new version is asked once on a terminal and shows as
+   `DEFERRED` without a terminal. A marketplace registered from another
+   source than the project declares is never refreshed, installed from or
+   updated from (`DEFERRED`, with the command to remove it). A `github` or
+   `git` marketplace declared with a custom catalog `path` is not used yet:
+   the marketplace listing does not report that path, so the registration
+   cannot be verified. The marketplace
    registration is shared by every project on the machine, so the step
    never re-points it: when it is registered at another ref than the
    project declares, the plugin shows as `PENDING`. Claude Code moves the

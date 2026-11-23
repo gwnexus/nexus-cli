@@ -315,6 +315,32 @@ fn reset_target_covers(target: &str, item: &Item) -> bool {
     }
 }
 
+/// Whether the workspace file `rel` is on disk exactly as an earlier
+/// consent (or adoption) recorded it. A missing file, a target outside the
+/// workspace or behind a symlink, or a changed file is not approved.
+pub fn approved_on_disk(workspace: &Path, rel: &str) -> bool {
+    let Ok(dir) = nexus_core::config::Config::dir() else {
+        return false;
+    };
+    approved_in(
+        &Store::load(Store::path_for(&dir, workspace), workspace),
+        workspace,
+        rel,
+    )
+}
+
+fn approved_in(store: &Store, workspace: &Path, rel: &str) -> bool {
+    let Some(body) = read_file(workspace, rel) else {
+        return false;
+    };
+    let (plain, normalized) = (sha256_hex(&body), sha256_hex_normalized(&body));
+    // The id after the kind must be the path itself (`kind:path`).
+    store.data.items.iter().any(|(key, r)| {
+        key.split_once(':').is_some_and(|(_, id)| id == rel)
+            && (r.sha256 == plain || r.sha256 == normalized)
+    })
+}
+
 /// An item for a whole file written as is.
 fn file_item(workspace: &Path, kind: Kind, id: &str, target: &str, body: &str, slot: Slot) -> Item {
     let local = read_file(workspace, target);
@@ -2115,6 +2141,40 @@ mod tests {
         let hook = items.iter().find(|i| i.kind == Kind::ClaudeHook).unwrap();
         assert!(!hook.installed);
         assert!(hook.content.contains("Stop matcher=\"Bash\""));
+    }
+
+    #[test]
+    fn test_approved_on_disk_needs_a_matching_record() {
+        let cfg = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        write(ws.path(), "layout.kdl", "layout {}\n");
+        let mut store = store_in(cfg.path(), ws.path());
+        assert!(!approved_in(&store, ws.path(), "layout.kdl"));
+        let item = file_item(
+            ws.path(),
+            Kind::ZellijLayout,
+            "layout.kdl",
+            "layout.kdl",
+            "layout {}\n",
+            Slot::Layout,
+        );
+        store.record(&item, None);
+        assert!(approved_in(&store, ws.path(), "layout.kdl"));
+        write(ws.path(), "layout.kdl", "layout { pane command=\"sh\" }\n");
+        assert!(!approved_in(&store, ws.path(), "layout.kdl"));
+        assert!(!approved_in(&store, ws.path(), "missing.kdl"));
+        // A record for another id that merely ends in the path does not count.
+        write(ws.path(), "other.kdl", "layout {}\n");
+        let item = file_item(
+            ws.path(),
+            Kind::ZellijLayout,
+            "archive:other.kdl",
+            "other.kdl",
+            "layout {}\n",
+            Slot::Layout,
+        );
+        store.record(&item, None);
+        assert!(!approved_in(&store, ws.path(), "other.kdl"));
     }
 
     #[test]
