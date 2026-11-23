@@ -636,11 +636,29 @@ pub fn merge_claude_hooks(
                 adapter.target_path,
                 kebab_case_event(&hook_event.event)
             );
+            // An entry with this command and this matcher is in place.
+            if event_array.iter().any(|entry| {
+                hook_entry_is_only(entry, &command)
+                    && entry.get("matcher").and_then(|m| m.as_str())
+                        == hook_event.matcher.as_deref()
+            }) {
+                continue;
+            }
+            // Several registrations of one command for this event (each
+            // with its own matcher): the missing one is added, none is
+            // rewritten into another.
+            let same_event = adapter
+                .hook_events
+                .iter()
+                .filter(|e| e.event == hook_event.event)
+                .count();
             // Nexus's own entry (exactly its command, nothing else): keep
             // its matcher in sync, since the backend widens matchers over
             // time (e.g. `mcp__nexus__.*`). An entry the operator changed
             // or extended is left alone.
-            if let Some(own) = event_array
+            if same_event > 1 {
+                // fall through to the append below
+            } else if let Some(own) = event_array
                 .iter_mut()
                 .find(|entry| hook_entry_is_only(entry, &command))
             {
@@ -660,17 +678,21 @@ pub fn merge_claude_hooks(
                 continue;
             }
             let already_registered = event_array.iter().any(|entry| {
-                entry
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .map(|hooks| {
-                        hooks.iter().any(|h| {
-                            h.get("command")
-                                .and_then(|c| c.as_str())
-                                .is_some_and(|c| c.contains(&adapter.target_path))
+                // With several matchers, only an entry for this matcher.
+                (same_event == 1
+                    || entry.get("matcher").and_then(|m| m.as_str())
+                        == hook_event.matcher.as_deref())
+                    && entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|c| c.contains(&adapter.target_path))
+                            })
                         })
-                    })
-                    .unwrap_or(false)
+                        .unwrap_or(false)
             });
             if already_registered {
                 continue;
@@ -3261,6 +3283,57 @@ mod tests {
             serde_json::json!([{"matcher": "Edit", "hooks": [{"type": "command", "command": "./mine.sh"}]}])
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_claude_hooks_keeps_two_matchers_of_one_command() {
+        let dir = temp_dir("hooks-two-matchers");
+        let cmd = "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/nexus-guard.mjs\" pre-tool-use";
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        let settings = serde_json::json!({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]},
+            {"matcher": "Edit", "hooks": [{"type": "command", "command": cmd}]}
+        ]}});
+        fs::write(dir.join(".claude/settings.json"), settings.to_string()).unwrap();
+        let event = |m: &str| nexus_core::api::ClaudeHookEvent {
+            event: "PreToolUse".to_string(),
+            matcher: Some(m.to_string()),
+            timeout: None,
+        };
+        let adapter = ClaudeHookAdapter {
+            plugin_name: "guard".to_string(),
+            target_path: ".claude/hooks/nexus-guard.mjs".to_string(),
+            body: String::new(),
+            hook_events: vec![event("Bash"), event("Edit")],
+        };
+        let (changed, _) = merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
+        assert_eq!(changed, 0);
+        let read: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(read, settings);
+
+        // A missing second matcher is added next to the first.
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]}
+            ]}})
+            .to_string(),
+        )
+        .unwrap();
+        merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
+        let read: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let matchers: Vec<&str> = read["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["matcher"].as_str().unwrap())
+            .collect();
+        assert_eq!(matchers, vec!["Bash", "Edit"]);
         let _ = fs::remove_dir_all(&dir);
     }
 

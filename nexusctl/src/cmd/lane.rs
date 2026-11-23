@@ -60,6 +60,14 @@ fn cache_path(workspace: &Path, agentic_root: &str) -> PathBuf {
 /// inference token is sent.
 pub(crate) fn load_cache(workspace: &Path, agentic_root: &str) -> Option<LaneCache> {
     let path = cache_path(workspace, agentic_root);
+    // Read only what `sync_cache` would also write: no symlink, nothing
+    // outside the workspace.
+    let rel = format!("{agentic_root}/{LANE_FILE}");
+    if super::pull::validate_agent_file_target_path(workspace, &rel).is_err()
+        || fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return None;
+    }
     let raw = fs::read_to_string(&path).ok()?;
     if config::trust::is_git_tracked(&path) {
         return None;
@@ -93,6 +101,8 @@ pub(crate) enum CacheSync {
     Written(usize),
     Removed,
     Unchanged,
+    /// Left alone: outside the workspace, through a symlink, or tracked.
+    Refused(&'static str),
 }
 
 /// Write the lane actors of an export to the cache, or remove the cache
@@ -103,6 +113,25 @@ pub(crate) fn sync_cache(
     export: &AgentFileExportResponse,
 ) -> anyhow::Result<CacheSync> {
     let path = cache_path(workspace, agentic_root);
+    // The same rules as every other pulled file, and a tracked cache (which
+    // the reader ignores) is never overwritten or removed.
+    let rel = format!("{agentic_root}/{LANE_FILE}");
+    if super::pull::validate_agent_file_target_path(workspace, &rel).is_err() {
+        return Ok(CacheSync::Refused(
+            "outside the workspace or through a symlink",
+        ));
+    }
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ok(CacheSync::Refused("a symlink"));
+    }
+    // Tracked even when deleted from the working tree. An indeterminate
+    // answer protects an existing cache, but does not block a fresh one.
+    let exists = fs::symlink_metadata(&path).is_ok();
+    match config::trust::git_tracking(&path) {
+        Some(true) => return Ok(CacheSync::Refused("tracked by git")),
+        None if exists => return Ok(CacheSync::Refused("git cannot tell whether it is tracked")),
+        _ => {}
+    }
     let Some(cache) = cache_from_export(export) else {
         if path.is_file() {
             fs::remove_file(&path)?;
@@ -133,6 +162,10 @@ pub(crate) fn print_sync(agentic_root: &str, outcome: CacheSync) {
             style("-").red()
         ),
         CacheSync::Unchanged => {}
+        CacheSync::Refused(reason) => println!(
+            "   {} {agentic_root}/{LANE_FILE} not updated ({reason})",
+            style("!").bold().yellow()
+        ),
     }
 }
 
@@ -463,8 +496,13 @@ async fn lane_for(
     project_id: &str,
     slug: &str,
 ) -> Option<LaneCache> {
-    let cached =
-        load_cache(workspace, agentic_root).filter(|c| c.project_id.as_deref() == Some(project_id));
+    // The cache checks run git: off the async worker.
+    let (ws, root) = (workspace.to_path_buf(), agentic_root.to_string());
+    let cached = tokio::task::spawn_blocking(move || load_cache(&ws, &root))
+        .await
+        .ok()
+        .flatten()
+        .filter(|c| c.project_id.as_deref() == Some(project_id));
     if cached
         .as_ref()
         .is_some_and(|c| c.actors.iter().any(|a| a.slug == slug))
@@ -473,11 +511,35 @@ async fn lane_for(
     }
     let client = NexusClient::new(api_url, Some(resolve_token()?)).ok()?;
     let export = client.export_agent_files(project_id).await.ok()?;
-    let _ = sync_cache(workspace, agentic_root, &export);
-    load_cache(workspace, agentic_root)
+    let (ws, root, exp) = (
+        workspace.to_path_buf(),
+        agentic_root.to_string(),
+        export.clone(),
+    );
+    let (outcome, loaded) = tokio::task::spawn_blocking(move || {
+        let outcome = sync_cache(&ws, &root, &exp);
+        (outcome, load_cache(&ws, &root))
+    })
+    .await
+    .ok()?;
+    after_sync(&outcome, loaded, &export, project_id).or(cached)
+}
+
+/// The cache to use after [`sync_cache`]: the file it wrote or kept, but
+/// the fetched export itself when the file was refused or not written (a
+/// refused file may be stale and is left untouched).
+fn after_sync(
+    outcome: &anyhow::Result<CacheSync>,
+    loaded: Option<LaneCache>,
+    export: &AgentFileExportResponse,
+    project_id: &str,
+) -> Option<LaneCache> {
+    if matches!(outcome, Ok(CacheSync::Refused(_)) | Err(_)) {
+        return cache_from_export(export);
+    }
+    loaded
         .filter(|c| c.project_id.as_deref() == Some(project_id))
-        .or_else(|| cache_from_export(&export))
-        .or(cached)
+        .or_else(|| cache_from_export(export))
 }
 
 /// `nexus actors run <slug> [-p <prompt>] [-- <claude args>]`.
@@ -1127,6 +1189,92 @@ mod tests {
         assert_eq!(
             sync_cache(ws, ".nexus", &export(Some(vec![]), None)).unwrap(),
             CacheSync::Unchanged
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sync_cache_refuses_a_linked_root_and_a_tracked_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.join(".nexus")).unwrap();
+        let e = export(Some(vec![actor("spark-coder", "local-coder-main")]), None);
+        assert!(matches!(
+            sync_cache(ws, ".nexus", &e).unwrap(),
+            CacheSync::Refused(_)
+        ));
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        fs::create_dir_all(cache_path(ws, ".nexus").parent().unwrap()).unwrap();
+        fs::write(cache_path(ws, ".nexus"), "{}\n").unwrap();
+        let git = |args: &[&str]| {
+            let mut cmd = std::process::Command::new("git");
+            for var in nexus_core::config::trust::GIT_LOCATION_VARS {
+                cmd.env_remove(var);
+            }
+            assert!(cmd
+                .args(args)
+                .current_dir(ws)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-f", ".nexus"]);
+        assert_eq!(
+            sync_cache(ws, ".nexus", &export(None, None)).unwrap(),
+            CacheSync::Refused("tracked by git")
+        );
+        assert_eq!(
+            fs::read_to_string(cache_path(ws, ".nexus")).unwrap(),
+            "{}\n"
+        );
+        // Deleted from the working tree but still in the index.
+        fs::remove_file(cache_path(ws, ".nexus")).unwrap();
+        let e = export(Some(vec![actor("spark-coder", "local-coder-main")]), None);
+        assert_eq!(
+            sync_cache(ws, ".nexus", &e).unwrap(),
+            CacheSync::Refused("tracked by git")
+        );
+        assert!(!cache_path(ws, ".nexus").exists());
+
+        // An existing cache in a repository git cannot read is kept.
+        fs::write(cache_path(ws, ".nexus"), "{}\n").unwrap();
+        fs::remove_dir_all(ws.join(".git")).unwrap();
+        fs::write(ws.join(".git"), "gitdir: /nonexistent/repo\n").unwrap();
+        assert!(matches!(
+            sync_cache(ws, ".nexus", &export(None, None)).unwrap(),
+            CacheSync::Refused(_)
+        ));
+        assert!(cache_path(ws, ".nexus").exists());
+
+        // A symlink at the cache path, even to a file inside the workspace.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        fs::write(ws.join("README.md"), "readme\n").unwrap();
+        fs::create_dir_all(cache_path(ws, ".nexus").parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../../README.md", cache_path(ws, ".nexus")).unwrap();
+        assert_eq!(
+            sync_cache(ws, ".nexus", &e).unwrap(),
+            CacheSync::Refused("a symlink")
+        );
+        // The linked file is not read, and the fetched export wins.
+        assert!(load_cache(ws, ".nexus").is_none());
+        let stale = LaneCache {
+            project_id: Some("p".into()),
+            base_url: None,
+            actors: vec![],
+        };
+        let picked =
+            after_sync(&Ok(CacheSync::Refused("a symlink")), Some(stale), &e, "p").unwrap();
+        assert!(picked.actors.iter().any(|a| a.slug == "spark-coder"));
+        assert_eq!(
+            fs::read_to_string(ws.join("README.md")).unwrap(),
+            "readme\n"
         );
     }
 

@@ -625,17 +625,21 @@ pub(crate) fn error_text(e: &(dyn std::error::Error + 'static)) -> String {
 }
 
 fn runner_note_line(snap: &Snapshot) -> Option<String> {
-    snap.runner
-        .note
-        .as_ref()
-        .map(|n| style(format!("{MANAGER}: {n}")).yellow().to_string())
+    snap.runner.note.as_ref().map(|n| {
+        style(format!("{MANAGER}: {}", printable(n)))
+            .yellow()
+            .to_string()
+    })
 }
 
 fn error_line(snap: &Snapshot) -> Option<String> {
     snap.error.as_ref().map(|e| {
-        style(format!("! refresh failed, showing last state: {e}"))
-            .red()
-            .to_string()
+        style(format!(
+            "! refresh failed, showing last state: {}",
+            printable(&e.to_string())
+        ))
+        .red()
+        .to_string()
     })
 }
 
@@ -645,9 +649,9 @@ fn render(snap: &Snapshot, now: i64) -> Vec<String> {
         format!(
             "{}  {}   refreshed {}Z   {MANAGER}: {}",
             style("Dispatches").bold(),
-            style(&snap.project.name).bold(),
+            style(printable(&snap.project.name)).bold(),
             hhmm(&snap.refreshed_at),
-            snap.runner.state
+            printable(&snap.runner.state.to_string())
         ),
         format!(
             "  in   {} · {} · {} · {}",
@@ -722,9 +726,10 @@ fn render_compact(snap: &Snapshot, now: i64) -> Vec<String> {
     let mut lines = vec![
         format!(
             "{} {}Z {MANAGER} {}",
-            style(console::truncate_str(&snap.project.name, 20, "…")).bold(),
+            style(console::truncate_str(&printable(&snap.project.name), 20, "…").into_owned())
+                .bold(),
             &hhmm(&snap.refreshed_at)[..5.min(hhmm(&snap.refreshed_at).len())],
-            snap.runner.state
+            printable(&snap.runner.state.to_string())
         ),
         format!(
             "in  {} {} {} {}",
@@ -1288,6 +1293,22 @@ mod tests {
             7,
             NOW,
         )
+    }
+
+    #[test]
+    fn test_views_strip_control_characters_from_hub_and_runner_text() {
+        let mut s = snap(&sample());
+        s.project.name = "Demo\u{1b}]0;owned\u{7}".into();
+        s.runner.state = "none\u{1b}[2J".into();
+        s.runner.note = Some("note\u{1b}[5m".into());
+        s.error = Some("failed\u{1b}[H".into());
+        for lines in [render(&s, NOW), render_compact(&s, NOW)] {
+            let text = lines.join("\n");
+            for payload in ["\u{1b}]0;", "\u{1b}[2J", "\u{1b}[5m", "\u{1b}[H", "\u{7}"] {
+                assert!(!text.contains(payload), "{payload:?} in {text:?}");
+            }
+            assert!(text.contains("Demo") && text.contains("failed"), "{text:?}");
+        }
     }
 
     fn sample() -> Lists {
