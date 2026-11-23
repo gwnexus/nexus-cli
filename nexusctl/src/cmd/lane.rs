@@ -60,6 +60,14 @@ fn cache_path(workspace: &Path, agentic_root: &str) -> PathBuf {
 /// inference token is sent.
 pub(crate) fn load_cache(workspace: &Path, agentic_root: &str) -> Option<LaneCache> {
     let path = cache_path(workspace, agentic_root);
+    // Read only what `sync_cache` would also write: no symlink, nothing
+    // outside the workspace.
+    let rel = format!("{agentic_root}/{LANE_FILE}");
+    if super::pull::validate_agent_file_target_path(workspace, &rel).is_err()
+        || fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return None;
+    }
     let raw = fs::read_to_string(&path).ok()?;
     if config::trust::is_git_tracked(&path) {
         return None;
@@ -508,17 +516,30 @@ async fn lane_for(
         agentic_root.to_string(),
         export.clone(),
     );
-    let synced = tokio::task::spawn_blocking(move || {
-        let _ = sync_cache(&ws, &root, &exp);
-        load_cache(&ws, &root)
+    let (outcome, loaded) = tokio::task::spawn_blocking(move || {
+        let outcome = sync_cache(&ws, &root, &exp);
+        (outcome, load_cache(&ws, &root))
     })
     .await
-    .ok()
-    .flatten();
-    synced
+    .ok()?;
+    after_sync(&outcome, loaded, &export, project_id).or(cached)
+}
+
+/// The cache to use after [`sync_cache`]: the file it wrote or kept, but
+/// the fetched export itself when the file was refused or not written (a
+/// refused file may be stale and is left untouched).
+fn after_sync(
+    outcome: &anyhow::Result<CacheSync>,
+    loaded: Option<LaneCache>,
+    export: &AgentFileExportResponse,
+    project_id: &str,
+) -> Option<LaneCache> {
+    if matches!(outcome, Ok(CacheSync::Refused(_)) | Err(_)) {
+        return cache_from_export(export);
+    }
+    loaded
         .filter(|c| c.project_id.as_deref() == Some(project_id))
-        .or_else(|| cache_from_export(&export))
-        .or(cached)
+        .or_else(|| cache_from_export(export))
 }
 
 /// `nexus actors run <slug> [-p <prompt>] [-- <claude args>]`.
@@ -1241,6 +1262,16 @@ mod tests {
             sync_cache(ws, ".nexus", &e).unwrap(),
             CacheSync::Refused("a symlink")
         );
+        // The linked file is not read, and the fetched export wins.
+        assert!(load_cache(ws, ".nexus").is_none());
+        let stale = LaneCache {
+            project_id: Some("p".into()),
+            base_url: None,
+            actors: vec![],
+        };
+        let picked =
+            after_sync(&Ok(CacheSync::Refused("a symlink")), Some(stale), &e, "p").unwrap();
+        assert!(picked.actors.iter().any(|a| a.slug == "spark-coder"));
         assert_eq!(
             fs::read_to_string(ws.join("README.md")).unwrap(),
             "readme\n"
