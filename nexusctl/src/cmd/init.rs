@@ -403,11 +403,18 @@ pub async fn run(
             // Apply extra MCP servers and plugins from .nexus/config.toml
             // (plugins are OpenCode plugins: OpenCode projects only).
             if let Ok(Some(proj_config)) = config::load_project_config(Some(&target)) {
+                // The project config may be tracked by the repository: its
+                // servers and plugins need consent or --trust like exports.
                 if let Some(ref extras) = proj_config.mcp_extra {
-                    merge_extra_mcp_servers(&target, extras, &agentic_root)?;
+                    let opencode =
+                        approved_extra_mcp(&mut consent, &target, extras, "opencode.json");
+                    let claude = approved_extra_mcp(&mut consent, &target, extras, ".mcp.json");
+                    merge_extra_mcp_servers(&target, &opencode, &claude, &agentic_root)?;
                 }
                 if let (false, Some(ref plugins)) = (is_claude, &proj_config.plugins) {
-                    install_plugins(&target, plugins).await?;
+                    let (plugins, digests) =
+                        approved_config_plugins(&mut consent, &target, plugins);
+                    install_plugins(&target, &plugins, &digests).await?;
                 }
             }
 
@@ -417,9 +424,16 @@ pub async fn run(
             // OpenCode projects only, like `nexus pull`.
             if let (false, Ok(ref af_export)) = (is_claude, &af_export_result) {
                 if !af_export.plugins.is_empty() {
-                    let platform_plugins = resolve_platform_plugins(&af_export.plugins);
+                    // A destination delivered as an agent file is never
+                    // overwritten from the registry (as in pull).
+                    let mut platform_plugins = resolve_platform_plugins(&af_export.plugins);
+                    platform_plugins.retain(|slug, def| {
+                        let file = def.filename.clone().unwrap_or_else(|| format!("{slug}.ts"));
+                        let dest = format!(".opencode/plugins/{file}");
+                        !af_export.agent_files.iter().any(|f| f.target_path == dest)
+                    });
                     if !platform_plugins.is_empty() {
-                        install_plugins(&target, &platform_plugins).await?;
+                        install_plugins(&target, &platform_plugins, &HashMap::new()).await?;
                     }
                 }
             }
@@ -523,6 +537,14 @@ pub async fn run(
                             continue;
                         }
                         let script_target = target.join(&script.path);
+                        // An identical file is adopted without a prompt, so
+                        // it keeps its mode: a non-executable file never
+                        // becomes executable without consent (as in pull).
+                        if fs::read_to_string(&script_target).ok().as_deref()
+                            == Some(script.body.as_str())
+                        {
+                            continue;
+                        }
                         if let Some(parent) = script_target.parent() {
                             fs::create_dir_all(parent)?;
                         }
@@ -1356,12 +1378,147 @@ fn write_mcp_configs(
 /// environment first, then from `.env.local` in the project root as a
 /// fallback.  Unresolvable references are replaced with an empty string and
 /// a warning is printed.
-fn merge_extra_mcp_servers(
+const PROJECT_CONFIG: &str = ".nexus/config.toml";
+
+/// `[mcp_extra]` servers that may be written to `dest` (`opencode.json` or
+/// `.mcp.json`, approved separately): refused environment variables are
+/// dropped first, then each server needs consent (or `--trust`). Nothing
+/// when `dest` does not exist (the merge only extends existing files).
+fn approved_extra_mcp(
+    consent: &mut super::consent::Gate,
     target: &Path,
     extras: &HashMap<String, ExtraMcpServer>,
+    dest: &str,
+) -> HashMap<String, ExtraMcpServer> {
+    if !target.join(dest).exists() {
+        return HashMap::new();
+    }
+    let mut names: Vec<&String> = extras.keys().collect();
+    names.sort();
+    let mut out = HashMap::new();
+    for name in names {
+        let mut server = extras[name].clone();
+        if let Some(env) = server.environment.as_mut() {
+            env.retain(|k, v| match super::run::refused_env_var(k, v, false) {
+                Some(why) => {
+                    println!(
+                        "   {} mcp_extra {name}: {k} not set ({why})",
+                        style("!").bold().yellow()
+                    );
+                    false
+                }
+                None => true,
+            });
+        }
+        let item = super::consent::config_item(
+            super::consent::Kind::McpServer,
+            name,
+            dest,
+            extra_mcp_content(&server),
+        );
+        if consent.local(&item) {
+            out.insert(name.clone(), server);
+        }
+    }
+    out
+}
+
+/// What a `[mcp_extra]` server runs, for the prompt: the argv and each
+/// variable; a literal value is shown by a short hash, so a changed value
+/// asks again without being printed.
+fn extra_mcp_content(server: &ExtraMcpServer) -> String {
+    // JSON keeps the argument boundaries: ["sh","-c","a",";b"] and
+    // ["sh","-c","a ;b"] never read the same.
+    let mut out = format!(
+        "command: {}\n",
+        serde_json::to_string(&server.command).unwrap_or_default()
+    );
+    let mut env: Vec<(&String, &String)> = server.environment.iter().flatten().collect();
+    env.sort();
+    for (k, v) in env {
+        let shown = if v.starts_with("${env:") && v.ends_with('}') {
+            v.clone()
+        } else {
+            let digest = nexus_core::hash::sha256_hex(v);
+            format!("<value sha256:{}>", &digest[..12])
+        };
+        out.push_str(&format!("env {k}={shown}\n"));
+    }
+    out
+}
+
+/// `[plugins]` entries that may be installed (consent or `--trust`), and
+/// for local sources the sha256 of the approved file: the installer only
+/// copies a file that still matches it.
+fn approved_config_plugins(
+    consent: &mut super::consent::Gate,
+    target: &Path,
+    plugins: &HashMap<String, PluginDef>,
+) -> (HashMap<String, PluginDef>, HashMap<String, String>) {
+    let mut names: Vec<&String> = plugins.keys().collect();
+    names.sort();
+    let mut approved = HashMap::new();
+    let mut digests = HashMap::new();
+    for name in names {
+        let def = &plugins[name];
+        // Read once: the digest shown and approved is the one the
+        // installer compares against.
+        let digest = (def.source == "local")
+            .then(|| local_plugin_digest(target, def))
+            .flatten();
+        let item = super::consent::config_item(
+            super::consent::Kind::OpencodePlugin,
+            name,
+            PROJECT_CONFIG,
+            config_plugin_content(def, digest.as_deref()),
+        );
+        if consent.local(&item) {
+            approved.insert(name.clone(), def.clone());
+            if let Some(d) = digest {
+                digests.insert(name.clone(), d);
+            }
+        }
+    }
+    (approved, digests)
+}
+
+/// The sha256 of a local plugin's validated source file.
+fn local_plugin_digest(target: &Path, def: &PluginDef) -> Option<String> {
+    let src = local_plugin_source(target, def.path.as_deref()?)?;
+    fs::read(src)
+        .ok()
+        .map(|bytes| nexus_core::hash::sha256_hex_bytes(&bytes))
+}
+
+/// What a `[plugins]` entry installs, for the prompt: its definition and,
+/// for a local source, a hash of the file, so a changed file asks again.
+fn config_plugin_content(def: &PluginDef, local_digest: Option<&str>) -> String {
+    let mut out = format!(
+        "source: {}\nurl: {}\npath: {}\nfilename: {}\n",
+        def.source,
+        def.url.as_deref().unwrap_or("-"),
+        def.path.as_deref().unwrap_or("-"),
+        def.filename.as_deref().unwrap_or("-"),
+    );
+    if def.source == "local" {
+        out.push_str(&format!(
+            "content sha256: {}\n",
+            local_digest.unwrap_or("-")
+        ));
+    }
+    out
+}
+
+/// Merge `[mcp_extra]` servers into existing client configs: `opencode`
+/// into `opencode.json`, `claude` into `.mcp.json` (each approved for that
+/// destination).
+fn merge_extra_mcp_servers(
+    target: &Path,
+    opencode: &HashMap<String, ExtraMcpServer>,
+    claude: &HashMap<String, ExtraMcpServer>,
     _agentic_root: &str,
 ) -> anyhow::Result<()> {
-    if extras.is_empty() {
+    if opencode.is_empty() && claude.is_empty() {
         return Ok(());
     }
 
@@ -1370,7 +1527,9 @@ fn merge_extra_mcp_servers(
 
     // --- OpenCode (opencode.json) ---
     let opencode_path = target.join("opencode.json");
-    if opencode_path.exists() {
+    // Each destination only when it has an approved server: a refused or
+    // unparsable file never blocks the other one.
+    if !opencode.is_empty() && opencode_path.exists() {
         let content = fs::read_to_string(&opencode_path)?;
         let mut doc: serde_json::Value = serde_json::from_str(&content)?;
 
@@ -1379,7 +1538,7 @@ fn merge_extra_mcp_servers(
             .and_then(|o| o.get_mut("mcp"))
             .and_then(|v| v.as_object_mut())
         {
-            for (name, server) in extras {
+            for (name, server) in opencode {
                 if mcp.contains_key(name) {
                     continue;
                 }
@@ -1419,7 +1578,7 @@ fn merge_extra_mcp_servers(
 
     // --- Claude Code (.mcp.json at project root) ---
     let claude_mcp_path = target.join(".mcp.json");
-    if claude_mcp_path.exists() {
+    if !claude.is_empty() && claude_mcp_path.exists() {
         let content = fs::read_to_string(&claude_mcp_path)?;
         let mut doc: serde_json::Value = serde_json::from_str(&content)?;
 
@@ -1428,7 +1587,7 @@ fn merge_extra_mcp_servers(
             .and_then(|o| o.get_mut("mcpServers"))
             .and_then(|v| v.as_object_mut())
         {
-            for (name, server) in extras {
+            for (name, server) in claude {
                 if servers.contains_key(name) {
                     continue;
                 }
@@ -1680,9 +1839,13 @@ fn local_plugin_source(workspace: &Path, path: &str) -> Option<PathBuf> {
 ///
 /// Supports `source = "github-raw"` (downloads via HTTP) and
 /// `source = "local"` (copies from a local path).
+/// Install plugins into `.opencode/plugins/`. `approved` holds the sha256
+/// of each local source as approved: a local plugin is copied only when
+/// its file still has that hash.
 async fn install_plugins(
     target: &Path,
     plugins: &HashMap<String, PluginDef>,
+    approved: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     if plugins.is_empty() {
         return Ok(());
@@ -1783,7 +1946,18 @@ async fn install_plugins(
                     if src.is_file() {
                         // Read and write instead of fs::copy, so the source's
                         // permission bits (an executable bit) are not carried over.
-                        fs::write(&dest, fs::read(&src)?)?;
+                        let bytes = fs::read(&src)?;
+                        let digest = nexus_core::hash::sha256_hex_bytes(&bytes);
+                        if approved.get(name) != Some(&digest) {
+                            println!(
+                                "   {} Plugin '{}' skipped: {} changed after it was approved; run nexus init again",
+                                style("!").bold().yellow(),
+                                name,
+                                path,
+                            );
+                            continue;
+                        }
+                        fs::write(&dest, bytes)?;
                         println!(
                             "   {} .opencode/plugins/{} (copied from local)",
                             style("+").bold().green(),
@@ -1870,6 +2044,117 @@ fn print_done(server_aware: bool) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The approval digests of every local plugin, as consent records them.
+    fn digests(dir: &Path, plugins: &HashMap<String, PluginDef>) -> HashMap<String, String> {
+        plugins
+            .iter()
+            .filter_map(|(n, d)| Some((n.clone(), local_plugin_digest(dir, d)?)))
+            .collect()
+    }
+
+    #[test]
+    fn test_merge_skips_a_destination_without_approved_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        fs::write(dir.join("opencode.json"), "{ not json").unwrap();
+        fs::write(dir.join(".mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
+        let claude = HashMap::from([(
+            "tool".to_string(),
+            ExtraMcpServer {
+                command: vec!["npx".into(), "tool".into()],
+                environment: None,
+            },
+        )]);
+        merge_extra_mcp_servers(dir, &HashMap::new(), &claude, ".nexus").unwrap();
+        assert!(fs::read_to_string(dir.join(".mcp.json"))
+            .unwrap()
+            .contains("\"tool\""));
+        assert_eq!(
+            fs::read_to_string(dir.join("opencode.json")).unwrap(),
+            "{ not json"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_plugins_skips_a_changed_local_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        fs::write(dir.join("p.ts"), "approved\n").unwrap();
+        let plugins = HashMap::from([(
+            "p".to_string(),
+            PluginDef {
+                source: "local".into(),
+                url: None,
+                path: Some("p.ts".into()),
+                filename: Some("p.ts".into()),
+            },
+        )]);
+        let approved = digests(dir, &plugins);
+        fs::write(dir.join("p.ts"), "changed\n").unwrap();
+        install_plugins(dir, &plugins, &approved).await.unwrap();
+        assert!(!dir.join(".opencode/plugins/p.ts").exists());
+        install_plugins(dir, &plugins, &digests(dir, &plugins))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join(".opencode/plugins/p.ts")).unwrap(),
+            "changed\n"
+        );
+    }
+
+    #[test]
+    fn test_extra_mcp_content_keeps_argument_boundaries() {
+        let server = |cmd: &[&str]| ExtraMcpServer {
+            command: cmd.iter().map(|s| s.to_string()).collect(),
+            environment: None,
+        };
+        assert_ne!(
+            extra_mcp_content(&server(&["sh", "-c", "echo safe", "; touch /tmp/x"])),
+            extra_mcp_content(&server(&["sh", "-c", "echo safe ; touch /tmp/x"]))
+        );
+    }
+
+    #[test]
+    fn test_local_plugin_content_tracks_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("tools")).unwrap();
+        fs::write(dir.path().join("tools/p.ts"), "export const a = 1;\n").unwrap();
+        let def = PluginDef {
+            source: "local".into(),
+            url: None,
+            path: Some("tools/p.ts".into()),
+            filename: Some("p.ts".into()),
+        };
+        let content =
+            |d: &PluginDef| config_plugin_content(d, local_plugin_digest(dir.path(), d).as_deref());
+        let before = content(&def);
+        fs::write(dir.path().join("tools/p.ts"), "export const a = 2;\n").unwrap();
+        assert_ne!(before, content(&def));
+    }
+
+    #[test]
+    fn test_extra_mcp_content_hides_literal_values() {
+        let server = ExtraMcpServer {
+            command: vec!["npx".into(), "-y".into(), "tool".into()],
+            environment: Some(HashMap::from([
+                ("API_KEY".to_string(), "literal-value".to_string()),
+                ("REF".to_string(), "${env:REF}".to_string()),
+            ])),
+        };
+        let shown = extra_mcp_content(&server);
+        assert!(shown.contains(r#"command: ["npx","-y","tool"]"#), "{shown}");
+        assert!(shown.contains("env REF=${env:REF}"));
+        assert!(!shown.contains("literal-value"), "{shown}");
+        let mut changed = server.clone();
+        changed
+            .environment
+            .as_mut()
+            .unwrap()
+            .insert("API_KEY".into(), "other".into());
+        assert_ne!(shown, extra_mcp_content(&changed));
+    }
+
     use super::*;
 
     /// Test shims for the former init writers, now backed by the shared
@@ -2534,7 +2819,7 @@ mod tests {
             },
         );
 
-        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
+        merge_extra_mcp_servers(&dir, &extras, &extras, ".nexus").unwrap();
 
         let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(
@@ -2588,7 +2873,7 @@ mod tests {
             },
         );
 
-        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
+        merge_extra_mcp_servers(&dir, &extras, &extras, ".nexus").unwrap();
 
         let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
         // Must preserve the existing version, not overwrite with @latest
@@ -2633,7 +2918,7 @@ mod tests {
             },
         );
 
-        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
+        merge_extra_mcp_servers(&dir, &extras, &extras, ".nexus").unwrap();
 
         let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(result.contains("my-server"), "new server must be added");
@@ -2678,7 +2963,7 @@ mod tests {
             },
         );
 
-        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
+        merge_extra_mcp_servers(&dir, &extras, &extras, ".nexus").unwrap();
 
         let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(
@@ -2724,7 +3009,7 @@ mod tests {
             },
         );
 
-        merge_extra_mcp_servers(&dir, &extras, ".nexus").unwrap();
+        merge_extra_mcp_servers(&dir, &extras, &extras, ".nexus").unwrap();
 
         let result = fs::read_to_string(dir.join("opencode.json")).unwrap();
         assert!(
@@ -2761,7 +3046,9 @@ mod tests {
             },
         );
 
-        install_plugins(&dir, &plugins).await.unwrap();
+        install_plugins(&dir, &plugins, &digests(&dir, &plugins))
+            .await
+            .unwrap();
 
         let dest = plugins_dir.join("my-plugin.ts");
         assert!(dest.exists(), "plugin must be copied to .opencode/plugins/");
@@ -2799,7 +3086,9 @@ mod tests {
         );
         plugins.insert("rel-out".to_string(), def("../outside.ts", "rel.ts"));
 
-        install_plugins(&dir, &plugins).await.unwrap();
+        install_plugins(&dir, &plugins, &digests(&dir, &plugins))
+            .await
+            .unwrap();
 
         assert!(!dir.join(".git/hooks/post-merge").exists());
         assert!(!dir.join(".opencode/plugins/stolen.ts").exists());
@@ -2827,7 +3116,9 @@ mod tests {
                 filename: Some("p.ts".to_string()),
             },
         );
-        install_plugins(&dir, &plugins).await.unwrap();
+        install_plugins(&dir, &plugins, &digests(&dir, &plugins))
+            .await
+            .unwrap();
         let mode = fs::metadata(dir.join(".opencode/plugins/p.ts"))
             .unwrap()
             .permissions()
@@ -2853,7 +3144,9 @@ mod tests {
         );
 
         // Should not error, just warn
-        install_plugins(&dir, &plugins).await.unwrap();
+        install_plugins(&dir, &plugins, &digests(&dir, &plugins))
+            .await
+            .unwrap();
 
         let dest = dir.join(".opencode/plugins/plugin.ts");
         assert!(

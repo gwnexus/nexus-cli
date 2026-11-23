@@ -45,6 +45,8 @@ pub enum Kind {
     DevboxScript,
     DevboxConfig,
     SkillScript,
+    /// A git hook the CLI installs (the shadow guard `commit-msg` hook).
+    GitHook,
 }
 
 impl Kind {
@@ -62,6 +64,7 @@ impl Kind {
             Kind::DevboxScript => "devbox_script",
             Kind::DevboxConfig => "devbox_config",
             Kind::SkillScript => "skill_script",
+            Kind::GitHook => "git_hook",
         }
     }
 }
@@ -97,6 +100,8 @@ enum Slot {
     SkillBody(usize),
     SkillResource(usize, usize),
     Workspace,
+    /// A slug of `af_export.plugins`, downloaded from the built-in registry.
+    RegistryPlugin(String),
 }
 
 /// One executable item of an export, as the CLI would write it.
@@ -215,6 +220,101 @@ fn read_file(workspace: &Path, rel: &str) -> Option<String> {
     fs::read_to_string(workspace.join(rel)).ok()
 }
 
+/// The item for a git hook the CLI installs: `target` as shown, `script`
+/// as written, `local` the hook on disk.
+pub fn git_hook_item(target: &str, script: &str, local: Option<String>) -> Item {
+    Item {
+        kind: Kind::GitHook,
+        id: target.to_string(),
+        target_path: target.to_string(),
+        command: None,
+        content: script.to_string(),
+        installed: local.as_deref() == Some(script),
+        local,
+        fingerprint: sha256_hex(script),
+        server_hash: None,
+        slot: Slot::Workspace,
+    }
+}
+
+/// The registry file name of each slug in `af.plugins` (OpenCode only).
+fn registry_targets(af: &AgentFileExportResponse) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = super::init::resolve_platform_plugins(&af.plugins)
+        .into_iter()
+        .map(|(slug, def)| {
+            let file = def.filename.unwrap_or_else(|| format!("{slug}.ts"));
+            (slug, format!(".opencode/plugins/{file}"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Registry plugins the CLI would download: one item per slug whose file
+/// is not already delivered as an agent file. The item is the source URL
+/// (the file is fetched later), so a changed URL asks again.
+fn registry_plugin_items(workspace: &Path, af: &AgentFileExportResponse) -> Vec<Item> {
+    let registry = super::init::resolve_platform_plugins(&af.plugins);
+    registry_targets(af)
+        .into_iter()
+        .filter(|(_, target)| !af.agent_files.iter().any(|f| &f.target_path == target))
+        .map(|(slug, target)| {
+            let url = registry[&slug].url.clone().unwrap_or_default();
+            let content = format!("download {url}\n");
+            Item {
+                kind: Kind::OpencodePlugin,
+                id: target.clone(),
+                installed: false,
+                local: read_file(workspace, &target),
+                target_path: target,
+                command: None,
+                fingerprint: sha256_hex(&format!("{slug}\n{content}")),
+                content,
+                server_hash: None,
+                slot: Slot::RegistryPlugin(slug),
+            }
+        })
+        .collect()
+}
+
+/// An item for executable content from the project's own config (for
+/// example `[mcp_extra]` in `.nexus/config.toml`), approved by content.
+pub fn config_item(kind: Kind, id: &str, target: &str, content: String) -> Item {
+    Item {
+        kind,
+        id: id.to_string(),
+        target_path: target.to_string(),
+        command: None,
+        fingerprint: sha256_hex(&content),
+        content,
+        local: None,
+        installed: false,
+        server_hash: None,
+        slot: Slot::Workspace,
+    }
+}
+
+/// Whether a reset target (a path, or `.claude/settings.json#<key>`)
+/// writes `item`.
+fn reset_target_covers(target: &str, item: &Item) -> bool {
+    match target.split_once('#') {
+        Some((file, key)) => {
+            item.target_path == file
+                && match item.kind {
+                    Kind::ClaudePlugin => {
+                        key == "enabledPlugins" || key == format!("enabledPlugins.{}", item.id)
+                    }
+                    Kind::ClaudeMarketplace => {
+                        key == "extraKnownMarketplaces"
+                            || key == format!("extraKnownMarketplaces.{}", item.id)
+                    }
+                    _ => item.id == key || item.id.starts_with(&format!("{key}.")),
+                }
+        }
+        None => item.target_path == target,
+    }
+}
+
 /// An item for a whole file written as is.
 fn file_item(workspace: &Path, kind: Kind, id: &str, target: &str, body: &str, slot: Slot) -> Item {
     let local = read_file(workspace, target);
@@ -271,6 +371,10 @@ pub fn collect_agent_export(
             server_hash: Some(sha256_hex(&f.body)),
             slot: Slot::AgentFile(i),
         });
+    }
+
+    if !is_claude {
+        items.extend(registry_plugin_items(workspace, af));
     }
 
     let target = if is_claude {
@@ -971,6 +1075,80 @@ impl Gate {
         }
     }
 
+    /// Gate one item the CLI writes on its own (no server declaration):
+    /// `true` when it may be written.
+    pub fn local(&mut self, item: &Item) -> bool {
+        self.resolve(std::slice::from_ref(item), &[], &mut prompt)
+            .is_empty()
+    }
+
+    /// Gate the executable content a `nexus reset` would write. `targets`
+    /// are the selected entries: a path, or `.claude/settings.json#<key>`,
+    /// with the content reset writes. Returns the targets to leave alone.
+    pub fn reset(
+        &mut self,
+        workspace: &Path,
+        af: &AgentFileExportResponse,
+        is_claude: bool,
+        agentic_root: &str,
+        targets: &[(String, Option<String>)],
+    ) -> HashSet<String> {
+        let export_items = collect_agent_export(workspace, af, is_claude, agentic_root);
+        let mut items = Vec::new();
+        let mut owner = Vec::new();
+        for (target, desired) in targets {
+            let matched: Vec<&Item> = export_items
+                .iter()
+                .filter(|i| reset_target_covers(target, i))
+                .collect();
+            if matched.is_empty() {
+                // Not in the agent export (workspace files, rendered skill
+                // files): a script, or Markdown with inline shell (a skill
+                // body or command), is gated by its content.
+                if let Some(body) = desired
+                    .as_deref()
+                    .filter(|b| is_script(target, b) || has_inline_shell(b))
+                {
+                    let kind = if target == "devbox.json" {
+                        Kind::DevboxConfig
+                    } else if has_inline_shell(body) {
+                        Kind::SkillScript
+                    } else {
+                        Kind::DevboxScript
+                    };
+                    items.push(file_item(
+                        workspace,
+                        kind,
+                        target,
+                        target,
+                        body,
+                        Slot::Workspace,
+                    ));
+                    owner.push(target.clone());
+                }
+            }
+            for item in matched {
+                items.push(item.clone());
+                owner.push(target.clone());
+            }
+            if target == "devbox.json" {
+                if let Some(body) = desired.as_deref() {
+                    items.push(file_item(
+                        workspace,
+                        Kind::DevboxConfig,
+                        target,
+                        target,
+                        body,
+                        Slot::Workspace,
+                    ));
+                    owner.push(target.clone());
+                }
+            }
+        }
+        let refused = self.resolve(&items, &af.executables, &mut prompt);
+        refused.into_iter().map(|i| owner[i].clone()).collect()
+    }
+
     /// Gate a v2 workspace export; returns the paths to leave untouched.
     pub fn workspace_v2(
         &mut self,
@@ -1335,6 +1513,19 @@ fn hold_agent_export(
     let settings = read_json(workspace, ".claude/settings.json");
     let mut drop_files = Vec::new();
     let mut drop_hooks = Vec::new();
+    let mut drop_slugs: Vec<String> = Vec::new();
+    // A refused plugin file is not fetched from the registry instead.
+    let registry = registry_targets(af);
+    for item in refused {
+        if matches!(item.slot, Slot::AgentFile(_)) {
+            drop_slugs.extend(
+                registry
+                    .iter()
+                    .filter(|(_, t)| *t == item.target_path)
+                    .map(|(s, _)| s.clone()),
+            );
+        }
+    }
     for item in refused {
         match &item.slot {
             Slot::AgentFile(i) => match item.local {
@@ -1404,9 +1595,11 @@ fn hold_agent_export(
                     }
                 }
             }
+            Slot::RegistryPlugin(slug) => drop_slugs.push(slug.clone()),
             Slot::SkillBody(_) | Slot::SkillResource(..) | Slot::Workspace => {}
         }
     }
+    af.plugins.retain(|slug| !drop_slugs.contains(slug));
     drop_files.sort_unstable();
     for i in drop_files.into_iter().rev() {
         af.agent_files.remove(i);
@@ -1922,6 +2115,125 @@ mod tests {
         let hook = items.iter().find(|i| i.kind == Kind::ClaudeHook).unwrap();
         assert!(!hook.installed);
         assert!(hook.content.contains("Stop matcher=\"Bash\""));
+    }
+
+    #[test]
+    fn test_registry_plugins_need_consent() {
+        let cfg = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let mut export = agent_export();
+        export.plugins = vec!["nexus-cost-control".into(), "nexus-compaction-plus".into()];
+        // One plugin is also exported as an agent file: that item covers it.
+        export.agent_files.push(
+            serde_json::from_value(json!({
+                "file_key": "p", "target_path": ".opencode/plugins/nexus-compaction-plus.ts",
+                "name": "p", "category": "agent", "version": 1,
+                "body": "export default {}\n"
+            }))
+            .unwrap(),
+        );
+        let items = collect_agent_export(ws.path(), &export, false, ".nexus");
+        let registry: Vec<&Item> = items
+            .iter()
+            .filter(|i| matches!(i.slot, Slot::RegistryPlugin(_)))
+            .collect();
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry[0].target_path,
+            ".opencode/plugins/nexus-cost-control.ts"
+        );
+        assert!(registry[0].content.contains("https://"));
+        // Refused: neither the registry slug nor the refused agent file's
+        // slug is downloaded.
+        let mut gate = Gate::with(store_in(cfg.path(), ws.path()), Answer::Refuse);
+        gate.exports(ws.path(), Some(&mut export), None, false, ".nexus");
+        assert!(export.plugins.is_empty(), "{:?}", export.plugins);
+        // Claude projects never download registry plugins.
+        let claude = collect_agent_export(ws.path(), &agent_export(), true, ".nexus");
+        assert!(!claude
+            .iter()
+            .any(|i| matches!(i.slot, Slot::RegistryPlugin(_))));
+    }
+
+    #[test]
+    fn test_git_hook_is_adopted_only_when_identical() {
+        let cfg = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let mut gate = Gate::with(store_in(cfg.path(), ws.path()), Answer::Refuse);
+        assert!(!gate.local(&git_hook_item(".git/hooks/commit-msg", "#!/bin/sh\n", None)));
+        assert!(!gate.local(&git_hook_item(
+            ".git/hooks/commit-msg",
+            "#!/bin/sh\n",
+            Some("#!/bin/sh\necho other\n".into())
+        )));
+        assert!(gate.local(&git_hook_item(
+            ".git/hooks/commit-msg",
+            "#!/bin/sh\n",
+            Some("#!/bin/sh\n".into())
+        )));
+        let mut trusted = Gate::with(store_in(cfg.path(), ws.path()), Answer::Trust);
+        assert!(trusted.local(&git_hook_item(
+            ".git/hooks/commit-msg",
+            "#!/bin/sh\nx\n",
+            None
+        )));
+    }
+
+    #[test]
+    fn test_reset_gates_executable_targets_only() {
+        let cfg = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let mut gate = Gate::with(store_in(cfg.path(), ws.path()), Answer::Refuse);
+        let targets = vec![
+            (".mcp.json".to_string(), Some("{}\n".to_string())),
+            (
+                "scripts/setup.sh".to_string(),
+                Some("#!/bin/sh\necho\n".to_string()),
+            ),
+            ("docs/notes.md".to_string(), Some("# notes\n".to_string())),
+            (
+                ".claude/skills/x/SKILL.md".to_string(),
+                Some("---\nname: x\n---\nRun !`date`\n".to_string()),
+            ),
+            (
+                "devbox.json".to_string(),
+                Some("{\"shell\":{}}\n".to_string()),
+            ),
+        ];
+        let held = gate.reset(ws.path(), &agent_export(), true, ".nexus", &targets);
+        assert!(held.contains(".mcp.json"));
+        assert!(held.contains("scripts/setup.sh"));
+        assert!(held.contains("devbox.json"));
+        assert!(!held.contains("docs/notes.md"));
+        assert!(held.contains(".claude/skills/x/SKILL.md"));
+    }
+
+    #[test]
+    fn test_reset_target_covers_settings_keys() {
+        let plugin = |id: &str| Item {
+            kind: Kind::ClaudePlugin,
+            id: id.into(),
+            target_path: ".claude/settings.json".into(),
+            command: None,
+            content: String::new(),
+            local: None,
+            fingerprint: String::new(),
+            installed: false,
+            server_hash: None,
+            slot: Slot::Plugin(id.into()),
+        };
+        let p = plugin("core@nexus");
+        assert!(reset_target_covers(
+            ".claude/settings.json#enabledPlugins",
+            &p
+        ));
+        assert!(reset_target_covers(
+            ".claude/settings.json#enabledPlugins.core@nexus",
+            &p
+        ));
+        assert!(!reset_target_covers(".claude/settings.json#statusLine", &p));
+        // A reset of the whole file writes every entry in it.
+        assert!(reset_target_covers(".claude/settings.json", &p));
     }
 
     #[test]

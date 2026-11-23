@@ -458,7 +458,31 @@ pub async fn reset(
         }
     }
 
+    // Executable content needs consent like in nexus pull; -y only skips
+    // the confirmation above. Content without executables resets as before.
+    let targets: Vec<(String, Option<String>)> = selected
+        .iter()
+        .map(|e| (e.path.clone(), e.desired.clone()))
+        .collect();
+    let mut consent = super::consent::Gate::open(&workspace, false);
+    let held = consent.reset(
+        &workspace,
+        &state.export,
+        state.is_claude,
+        &state.agentic_root,
+        &targets,
+    );
+    consent.finish();
+
     for e in selected {
+        if held.contains(&e.path) {
+            println!(
+                "   {} {}: executable content not approved; left as is (review it with nexus pull)",
+                style("--").yellow(),
+                e.path
+            );
+            continue;
+        }
         match reset_entry(&state, e)? {
             Some(note) => println!("   {} {}: {}", style("--").yellow(), e.path, note),
             None => println!("   {} {} restored", style("~").bold().blue(), e.path),
