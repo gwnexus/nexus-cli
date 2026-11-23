@@ -393,9 +393,21 @@ pub fn write_token_file(
             "{rel} is a symlink; refusing to write a token through it (replace it with a regular file)"
         );
     }
-    try_ensure_git_excluded_in(workspace, excludes, "token-bearing files").map_err(|e| {
-        anyhow::anyhow!("{rel} carries a token, but .git/info/exclude could not be updated: {e}")
-    })?;
+    let exclude_failed = |e: std::io::Error| {
+        anyhow::anyhow!("{rel} carries a token, but it could not be git-excluded: {e}")
+    };
+    try_ensure_git_excluded_in(workspace, excludes, "token-bearing files")
+        .map_err(exclude_failed)?;
+    // A later `!` rule (or a .gitignore negation) can still un-ignore it.
+    if git_ignores(workspace, rel) == Some(false) {
+        write_excludes(workspace, excludes, "token-bearing files", true).map_err(exclude_failed)?;
+        if git_ignores(workspace, rel) == Some(false) {
+            anyhow::bail!(
+                "{rel} carries a token, but git does not ignore it (a negating rule in \
+                 .gitignore or .git/info/exclude wins); remove that rule and run again"
+            );
+        }
+    }
     nexus_core::fsutil::write_private_atomic(&path, content.as_bytes())
         .map_err(|e| anyhow::anyhow!("failed to write {rel}: {e}"))?;
     warn_if_token_file_tracked(workspace, rel);
@@ -417,11 +429,70 @@ pub fn try_ensure_git_excluded_in(
     paths: &[&str],
     reason: &str,
 ) -> std::io::Result<()> {
-    let git_dir = match find_git_dir_from(start.to_path_buf()) {
-        Ok(d) => d,
-        Err(_) => return Ok(()),
+    write_excludes(start, paths, reason, false)
+}
+
+/// The exclude file git uses for the repository containing `start`, also
+/// in linked worktrees and submodules (where `.git` is a file). `None`
+/// outside a repository; an error when git metadata exists above `start`
+/// but cannot be resolved.
+fn exclude_file_for(start: &Path) -> std::io::Result<Option<PathBuf>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    if let Some(out) = out.ok().filter(|o| o.status.success()) {
+        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !raw.is_empty() {
+            let path = PathBuf::from(raw);
+            return Ok(Some(if path.is_absolute() {
+                path
+            } else {
+                start.join(path)
+            }));
+        }
+    }
+    if let Ok(git_dir) = find_git_dir_from(start.to_path_buf()) {
+        return Ok(Some(git_dir.join("info").join("exclude")));
+    }
+    if start.ancestors().any(|d| d.join(".git").exists()) {
+        return Err(std::io::Error::other(
+            "git metadata (.git) found, but its exclude file could not be resolved",
+        ));
+    }
+    Ok(None)
+}
+
+/// Whether git ignores `rel` in the repository containing `workspace`,
+/// by the ignore rules alone (also for a tracked file). `None` outside a
+/// repository or when git cannot answer.
+fn git_ignores(workspace: &Path, rel: &str) -> Option<bool> {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["check-ignore", "-q", "--no-index", "--"])
+        .arg(rel)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Add `paths` to the exclude file; with `force`, append them again even
+/// when they are listed already (so they come after a negating `!` line).
+fn write_excludes(start: &Path, paths: &[&str], reason: &str, force: bool) -> std::io::Result<()> {
+    let Some(exclude_path) = exclude_file_for(start)? else {
+        return Ok(());
     };
-    let exclude_path = git_dir.join("info").join("exclude");
 
     // Ensure parent directory exists
     if let Some(parent) = exclude_path.parent() {
@@ -436,7 +507,7 @@ pub fn try_ensure_git_excluded_in(
 
     let mut additions = Vec::new();
     for path in paths {
-        if !existing.lines().any(|line| line.trim() == *path) {
+        if force || !existing.lines().any(|line| line.trim() == *path) {
             additions.push(*path);
         }
     }
@@ -1883,6 +1954,48 @@ mod tests {
         assert!(exclude.lines().any(|l| l.trim() == ".mcp.json"));
     }
 
+    #[test]
+    fn test_write_token_file_overrides_a_negating_rule() {
+        let dir = make_temp_repo_with_commit("README.md", "x");
+        let exclude = dir.path().join(".git/info/exclude");
+        fs::write(&exclude, ".mcp.json\n!.mcp.json\n").unwrap();
+        write_token_file(dir.path(), ".mcp.json", "secret", &[".mcp.json"]).unwrap();
+        assert_eq!(git_ignores(dir.path(), ".mcp.json"), Some(true));
+    }
+
+    #[test]
+    fn test_write_token_file_refuses_when_gitignore_negation_wins() {
+        let dir = make_temp_repo_with_commit("README.md", "x");
+        // .gitignore beats .git/info/exclude, so the exclude cannot fix it.
+        fs::write(dir.path().join(".gitignore"), "!.mcp.json\n").unwrap();
+        let err = write_token_file(dir.path(), ".mcp.json", "secret", &[".mcp.json"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not ignore"), "{err}");
+        assert!(!dir.path().join(".mcp.json").exists());
+    }
+
+    #[test]
+    fn test_write_token_file_in_a_linked_worktree() {
+        let dir = make_temp_repo_with_commit("README.md", "x");
+        let wt = tempfile::tempdir().unwrap();
+        let wt_path = wt.path().join("wt");
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["worktree", "add", "-q", "--detach"])
+            .arg(&wt_path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok);
+        assert!(wt_path.join(".git").is_file());
+        write_token_file(&wt_path, ".mcp.json", "secret", &[".mcp.json"]).unwrap();
+        assert_eq!(git_ignores(&wt_path, ".mcp.json"), Some(true));
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_write_token_file_refuses_a_symlink() {
@@ -1901,19 +2014,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_write_token_file_stops_when_the_exclude_cannot_be_written() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = make_temp_repo_with_commit("README.md", "x");
-        let info = dir.path().join(".git/info");
-        fs::create_dir_all(&info).unwrap();
-        let exclude = info.join("exclude");
-        fs::write(&exclude, "").unwrap();
-        fs::set_permissions(&exclude, fs::Permissions::from_mode(0o400)).unwrap();
+        // A directory in place of the exclude file cannot be read or written.
+        let exclude = dir.path().join(".git/info/exclude");
+        let _ = fs::remove_file(&exclude);
+        fs::create_dir_all(&exclude).unwrap();
         let result = write_token_file(dir.path(), ".mcp.json", "secret", &[".mcp.json"]);
-        fs::set_permissions(&exclude, fs::Permissions::from_mode(0o600)).unwrap();
-        if result.is_ok() {
-            // Running as root ignores file permissions; nothing to check.
-            return;
-        }
+        assert!(result.is_err());
         assert!(!dir.path().join(".mcp.json").exists());
     }
 

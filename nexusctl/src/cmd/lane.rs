@@ -67,6 +67,13 @@ pub(crate) fn load_cache(workspace: &Path, agentic_root: &str) -> Option<LaneCac
     serde_json::from_str(&raw).ok()
 }
 
+/// The lane cache when it belongs to the workspace's linked project; a cache
+/// from before a relink (or one without a project id) is ignored.
+fn load_project_cache(workspace: &Path, agentic_root: &str) -> Option<LaneCache> {
+    let project_id = config::resolve_project_id(None, Some(workspace)).ok()?;
+    load_cache(workspace, agentic_root).filter(|c| c.project_id.as_deref() == Some(&project_id))
+}
+
 /// The lane cache content of an export, `None` without lane actors.
 fn cache_from_export(export: &AgentFileExportResponse) -> Option<LaneCache> {
     let actors = export.claude_lane_actors.clone().unwrap_or_default();
@@ -631,7 +638,7 @@ pub(crate) fn apply_actor_panes(
     agentic_root: &str,
     leading_args: &mut [String],
 ) -> anyhow::Result<CheckResult> {
-    let actors = load_cache(workspace, agentic_root)
+    let actors = load_project_cache(workspace, agentic_root)
         .map(|c| c.actors)
         .unwrap_or_default();
     if actors.is_empty() {
@@ -693,7 +700,8 @@ fn model_ids(body: &serde_json::Value) -> Vec<String> {
 /// Local-lane rows for `nexus doctor claude`; empty without lane actors.
 pub(crate) async fn doctor_checks(workspace: &Path) -> Vec<(&'static str, CheckResult)> {
     let agentic_root = super::run::resolve_agentic_root(workspace);
-    let Some(cache) = load_cache(workspace, &agentic_root).filter(|c| !c.actors.is_empty()) else {
+    let Some(cache) = load_project_cache(workspace, &agentic_root).filter(|c| !c.actors.is_empty())
+    else {
         return Vec::new();
     };
     let mut rows = vec![(
@@ -707,14 +715,8 @@ pub(crate) async fn doctor_checks(workspace: &Path) -> Vec<(&'static str, CheckR
                 .join(", "),
         ),
     )];
-    let project_id = config::resolve_project_id(None, Some(workspace)).ok();
-    // A cache written for another project (before a relink) has no say
-    // about where this project's token goes.
-    let cache_base = cache
-        .base_url
-        .as_deref()
-        .filter(|_| cache.project_id.is_some() && cache.project_id == project_id);
-    let token = project_id.as_deref().and_then(resolve_project_token);
+    let cache_base = cache.base_url.as_deref();
+    let token = cache.project_id.as_deref().and_then(resolve_project_token);
     // Only a well-formed project token is ever sent to the gateway.
     let token_ok = token
         .as_deref()

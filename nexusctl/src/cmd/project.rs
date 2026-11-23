@@ -129,7 +129,8 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
             // The workspace must already use the replacement: revoking the
             // previous token while `.env.nexus.local` still holds it would
             // cut this workspace off.
-            if owns_workspace && workspace_env_token(&workspace).is_some_and(|t| t != current.token)
+            if owns_workspace
+                && workspace_env_token(&workspace)?.is_some_and(|t| t != current.token)
             {
                 anyhow::bail!(
                     "{ENV_LOCAL_FILE} still holds the previous project token; run \
@@ -157,6 +158,25 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
             );
         }
         return Ok(());
+    }
+
+    // A rotation is still pending: issuing another one would drop the
+    // record of the token before it, which then could never be revoked.
+    if current.previous_token_id.is_some() {
+        if owns_workspace && workspace_env_token(&workspace)?.is_some_and(|t| t != current.token) {
+            // The last rotation could not update the workspace; finish that.
+            sync_env_token(&workspace, &current.token)?;
+            println!(
+                "{} {ENV_LOCAL_FILE} now holds the replacement token from the pending rotation. \
+                 Run '{}' to revoke the previous one.",
+                style("OK").bold().green(),
+                style("nexus project rotate --finalize").bold()
+            );
+            return Ok(());
+        }
+        anyhow::bail!(
+            "a rotation is still pending; run nexus project rotate --finalize before rotating again"
+        );
     }
 
     println!(
@@ -205,9 +225,21 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
 pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<()> {
     let project_id = resolve_project_id(project_id)?;
     let mut store = ProjectTokenStore::load()?;
+    let workspace = std::env::current_dir()?;
+    let owns_workspace = workspace_linked_to(&workspace, &project_id);
     let entry = match store.get(&project_id).cloned() {
         Some(e) => e,
         None => {
+            // An earlier unlink may have stopped before the workspace was
+            // cleared; finish that part.
+            if owns_workspace && workspace_env_token(&workspace)?.is_some() {
+                clear_env_token(&workspace)?;
+                println!(
+                    "{} Removed the leftover project token from {ENV_LOCAL_FILE}.",
+                    style("OK").bold().green()
+                );
+                return Ok(());
+            }
             println!(
                 "{} No project token stored for this project.",
                 style("--").bold().yellow()
@@ -242,15 +274,15 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
         }
     }
 
-    store.remove(&project_id);
-    store.save()?;
-
-    let workspace = std::env::current_dir()?;
-    if workspace_linked_to(&workspace, &project_id) {
+    // Workspace first: when it fails, the store entry stays and a retry
+    // can finish the cleanup.
+    if owns_workspace {
         clear_env_token(&workspace)?;
     } else {
         print_workspace_skipped(&project_id);
     }
+    store.remove(&project_id);
+    store.save()?;
 
     println!();
     println!(
@@ -652,14 +684,34 @@ fn print_workspace_skipped(project_id: &str) {
     );
 }
 
-/// The `NEXUS_PROJECT_TOKEN` value in the workspace `.env.nexus.local`.
-fn workspace_env_token(workspace: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(workspace.join(ENV_LOCAL_FILE)).ok()?;
-    let prefix = format!("{PROJECT_TOKEN_ENV}=");
+/// The `NEXUS_PROJECT_TOKEN` value in the workspace `.env.nexus.local` (the
+/// last assignment, `export` and quotes allowed). A missing file is `None`;
+/// any other read error is returned, never taken as "no token".
+fn workspace_env_token(workspace: &Path) -> anyhow::Result<Option<String>> {
+    let content = read_env_local(&workspace.join(ENV_LOCAL_FILE))?;
+    Ok(env_var_value(&content, PROJECT_TOKEN_ENV))
+}
+
+/// The value of the last `KEY=value` assignment of `key`, with the same
+/// key rules as [`upsert_env_var`] and surrounding quotes removed.
+fn env_var_value(content: &str, key: &str) -> Option<String> {
     content
         .lines()
-        .filter_map(|l| l.trim().strip_prefix(&prefix))
-        .map(|v| v.trim().to_string())
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let (k, v) = trimmed
+                .strip_prefix("export ")
+                .unwrap_or(trimmed)
+                .split_once('=')?;
+            (k.trim() == key).then(|| {
+                let v = v.trim();
+                v.strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .or_else(|| v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                    .unwrap_or(v)
+                    .to_string()
+            })
+        })
         .next_back()
 }
 
@@ -688,8 +740,8 @@ fn clear_env_token(workspace: &Path) -> anyhow::Result<()> {
     }
     let existing = read_env_local(&path)?;
     let updated = remove_env_var(&existing, PROJECT_TOKEN_ENV);
-    nexus_core::fsutil::write_private_atomic(&path, updated.as_bytes())?;
-    Ok(())
+    // Other entries may be secrets too: same guarded write as the token.
+    super::shadow::write_token_file(workspace, ENV_LOCAL_FILE, &updated, &[ENV_LOCAL_FILE])
 }
 
 /// The current `.env.nexus.local`, empty when it does not exist. Any other
@@ -851,13 +903,34 @@ mod tests {
     #[test]
     fn test_workspace_env_token_reads_the_last_value() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(workspace_env_token(dir.path()), None);
+        assert_eq!(workspace_env_token(dir.path()).unwrap(), None);
         std::fs::write(
             dir.path().join(ENV_LOCAL_FILE),
             "OTHER=1\nNEXUS_PROJECT_TOKEN=old\nNEXUS_PROJECT_TOKEN=new\n",
         )
         .unwrap();
-        assert_eq!(workspace_env_token(dir.path()).as_deref(), Some("new"));
+        assert_eq!(
+            workspace_env_token(dir.path()).unwrap().as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            env_var_value("export NEXUS_PROJECT_TOKEN=\"q\"\n", "NEXUS_PROJECT_TOKEN").as_deref(),
+            Some("q")
+        );
+        assert_eq!(
+            env_var_value(" NEXUS_PROJECT_TOKEN = 'a'\n", "NEXUS_PROJECT_TOKEN").as_deref(),
+            Some("a")
+        );
+        assert_eq!(env_var_value("OTHER=1\n", "NEXUS_PROJECT_TOKEN"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_workspace_env_token_reports_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory in place of the file cannot be read: an error, not "no token".
+        std::fs::create_dir(dir.path().join(ENV_LOCAL_FILE)).unwrap();
+        assert!(workspace_env_token(dir.path()).is_err());
     }
 
     #[test]

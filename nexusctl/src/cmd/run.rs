@@ -912,7 +912,13 @@ fn sync_mcp_credentials(
         if nexus_core::config::trust::is_git_tracked(&path) {
             continue;
         }
-        let raw = fs::read_to_string(&path)?;
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn_mcp_sync_failed(rel, &e.to_string());
+                continue;
+            }
+        };
         let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) else {
             continue;
         };
@@ -931,12 +937,22 @@ fn sync_mcp_credentials(
         }
         if dirty {
             let out = serde_json::to_string_pretty(&root)? + "\n";
-            super::shadow::write_token_file(workspace, rel, &out, &[rel])?;
-            changed.push(rel.to_string());
+            // One file failing does not keep the other one stale.
+            match super::shadow::write_token_file(workspace, rel, &out, &[rel]) {
+                Ok(()) => changed.push(rel.to_string()),
+                Err(e) => warn_mcp_sync_failed(rel, &e.to_string()),
+            }
         }
     }
 
     Ok(changed)
+}
+
+fn warn_mcp_sync_failed(rel: &str, error: &str) {
+    println!(
+        "   {} could not sync Nexus credentials into {rel}: {error}",
+        style("!").bold().yellow()
+    );
 }
 
 // ---------------------------------------------------------------------------
