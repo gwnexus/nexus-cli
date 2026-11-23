@@ -485,15 +485,27 @@ fn apply_ssh_command(dir: &Path, key: &str, assume_yes: bool) -> Result<()> {
     Ok(())
 }
 
+/// The git credential helper for a profile: `gh auth git-credential` with
+/// the profile's `GH_CONFIG_DIR` and without the ambient token variables,
+/// which `gh` would otherwise prefer over the profile's login. Git runs the
+/// helper in the caller's environment and passes the protocol on stdin.
+fn credential_helper(profile_dir: &Path) -> String {
+    let unset: String = GH_TOKEN_ENV_VARS
+        .iter()
+        .map(|v| format!("-u {v} "))
+        .collect();
+    format!(
+        "!env {unset}GH_CONFIG_DIR={} gh auth git-credential",
+        env_value(&profile_dir.to_string_lossy())
+    )
+}
+
 /// Route git over HTTPS to `host` through the profile:
 /// `credential.https://<host>.helper` reset, then `gh auth git-credential`
 /// with the profile's `GH_CONFIG_DIR`. Local config only.
 fn apply_credential_helper(dir: &Path, host: &str, profile_dir: &Path) -> Result<()> {
     let key = format!("credential.https://{host}.helper");
-    let helper = format!(
-        "!GH_CONFIG_DIR={} gh auth git-credential",
-        env_value(&profile_dir.to_string_lossy())
-    );
+    let helper = credential_helper(profile_dir);
     let current = git_out(dir, &["config", "--local", "--get-all", &key]).unwrap_or_default();
     if current.lines().collect::<Vec<_>>() == ["", helper.as_str()] {
         return Ok(());
@@ -1384,7 +1396,7 @@ mod tests {
             values.lines().collect::<Vec<_>>(),
             [
                 "",
-                "!GH_CONFIG_DIR='/abs/gh profiles/octocat' gh auth git-credential"
+                "!env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN GH_CONFIG_DIR='/abs/gh profiles/octocat' gh auth git-credential"
             ]
         );
     }
