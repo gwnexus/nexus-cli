@@ -219,16 +219,27 @@ fn local_credentials_usable(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
-    if crate::config::trust::is_git_tracked(path) {
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| {
-            eprintln!(
-                "warning: ignoring {}: it is tracked by git, so the repository chose it; \
-                 using the global login instead (untrack it with git rm --cached)",
-                path.display()
-            );
-        });
-        return false;
+    match crate::config::trust::git_tracking(path) {
+        Some(false) => {}
+        tracked => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                if tracked.is_some() {
+                    eprintln!(
+                        "warning: ignoring {}: it is tracked by git, so the repository chose it; \
+                         using the global login instead (untrack it with git rm --cached)",
+                        path.display()
+                    );
+                } else {
+                    eprintln!(
+                        "warning: ignoring {}: git could not confirm that it is untracked; \
+                         using the global login instead",
+                        path.display()
+                    );
+                }
+            });
+            return false;
+        }
     }
     #[cfg(unix)]
     {

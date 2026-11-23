@@ -165,12 +165,20 @@ fn repo_root(workspace: &Path) -> Option<std::path::PathBuf> {
         .filter(|p: &std::path::PathBuf| !p.as_os_str().is_empty())
 }
 
-/// Whether git ignores a file inside `.vault/`.
+/// Whether git ignores the `.vault` directory itself. A probe file inside
+/// is not enough: `.vault/*` with `!.vault/screenshots/` ignores the probe
+/// but reopens a subdirectory. Without the directory on disk git cannot
+/// apply a directory-only rule, so a file inside is probed instead.
 fn is_ignored(workspace: &Path) -> bool {
+    let probe = if workspace.join(VAULT_DIR).is_dir() {
+        VAULT_DIR
+    } else {
+        ".vault/x"
+    };
     Command::new("git")
         .arg("-C")
         .arg(workspace)
-        .args(["check-ignore", "-q", "--", ".vault/x"])
+        .args(["check-ignore", "-q", "--", probe])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -269,6 +277,19 @@ mod tests {
         assert!(r.created.is_empty());
         assert_eq!(r.ignore, IgnoreChange::AlreadyIgnored);
         assert_eq!(read(&dir.join(".gitignore")).matches(".vault/").count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_scaffold_adds_the_directory_when_a_subdirectory_is_reopened() {
+        let dir = repo("reopened");
+        fs::write(dir.join(".gitignore"), ".vault/*\n!.vault/screenshots/\n").unwrap();
+        let r = scaffold(&dir, Some("off"));
+        assert_eq!(r.ignore, IgnoreChange::Gitignore);
+        assert!(read(&dir.join(".gitignore"))
+            .lines()
+            .any(|l| l == ".vault/"));
+        assert!(is_ignored(&dir));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -874,6 +874,8 @@ fn active_projects(bindings: &[RunnerBinding]) -> BTreeSet<String> {
     bindings
         .iter()
         .filter(|b| b.mode_effective.as_deref().is_some_and(|m| m != "off"))
+        // The id names the queue files: one plain path component only.
+        .filter(|b| nexus_core::config::is_path_component_id(&b.project_id))
         .map(|b| b.project_id.clone())
         .collect()
 }
@@ -2071,6 +2073,17 @@ mod tests {
             &BTreeMap::new(),
         );
         assert!(none.get("cursors").is_none());
+    }
+
+    #[test]
+    fn test_active_projects_skips_ids_that_are_not_one_component() {
+        let b = |id: &str| RunnerBinding {
+            project_id: id.into(),
+            mode_effective: Some("notify".into()),
+            ..Default::default()
+        };
+        let active = active_projects(&[b(P), b("../escape"), b("a/b"), b(".."), b("/abs"), b("")]);
+        assert_eq!(active.into_iter().collect::<Vec<_>>(), vec![P.to_string()]);
     }
 
     #[test]

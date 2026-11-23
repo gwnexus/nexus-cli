@@ -560,10 +560,80 @@ pub fn project_config_path(from: Option<&std::path::Path>) -> Result<PathBuf, Er
     Ok(base.join(".nexus").join("config.toml"))
 }
 
+/// Whether `id` is safe as a single file or directory name: letters,
+/// digits, `-` and `_` only (project UUIDs and slugs). Server- or
+/// repository-supplied ids pass this before they are joined into a path.
+pub fn is_path_component_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// [`project_config_path`], refused when `.nexus` or `config.toml` is a
+/// symlink that resolves outside the workspace or into `.git`: reads and
+/// the cache writes would otherwise follow it to a file the repository
+/// picked.
+pub fn confined_project_config_path(from: Option<&std::path::Path>) -> Result<PathBuf, Error> {
+    let path = project_config_path(from)?;
+    let Some(base) = path.parent().and_then(|p| p.parent()) else {
+        return Ok(path);
+    };
+    let Ok(base_real) = std::fs::canonicalize(base) else {
+        return Ok(path);
+    };
+    // The git directory as it resolves: a symlink, or a `.git` file
+    // pointing elsewhere (`gitdir: <path>`).
+    let git_entry = base.join(".git");
+    let git_real = if std::fs::metadata(&git_entry).is_ok_and(|m| m.is_file()) {
+        std::fs::read_to_string(&git_entry)
+            .ok()
+            .and_then(|c| {
+                // As git reads it: terminal CR/LF bytes removed, then the
+                // `gitdir: ` prefix; spaces in the path are kept.
+                c.trim_end_matches(['\r', '\n'])
+                    .strip_prefix("gitdir: ")
+                    .map(|p| base.join(p))
+            })
+            .and_then(|p| std::fs::canonicalize(p).ok())
+    } else {
+        std::fs::canonicalize(&git_entry).ok()
+    };
+    let escapes = |p: &std::path::Path| -> bool {
+        if std::fs::symlink_metadata(p).is_err() {
+            return false;
+        }
+        match std::fs::canonicalize(p) {
+            Ok(real) => match real.strip_prefix(&base_real) {
+                Ok(rel) => {
+                    rel.components().any(|c| c.as_os_str() == ".git")
+                        || git_real.as_deref().is_some_and(|g| real.starts_with(g))
+                }
+                Err(_) => true,
+            },
+            // A dangling symlink: nothing to read, and a write would
+            // create its target wherever it points.
+            Err(_) => true,
+        }
+    };
+    // The directory and the file each: a `.nexus` outside the workspace
+    // with a `config.toml` pointing back inside is refused too.
+    let nexus_dir = path.parent().unwrap_or(base);
+    if escapes(nexus_dir) || escapes(&path) {
+        return Err(Error::Config(format!(
+            "{} resolves outside the workspace or into .git; refusing to use it \
+             (replace the symlink with a regular file)",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
 /// Load the project-local config from `.nexus/config.toml`.
 /// Returns `None` if the file does not exist.
 pub fn load_project_config(from: Option<&std::path::Path>) -> Result<Option<ProjectConfig>, Error> {
-    let path = project_config_path(from)?;
+    let path = confined_project_config_path(from)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -578,7 +648,7 @@ pub fn save_project_config(
     from: Option<&std::path::Path>,
     config: &ProjectConfig,
 ) -> Result<(), Error> {
-    let path = project_config_path(from)?;
+    let path = confined_project_config_path(from)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -590,7 +660,7 @@ pub fn save_project_config(
 /// Remove the `[project]` section from `.nexus/config.toml`.
 /// Preserves other sections (e.g. `[mcp]`).
 pub fn remove_project_section(from: Option<&std::path::Path>) -> Result<bool, Error> {
-    let path = project_config_path(from)?;
+    let path = confined_project_config_path(from)?;
     if !path.exists() {
         return Ok(false);
     }

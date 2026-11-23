@@ -500,3 +500,89 @@ fn test_config_code_signals_defaults_on_for_older_files() {
     let config: Config = toml::from_str("code_signals = false\n").unwrap();
     assert!(!config.code_signals);
 }
+
+#[cfg(unix)]
+#[test]
+fn test_project_config_symlink_out_of_the_workspace_is_refused() {
+    use nexus_core::config::{load_project_config, update_run_target};
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("victim.toml");
+    std::fs::write(
+        &target,
+        "[project]\nid = \"p\"\nslug = \"s\"\nname = \"n\"\n",
+    )
+    .unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink(&target, ws.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws.path())).is_err());
+    assert!(update_run_target(Some(ws.path()), None).is_err());
+    assert!(std::fs::read_to_string(&target)
+        .unwrap()
+        .contains("id = \"p\""));
+    // A symlinked .nexus directory is refused too.
+    let ws2 = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), ws2.path().join(".nexus")).unwrap();
+    assert!(load_project_config(Some(ws2.path())).is_err());
+    // A regular file inside the workspace still works.
+    let ws3 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws3.path().join(".nexus")).unwrap();
+    std::fs::copy(&target, ws3.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws3.path())).unwrap().is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_project_config_dir_outside_or_into_a_linked_git_is_refused() {
+    use nexus_core::config::load_project_config;
+    // `.nexus` outside the workspace, its config.toml pointing back in.
+    let ws = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("real.toml"), "").unwrap();
+    std::os::unix::fs::symlink(
+        ws.path().join("real.toml"),
+        outside.path().join("config.toml"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(outside.path(), ws.path().join(".nexus")).unwrap();
+    assert!(load_project_config(Some(ws.path())).is_err());
+    // `.git` is a symlink to an in-workspace directory; the config links
+    // into it.
+    let ws2 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws2.path().join("gitdata")).unwrap();
+    std::fs::write(ws2.path().join("gitdata/config"), "").unwrap();
+    std::os::unix::fs::symlink(ws2.path().join("gitdata"), ws2.path().join(".git")).unwrap();
+    std::fs::create_dir_all(ws2.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink("../.git/config", ws2.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws2.path())).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_project_config_into_a_gitfile_directory_is_refused() {
+    use nexus_core::config::load_project_config;
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join("admin")).unwrap();
+    std::fs::write(ws.path().join("admin/config.toml"), "").unwrap();
+    std::fs::write(ws.path().join(".git"), "gitdir: admin\n").unwrap();
+    std::fs::create_dir_all(ws.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink("../admin/config.toml", ws.path().join(".nexus/config.toml"))
+        .unwrap();
+    assert!(load_project_config(Some(ws.path())).is_err());
+    // A directory name with a trailing space is kept as written.
+    let ws2 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws2.path().join("admin ")).unwrap();
+    std::fs::write(ws2.path().join("admin /config"), "").unwrap();
+    std::fs::write(ws2.path().join(".git"), "gitdir: admin \n").unwrap();
+    std::fs::create_dir_all(ws2.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink("../admin /config", ws2.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws2.path())).is_err());
+    // A gitfile ending in a bare CR names `admin`.
+    let ws3 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws3.path().join("admin")).unwrap();
+    std::fs::write(ws3.path().join("admin/config"), "").unwrap();
+    std::fs::write(ws3.path().join(".git"), "gitdir: admin\r").unwrap();
+    std::fs::create_dir_all(ws3.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink("../admin/config", ws3.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws3.path())).is_err());
+}

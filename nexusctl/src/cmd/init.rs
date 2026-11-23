@@ -234,7 +234,9 @@ pub async fn run(
             // Cache the flavor in .nexus/config.toml so launch-time commands
             // (`nexus run`, `nexus preflight`) can pick the right artifacts and
             // binary offline.
-            let _ = config::update_agent_owner(Some(&target), tool_flavor.as_deref());
+            if let Err(e) = config::update_agent_owner(Some(&target), tool_flavor.as_deref()) {
+                eprintln!("  warning: .nexus/config.toml not updated: {e}");
+            }
             let is_claude = config::is_claude_owner(tool_flavor.as_deref());
             create_runtime_dir(&target, is_claude)?;
             let agentic_root = project_detail
@@ -780,6 +782,9 @@ fn create_nexus_dir(
     project_name: &str,
     project_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    // A `.nexus` or config symlinked out of the workspace (dangling
+    // included) is refused before anything is created through it.
+    config::confined_project_config_path(Some(target))?;
     let nexus_dir = target.join(".nexus");
     fs::create_dir_all(&nexus_dir)?;
 
@@ -3219,6 +3224,21 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_create_nexus_dir_refuses_a_dangling_config_symlink() {
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("created.toml");
+        let ws = tempfile::tempdir().unwrap();
+        fs::create_dir_all(ws.path().join(".nexus")).unwrap();
+        std::os::unix::fs::symlink(&victim, ws.path().join(".nexus/config.toml")).unwrap();
+        assert!(create_nexus_dir(ws.path(), "test", None).is_err());
+        assert!(!victim.exists());
+        let ok = tempfile::tempdir().unwrap();
+        create_nexus_dir(ok.path(), "test", None).unwrap();
+        assert!(ok.path().join(".nexus/config.toml").is_file());
     }
 
     #[test]

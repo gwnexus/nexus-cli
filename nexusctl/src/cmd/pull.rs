@@ -738,6 +738,10 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
+    // A refused .nexus/config.toml is an error, not "no project linked".
+    if cli_project_id.is_none() {
+        config::confined_project_config_path(Some(&workspace))?;
+    }
     // Resolve project ID from CLI flag or linked project
     let project_id = match config::resolve_project_id(cli_project_id, Some(&workspace)) {
         Ok(id) => id,
@@ -1234,10 +1238,18 @@ pub async fn run(
     // Cache the flavor (and the backend's run target) in .nexus/config.toml
     // so launch-time commands (`nexus run`, `nexus preflight`) can pick the
     // right artifacts and binary offline.
-    let _ = nexus_core::config::update_agent_owner(Some(&workspace), tool_flavor.as_deref());
-    if let Ok(ref af_export) = af_export_result {
-        let _ =
-            nexus_core::config::update_run_target(Some(&workspace), af_export.run_target.as_ref());
+    // Nonfatal, but a refused config (e.g. a symlink out of the
+    // workspace) is reported.
+    let cached = nexus_core::config::update_agent_owner(Some(&workspace), tool_flavor.as_deref())
+        .and_then(|_| match af_export_result {
+            Ok(ref af_export) => nexus_core::config::update_run_target(
+                Some(&workspace),
+                af_export.run_target.as_ref(),
+            ),
+            Err(_) => Ok(false),
+        });
+    if let Err(e) = cached {
+        eprintln!("  warning: .nexus/config.toml not updated: {e}");
     }
 
     let plugin_mcp_servers = af_export_result

@@ -36,32 +36,58 @@ pub fn approved_origins<'a>(
         .collect()
 }
 
-/// Whether `path` is tracked by the git repository it lives in. Outside a
-/// repository, or when git is unavailable, it is not. Parent directories
-/// that do not exist (yet) are fine: git runs in the nearest existing
-/// ancestor and checks the path relative to it, so an index entry for a
-/// file whose directory was removed still counts as tracked. A relative
-/// `path` is resolved against the current directory.
-pub fn is_git_tracked(path: &Path) -> bool {
-    let Ok(path) = std::path::absolute(path) else {
-        return false;
-    };
-    let Some(mut dir) = path.parent() else {
-        return false;
-    };
+/// Environment variables that point git at another repository, index or
+/// object store; removed for the tracking check.
+pub const GIT_LOCATION_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+/// Whether git tracks `path`: `Some(true)` tracked, `Some(false)` confirmed
+/// untracked (or outside any repository), `None` when git could not tell
+/// (not installed, unreadable index, refused repository). Parent
+/// directories that do not exist (yet) are fine: git runs in the nearest
+/// existing ancestor and checks the path relative to it, so an index entry
+/// for a file whose directory was removed still counts as tracked. A
+/// relative `path` is resolved against the current directory.
+pub fn git_tracking(path: &Path) -> Option<bool> {
+    let path = std::path::absolute(path).ok()?;
+    let mut dir = path.parent()?;
     while !dir.is_dir() {
-        match dir.parent() {
-            Some(p) => dir = p,
-            None => return false,
-        }
+        dir = dir.parent()?;
     }
-    let Ok(rel) = path.strip_prefix(dir) else {
-        return false;
-    };
+    let rel = path.strip_prefix(dir).ok()?;
     if rel.as_os_str().is_empty() {
-        return false;
+        return None;
     }
-    std::process::Command::new("git")
+    // No `.git` entry anywhere above the path: nothing can track it. Any
+    // entry, even a dangling or unreadable one, lets git decide.
+    let has_git_entry = |d: &Path| match std::fs::symlink_metadata(d.join(".git")) {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    };
+    // Git runs in the resolved directory: scan the ancestors it sees too.
+    let real_dir = std::fs::canonicalize(dir).ok();
+    let found = dir.ancestors().any(has_git_entry)
+        || real_dir
+            .as_deref()
+            .is_some_and(|d| d.ancestors().any(has_git_entry));
+    if !found {
+        return Some(false);
+    }
+    let mut git = std::process::Command::new("git");
+    // The repository around the path answers, not one the environment
+    // points to (another index or git directory could miss the path).
+    for var in GIT_LOCATION_VARS {
+        git.env_remove(var);
+    }
+    let status = git
         .arg("-C")
         .arg(dir)
         .args(["ls-files", "--error-unmatch", "--"])
@@ -70,7 +96,21 @@ pub fn is_git_tracked(path: &Path) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .ok()?;
+    // `--error-unmatch` exits 1 for an untracked path; other codes are
+    // failures (no repository after all, dubious ownership, broken index).
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether `path` may be tracked by git: tracked, or git could not confirm
+/// that it is not. Every caller treats a tracked file as chosen by the
+/// repository, so an indeterminate check takes that safe side.
+pub fn is_git_tracked(path: &Path) -> bool {
+    git_tracking(path) != Some(false)
 }
 
 /// A repository-pinned API URL the operator has not approved.
@@ -191,12 +231,11 @@ mod tests {
     fn test_is_git_tracked() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(args)
-                .output()
-                .unwrap()
+            let mut cmd = std::process::Command::new("git");
+            for var in GIT_LOCATION_VARS {
+                cmd.env_remove(var);
+            }
+            cmd.arg("-C").arg(dir.path()).args(args).output().unwrap()
         };
         let file = dir.path().join(".nexus").join("config.toml");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -220,5 +259,48 @@ mod tests {
         // Tracked in the index after its directory was removed.
         std::fs::remove_dir_all(dir.path().join(".nexus")).unwrap();
         assert!(is_git_tracked(&file), "tracked, directory missing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_git_tracking_through_a_symlinked_directory() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let mut cmd = std::process::Command::new("git");
+            for var in GIT_LOCATION_VARS {
+                cmd.env_remove(var);
+            }
+            cmd.arg("-C").arg(repo.path()).args(args).output().unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(repo.path().join("sub/.nexus")).unwrap();
+        std::fs::write(repo.path().join("sub/.nexus/config.toml"), "x").unwrap();
+        git(&["add", "sub/.nexus/config.toml"]);
+        let aliases = tempfile::tempdir().unwrap();
+        let alias = aliases.path().join("alias");
+        std::os::unix::fs::symlink(repo.path().join("sub"), &alias).unwrap();
+        assert_eq!(git_tracking(&alias.join(".nexus/config.toml")), Some(true));
+    }
+
+    #[test]
+    fn test_git_tracking_failure_is_not_untracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("creds");
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(git_tracking(&file), Some(false), "outside a repository");
+        // A broken repository: git fails instead of answering.
+        std::fs::write(dir.path().join(".git"), "gitdir: /nonexistent/repo\n").unwrap();
+        assert_eq!(git_tracking(&file), None);
+        assert!(
+            is_git_tracked(&file),
+            "an indeterminate check takes the safe side"
+        );
+        // A dangling `.git` symlink is not proof of "no repository".
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(dir.path().join(".git")).unwrap();
+            std::os::unix::fs::symlink("/nonexistent/repo", dir.path().join(".git")).unwrap();
+            assert_eq!(git_tracking(&file), None);
+        }
     }
 }

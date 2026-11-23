@@ -1342,7 +1342,10 @@ default no) and refuses without a terminal or with `--yes`; `nexus login`
 included. An approval also covers the commands it starts (for example the
 `nexus run` panes). `nexus status` shows such a URL as `(local, tracked by
 git)`. Untracked project configs, as written by `nexus link` and
-`nexus config set --local`, work as before.
+`nexus config set --local`, work as before. When git cannot tell whether
+the file is tracked (git missing, a broken repository, refused ownership),
+it counts as tracked. A `.nexus/config.toml` or `.nexus` directory that is
+a symlink out of the workspace or into `.git` is refused.
 
 ```bash
 # Temporary staging session (no config change needed)
