@@ -273,7 +273,9 @@ pub fn scan_agentic_files(workspace: &Path) -> Vec<ImportAgenticFile> {
 
     // Glob scan for .windsurf/rules/*.md
     let windsurf_dir = workspace.join(".windsurf/rules");
-    if windsurf_dir.is_dir() {
+    // A linked rules directory contributes nothing (not even warnings).
+    let linked_root = fs::symlink_metadata(&windsurf_dir).is_ok_and(|m| m.file_type().is_symlink());
+    if !linked_root && windsurf_dir.is_dir() {
         if let Ok(entries) = fs::read_dir(&windsurf_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -602,6 +604,14 @@ mod tests {
             found.iter().all(|f| !f.body.contains("external")),
             "{found:?}"
         );
+        // A rules directory linked inside the workspace is not read either.
+        fs::create_dir_all(ws.path().join("rules-src")).unwrap();
+        fs::write(ws.path().join("rules-src/r.md"), "linked rule").unwrap();
+        fs::remove_file(ws.path().join(".windsurf/rules")).unwrap();
+        std::os::unix::fs::symlink("../rules-src", ws.path().join(".windsurf/rules")).unwrap();
+        assert!(scan_agentic_files(ws.path())
+            .iter()
+            .all(|f| f.body != "linked rule"));
         // A link that stays inside the workspace still counts.
         fs::remove_file(ws.path().join("CLAUDE.md")).unwrap();
         fs::write(ws.path().join("real.md"), "inside").unwrap();

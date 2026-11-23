@@ -81,6 +81,33 @@ fn collect_script_hashes(workspace: &Path, dir: &Path, hashes: &mut HashMap<Stri
     }
 }
 
+/// Stop when a file selected from the first scan is missing from the
+/// payload read afterwards (it vanished or became a symlink in between):
+/// the fork is built from the upload alone, so it would drop the file.
+fn ensure_payload_complete(
+    selected: &[String],
+    devbox_json: Option<&serde_json::Value>,
+    scripts: Option<&HashMap<String, String>>,
+) -> anyhow::Result<()> {
+    let prefix = format!("{SCRIPTS_DIR}/");
+    let missing: Vec<&str> = selected
+        .iter()
+        .filter(|path| match path.strip_prefix(&prefix) {
+            Some(rel) => !scripts.is_some_and(|s| s.contains_key(rel)),
+            None if path.as_str() == "devbox.json" => devbox_json.is_none(),
+            None => false,
+        })
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "push stopped: {} changed while reading (missing or now a symlink); nothing was pushed, run nexus push again",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// Read local workspace files for push payload.
 fn read_workspace_files(
     workspace: &Path,
@@ -322,6 +349,7 @@ async fn adopt_local_push(
                 .collect::<HashMap<_, _>>()
         })
         .filter(|files| !files.is_empty());
+    ensure_payload_complete(&keys, devbox_json.as_ref(), script_files.as_ref())?;
 
     let result = client
         .workspace_push(project_id, devbox_json, script_files, fork_name)
@@ -571,6 +599,8 @@ pub async fn run(
         // deleted; without deletions it would push nothing.
         .filter(|files| !files.is_empty() || !deleted.is_empty())
         .or_else(|| (!deleted.is_empty()).then(HashMap::new));
+    let selected: Vec<String> = tracked.iter().cloned().collect();
+    ensure_payload_complete(&selected, devbox_json.as_ref(), script_files.as_ref())?;
 
     let result = client
         .workspace_push(&project_id, devbox_json, script_files, fork_name)
@@ -679,6 +709,31 @@ mod tests {
         );
         let scripts = read_workspace_files(ws.path()).1.unwrap();
         assert_eq!(scripts.keys().collect::<Vec<_>>(), vec!["vendor/run.sh"]);
+    }
+
+    #[test]
+    fn test_ensure_payload_complete_names_missing_files() {
+        let scripts = HashMap::from([("a.sh".to_string(), "x".to_string())]);
+        let devbox = serde_json::json!({});
+        let sel = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(ensure_payload_complete(
+            &sel(&["devbox.json", "scripts/devbox/a.sh"]),
+            Some(&devbox),
+            Some(&scripts)
+        )
+        .is_ok());
+        let err = ensure_payload_complete(
+            &sel(&["devbox.json", "scripts/devbox/a.sh", "scripts/devbox/b.sh"]),
+            None,
+            Some(&scripts),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("devbox.json") && err.contains("scripts/devbox/b.sh"),
+            "{err}"
+        );
+        assert!(!err.contains("a.sh,"), "{err}");
     }
 
     #[test]
