@@ -569,4 +569,12 @@ fn test_project_config_into_a_gitfile_directory_is_refused() {
     std::os::unix::fs::symlink("../admin/config.toml", ws.path().join(".nexus/config.toml"))
         .unwrap();
     assert!(load_project_config(Some(ws.path())).is_err());
+    // A directory name with a trailing space is kept as written.
+    let ws2 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws2.path().join("admin ")).unwrap();
+    std::fs::write(ws2.path().join("admin /config"), "").unwrap();
+    std::fs::write(ws2.path().join(".git"), "gitdir: admin \n").unwrap();
+    std::fs::create_dir_all(ws2.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink("../admin /config", ws2.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws2.path())).is_err());
 }
