@@ -579,7 +579,7 @@ pub async fn run(
     // ── 5. Dry-run / show-env output ─────────────────────────────────────────
     if dry_run || show_env {
         print_env_table(&workspace, effective_tool, &to_inject, &skipped, args);
-        print_gh_env_plan(&gh_outcome);
+        print_gh_env_plan(&gh_outcome, &to_inject);
         if dry_run {
             return Ok(());
         }
@@ -1108,7 +1108,20 @@ fn print_env_table(
 /// `GH_HOST`, if overridden) that will be set, and the *names* of any
 /// ambient token env vars that will be removed from the child (never the
 /// values). No-op when no `gh` profile is configured for this project.
-fn print_gh_env_plan(outcome: &GhOutcome) {
+/// The gh token variables the launch removes: those in the shell plus those
+/// the env files would inject (removal happens after injection).
+fn removed_gh_tokens(
+    shell: &[&'static str],
+    to_inject: &[(String, String, &str)],
+) -> Vec<&'static str> {
+    GH_TOKEN_ENV_VARS
+        .iter()
+        .copied()
+        .filter(|v| shell.contains(v) || to_inject.iter().any(|(k, _, _)| k == v))
+        .collect()
+}
+
+fn print_gh_env_plan(outcome: &GhOutcome, to_inject: &[(String, String, &str)]) {
     match outcome {
         GhOutcome::NotConfigured => {}
         GhOutcome::Ready { plan, status_line } => {
@@ -1121,11 +1134,9 @@ fn print_gh_env_plan(outcome: &GhOutcome) {
             if let Some(host) = &plan.host_override {
                 println!("     {:<36} = {}", style("GH_HOST").bold(), host);
             }
-            if !plan.tokens_to_remove.is_empty() {
-                println!(
-                    "     removed from child env: {}",
-                    plan.tokens_to_remove.join(", ")
-                );
+            let removed = removed_gh_tokens(&plan.tokens_to_remove, to_inject);
+            if !removed.is_empty() {
+                println!("     removed from child env: {}", removed.join(", "));
             }
             println!();
         }
@@ -3348,6 +3359,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn test_removed_gh_tokens_include_pending_injections() {
+        let inject = vec![("GH_TOKEN".to_string(), "x".to_string(), ".env.nexus.local")];
+        assert_eq!(
+            removed_gh_tokens(&["GITHUB_TOKEN"], &inject),
+            ["GH_TOKEN", "GITHUB_TOKEN"]
+        );
+        assert!(removed_gh_tokens(&[], &[]).is_empty());
+    }
 
     #[test]
     fn test_dispatch_pane_follows_flag_then_policy() {

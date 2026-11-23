@@ -395,10 +395,20 @@ pub fn gh_verify_login_within(
             Err(_) => return Some(GhVerifyStatus::NotLoggedIn),
         }
     };
-    let mut out = Vec::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = stdout.read_to_end(&mut out);
-    }
+    // Read on a helper thread: a descendant that keeps the pipe open must
+    // not hold the caller past the deadline.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(mut stdout) = stdout {
+            let _ = stdout.read_to_end(&mut out);
+        }
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(timeout.saturating_sub(start.elapsed()))
+        .ok()?;
     Some(classify_gh_verify_output(
         status.success(),
         &out,
