@@ -1,0 +1,921 @@
+//! Command dispatcher and implementations.
+
+mod actors;
+mod api_trust;
+pub(crate) mod auth;
+pub(crate) mod ccx;
+mod classification;
+mod claude_cmd;
+pub(crate) mod claude_plugins;
+pub(crate) mod claude_probe;
+pub(crate) mod claude_render;
+pub(crate) mod code_signals;
+mod config_cmd;
+mod consent;
+mod deinit;
+mod dispatch_listen;
+pub(crate) mod dispatch_runner;
+mod dispatch_status;
+pub(crate) mod display;
+mod doctor;
+mod env_cmd;
+pub(crate) mod gh_account;
+pub(crate) mod git;
+pub(crate) mod githooks;
+pub(crate) mod import;
+mod init;
+mod lane;
+mod link;
+mod man;
+pub(crate) mod mcp_local;
+pub(crate) mod observer;
+mod plugin_env;
+pub(crate) mod plugin_requirements;
+pub(crate) mod preflight;
+pub(crate) mod project;
+pub(crate) mod projection_cleanup;
+pub(crate) mod pull;
+pub(crate) mod push;
+mod reload;
+pub(crate) mod run;
+pub(crate) mod shadow;
+mod shadow_guard;
+mod skills_cmd;
+pub(crate) mod stash;
+mod state_cmd;
+pub(crate) mod sync;
+mod upgrade;
+pub(crate) mod vault;
+pub(crate) mod workspace_state;
+mod zellij_clipboard;
+mod zellij_guard;
+
+use crate::{
+    ActorAvatarAction, ActorsAction, ClassificationAction, ClaudeAction, Cli, Command,
+    ConfigAction, DispatchAction, DoctorTarget, EnvAction, GitAction, ProjectAction, RunnerAction,
+    ShadowAction, SkillsAction, StashAction, SyncAction, WorkspaceAction, WorkspaceShadowAction,
+};
+
+/// Dispatch the parsed CLI command to the appropriate handler.
+pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    api_trust::guard(&cli)?;
+    match cli.command {
+        Command::Init {
+            ref path,
+            ref name,
+            ref project_id,
+            force,
+            trust,
+            ..
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            init::run(
+                path,
+                name.as_deref(),
+                project_id.as_deref(),
+                &api_url,
+                force || cli.yes,
+                config.mcp_source,
+                trust,
+            )
+            .await?;
+        }
+        Command::Link { ref project_id } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            link::link(&api_url, project_id.as_deref()).await?;
+        }
+        Command::Unlink => {
+            link::unlink()?;
+        }
+        Command::CodeReport { dry_run } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            code_signals::code_report(&api_url, dry_run).await?;
+        }
+        Command::Project { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            match action {
+                ProjectAction::Link {
+                    ref project_id,
+                    ref runtime_id,
+                    ref restrict_profiles,
+                    ref expires,
+                    rotate,
+                    status,
+                } => {
+                    if *rotate {
+                        project::rotate(&api_url, project_id.as_deref(), false).await?;
+                    } else if *status {
+                        project::status(&api_url, project_id.as_deref()).await?;
+                    } else {
+                        project::link(
+                            &api_url,
+                            project_id.as_deref(),
+                            runtime_id.as_deref(),
+                            restrict_profiles,
+                            expires.as_deref(),
+                        )
+                        .await?;
+                    }
+                }
+                ProjectAction::Rotate {
+                    ref project_id,
+                    finalize,
+                } => {
+                    project::rotate(&api_url, project_id.as_deref(), *finalize).await?;
+                }
+                ProjectAction::Unlink { ref project_id } => {
+                    project::unlink(&api_url, project_id.as_deref()).await?;
+                }
+                ProjectAction::Status { ref project_id } => {
+                    project::status(&api_url, project_id.as_deref()).await?;
+                }
+            }
+        }
+        Command::Deinit { force } => {
+            deinit::run(force || cli.yes)?;
+        }
+        Command::Login { global, .. } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            auth::login(&api_url, global).await?;
+        }
+        Command::Logout { global, .. } => {
+            auth::logout(global)?;
+        }
+        Command::Status {
+            agents: true,
+            watch,
+            json,
+            all,
+            ref file,
+        } => {
+            // Local only: no config, auth or network needed.
+            let json = json
+                || matches!(
+                    cli.output
+                        .as_deref()
+                        .map(str::to_ascii_lowercase)
+                        .as_deref(),
+                    Some("json")
+                );
+            if watch {
+                observer::watch(file.as_deref(), json, all)?;
+            } else {
+                observer::show(file.as_deref(), json, all)?;
+            }
+        }
+        Command::Doctor {
+            target: DoctorTarget::Claude { fix },
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            let json = matches!(
+                cli.resolve_output(&config),
+                nexus_core::OutputPreference::Json
+            );
+            exit_with(doctor::claude(&api_url, fix, cli.yes, json).await?);
+        }
+        Command::Status { json, .. } => {
+            let workspace = std::env::current_dir()?;
+            let effective =
+                nexus_core::config::Config::load_effective_with_provenance(Some(&workspace))?;
+            let api_url = cli.resolve_api_url(&effective.config);
+            let api_url_source =
+                api_trust::source_label(cli.resolve_api_url_source(&effective), &effective);
+            let json = json
+                || matches!(
+                    cli.resolve_output(&effective.config),
+                    nexus_core::OutputPreference::Json
+                );
+            exit_with(state_cmd::status(&api_url, &api_url_source, json).await?);
+        }
+        Command::Diff { ref path } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            exit_with(state_cmd::diff(&api_url, path.as_deref()).await?);
+        }
+        Command::Reset {
+            ref path,
+            ref project_id,
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            state_cmd::reset(&api_url, project_id.as_deref(), path.as_deref(), cli.yes).await?;
+        }
+        Command::Dispatch { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            match action {
+                DispatchAction::Status {
+                    watch,
+                    interval,
+                    ref project,
+                    window,
+                    compact,
+                    json,
+                    no_listen,
+                } => {
+                    let json = *json
+                        || matches!(
+                            cli.resolve_output(&config),
+                            nexus_core::OutputPreference::Json
+                        );
+                    dispatch_status::status(
+                        &api_url,
+                        dispatch_status::StatusOptions {
+                            project_id: project.as_deref(),
+                            watch: *watch,
+                            interval_secs: *interval,
+                            window_days: *window,
+                            compact: *compact,
+                            json,
+                            listen: !*no_listen,
+                        },
+                    )
+                    .await?
+                }
+                DispatchAction::Runner { action } => match action {
+                    RunnerAction::Register {
+                        projects,
+                        mode,
+                        name,
+                        expires_days,
+                        replace,
+                    } => {
+                        dispatch_runner::register(
+                            &api_url,
+                            dispatch_runner::RegisterOptions {
+                                project_ids: projects,
+                                mode,
+                                name: name.as_deref(),
+                                expires_days: *expires_days,
+                                replace: *replace,
+                            },
+                        )
+                        .await?
+                    }
+                    RunnerAction::Status { json } => {
+                        dispatch_runner::status(&api_url, *json).await?
+                    }
+                    RunnerAction::Pause => dispatch_runner::control(&api_url, "pause").await?,
+                    RunnerAction::Resume => dispatch_runner::control(&api_url, "resume").await?,
+                    RunnerAction::Revoke => dispatch_runner::control(&api_url, "revoke").await?,
+                    RunnerAction::Titles { state } => {
+                        dispatch_runner::set_notice_titles(&api_url, state == "on")?
+                    }
+                    RunnerAction::Probe { json } => dispatch_runner::probe(*json)?,
+                },
+                DispatchAction::Listen {
+                    interval,
+                    heartbeat,
+                    once,
+                } => {
+                    dispatch_listen::listen(
+                        &api_url,
+                        dispatch_listen::ListenOptions {
+                            interval_secs: *interval,
+                            heartbeat_secs: *heartbeat,
+                            once: *once,
+                        },
+                    )
+                    .await?
+                }
+            }
+        }
+        Command::Classification { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            let json = matches!(
+                cli.resolve_output(&config),
+                nexus_core::OutputPreference::Json
+            );
+            match action.as_ref().unwrap_or(&ClassificationAction::Show) {
+                ClassificationAction::Show => classification::show(&api_url, json).await?,
+                ClassificationAction::Levels => classification::levels(&api_url, json).await?,
+                ClassificationAction::Set {
+                    level,
+                    reason,
+                    dry_run,
+                    force,
+                    pull,
+                } => {
+                    let changed = classification::set(
+                        &api_url,
+                        level,
+                        reason.as_deref(),
+                        *dry_run,
+                        *force,
+                        cli.yes,
+                        json,
+                    )
+                    .await?;
+                    match classification::after_set(changed, *pull) {
+                        classification::AfterSet::Pull => {
+                            pull::run(
+                                &api_url,
+                                None,
+                                false,
+                                config.mcp_source,
+                                &[],
+                                false,
+                                ccx::ForceMode::None,
+                                false,
+                                false,
+                                false,
+                            )
+                            .await?
+                        }
+                        classification::AfterSet::Hint => println!(
+                            "   Run 'nexus pull' so lane delegates follow the new classification."
+                        ),
+                        classification::AfterSet::Nothing => {}
+                    }
+                }
+            }
+        }
+        Command::Env { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            let json = matches!(
+                cli.resolve_output(&config),
+                nexus_core::OutputPreference::Json
+            );
+            match action.as_ref().unwrap_or(&EnvAction::Get { key: None }) {
+                EnvAction::Get { key } => env_cmd::get(&api_url, key.as_deref(), json).await?,
+                EnvAction::Keys => env_cmd::keys(&api_url, json).await?,
+                EnvAction::Set {
+                    key,
+                    value,
+                    dry_run,
+                    pull,
+                } => {
+                    let picked;
+                    let (key, value) = match key {
+                        Some(key) => env_cmd::set_args(key, value.as_deref())?,
+                        None => {
+                            picked = env_cmd::pick(&api_url).await?;
+                            match &picked {
+                                Some((k, v)) => (k.as_str(), v.as_str()),
+                                None => return Ok(()),
+                            }
+                        }
+                    };
+                    let changed = env_cmd::set(&api_url, key, value, *dry_run, cli.yes).await?;
+                    if changed && *pull {
+                        pull::run(
+                            &api_url,
+                            None,
+                            false,
+                            config.mcp_source,
+                            &[],
+                            false,
+                            ccx::ForceMode::None,
+                            false,
+                            false,
+                            false,
+                        )
+                        .await?;
+                    } else if changed {
+                        println!("   Run 'nexus pull' to apply it to this workspace.");
+                    }
+                }
+            }
+        }
+        Command::Reload {
+            ref project_id,
+            force,
+            force_unmanaged,
+            trust,
+            no_notify,
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            reload::run(
+                &api_url,
+                reload::ReloadOptions {
+                    project_id: project_id.as_deref(),
+                    force: force || cli.yes,
+                    force_unmanaged,
+                    trust,
+                    notify: !no_notify,
+                    mcp_source: config.mcp_source,
+                },
+            )
+            .await?;
+        }
+        Command::Pull {
+            ref project_id,
+            force,
+            force_unmanaged,
+            ref scope,
+            with_actor_assets,
+            skip_actor_assets,
+            dry_run,
+            trust,
+            untrack_shadowed,
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            // --skip-actor-assets takes precedence over --with-actor-assets
+            let effective_with_assets = with_actor_assets && !skip_actor_assets;
+            pull::run(
+                &api_url,
+                project_id.as_deref(),
+                force || cli.yes,
+                config.mcp_source,
+                scope,
+                effective_with_assets,
+                // Only the explicit flags, never -y: accepting prompts must
+                // not discard local edits to CCX files.
+                ccx::ForceMode::from_flags(force, force_unmanaged),
+                dry_run,
+                trust,
+                untrack_shadowed,
+            )
+            .await?;
+        }
+        Command::Claude { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            let code = match action {
+                ClaudeAction::Status { .. } => {
+                    deprecated("nexus claude status", "nexus status");
+                    let json = matches!(
+                        cli.resolve_output(&config),
+                        nexus_core::OutputPreference::Json
+                    );
+                    state_cmd::status(&api_url, "config", json).await?
+                }
+                ClaudeAction::Diff { .. } => {
+                    deprecated("nexus claude diff", "nexus diff");
+                    state_cmd::diff(&api_url, None).await?
+                }
+                ClaudeAction::Launch {
+                    skip_checks,
+                    force,
+                    ref account,
+                } => {
+                    claude_cmd::launch(
+                        &api_url,
+                        *skip_checks,
+                        *force,
+                        config.run.default_tool.as_deref(),
+                        config.run.launch_countdown_secs,
+                        account.as_deref(),
+                        cli.yes,
+                    )
+                    .await?;
+                    0
+                }
+            };
+            exit_with(code);
+        }
+        Command::Skills { ref action } => match action {
+            SkillsAction::List { ref status, limit } => {
+                let config = nexus_core::config::Config::load_effective(None)?;
+                let api_url = cli.resolve_api_url(&config);
+                let output = cli.resolve_output(&config);
+                skills_cmd::list(&api_url, status.as_deref(), *limit, output).await?;
+            }
+            SkillsAction::Export { ref project_id } => {
+                let config = nexus_core::config::Config::load_effective(None)?;
+                let api_url = cli.resolve_api_url(&config);
+                skills_cmd::export(&api_url, project_id.as_deref()).await?;
+            }
+        },
+        Command::Preflight { no_live } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            preflight::run(&api_url, !no_live).await?;
+        }
+        Command::Config { action } => match action {
+            ConfigAction::Show => config_cmd::show()?,
+            ConfigAction::Set { pair, local, .. } => config_cmd::set(&pair, local)?,
+            ConfigAction::Path { local, .. } => config_cmd::path(local)?,
+        },
+        Command::Upgrade => {
+            upgrade::run()?;
+        }
+        Command::Man {
+            ref command,
+            ref out_dir,
+        } => {
+            man::run(command, out_dir.as_deref())?;
+        }
+        Command::McpLocal => {
+            mcp_local::run().await?;
+        }
+        Command::Shadow { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            match action {
+                ShadowAction::On(args) => {
+                    shadow::switch(
+                        &api_url,
+                        true,
+                        &args.target,
+                        args.all,
+                        args.dry_run,
+                        args.untrack,
+                        cli.yes,
+                    )
+                    .await?
+                }
+                ShadowAction::Off(args) => {
+                    shadow::switch(
+                        &api_url,
+                        false,
+                        &args.target,
+                        args.all,
+                        args.dry_run,
+                        args.untrack,
+                        cli.yes,
+                    )
+                    .await?
+                }
+                ShadowAction::Ai => {
+                    shadow::deprecated("nexus shadow ai", "nexus shadow on --target agentic");
+                    shadow::switch(
+                        &api_url,
+                        true,
+                        &[shadow::ShadowTarget::Agentic],
+                        false,
+                        false,
+                        false,
+                        cli.yes,
+                    )
+                    .await?
+                }
+                ShadowAction::Nexus => {
+                    shadow::deprecated("nexus shadow nexus", "nexus shadow on --target nexus");
+                    shadow::switch(
+                        &api_url,
+                        true,
+                        &[shadow::ShadowTarget::Nexus],
+                        false,
+                        false,
+                        false,
+                        cli.yes,
+                    )
+                    .await?
+                }
+                ShadowAction::Status => shadow::status_with_server(&api_url).await?,
+                ShadowAction::Check { commits, json } => {
+                    let json = *json
+                        || matches!(
+                            cli.resolve_output(&config),
+                            nexus_core::OutputPreference::Json
+                        );
+                    exit_with(shadow::check(&api_url, *commits, json).await?);
+                }
+                ShadowAction::CheckMsg { guard, file } => {
+                    exit_with(shadow_guard::check_message_file(
+                        std::path::Path::new(guard),
+                        std::path::Path::new(file),
+                    )?);
+                }
+            }
+        }
+        Command::Workspace { ref action } => match action {
+            WorkspaceAction::Shadow { ref action } => {
+                let config = nexus_core::config::Config::load_effective(None)?;
+                let api_url = cli.resolve_api_url(&config);
+                let workspace = [shadow::ShadowTarget::Workspace];
+                match action {
+                    WorkspaceShadowAction::On => {
+                        shadow::deprecated(
+                            "nexus workspace shadow on",
+                            "nexus shadow on --target workspace",
+                        );
+                        shadow::switch(&api_url, true, &workspace, false, false, false, cli.yes)
+                            .await?
+                    }
+                    WorkspaceShadowAction::Off => {
+                        shadow::deprecated(
+                            "nexus workspace shadow off",
+                            "nexus shadow off --target workspace",
+                        );
+                        shadow::switch(&api_url, false, &workspace, false, false, false, cli.yes)
+                            .await?
+                    }
+                    WorkspaceShadowAction::Status => shadow::status_with_server(&api_url).await?,
+                }
+            }
+        },
+        Command::Import { dry_run } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            import::run(&api_url, dry_run, cli.yes).await?;
+        }
+        Command::Sync { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            // Deprecated aliases: file keys map
+            // to their paths via the sync manifest.
+            let path_of = |file_key: &str| -> anyhow::Result<String> {
+                let manifest = sync::load_manifest_pub(&std::env::current_dir()?);
+                manifest[file_key]["target_path"]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "File '{}' not found in sync manifest. Run 'nexus pull' first.",
+                            file_key
+                        )
+                    })
+            };
+            match action {
+                SyncAction::Status { .. } => {
+                    deprecated("nexus sync status", "nexus status");
+                    exit_with(state_cmd::status(&api_url, "config", false).await?);
+                }
+                SyncAction::Push {
+                    ref file_key,
+                    ref project_id,
+                } => {
+                    let path = path_of(file_key)?;
+                    deprecated("nexus sync push", &format!("nexus push {path}"));
+                    state_cmd::push(
+                        &api_url,
+                        project_id.as_deref(),
+                        Some(&path),
+                        None,
+                        false,
+                        false,
+                    )
+                    .await?;
+                }
+                SyncAction::Reset {
+                    ref file_key,
+                    ref project_id,
+                } => {
+                    let path = path_of(file_key)?;
+                    deprecated("nexus sync reset", &format!("nexus reset {path}"));
+                    state_cmd::reset(&api_url, project_id.as_deref(), Some(&path), cli.yes).await?;
+                }
+            }
+        }
+        Command::Git { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            // Resolve project ID from .nexus/config.toml
+            let workspace = std::env::current_dir()?;
+            let project_id = nexus_core::config::resolve_project_id(None, Some(&workspace))?;
+            let token = nexus_core::auth::resolve_token().ok_or_else(|| {
+                anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
+            })?;
+            let client = nexus_core::api::NexusClient::new(&api_url, Some(token))?;
+            let detail = client.get_project(&project_id).await?;
+
+            let git_config = detail.project.git_config.as_ref();
+            let gh_effective = detail.project.gh_effective.as_ref();
+
+            if let GitAction::Login {
+                ref account,
+                ref profile,
+                with_token,
+            } = *action
+            {
+                gh_account::login(
+                    &workspace,
+                    gh_effective,
+                    git_config,
+                    account.as_deref(),
+                    profile.as_deref(),
+                    with_token,
+                    cli.yes,
+                )?;
+            } else if git_config.is_none() && gh_effective.is_none() {
+                // A gh.env left from an earlier account goes away.
+                gh_account::apply(&workspace, None, None, &Default::default());
+                println!(
+                    "No git_config or gh profile set for this project. Configure it in the Nexus dashboard."
+                );
+            } else {
+                match *action {
+                    GitAction::Verify => git::run_verify(&workspace, git_config, gh_effective),
+                    GitAction::Apply { canonical_remotes } => git::run_apply(
+                        &workspace,
+                        git_config,
+                        gh_effective,
+                        &gh_account::ApplyOptions {
+                            assume_yes: cli.yes,
+                            canonical_remotes,
+                        },
+                    ),
+                    GitAction::Login { .. } => unreachable!("handled above"),
+                }
+            }
+        }
+        Command::Actors { ref action } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            match action {
+                ActorsAction::List { ref project_id } => {
+                    actors::list(&api_url, project_id.as_deref()).await?;
+                }
+                ActorsAction::Show {
+                    ref slug,
+                    ref project_id,
+                } => {
+                    actors::show(&api_url, slug, project_id.as_deref()).await?;
+                }
+                ActorsAction::Normalize { ref path } => {
+                    actors::normalize(path)?;
+                }
+                ActorsAction::Validate {
+                    ref path,
+                    ref project_id,
+                } => {
+                    actors::validate(&api_url, path, project_id.as_deref()).await?;
+                }
+                ActorsAction::Import {
+                    ref path,
+                    ref project_id,
+                } => {
+                    actors::import(&api_url, path, project_id.as_deref()).await?;
+                }
+                ActorsAction::Export {
+                    ref target,
+                    ref project_id,
+                } => {
+                    actors::export(&api_url, target, project_id.as_deref()).await?;
+                }
+                ActorsAction::Run {
+                    ref slug,
+                    ref prompt,
+                    ref gateway_url,
+                    ref claude_args,
+                } => {
+                    exit_with(
+                        lane::run(
+                            &api_url,
+                            slug,
+                            prompt.as_deref(),
+                            gateway_url.as_deref(),
+                            claude_args,
+                        )
+                        .await?,
+                    );
+                }
+                ActorsAction::Avatar { ref action } => match action {
+                    ActorAvatarAction::Generate {
+                        ref slug,
+                        ref project_id,
+                    } => {
+                        actors::avatar_generate(&api_url, slug, project_id.as_deref()).await?;
+                    }
+                    ActorAvatarAction::Reset {
+                        ref slug,
+                        ref project_id,
+                    } => {
+                        actors::avatar_reset(&api_url, slug, project_id.as_deref()).await?;
+                    }
+                },
+            }
+        }
+        Command::Push {
+            ref path,
+            ref project_id,
+            ref name,
+            dry_run,
+            workspace: _,
+            adopt_local,
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            state_cmd::push(
+                &api_url,
+                project_id.as_deref(),
+                path.as_deref(),
+                name.as_deref(),
+                dry_run,
+                adopt_local,
+            )
+            .await?;
+        }
+        Command::Stash { ref action } => {
+            let workspace = std::env::current_dir()?;
+            match action.as_ref().unwrap_or(&StashAction::Save) {
+                StashAction::Save => stash::save(&workspace)?,
+                StashAction::Pop => stash::pop(&workspace)?,
+                StashAction::List => stash::list(&workspace)?,
+            }
+        }
+        Command::Run {
+            ref tool,
+            dry_run,
+            show_env,
+            no_db,
+            exec,
+            skip_checks,
+            skip_claude_check,
+            force,
+            plain,
+            ref workspace,
+            actor_panes,
+            dispatch_pane,
+            no_dispatch_pane,
+            resume,
+            ref account,
+            ref args,
+        } => {
+            let config = nexus_core::config::Config::load_effective(None)?;
+            let api_url = cli.resolve_api_url(&config);
+            let default_tool = config.run.default_tool.clone();
+            let countdown_secs = config.run.launch_countdown_secs;
+            run::run(
+                &api_url,
+                tool.as_deref(),
+                dry_run,
+                show_env,
+                no_db,
+                exec,
+                should_skip_prelaunch_checks(skip_checks, force),
+                force,
+                args,
+                default_tool.as_deref(),
+                countdown_secs,
+                account.as_deref(),
+                cli.yes,
+                if plain {
+                    Some(("none", run::WorkspaceSource::Plain))
+                } else {
+                    workspace
+                        .as_deref()
+                        .map(|w| (w, run::WorkspaceSource::Flag))
+                },
+                actor_panes,
+                match (dispatch_pane, no_dispatch_pane) {
+                    (true, _) => Some(true),
+                    (_, true) => Some(false),
+                    _ => None,
+                },
+                resume,
+                skip_claude_check,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Exit with `code` when it is non-zero (status/diff "pending" signal).
+fn exit_with(code: i32) {
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+/// Deprecation notice for the one-release aliases.
+fn deprecated(old: &str, new: &str) {
+    eprintln!(
+        "{} `{old}` is deprecated and will be removed; use `{new}`.",
+        console::style("!").bold().yellow()
+    );
+}
+
+/// Whether `nexus run` should skip pre-launch checks (the "Nexus Pre-launch
+/// Check" panel, `run_prelaunch_checks`) entirely.
+///
+/// `--force` only skips the interactive "N checks failed, continue anyway?"
+/// confirmation prompt after checks have been shown (documented as
+/// "non-interactive/CI mode"); it must NOT imply `--skip-checks`. Some
+/// checks (e.g. Billing Auth) are deliberately
+/// not bypassable by `--force` and rely on `run_prelaunch_checks` actually
+/// running to enforce that. A prior version of this call site computed
+/// `skip_checks || force`, which skipped the whole check function --
+/// including the force-proof checks inside it -- whenever `--force` was
+/// passed alone, silently defeating the guarantee those checks exist to
+/// provide (regression reported as a follow-up to 8de19c71).
+fn should_skip_prelaunch_checks(skip_checks: bool, _force: bool) -> bool {
+    skip_checks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_prelaunch_checks;
+
+    #[test]
+    fn test_force_alone_does_not_skip_prelaunch_checks() {
+        // The exact regression: --force without --skip-checks must still
+        // run run_prelaunch_checks, so force-proof checks (e.g. Billing
+        // Auth) get a chance to fire.
+        assert!(!should_skip_prelaunch_checks(false, true));
+    }
+
+    #[test]
+    fn test_skip_checks_flag_skips_prelaunch_checks_regardless_of_force() {
+        assert!(should_skip_prelaunch_checks(true, false));
+        assert!(should_skip_prelaunch_checks(true, true));
+    }
+
+    #[test]
+    fn test_neither_flag_runs_prelaunch_checks() {
+        assert!(!should_skip_prelaunch_checks(false, false));
+    }
+}

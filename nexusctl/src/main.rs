@@ -1,0 +1,2815 @@
+//! Nexus CLI entry point.
+//!
+//! The `nexus` binary provides project scaffolding, authentication,
+//! and configuration management for the Nexus platform.
+
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use tracing_subscriber::EnvFilter;
+
+mod cmd;
+
+/// Nexus CLI -- project scaffolding and platform tools for Nexus.
+#[derive(Debug, Parser)]
+#[command(
+    name = "nexus",
+    version = env!("CARGO_PKG_VERSION"),
+    about = "Nexus CLI: Nexus platform operations",
+)]
+pub struct Cli {
+    /// Nexus API base URL (overrides config file).
+    #[arg(long, global = true, help_heading = "Global options")]
+    pub api_url: Option<String>,
+
+    /// Output format: table, json, plain (overrides config file).
+    #[arg(long, global = true, help_heading = "Global options")]
+    pub output: Option<String>,
+
+    /// Enable verbose/debug output.
+    #[arg(short, long, global = true, help_heading = "Global options")]
+    pub verbose: bool,
+
+    /// Accept all defaults without prompting (non-interactive mode).
+    #[arg(
+        short = 'y',
+        long = "yes",
+        global = true,
+        help_heading = "Global options"
+    )]
+    pub yes: bool,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// Available CLI subcommands.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Initialize a new Nexus project workspace.
+    Init {
+        /// Target directory (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: String,
+
+        /// Project name (defaults to directory name).
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Nexus project UUID; pulls skills, commands and MCP config
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Skip interactive prompts and use defaults.
+        #[arg(short, long)]
+        force: bool,
+
+        /// Accept executable server content without asking
+        ///
+        /// Covers hooks, settings commands, plugins, MCP servers, layouts and
+        /// scripts. Not implied by --force or --yes.
+        #[arg(long)]
+        trust: bool,
+
+        /// [DEPRECATED] Shadow flag is no longer needed; .nexus/ is always excluded via .git/info/exclude.
+        #[arg(long, hide = true)]
+        shadowed_ai: bool,
+    },
+
+    /// Link this directory to a Nexus project.
+    Link {
+        /// Nexus project UUID to link directly (skips interactive selection).
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Unlink this directory from its Nexus project.
+    Unlink,
+
+    /// Send the repository's code signals to the hub
+    ///
+    /// Reports which known marker files exist (Cargo.toml, package.json, ...)
+    /// and how many tracked files there are per extension, so the hub can
+    /// suggest codebase tags, language-server plugins and a devbox blueprint.
+    /// Only tracked files count; no file contents, other file names, the
+    /// repository path or remotes are sent. `nexus link` and `nexus run`
+    /// (once per 24 h) send it on their own unless `code_signals = false` or
+    /// NEXUS_NO_CODE_SIGNALS=1.
+    CodeReport {
+        /// Print the report as JSON without sending it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Manage project inference tokens for gateway auth
+    ///
+    /// Tokens have the form nxs_proj_*.
+    /// Provisions a project-scoped inference credential from your PAT and
+    /// stores it locally (never committed). Exposed to tools as
+    /// NEXUS_PROJECT_TOKEN via the gitignored .env.nexus.local.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+
+    /// Remove all Nexus/AI scaffold files from this directory.
+    Deinit {
+        /// Delete without confirmation prompt.
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Authenticate with the Nexus platform.
+    ///
+    /// By default stores the token in the project-local
+    /// `.nexus/credentials.toml` (mirrors `nexus config set --local`),
+    /// scoping it to this project only. Pass `--global` to store it in the
+    /// shared `~/.config/nexus/credentials.toml` instead.
+    Login {
+        /// Store in the project-local .nexus/credentials.toml (default)
+        #[arg(long, conflicts_with = "global")]
+        local: bool,
+
+        /// Store in the global ~/.config/nexus/credentials.toml
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+    },
+
+    /// Remove stored credentials.
+    ///
+    /// By default only removes the project-local `.nexus/credentials.toml`
+    /// in the current workspace; other projects and the global credential
+    /// store are never touched. Pass `--global` to remove the shared
+    /// global credentials instead.
+    Logout {
+        /// Remove the project-local .nexus/credentials.toml (default)
+        #[arg(long, conflicts_with = "global")]
+        local: bool,
+
+        /// Remove the global ~/.config/nexus/credentials.toml
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+    },
+
+    /// Show workspace, auth and agent environment state
+    ///
+    /// Shows auth and project, the agent environment, git identity, and every
+    /// non-clean workspace file with its class (content/projection), state
+    /// and next action. Supports --output json. Exits 1 when changes are
+    /// pending.
+    ///
+    /// With --agents: the local Agent Observability view instead (main
+    /// agent, subagents, background processes, state, tool, runtime),
+    /// folded from .nexus/claude/observer/events.jsonl. No network.
+    Status {
+        /// Show the agent fleet from the local observation events.
+        #[arg(long)]
+        agents: bool,
+
+        /// Follow the events and redraw once per second (with --agents).
+        #[arg(long, requires = "agents")]
+        watch: bool,
+
+        /// Print JSON (same as --output json)
+        ///
+        /// The workspace status, or with --agents the folded agent list.
+        #[arg(long)]
+        json: bool,
+
+        /// Include sessions that finished long ago (with --agents).
+        #[arg(long, requires = "agents")]
+        all: bool,
+
+        /// Events file (default: .nexus/claude/observer/events.jsonl).
+        #[arg(long, requires = "agents", value_name = "PATH")]
+        file: Option<String>,
+    },
+
+    /// Check the host environment.
+    Doctor {
+        #[command(subcommand)]
+        target: DoctorTarget,
+    },
+
+    /// Show diffs for changed workspace files
+    ///
+    /// Unified diffs for non-clean files: content vs. the backend,
+    /// projection vs. what the next pull writes (incl. managed settings keys
+    /// and the CLAUDE.md block). Read-only. Exits 1 when differences exist.
+    Diff {
+        /// Limit to a file or directory.
+        path: Option<String>,
+    },
+
+    /// Discard local changes to workspace files
+    ///
+    /// Content returns to the backend version, projection files to what the
+    /// next pull writes. Without a path, all pending changes are reset after
+    /// one confirmation (-y skips it).
+    Reset {
+        /// File or directory to reset.
+        path: Option<String>,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Show or change the project's backend settings
+    ///
+    /// Settings cover executioner, execution mode, Claude Code experience
+    /// and git identity. Never writes local files except through
+    /// `set --pull`.
+    #[command(visible_alias = "settings")]
+    Env {
+        #[command(subcommand)]
+        action: Option<EnvAction>,
+    },
+
+    /// Show or change the project's classification
+    ///
+    /// The confidentiality classification drives the gateway class, lane
+    /// delegates and blocked external services. Without a subcommand: show.
+    #[command(visible_alias = "class")]
+    Classification {
+        #[command(subcommand)]
+        action: Option<ClassificationAction>,
+    },
+
+    /// Show and receive Dispatches between projects
+    ///
+    /// `nexus dispatch status` shows the linked project's incoming and
+    /// outgoing traffic (read-only).
+    Dispatch {
+        #[command(subcommand)]
+        action: DispatchAction,
+    },
+
+    /// Pull backend changes into a running session
+    ///
+    /// Runs `nexus pull` and the managed plugin step, then shows per area what
+    /// the running Claude Code session picks up live and what needs
+    /// /reload-plugins, a re-read or a restart, and sends that summary to
+    /// the running sessions of this repository.
+    Reload {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// As for nexus pull: overwrite existing files without confirmation.
+        #[arg(short, long)]
+        force: bool,
+
+        /// As for nexus pull: also replace CCX files never managed by Nexus.
+        #[arg(long)]
+        force_unmanaged: bool,
+
+        /// As for nexus pull: accept new or changed executable content.
+        #[arg(long)]
+        trust: bool,
+
+        /// Do not send the summary to running Claude Code sessions.
+        #[arg(long)]
+        no_notify: bool,
+    },
+
+    /// Pull skills and configuration from the platform
+    Pull {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Overwrite existing files without confirmation
+        ///
+        /// For Claude Code Experience (CCX) files this also overwrites local
+        /// edits (drifted/conflict) and deletes modified orphaned files.
+        #[arg(short, long)]
+        force: bool,
+
+        /// Also replace CCX files never managed by Nexus
+        ///
+        /// Like --force for CCX files, and additionally replaces CCX files
+        /// that exist locally but were never managed by Nexus.
+        #[arg(long)]
+        force_unmanaged: bool,
+
+        /// Limit the pull to scopes (repeatable, comma-separated)
+        ///
+        /// Scopes: skills, directives, agents, workspace, tasks. If omitted,
+        /// pulls everything.
+        #[arg(long, value_delimiter = ',')]
+        scope: Vec<String>,
+
+        /// Download actor avatar SVGs into .nexus/actors/assets/.
+        #[arg(long)]
+        with_actor_assets: bool,
+
+        /// Skip actor asset download (metadata only). This is the default.
+        #[arg(long)]
+        skip_actor_assets: bool,
+
+        /// Show what the pull would change without writing
+        ///
+        /// Covers the devbox workspace files (devbox.json, scripts), including
+        /// removals of files the fork no longer has. Also lists the
+        /// executable items a pull would ask about.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Accept new or changed executable content without asking
+        ///
+        /// Covers hooks, settings commands, plugins, MCP servers, layouts and
+        /// scripts. Without it, pull asks in a terminal and keeps the local
+        /// version otherwise. Not implied by --yes.
+        #[arg(long)]
+        trust: bool,
+
+        /// Untrack shadowed paths that git still tracks
+        ///
+        /// Takes them out of the index (`git rm -r --cached`); the files stay
+        /// on disk and nothing is committed. Never done without this flag.
+        #[arg(long)]
+        untrack_shadowed: bool,
+    },
+
+    /// Deprecated: use `nexus status`, `nexus diff`, `nexus run`.
+    #[command(hide = true)]
+    Claude {
+        #[command(subcommand)]
+        action: ClaudeAction,
+    },
+
+    /// List and export skills
+    Skills {
+        #[command(subcommand)]
+        action: SkillsAction,
+    },
+
+    /// View or update CLI configuration.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
+    /// Run preflight checks to verify environment readiness
+    ///
+    /// Checks tools, configuration, login and workspace, the environment
+    /// variables and settings the project's plugins need (decided locally;
+    /// no variable names or values are sent to the Nexus API), and, for the
+    /// Sentry developer tool, whether the local token reaches the Sentry
+    /// organization.
+    Preflight {
+        /// Skip the live check against developer tool APIs (Sentry)
+        #[arg(long)]
+        no_live: bool,
+    },
+
+    /// Upgrade the Nexus CLI to the latest release version.
+    Upgrade,
+
+    /// Print or install the manual pages
+    ///
+    /// Without --out-dir, prints the page of `nexus` or of the named command
+    /// to stdout (read it with `nexus man run | man -l -`). With --out-dir,
+    /// writes one page per command (nexus.1, nexus-pull.1, ...), for example
+    /// into ~/.local/share/man/man1 so that `man nexus` finds them.
+    Man {
+        /// Command to show, e.g. `run` or `dispatch status`.
+        command: Vec<String>,
+
+        /// Write the pages of all commands into this directory
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<std::path::PathBuf>,
+    },
+
+    /// Run the local MCP server (stdio)
+    ///
+    /// Exposes Nexus tools that need filesystem/session-local access and
+    /// have no Claude Code custom-tool
+    /// equivalent: `nexus_headroom_intercept_retrieve`, `nexus_cost_summary`.
+    /// Registered automatically in `.mcp.json` for Claude Code projects;
+    /// not intended for direct interactive use.
+    #[command(hide = true)]
+    McpLocal,
+
+    /// Hide agentic files, workspace and Nexus internals from Git
+    Shadow {
+        #[command(subcommand)]
+        action: ShadowAction,
+    },
+
+    /// Manage workspace shadow mode (deprecated)
+    ///
+    /// Excludes devbox files from Git tracking. Use
+    /// `nexus shadow on|off --target workspace` instead.
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
+
+    /// Import existing agentic files into the project
+    ///
+    /// Detects CLAUDE.md, AGENTS.md, .cursorrules and similar files and
+    /// imports them into the linked Nexus project.
+    Import {
+        /// Only detect files, don't import.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Deprecated: use `nexus status`, `nexus push`, `nexus reset`.
+    #[command(hide = true)]
+    Sync {
+        #[command(subcommand)]
+        action: SyncAction,
+    },
+
+    /// Manage the project's git identity
+    ///
+    /// Per-project user.name, user.email, GPG signing and GitHub account.
+    Git {
+        #[command(subcommand)]
+        action: GitAction,
+    },
+
+    /// Manage actors assigned to the linked project.
+    #[command(visible_alias = "actor")]
+    Actors {
+        #[command(subcommand)]
+        action: ActorsAction,
+    },
+
+    /// Push local content changes to the linked Nexus project.
+    ///
+    /// Content only: modified agent files are synced back; devbox changes
+    /// (devbox.json, scripts/devbox/) become a new workspace fork.
+    /// Projection files (generated from settings) are refused with the
+    /// setting to change instead.
+    Push {
+        /// Limit to a file or directory (default: all modified content).
+        path: Option<String>,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Custom name for the created fork (default: auto-generated).
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Only show what would be pushed, without sending changes.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Deprecated, has no effect (kept for compatibility).
+        #[arg(long, hide = true)]
+        workspace: bool,
+
+        /// Publish the local workspace as a new fork without a pull
+        ///
+        /// Bypasses the sync-manifest origin guard and pushes the local
+        /// devbox.json and scripts/devbox/** as-is. Use this to bootstrap a
+        /// first fork from an untracked local workspace without risking a
+        /// clobber from pulling an older server-side fork.
+        #[arg(long)]
+        adopt_local: bool,
+    },
+
+    /// Save and restore modified content files
+    ///
+    /// Temporarily saves modified devbox workspace and agent files and
+    /// restores them later. Projection files are never stashed.
+    ///
+    /// Running `nexus stash` without a subcommand defaults to `nexus stash save`.
+    Stash {
+        #[command(subcommand)]
+        action: Option<StashAction>,
+    },
+
+    /// Start the project's agent environment
+    ///
+    /// Starts whatever the backend selects (OpenCode, Claude Code, or the
+    /// Claude Code zellij workspace), with platform-managed env vars injected.
+    ///
+    /// Resolves env vars from .nexus/env (plugin defaults) and .env.nexus.local
+    /// (secrets), runs a pre-launch check, then spawns the tool. After the tool
+    /// exits, prints a session summary with duration and git activity.
+    /// Shell vars already set are never overwritten.
+    Run {
+        /// Tool binary to launch instead of the run target
+        ///
+        /// Without a run target (older backends): config run.default_tool,
+        /// else the project's agent_owner (claude-cli -> claude), else
+        /// opencode.
+        #[arg(short, long)]
+        tool: Option<String>,
+
+        /// Print resolved env block and exit without launching the tool.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print resolved env block, then confirm before launching.
+        #[arg(long)]
+        show_env: bool,
+
+        /// Skip the platform call; use only .nexus/env from disk
+        #[arg(long)]
+        no_db: bool,
+
+        /// Replace this process with the tool (Unix only)
+        ///
+        /// Uses exec() instead of spawn and wait, so there is no post-session
+        /// summary.
+        #[arg(long)]
+        exec: bool,
+
+        /// Skip pre-launch checks.
+        ///
+        /// The Claude Code check still runs; see --skip-claude-check.
+        #[arg(long)]
+        skip_checks: bool,
+
+        /// Skip the Claude Code check (CI or headless use)
+        ///
+        /// Without it, nexus run stops before opening the workspace when a
+        /// Claude Code project has no runnable `claude`.
+        #[arg(long)]
+        skip_claude_check: bool,
+
+        /// Skip the pre-launch confirmation (non-interactive use)
+        #[arg(short, long)]
+        force: bool,
+
+        /// Start without the terminal workspace (multiplexer)
+        ///
+        /// Shorthand for `--workspace none`. Everything else nexus run does
+        /// stays active.
+        #[arg(long, conflicts_with = "workspace")]
+        plain: bool,
+
+        /// Terminal workspace for this start: none or zellij
+        ///
+        /// Overrides the local `[run] workspace` and the project default.
+        #[arg(long, value_name = "NAME")]
+        workspace: Option<String>,
+
+        /// Add a tab with one pane per local-lane actor
+        ///
+        /// Adds an `actors` tab to the zellij workspace running
+        /// `nexus actors run <slug>` per actor. The main pane keeps its
+        /// subscription.
+        #[arg(long)]
+        actor_panes: bool,
+
+        /// Add a Dispatch status pane to the CLAUDE tab
+        ///
+        /// Runs `nexus dispatch status --watch --compact` below the claude
+        /// pane. On by default when the project's dispatch automation is not
+        /// off.
+        #[arg(long)]
+        dispatch_pane: bool,
+
+        /// Leave the Dispatch status pane out
+        ///
+        /// Applies even when the project's dispatch automation is on.
+        #[arg(long, conflicts_with = "dispatch_pane")]
+        no_dispatch_pane: bool,
+
+        /// Resurrect the exited zellij session with its old layout
+        ///
+        /// Without it, the exited session is removed and the current layout
+        /// starts.
+        #[arg(long)]
+        resume: bool,
+
+        /// Named Claude Code account with its own login
+        ///
+        /// Sets CLAUDE_CONFIG_DIR to an isolated
+        /// directory under ~/.config/nexus/claude-accounts/<name>/, giving
+        /// this invocation its own Keychain login). Only applies to
+        /// claude-cli projects. Explicit only: no automatic switching,
+        /// no rotation. Omit for the existing default (~/.claude).
+        #[arg(long)]
+        account: Option<String>,
+
+        /// Extra arguments forwarded verbatim to the tool.
+        ///
+        /// Only for a plain start: in the zellij workspace they are ignored
+        /// with a warning (the layout defines the pane commands).
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+}
+
+/// Backend settings subcommands. Keys and values come from the backend
+/// schema (`nexus env keys`).
+#[derive(Debug, Subcommand)]
+pub enum EnvAction {
+    /// Print all settings, or one key's value
+    ///
+    /// Supports --output json.
+    Get {
+        /// Setting key, e.g. claude.hud.
+        key: Option<String>,
+    },
+
+    /// List the settable keys with types and allowed values
+    Keys,
+
+    /// Change a setting in the backend
+    ///
+    /// Requires project admin rights.
+    /// Takes `<KEY> <VALUE>` or `<KEY>=<VALUE>`; without arguments, pick
+    /// the key and value interactively.
+    Set {
+        /// Setting key, e.g. claude.hud, or `key=value`.
+        key: Option<String>,
+
+        /// New value; `unset` clears nullable keys
+        ///
+        /// `true`/`false` for booleans. Omit it when the key is given as
+        /// `key=value`.
+        value: Option<String>,
+
+        /// Preview the change without applying it.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Run `nexus pull` afterwards to apply the change locally.
+        #[arg(long)]
+        pull: bool,
+    },
+}
+
+/// `nexus dispatch` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum DispatchAction {
+    /// Show the project's incoming and outgoing Dispatches
+    ///
+    /// Counters, one row per open Dispatch (highlighted when the next step
+    /// is ours) and a per-peer summary. Read-only.
+    Status {
+        /// Redraw every --interval seconds until interrupted
+        ///
+        /// On a network error the last state stays with an error marker.
+        #[arg(long)]
+        watch: bool,
+
+        /// Seconds between refreshes with --watch (at least 10).
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(10..))]
+        interval: u64,
+
+        /// Project ID instead of the linked project.
+        #[arg(long = "project", alias = "project-id")]
+        project: Option<String>,
+
+        /// Days counted for resolved and closed Dispatches.
+        #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=365))]
+        window: u32,
+
+        /// Narrow layout for a side pane (about 40 to 60 columns).
+        #[arg(long)]
+        compact: bool,
+
+        /// Do not run this machine's Dispatch runner here
+        ///
+        /// By default --watch also runs it (notify mode) when it is
+        /// registered and bound to the project, and otherwise shows why not.
+        #[arg(long)]
+        no_listen: bool,
+
+        /// Machine-readable output (nexus.dispatch-status.v1)
+        ///
+        /// With --watch one JSON line per refresh.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Manage this machine's Dispatch runner
+    ///
+    /// Register, status, pause, resume, revoke, notice titles and the
+    /// Claude Code capability probe.
+    Runner {
+        #[command(subcommand)]
+        action: RunnerAction,
+    },
+
+    /// Run the Dispatch runner in the foreground
+    ///
+    /// Notify mode: polls the hub feed every --interval seconds, queues short
+    /// notices and delivers them into running sessions of the bound
+    /// repositories. One runner per machine; Ctrl-C stops it.
+    Listen {
+        /// Seconds between polls (at least 10).
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(10..))]
+        interval: u64,
+
+        /// Seconds between heartbeats (at least 30).
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(30..))]
+        heartbeat: u64,
+
+        /// One poll and delivery round, then exit.
+        #[arg(long)]
+        once: bool,
+    },
+}
+
+/// `nexus dispatch runner` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum RunnerAction {
+    /// Register this machine's Dispatch runner
+    ///
+    /// Registers the runner for the hub of the effective API URL with the
+    /// personal access token (used once) and stores the runner token in
+    /// ~/.config/nexus/dispatch-runners (mode 0600). Runners of other hubs
+    /// are not touched.
+    ///
+    /// Binds the linked project unless --project is given; earlier bindings
+    /// are kept unless --replace.
+    Register {
+        /// Project ID to bind (repeatable); default: the linked project.
+        #[arg(long = "project", alias = "project-id")]
+        projects: Vec<String>,
+
+        /// Binding mode; the runner supports notify only for now.
+        #[arg(long, default_value = "notify", value_parser = ["notify", "off"])]
+        mode: String,
+
+        /// Runner name (default: nexus-cli@<host>).
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Days until the runner token expires.
+        #[arg(long, default_value_t = cmd::dispatch_runner::DEFAULT_EXPIRES_DAYS, value_parser = clap::value_parser!(u32).range(1..=365))]
+        expires_days: u32,
+
+        /// Drop the bindings of an earlier register.
+        #[arg(long)]
+        replace: bool,
+    },
+
+    /// Show the runners on this machine and their bindings
+    ///
+    /// Heartbeats every runner (one per hub) and shows the bindings:
+    /// effective mode, blocking switch, lag and the Claude Code probe.
+    Status {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Pause the runner on the hub (it stays registered).
+    Pause,
+
+    /// Resume a paused runner.
+    Resume,
+
+    /// Revoke the runner on the hub and remove the local token file.
+    Revoke,
+
+    /// Quote the sender's title in notices (on) or not (off)
+    ///
+    /// Off by default: a notice then holds only the Dispatch id, the peer
+    /// project, type, priority and status, all reduced to a fixed character
+    /// set, and goes into the session as one plain line. On adds the title
+    /// another project wrote, fenced as untrusted data. Stored in the local
+    /// runner file; restart the listener to apply it.
+    Titles {
+        /// on or off.
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+
+    /// Check whether Claude Code accepts session notices
+    ///
+    /// Checks whether the installed Claude Code takes notices through its
+    /// cross-session inbox (tested version range).
+    Probe {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `nexus classification` subcommands. Levels, labels and the gateway
+/// mapping come from the hub.
+#[derive(Debug, Subcommand)]
+pub enum ClassificationAction {
+    /// Show the classification and its consequences
+    ///
+    /// Project, customer and effective level, gateway class and
+    /// consequences. Supports --output json.
+    Show,
+
+    /// All levels with group, label and gateway class.
+    Levels,
+
+    /// Change the project's classification level
+    ///
+    /// Always prints the impact plan first; lowering the gateway class
+    /// needs --reason and a typed confirmation.
+    Set {
+        /// New level, e.g. confidential (see `nexus classification levels`).
+        level: String,
+
+        /// Reason for the change, recorded in the audit log
+        ///
+        /// Required when the gateway class goes down.
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Print the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Let the project level override the customer level
+        ///
+        /// The project level becomes the effective level, also below the
+        /// customer level. A later set without --force makes the customer
+        /// level the floor again.
+        #[arg(long)]
+        force: bool,
+
+        /// Run `nexus pull` afterwards so delegates appear or disappear.
+        #[arg(long)]
+        pull: bool,
+    },
+}
+
+/// `nexus doctor` targets.
+#[derive(Debug, Subcommand)]
+pub enum DoctorTarget {
+    /// Check the tools the Claude Code workspace needs
+    ///
+    /// Checks claude, zellij, lazygit, ccusage and delta, driven by your
+    /// workspace layout, and whether copying from a Zellij pane reaches the
+    /// system clipboard.
+    /// Exits 1 when a required tool is missing. Supports --output json.
+    Claude {
+        /// Offer install commands and run them after confirmation
+        ///
+        /// Prints install commands (devbox, brew or npm) and offers the
+        /// Zellij `copy_command` line (with a backup). Nothing is installed
+        /// or written without it.
+        #[arg(long)]
+        fix: bool,
+    },
+}
+
+/// Deprecated `nexus claude` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ClaudeAction {
+    /// Show the CCX bundle state
+    ///
+    /// Per-file state, managed settings, Claude Code version, plugins, last
+    /// headroom summary. Read-only. Exits 1 when changes are pending or
+    /// conflicts exist. Supports --output json.
+    Status {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Show diffs for changed CCX files
+    ///
+    /// Unified diffs (local vs. desired) for every non-clean CCX file,
+    /// managed settings key, and the CLAUDE.md block. Read-only. Exits 1
+    /// when differences exist.
+    Diff {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Deprecated: use `nexus run` (it starts the backend's run target,
+    /// including the CCX zellij workspace).
+    #[command(hide = true)]
+    Launch {
+        /// Skip pre-launch checks.
+        #[arg(long)]
+        skip_checks: bool,
+
+        /// Skip the pre-launch confirmation (non-interactive use)
+        #[arg(short, long)]
+        force: bool,
+
+        /// Named Claude Code account (see `nexus run --account`).
+        #[arg(long)]
+        account: Option<String>,
+    },
+}
+
+/// Shadow mode subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ShadowAction {
+    /// Hide the selected targets from Git
+    ///
+    /// Targets: agentic files, the devbox workspace and Nexus internals in
+    /// commit messages and tracked files (all of them without --target).
+    On(ShadowSwitchArgs),
+    /// Stop hiding the selected targets from Git
+    ///
+    /// Reverse of `on` (all targets without --target).
+    Off(ShadowSwitchArgs),
+    /// Deprecated: use `nexus shadow on --target agentic`.
+    #[command(hide = true)]
+    Ai,
+    /// Deprecated: use `nexus shadow on --target nexus`.
+    #[command(hide = true)]
+    Nexus,
+    /// Show the effective shadow state
+    ///
+    /// Level, excluded paths and commit-msg hook, with a check summary and
+    /// the local exclude blocks.
+    Status,
+    /// Check tracked files and commits against the shadow rules
+    ///
+    /// Scans tracked files and recent commit messages with the project's
+    /// shadow rules and lists excluded paths git still tracks. Read-only;
+    /// exits 1 when anything is found. Supports --json / --output json.
+    Check {
+        /// Number of recent commits on the current branch to scan.
+        #[arg(long, default_value_t = 50)]
+        commits: usize,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a commit message file against the cached rules (used by the
+    /// commit-msg hook that nexus pull installs).
+    #[command(hide = true)]
+    CheckMsg {
+        /// Cached shadow guard (written by nexus pull).
+        #[arg(long)]
+        guard: String,
+        /// The commit message file git passes to the hook.
+        file: String,
+    },
+}
+
+/// Targets of `nexus shadow on|off`.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct ShadowSwitchArgs {
+    /// Targets to switch (repeatable, comma-separated)
+    ///
+    /// agentic (alias: ai, agentic-files), workspace, nexus; nexus includes
+    /// agentic.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub target: Vec<cmd::shadow::ShadowTarget>,
+    /// All targets (the default without --target).
+    #[arg(long, conflicts_with = "target")]
+    pub all: bool,
+    /// Show what would change without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// With on: also untrack files git already tracks
+    ///
+    /// Takes them (with commit history) out of the index. They stay on disk;
+    /// the next commit removes them from the repository.
+    #[arg(long)]
+    pub untrack: bool,
+}
+
+/// Workspace shadow subcommands.
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceAction {
+    /// Exclude the devbox workspace files from Git
+    ///
+    /// Covers devbox.json, devbox.lock, .devbox/ and scripts/devbox/.
+    #[command(name = "shadow")]
+    Shadow {
+        #[command(subcommand)]
+        action: WorkspaceShadowAction,
+    },
+}
+
+/// Workspace shadow on/off/status (deprecated: `nexus shadow on|off
+/// --target workspace`).
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceShadowAction {
+    /// Enable workspace shadow mode
+    ///
+    /// Same as `nexus shadow on --target workspace`.
+    On,
+    /// Disable workspace shadow mode
+    ///
+    /// Same as `nexus shadow off --target workspace`.
+    Off,
+    /// Show workspace shadow status.
+    Status,
+}
+
+/// Sync subcommands for agent file synchronization.
+#[derive(Debug, Subcommand)]
+pub enum SyncAction {
+    /// Show sync status of all agent files (local vs platform).
+    Status {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Push local agent file changes to the platform.
+    Push {
+        /// The file key to push (e.g. "AGENTS.md", "CLAUDE.md").
+        file_key: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Discard local changes and reset to the platform version.
+    Reset {
+        /// The file key to reset (e.g. "AGENTS.md", "CLAUDE.md").
+        file_key: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+}
+
+/// Git identity subcommands.
+#[derive(Debug, Subcommand)]
+pub enum GitAction {
+    /// Check the local git config against the project identity
+    Verify,
+    /// Apply the project's git identity to .git/config
+    ///
+    /// With a GitHub account on the project path, also writes
+    /// `.nexus/gh.env` and sets the transport identity (`core.sshCommand`,
+    /// the HTTPS credential helper), the gh default repository and the
+    /// account's commit identity in the local git config.
+    Apply {
+        /// Rewrite SSH host-alias remotes to git@<host>:owner/repo.git
+        ///
+        /// Needs an ssh key on the account; asks per remote unless --yes.
+        #[arg(long)]
+        canonical_remotes: bool,
+    },
+    /// Log the project's GitHub account into its own gh profile.
+    ///
+    /// Opens the browser login by default (`gh auth login --web`), scoped
+    /// to the profile directory. Checks that the login is the expected
+    /// account (on a mismatch the profile is logged out again and nothing
+    /// is written), then writes `.nexus/gh.env` and the local git config
+    /// like `nexus git apply`. The global gh login stays unchanged.
+    ///
+    /// Fine-grained token for a customer organization (--with-token):
+    /// resource owner = the customer organization; repository access =
+    /// only the repositories needed; permissions: Contents read, Metadata
+    /// read, Pull requests read (write to comment on or open pull
+    /// requests). The organization owner may have to approve the token.
+    ///
+    /// Example: nexus git login --account octocat --with-token < token.txt
+    Login {
+        /// Expected GitHub login (must match the project's account).
+        #[arg(long, conflicts_with = "profile")]
+        account: Option<String>,
+        /// gh profile name (must match the project's account).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Read a token from stdin instead of the browser login
+        ///
+        /// Hidden prompt on a terminal. The token is passed to gh over stdin
+        /// only.
+        #[arg(long)]
+        with_token: bool,
+    },
+}
+
+/// Project inference token subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ProjectAction {
+    /// Issue and store a project inference token for this workspace.
+    ///
+    /// Uses the linked project (or --project-id) and provisions a
+    /// nxs_proj_* token, storing it locally and exposing it as
+    /// NEXUS_PROJECT_TOKEN. Use --rotate/--status as shortcuts.
+    Link {
+        /// Nexus project UUID (defaults to the linked project).
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Logical runtime name (defaults to the hostname).
+        #[arg(long)]
+        runtime_id: Option<String>,
+
+        /// Restrict the token to specific profile slugs (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        restrict_profiles: Vec<String>,
+
+        /// Token lifetime: 30d, 12h, 2w or an ISO 8601 timestamp
+        #[arg(long)]
+        expires: Option<String>,
+
+        /// Shortcut for `nexus project rotate`.
+        #[arg(long, conflicts_with = "status")]
+        rotate: bool,
+
+        /// Shortcut for `nexus project status`.
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Rotate the project inference token
+    ///
+    /// The previous token stays valid until the rotation is finalized.
+    Rotate {
+        /// Nexus project UUID (defaults to the linked project).
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Revoke the superseded token to complete the rotation
+        #[arg(long)]
+        finalize: bool,
+    },
+
+    /// Revoke the project inference token and clear local state.
+    Unlink {
+        /// Nexus project UUID (defaults to the linked project).
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// List issued project inference tokens for the linked project.
+    Status {
+        /// Nexus project UUID (defaults to the linked project).
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+}
+
+/// Configuration subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Show the effective configuration
+    ///
+    /// Shows per-key provenance (local / global / default).
+    Show,
+
+    /// Set a configuration value (KEY=VALUE).
+    ///
+    /// By default writes to the global config
+    /// (`~/.config/nexus/config.toml`). Pass `--local` to write to the
+    /// project-local `.nexus/config.toml` instead, scoping the value to
+    /// this project only (mirrors `git config --local`).
+    Set {
+        /// Configuration key=value pair.
+        pair: String,
+
+        /// Write to the project-local .nexus/config.toml
+        ///
+        /// Supports api_url, default_output, no_color.
+        #[arg(long, conflicts_with = "global")]
+        local: bool,
+
+        /// Write to the global config (default)
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+    },
+
+    /// Show the configuration file path.
+    ///
+    /// Without flags, prints the global config path (unchanged from
+    /// previous versions). Pass `--local` for the project-local path.
+    Path {
+        /// Print the project-local .nexus/config.toml path
+        #[arg(long, conflicts_with = "global")]
+        local: bool,
+
+        /// Print the global config path (default)
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+    },
+}
+
+/// Skills management subcommands.
+#[derive(Debug, Subcommand)]
+pub enum SkillsAction {
+    /// List all skills for the current tenant.
+    List {
+        /// Filter by status: draft, active, archived (default: draft,active)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Maximum number of skills (default: 50, max: 100)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+
+    /// Export enabled skills for the linked project as JSON.
+    Export {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+}
+
+/// Actors management subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ActorsAction {
+    /// List actors assigned to the linked project.
+    List {
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Show full actor profile.
+    Show {
+        /// Actor slug or UUID.
+        slug: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Normalize actor markdown to YAML frontmatter format.
+    Normalize {
+        /// Path to actor markdown file.
+        path: String,
+    },
+
+    /// Validate actor profiles against schema and route catalog
+    Validate {
+        /// Path to actor markdown file.
+        path: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Import validated actor profiles into the Actor Registry.
+    Import {
+        /// Path to actor markdown file or directory.
+        path: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Export actor configuration for a target format.
+    Export {
+        /// Export target format: `opencode` or `claude`.
+        #[arg(long, default_value = "opencode")]
+        target: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Manage actor avatars.
+    Avatar {
+        #[command(subcommand)]
+        action: ActorAvatarAction,
+    },
+
+    /// Start a local-lane actor as its own Claude Code session
+    ///
+    /// Runs against the Nexus gateway, authenticated with the project
+    /// inference token (never a claude.ai login). Exits with claude's exit
+    /// code.
+    Run {
+        /// Actor slug (a local-lane actor of the linked project).
+        slug: String,
+
+        /// Run headless (`claude -p`) with this prompt and print the result.
+        #[arg(short = 'p', long)]
+        prompt: Option<String>,
+
+        /// Gateway base URL (default: NEXUS_GATEWAY_URL, then backend)
+        #[arg(long)]
+        gateway_url: Option<String>,
+
+        /// Extra arguments for claude (after `--`).
+        #[arg(last = true)]
+        claude_args: Vec<String>,
+    },
+}
+
+/// Actor avatar subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ActorAvatarAction {
+    /// Trigger avatar regeneration via API.
+    Generate {
+        /// Actor slug.
+        slug: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+
+    /// Reset avatar to DiceBear default.
+    Reset {
+        /// Actor slug.
+        slug: String,
+
+        /// Override the linked project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+}
+
+/// Stash subcommands for workspace file management.
+#[derive(Debug, Subcommand)]
+pub enum StashAction {
+    /// Save modified workspace files to a stash (default action).
+    Save,
+
+    /// Restore the most recent stash.
+    Pop,
+
+    /// List all available stashes.
+    List,
+}
+
+impl Cli {
+    /// Resolve the effective output format from CLI flag -> config -> default.
+    pub fn resolve_output(
+        &self,
+        config: &nexus_core::config::Config,
+    ) -> nexus_core::OutputPreference {
+        if let Some(ref fmt) = self.output {
+            fmt.parse().unwrap_or(config.default_output)
+        } else {
+            config.default_output
+        }
+    }
+
+    /// Resolve the effective API URL from CLI flag -> env var -> config -> default.
+    pub fn resolve_api_url(&self, config: &nexus_core::config::Config) -> String {
+        if let Some(ref url) = self.api_url {
+            url.clone()
+        } else if let Ok(env_url) = std::env::var("NEXUS_API_URL") {
+            if !env_url.is_empty() {
+                env_url
+            } else {
+                config.api_url.clone()
+            }
+        } else {
+            config.api_url.clone()
+        }
+    }
+
+    /// Report which layer supplied the effective API URL: CLI flag, env var,
+    /// or the config layer reported by `Config::load_effective_with_provenance`
+    /// (local / global / default). Used by `nexus status` to make silent
+    /// env-mismatches diagnosable at a glance.
+    pub fn resolve_api_url_source(
+        &self,
+        effective: &nexus_core::config::EffectiveConfig,
+    ) -> &'static str {
+        if self.api_url.is_some() {
+            "flag"
+        } else if std::env::var("NEXUS_API_URL")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
+            "env"
+        } else {
+            match effective.api_url_source {
+                nexus_core::config::ConfigSource::Local => "local",
+                nexus_core::config::ConfigSource::Global => "global",
+                nexus_core::config::ConfigSource::Default => "default",
+            }
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Build dynamic about string with version + copyright
+    let version = env!("CARGO_PKG_VERSION");
+    let about = format!(
+        "Nexus CLI v{version}: Nexus platform operations\n(C) 2025-present RelicFrog Holding UG | Nexus Product Group"
+    );
+
+    let cli = Cli::from_arg_matches(&Cli::command().about(about).get_matches())?;
+
+    // Initialize tracing. `mcp-local` is a stdio JSON-RPC server: any stray
+    // log line on stdout would corrupt the protocol stream, so its logs are
+    // always routed to stderr regardless of the default writer.
+    let filter = if cli.verbose {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::from_default_env().add_directive("nexus=info".parse()?)
+    };
+    if matches!(cli.command, Command::McpLocal) {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
+
+    // Load config for update check
+    let config = nexus_core::config::Config::load().unwrap_or_default();
+
+    // Spawn update check in background (non-blocking).
+    // Suppressed when the user is already running `nexus upgrade`: the new
+    // version is installed by the time the notice would appear, so showing it
+    // is misleading.
+    let is_upgrade_cmd = matches!(cli.command, Command::Upgrade);
+    // McpLocal is a stdio JSON-RPC server (spawned by Claude Code / other
+    // MCP hosts): never spawn background work or emit anything besides the
+    // protocol itself on stdout.
+    let is_mcp_local_cmd = matches!(cli.command, Command::McpLocal);
+    let update_handle = if config.check_updates && !is_upgrade_cmd && !is_mcp_local_cmd {
+        Some(tokio::spawn(async move {
+            nexus_core::update_check::check_for_update(&config).await
+        }))
+    } else {
+        None
+    };
+
+    let result = cmd::dispatch(cli).await;
+
+    // Show update notice after command output (if available)
+    if let Some(handle) = update_handle {
+        if let Ok(Some(info)) = handle.await {
+            use console::style;
+            eprintln!();
+            eprintln!(
+                "{} A new version of Nexus CLI is available: {} -> {}",
+                style("UPDATE").bold().yellow(),
+                style(&info.current).dim(),
+                style(&info.latest).bold().green(),
+            );
+            eprintln!("   Run {} to upgrade.", style("nexus upgrade").bold());
+        }
+    }
+
+    if let Err(e) = result {
+        // Print a clean, user-facing error (Display only, full cause chain,
+        // no backtrace) and exit non-zero via std::process::exit.
+        //
+        // We deliberately do NOT return the Err from main(): Rust's default
+        // Termination handler for a Result-returning main Debug-formats the
+        // error, and anyhow::Error's Debug impl includes a raw stack
+        // backtrace whenever RUST_BACKTRACE is set in the environment
+        // (common in dev shells / devbox). That backtrace is not actionable
+        // for CLI users and reads like a crash even for expected errors
+        // (e.g. an invalid auth token) -- see `nexus status`, which has
+        // always printed such errors cleanly via Display for this reason.
+        use console::style;
+        eprintln!();
+        eprintln!("{} {}", style("Error:").bold().red(), e);
+        for cause in e.chain().skip(1) {
+            eprintln!("  {} {}", style("Caused by:").dim(), cause);
+        }
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_parse_init_default() {
+        let cli = Cli::try_parse_from(["nexus", "init"]).unwrap();
+        match cli.command {
+            Command::Init {
+                ref path,
+                ref name,
+                ref project_id,
+                force,
+                trust,
+                shadowed_ai,
+            } => {
+                assert_eq!(path, ".");
+                assert!(name.is_none());
+                assert!(project_id.is_none());
+                assert!(!force);
+                assert!(!trust);
+                assert!(!shadowed_ai);
+            }
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_init_with_path_and_name() {
+        let cli =
+            Cli::try_parse_from(["nexus", "init", "/tmp/myproject", "-n", "My Project"]).unwrap();
+        match cli.command {
+            Command::Init {
+                ref path,
+                ref name,
+                ref project_id,
+                force,
+                ..
+            } => {
+                assert_eq!(path, "/tmp/myproject");
+                assert_eq!(name.as_deref(), Some("My Project"));
+                assert!(project_id.is_none());
+                assert!(!force);
+            }
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_init_force() {
+        let cli = Cli::try_parse_from(["nexus", "init", "--force"]).unwrap();
+        match cli.command {
+            Command::Init { force, .. } => assert!(force),
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_init_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "init",
+            ".",
+            "--project-id",
+            "11111111-2222-4333-8444-555555555555",
+            "--force",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Init {
+                ref project_id,
+                force,
+                ..
+            } => {
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("11111111-2222-4333-8444-555555555555")
+                );
+                assert!(force);
+            }
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_link_no_args() {
+        let cli = Cli::try_parse_from(["nexus", "link"]).unwrap();
+        match cli.command {
+            Command::Link { ref project_id } => {
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_link_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "link",
+            "--project-id",
+            "11111111-2222-4333-8444-555555555555",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Link { ref project_id } => {
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("11111111-2222-4333-8444-555555555555")
+                );
+            }
+            _ => panic!("expected Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_code_report() {
+        let cli = Cli::try_parse_from(["nexus", "code-report"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::CodeReport { dry_run: false }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "code-report", "--dry-run"]).unwrap();
+        assert!(matches!(cli.command, Command::CodeReport { dry_run: true }));
+    }
+
+    #[test]
+    fn test_parse_unlink() {
+        let cli = Cli::try_parse_from(["nexus", "unlink"]).unwrap();
+        assert!(matches!(cli.command, Command::Unlink));
+    }
+
+    #[test]
+    fn test_parse_project_link_no_args() {
+        let cli = Cli::try_parse_from(["nexus", "project", "link"]).unwrap();
+        match cli.command {
+            Command::Project {
+                action:
+                    ProjectAction::Link {
+                        project_id,
+                        runtime_id,
+                        restrict_profiles,
+                        expires,
+                        rotate,
+                        status,
+                    },
+            } => {
+                assert!(project_id.is_none());
+                assert!(runtime_id.is_none());
+                assert!(restrict_profiles.is_empty());
+                assert!(expires.is_none());
+                assert!(!rotate);
+                assert!(!status);
+            }
+            _ => panic!("expected Project::Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_link_full() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "project",
+            "link",
+            "--project-id",
+            "11111111-2222-4333-8444-555555555555",
+            "--runtime-id",
+            "ci-production",
+            "--restrict-profiles",
+            "coding,reasoning",
+            "--expires",
+            "30d",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Project {
+                action:
+                    ProjectAction::Link {
+                        project_id,
+                        runtime_id,
+                        restrict_profiles,
+                        expires,
+                        ..
+                    },
+            } => {
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("11111111-2222-4333-8444-555555555555")
+                );
+                assert_eq!(runtime_id.as_deref(), Some("ci-production"));
+                assert_eq!(restrict_profiles, vec!["coding", "reasoning"]);
+                assert_eq!(expires.as_deref(), Some("30d"));
+            }
+            _ => panic!("expected Project::Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_link_rotate_shortcut() {
+        let cli = Cli::try_parse_from(["nexus", "project", "link", "--rotate"]).unwrap();
+        match cli.command {
+            Command::Project {
+                action: ProjectAction::Link { rotate, status, .. },
+            } => {
+                assert!(rotate);
+                assert!(!status);
+            }
+            _ => panic!("expected Project::Link command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_rotate_finalize() {
+        let cli = Cli::try_parse_from(["nexus", "project", "rotate", "--finalize"]).unwrap();
+        match cli.command {
+            Command::Project {
+                action: ProjectAction::Rotate { finalize, .. },
+            } => assert!(finalize),
+            _ => panic!("expected Project::Rotate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_unlink_and_status() {
+        let unlink = Cli::try_parse_from(["nexus", "project", "unlink"]).unwrap();
+        assert!(matches!(
+            unlink.command,
+            Command::Project {
+                action: ProjectAction::Unlink { .. }
+            }
+        ));
+        let status = Cli::try_parse_from(["nexus", "project", "status"]).unwrap();
+        assert!(matches!(
+            status.command,
+            Command::Project {
+                action: ProjectAction::Status { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_project_link_rotate_status_conflict() {
+        // --rotate and --status are mutually exclusive.
+        let result = Cli::try_parse_from(["nexus", "project", "link", "--rotate", "--status"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_deinit_no_force() {
+        let cli = Cli::try_parse_from(["nexus", "deinit"]).unwrap();
+        match cli.command {
+            Command::Deinit { force } => assert!(!force),
+            _ => panic!("expected Deinit command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_deinit_with_force() {
+        let cli = Cli::try_parse_from(["nexus", "deinit", "--force"]).unwrap();
+        match cli.command {
+            Command::Deinit { force } => assert!(force),
+            _ => panic!("expected Deinit command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_login() {
+        let cli = Cli::try_parse_from(["nexus", "login"]).unwrap();
+        match cli.command {
+            Command::Login { local, global } => {
+                assert!(!local);
+                assert!(!global);
+            }
+            _ => panic!("expected Login command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_login_global() {
+        let cli = Cli::try_parse_from(["nexus", "login", "--global"]).unwrap();
+        match cli.command {
+            Command::Login { local, global } => {
+                assert!(!local);
+                assert!(global);
+            }
+            _ => panic!("expected Login command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_login_local_and_global_conflict() {
+        let result = Cli::try_parse_from(["nexus", "login", "--local", "--global"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_logout() {
+        let cli = Cli::try_parse_from(["nexus", "logout"]).unwrap();
+        match cli.command {
+            Command::Logout { local, global } => {
+                assert!(!local);
+                assert!(!global);
+            }
+            _ => panic!("expected Logout command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logout_global() {
+        let cli = Cli::try_parse_from(["nexus", "logout", "--global"]).unwrap();
+        match cli.command {
+            Command::Logout { local, global } => {
+                assert!(!local);
+                assert!(global);
+            }
+            _ => panic!("expected Logout command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_status() {
+        let cli = Cli::try_parse_from(["nexus", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Status {
+                agents: false,
+                watch: false,
+                ..
+            }
+        ));
+        // --json works without --agents (short for --output json).
+        let cli = Cli::try_parse_from(["nexus", "status", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Status {
+                agents: false,
+                json: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_config_show() {
+        let cli = Cli::try_parse_from(["nexus", "config", "show"]).unwrap();
+        match cli.command {
+            Command::Config {
+                action: ConfigAction::Show,
+            } => {}
+            _ => panic!("expected Config Show"),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_set() {
+        let cli =
+            Cli::try_parse_from(["nexus", "config", "set", "api_url=https://custom.url"]).unwrap();
+        match cli.command {
+            Command::Config {
+                action:
+                    ConfigAction::Set {
+                        ref pair,
+                        local,
+                        global,
+                    },
+            } => {
+                assert_eq!(pair, "api_url=https://custom.url");
+                assert!(!local);
+                assert!(!global);
+            }
+            _ => panic!("expected Config Set"),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_set_local() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "config",
+            "set",
+            "api_url=https://staging.example",
+            "--local",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Config {
+                action:
+                    ConfigAction::Set {
+                        ref pair,
+                        local,
+                        global,
+                    },
+            } => {
+                assert_eq!(pair, "api_url=https://staging.example");
+                assert!(local);
+                assert!(!global);
+            }
+            _ => panic!("expected Config Set"),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_path() {
+        let cli = Cli::try_parse_from(["nexus", "config", "path"]).unwrap();
+        match cli.command {
+            Command::Config {
+                action: ConfigAction::Path { local, global },
+            } => {
+                assert!(!local);
+                assert!(!global);
+            }
+            _ => panic!("expected Config Path"),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_path_local() {
+        let cli = Cli::try_parse_from(["nexus", "config", "path", "--local"]).unwrap();
+        match cli.command {
+            Command::Config {
+                action: ConfigAction::Path { local, global },
+            } => {
+                assert!(local);
+                assert!(!global);
+            }
+            _ => panic!("expected Config Path"),
+        }
+    }
+
+    #[test]
+    fn test_global_verbose_flag() {
+        let cli = Cli::try_parse_from(["nexus", "--verbose", "status"]).unwrap();
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn test_global_api_url_flag() {
+        let cli =
+            Cli::try_parse_from(["nexus", "--api-url", "https://custom.api", "status"]).unwrap();
+        assert_eq!(cli.api_url.as_deref(), Some("https://custom.api"));
+    }
+
+    #[test]
+    fn test_resolve_api_url_source_precedence() {
+        // Combined into a single test: NEXUS_API_URL is process-global state,
+        // so exercising "env" vs "no env" branches across separate #[test]
+        // functions racing on the default multi-threaded test runner is
+        // flaky. One test = one thread = deterministic ordering.
+        std::env::remove_var("NEXUS_API_URL");
+
+        // 1. CLI flag wins over everything, even if env is also set later.
+        let cli_flag =
+            Cli::try_parse_from(["nexus", "--api-url", "https://custom.api", "status"]).unwrap();
+        let effective = nexus_core::config::EffectiveConfig {
+            config: nexus_core::config::Config::default(),
+            api_url_source: nexus_core::config::ConfigSource::Local,
+            default_output_source: nexus_core::config::ConfigSource::Default,
+            no_color_source: nexus_core::config::ConfigSource::Default,
+            local_path: None,
+            global_path: nexus_core::config::Config::path().unwrap(),
+        };
+        assert_eq!(cli_flag.resolve_api_url_source(&effective), "flag");
+
+        // 2. Without a flag, NEXUS_API_URL env var wins over the config layer.
+        let cli_no_flag = Cli::try_parse_from(["nexus", "status"]).unwrap();
+        std::env::set_var("NEXUS_API_URL", "https://env.example.com");
+        assert_eq!(cli_no_flag.resolve_api_url_source(&effective), "env");
+        std::env::remove_var("NEXUS_API_URL");
+
+        // 3. Without a flag or env var, the config layer's own provenance
+        // (local / global / default) is reported as-is.
+        let local_effective = nexus_core::config::EffectiveConfig {
+            api_url_source: nexus_core::config::ConfigSource::Local,
+            ..effective
+        };
+        assert_eq!(
+            cli_no_flag.resolve_api_url_source(&local_effective),
+            "local"
+        );
+
+        let global_effective = nexus_core::config::EffectiveConfig {
+            api_url_source: nexus_core::config::ConfigSource::Global,
+            ..local_effective
+        };
+        assert_eq!(
+            cli_no_flag.resolve_api_url_source(&global_effective),
+            "global"
+        );
+
+        let default_effective = nexus_core::config::EffectiveConfig {
+            api_url_source: nexus_core::config::ConfigSource::Default,
+            ..global_effective
+        };
+        assert_eq!(
+            cli_no_flag.resolve_api_url_source(&default_effective),
+            "default"
+        );
+
+        // Leave no residue for other tests.
+        std::env::remove_var("NEXUS_API_URL");
+    }
+
+    #[test]
+    fn test_global_output_flag() {
+        let cli = Cli::try_parse_from(["nexus", "--output", "json", "status"]).unwrap();
+        assert_eq!(cli.output.as_deref(), Some("json"));
+    }
+
+    #[test]
+    fn test_unknown_command_fails() {
+        let result = Cli::try_parse_from(["nexus", "unknown"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_pull_no_args() {
+        let cli = Cli::try_parse_from(["nexus", "pull"]).unwrap();
+        match cli.command {
+            Command::Pull {
+                ref project_id,
+                force,
+                ..
+            } => {
+                assert!(project_id.is_none());
+                assert!(!force);
+            }
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_and_init_trust() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--trust"]).unwrap();
+        assert!(matches!(cli.command, Command::Pull { trust: true, .. }));
+        let cli = Cli::try_parse_from(["nexus", "pull", "-y"]).unwrap();
+        assert!(matches!(cli.command, Command::Pull { trust: false, .. }));
+        let cli = Cli::try_parse_from(["nexus", "init", "--trust"]).unwrap();
+        assert!(matches!(cli.command, Command::Init { trust: true, .. }));
+    }
+
+    #[test]
+    fn test_parse_pull_untrack_shadowed_and_settings_alias() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--untrack-shadowed"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Pull {
+                untrack_shadowed: true,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "pull", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Pull {
+                untrack_shadowed: false,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "settings", "get"]).unwrap();
+        assert!(matches!(cli.command, Command::Env { action: Some(_) }));
+    }
+
+    #[test]
+    fn test_parse_pull_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "pull",
+            "--project-id",
+            "11111111-2222-4333-8444-555555555555",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Pull {
+                ref project_id,
+                force,
+                ..
+            } => {
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("11111111-2222-4333-8444-555555555555")
+                );
+                assert!(!force);
+            }
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_with_force() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--force"]).unwrap();
+        match cli.command {
+            Command::Pull { force, .. } => assert!(force),
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_short_force() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "-f"]).unwrap();
+        match cli.command {
+            Command::Pull { force, .. } => assert!(force),
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_force_unmanaged() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--force-unmanaged"]).unwrap();
+        match cli.command {
+            Command::Pull {
+                force,
+                force_unmanaged,
+                ..
+            } => {
+                assert!(!force);
+                assert!(force_unmanaged);
+            }
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_commands() {
+        let cli = Cli::try_parse_from(["nexus", "diff", ".claude/rules"]).unwrap();
+        match cli.command {
+            Command::Diff { path } => assert_eq!(path.as_deref(), Some(".claude/rules")),
+            _ => panic!("expected Diff"),
+        }
+        let cli = Cli::try_parse_from(["nexus", "reset"]).unwrap();
+        assert!(matches!(cli.command, Command::Reset { path: None, .. }));
+        let cli = Cli::try_parse_from(["nexus", "push", ".nexus/AGENTS.md", "--dry-run"]).unwrap();
+        match cli.command {
+            Command::Push { path, dry_run, .. } => {
+                assert_eq!(path.as_deref(), Some(".nexus/AGENTS.md"));
+                assert!(dry_run);
+            }
+            _ => panic!("expected Push"),
+        }
+        // Bare `nexus push` keeps working.
+        let cli = Cli::try_parse_from(["nexus", "push"]).unwrap();
+        assert!(matches!(cli.command, Command::Push { path: None, .. }));
+    }
+
+    #[test]
+    fn test_parse_classification_commands() {
+        let cli = Cli::try_parse_from(["nexus", "classification"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Classification { action: None }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "class", "levels"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Classification {
+                action: Some(ClassificationAction::Levels)
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "classification",
+            "set",
+            "confidential",
+            "--reason",
+            "lane test",
+            "--dry-run",
+            "--pull",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Classification {
+                action:
+                    Some(ClassificationAction::Set {
+                        level,
+                        reason,
+                        dry_run,
+                        force,
+                        pull,
+                    }),
+            } => {
+                assert_eq!(level, "confidential");
+                assert_eq!(reason.as_deref(), Some("lane test"));
+                assert!(dry_run && pull && !force);
+            }
+            _ => panic!("expected Classification Set"),
+        }
+    }
+
+    #[test]
+    fn test_parse_env_commands() {
+        let cli = Cli::try_parse_from(["nexus", "env"]).unwrap();
+        assert!(matches!(cli.command, Command::Env { action: None }));
+        let cli = Cli::try_parse_from(["nexus", "env", "get", "claude.hud"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Env {
+                action: Some(EnvAction::Get { key: Some(_) })
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "env", "keys"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Env {
+                action: Some(EnvAction::Keys)
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "env", "set", "claude.hud", "minimal", "--pull"])
+            .unwrap();
+        match cli.command {
+            Command::Env {
+                action:
+                    Some(EnvAction::Set {
+                        key,
+                        value,
+                        pull,
+                        dry_run,
+                    }),
+            } => {
+                assert_eq!(
+                    (key.as_deref(), value.as_deref(), pull, dry_run),
+                    (Some("claude.hud"), Some("minimal"), true, false)
+                );
+            }
+            _ => panic!("expected env set"),
+        }
+    }
+
+    #[test]
+    fn test_parse_env_set_key_equals_value() {
+        let cli = Cli::try_parse_from(["nexus", "env", "set", "executioner=opencode"]).unwrap();
+        match cli.command {
+            Command::Env {
+                action: Some(EnvAction::Set { key, value, .. }),
+            } => assert_eq!(
+                (key.as_deref(), value),
+                (Some("executioner=opencode"), None)
+            ),
+            _ => panic!("expected env set"),
+        }
+    }
+
+    #[test]
+    fn test_deprecated_aliases_still_parse() {
+        assert!(Cli::try_parse_from(["nexus", "sync", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["nexus", "sync", "push", "AGENTS.md"]).is_ok());
+        assert!(Cli::try_parse_from(["nexus", "claude", "diff"]).is_ok());
+    }
+
+    #[test]
+    fn test_parse_claude_subcommands() {
+        let cli = Cli::try_parse_from(["nexus", "--output", "json", "claude", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Claude {
+                action: ClaudeAction::Status { .. }
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "claude", "diff"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Claude {
+                action: ClaudeAction::Diff { .. }
+            }
+        ));
+        let cli =
+            Cli::try_parse_from(["nexus", "claude", "launch", "--account", "work", "-f"]).unwrap();
+        match cli.command {
+            Command::Claude {
+                action:
+                    ClaudeAction::Launch {
+                        force,
+                        skip_checks,
+                        account,
+                    },
+            } => {
+                assert!(force);
+                assert!(!skip_checks);
+                assert_eq!(account.as_deref(), Some("work"));
+            }
+            _ => panic!("expected Claude Launch command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_skills_export_no_args() {
+        let cli = Cli::try_parse_from(["nexus", "skills", "export"]).unwrap();
+        match cli.command {
+            Command::Skills {
+                action: SkillsAction::Export { ref project_id },
+            } => {
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Skills Export command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_skills_export_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "skills",
+            "export",
+            "--project-id",
+            "11111111-2222-4333-8444-555555555555",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Skills {
+                action: SkillsAction::Export { ref project_id },
+            } => {
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("11111111-2222-4333-8444-555555555555")
+                );
+            }
+            _ => panic!("expected Skills Export command"),
+        }
+    }
+
+    #[test]
+    fn test_short_help_fits_a_terminal_line() {
+        // `-h` and the command lists show only the first paragraph of each
+        // doc comment; keep it to one short line so they read like the help
+        // of other Unix tools. Details belong in the following paragraphs
+        // (shown by --help and in the manual pages).
+        fn check(cmd: &clap::Command, path: &str, errors: &mut Vec<String>) {
+            for sub in cmd.get_subcommands().filter(|c| !c.is_hide_set()) {
+                let name = format!("{path} {}", sub.get_name());
+                let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+                if about.is_empty() || about.len() > 72 || about.contains('\n') {
+                    errors.push(format!("{name}: about {:?}", about));
+                }
+                check(sub, &name, errors);
+            }
+            for arg in cmd.get_arguments().filter(|a| !a.is_hide_set()) {
+                let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+                if help.len() > 72 || help.contains('\n') {
+                    errors.push(format!("{path} --{}: help {:?}", arg.get_id(), help));
+                }
+            }
+        }
+        let mut errors = Vec::new();
+        check(&Cli::command(), "nexus", &mut errors);
+        assert!(errors.is_empty(), "too long:\n{}", errors.join("\n"));
+    }
+
+    #[test]
+    fn test_parse_preflight() {
+        let cli = Cli::try_parse_from(["nexus", "preflight"]).unwrap();
+        assert!(matches!(cli.command, Command::Preflight { no_live: false }));
+    }
+
+    #[test]
+    fn test_parse_init_shadowed_ai() {
+        let cli = Cli::try_parse_from(["nexus", "init", "--shadowed-ai"]).unwrap();
+        match cli.command {
+            Command::Init { shadowed_ai, .. } => assert!(shadowed_ai),
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_global_yes_flag() {
+        let cli = Cli::try_parse_from(["nexus", "-y", "init"]).unwrap();
+        assert!(cli.yes);
+    }
+
+    #[test]
+    fn test_global_yes_long_flag() {
+        let cli = Cli::try_parse_from(["nexus", "--yes", "deinit"]).unwrap();
+        assert!(cli.yes);
+    }
+
+    #[test]
+    fn test_parse_upgrade() {
+        let cli = Cli::try_parse_from(["nexus", "upgrade"]).unwrap();
+        assert!(matches!(cli.command, Command::Upgrade));
+    }
+
+    #[test]
+    fn test_parse_shadow_on() {
+        let cli = Cli::try_parse_from(["nexus", "shadow", "on"]).unwrap();
+        match cli.command {
+            Command::Shadow {
+                action: ShadowAction::On(args),
+            } => assert!(args.target.is_empty() && !args.all && !args.dry_run),
+            _ => panic!("expected Shadow On"),
+        }
+    }
+
+    #[test]
+    fn test_parse_shadow_off() {
+        let cli = Cli::try_parse_from(["nexus", "shadow", "off"]).unwrap();
+        match cli.command {
+            Command::Shadow {
+                action: ShadowAction::Off(args),
+            } => assert!(args.target.is_empty()),
+            _ => panic!("expected Shadow Off"),
+        }
+    }
+
+    #[test]
+    fn test_parse_shadow_targets() {
+        use cmd::shadow::ShadowTarget;
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "shadow",
+            "on",
+            "--target=ai,workspace",
+            "--target",
+            "nexus",
+            "--dry-run",
+            "--untrack",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Shadow {
+                action: ShadowAction::On(args),
+            } => {
+                assert_eq!(
+                    args.target,
+                    vec![
+                        ShadowTarget::Agentic,
+                        ShadowTarget::Workspace,
+                        ShadowTarget::Nexus
+                    ]
+                );
+                assert!(args.dry_run);
+                assert!(args.untrack);
+            }
+            _ => panic!("expected Shadow On"),
+        }
+        let cli =
+            Cli::try_parse_from(["nexus", "shadow", "off", "--target", "agentic-files"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Shadow { action: ShadowAction::Off(ref a) } if a.target == vec![ShadowTarget::Agentic]
+        ));
+        let cli = Cli::try_parse_from(["nexus", "shadow", "on", "--all"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Shadow { action: ShadowAction::On(ref a) } if a.all
+        ));
+        assert!(
+            Cli::try_parse_from(["nexus", "shadow", "on", "--all", "--target", "nexus"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["nexus", "shadow", "on", "--target", "docs"]).is_err());
+    }
+
+    #[test]
+    fn test_parse_shadow_status() {
+        let cli = Cli::try_parse_from(["nexus", "shadow", "status"]).unwrap();
+        match cli.command {
+            Command::Shadow {
+                action: ShadowAction::Status,
+            } => {}
+            _ => panic!("expected Shadow Status"),
+        }
+    }
+
+    #[test]
+    fn test_parse_shadow_levels() {
+        // nexus shadow maps to policy.shadow.
+        for (arg, expected) in [("ai", "ai"), ("nexus", "nexus")] {
+            let cli = Cli::try_parse_from(["nexus", "shadow", arg]).unwrap();
+            match cli.command {
+                Command::Shadow {
+                    action: ShadowAction::Ai,
+                } => assert_eq!(expected, "ai"),
+                Command::Shadow {
+                    action: ShadowAction::Nexus,
+                } => assert_eq!(expected, "nexus"),
+                _ => panic!("expected Shadow {arg}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_shadow_no_subcommand_fails() {
+        let result = Cli::try_parse_from(["nexus", "shadow"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_shadow_invalid_subcommand_fails() {
+        let result = Cli::try_parse_from(["nexus", "shadow", "toggle"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_git_verify() {
+        let cli = Cli::try_parse_from(["nexus", "git", "verify"]).unwrap();
+        match cli.command {
+            Command::Git {
+                action: GitAction::Verify,
+            } => {}
+            _ => panic!("expected Git Verify"),
+        }
+    }
+
+    #[test]
+    fn test_parse_git_apply() {
+        let cli = Cli::try_parse_from(["nexus", "git", "apply"]).unwrap();
+        match cli.command {
+            Command::Git {
+                action:
+                    GitAction::Apply {
+                        canonical_remotes: false,
+                    },
+            } => {}
+            _ => panic!("expected Git Apply"),
+        }
+    }
+
+    #[test]
+    fn test_parse_git_login_flags() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "git",
+            "login",
+            "--account",
+            "octocat",
+            "--with-token",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Git {
+                action:
+                    GitAction::Login {
+                        account: Some(ref a),
+                        profile: None,
+                        with_token: true,
+                    },
+            } => assert_eq!(a, "octocat"),
+            _ => panic!("expected Git Login"),
+        }
+        // --account and --profile exclude each other.
+        assert!(
+            Cli::try_parse_from(["nexus", "git", "login", "--account", "a", "--profile", "b"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_parse_git_no_subcommand_fails() {
+        let result = Cli::try_parse_from(["nexus", "git"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_pull_with_actor_assets() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--with-actor-assets"]).unwrap();
+        match cli.command {
+            Command::Pull {
+                with_actor_assets, ..
+            } => assert!(with_actor_assets),
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_default_no_actor_assets() {
+        let cli = Cli::try_parse_from(["nexus", "pull"]).unwrap();
+        match cli.command {
+            Command::Pull {
+                with_actor_assets, ..
+            } => assert!(!with_actor_assets),
+            _ => panic!("expected Pull command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actor_run() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "actor",
+            "run",
+            "spark-coder",
+            "-p",
+            "review the diff",
+            "--",
+            "--verbose",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Run {
+                        ref slug,
+                        ref prompt,
+                        ref gateway_url,
+                        ref claude_args,
+                    },
+            } => {
+                assert_eq!(slug, "spark-coder");
+                assert_eq!(prompt.as_deref(), Some("review the diff"));
+                assert!(gateway_url.is_none());
+                assert_eq!(claude_args, &["--verbose"]);
+            }
+            _ => panic!("expected Actors Run command"),
+        }
+        let cli = Cli::try_parse_from(["nexus", "run", "--dispatch-pane"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                dispatch_pane: true,
+                actor_panes: false,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "dispatch",
+            "status",
+            "--watch",
+            "--compact",
+            "--interval",
+            "15",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Dispatch {
+                action: DispatchAction::Status {
+                    watch: true,
+                    compact: true,
+                    interval: 15,
+                    window: 7,
+                    json: false,
+                    ..
+                }
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["nexus", "dispatch", "status", "--interval", "5"]).is_err(),
+            "the interval has a 10 s floor"
+        );
+        let cli = Cli::try_parse_from(["nexus", "run", "--actor-panes", "--resume"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                actor_panes: true,
+                resume: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_actors_list() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "list"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action: ActorsAction::List { ref project_id },
+            } => {
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Actors List command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_show() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "show", "my-agent"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action: ActorsAction::Show { ref slug, .. },
+            } => {
+                assert_eq!(slug, "my-agent");
+            }
+            _ => panic!("expected Actors Show command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_avatar_generate() {
+        let cli =
+            Cli::try_parse_from(["nexus", "actors", "avatar", "generate", "my-agent"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Avatar {
+                        action: ActorAvatarAction::Generate { ref slug, .. },
+                    },
+            } => {
+                assert_eq!(slug, "my-agent");
+            }
+            _ => panic!("expected Actors Avatar Generate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_avatar_reset() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "avatar", "reset", "my-agent"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Avatar {
+                        action: ActorAvatarAction::Reset { ref slug, .. },
+                    },
+            } => {
+                assert_eq!(slug, "my-agent");
+            }
+            _ => panic!("expected Actors Avatar Reset command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_no_subcommand_fails() {
+        let result = Cli::try_parse_from(["nexus", "actors"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_actors_normalize() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "normalize", "/tmp/actor.md"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action: ActorsAction::Normalize { ref path },
+            } => {
+                assert_eq!(path, "/tmp/actor.md");
+            }
+            _ => panic!("expected Actors Normalize command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_validate() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "validate", "/tmp/actor.md"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Validate {
+                        ref path,
+                        ref project_id,
+                    },
+            } => {
+                assert_eq!(path, "/tmp/actor.md");
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Actors Validate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_validate_with_project_id() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "actors",
+            "validate",
+            "/tmp/actor.md",
+            "--project-id",
+            "11111111-2222-4333-8444-555555555555",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Validate {
+                        ref path,
+                        ref project_id,
+                    },
+            } => {
+                assert_eq!(path, "/tmp/actor.md");
+                assert_eq!(
+                    project_id.as_deref(),
+                    Some("11111111-2222-4333-8444-555555555555")
+                );
+            }
+            _ => panic!("expected Actors Validate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_import() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "import", "./actors/"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Import {
+                        ref path,
+                        ref project_id,
+                    },
+            } => {
+                assert_eq!(path, "./actors/");
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Actors Import command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_export_default_target() {
+        let cli = Cli::try_parse_from(["nexus", "actors", "export"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action:
+                    ActorsAction::Export {
+                        ref target,
+                        ref project_id,
+                    },
+            } => {
+                assert_eq!(target, "opencode");
+                assert!(project_id.is_none());
+            }
+            _ => panic!("expected Actors Export command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actors_export_custom_target() {
+        let cli =
+            Cli::try_parse_from(["nexus", "actors", "export", "--target", "opencode"]).unwrap();
+        match cli.command {
+            Command::Actors {
+                action: ActorsAction::Export { ref target, .. },
+            } => {
+                assert_eq!(target, "opencode");
+            }
+            _ => panic!("expected Actors Export command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pull_skip_actor_assets() {
+        let cli = Cli::try_parse_from(["nexus", "pull", "--skip-actor-assets"]).unwrap();
+        match cli.command {
+            Command::Pull {
+                skip_actor_assets,
+                with_actor_assets,
+                ..
+            } => {
+                assert!(skip_actor_assets);
+                assert!(!with_actor_assets);
+            }
+            _ => panic!("expected Pull command"),
+        }
+    }
+}

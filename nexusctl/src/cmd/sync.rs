@@ -1,0 +1,268 @@
+//! Agent-file sync with the Nexus platform: the sync manifest and the
+//! single-file push used by `nexus push` (the former `nexus sync status|
+//! push|reset` commands are deprecated aliases of `nexus status|push|reset`).
+//!
+//! Part of the sync protocol.
+
+use console::style;
+use nexus_core::api::NexusClient;
+use nexus_core::auth::resolve_token;
+use nexus_core::config;
+use nexus_core::hash::sha256_hex;
+use std::fs;
+use std::path::Path;
+
+/// Path to the local sync manifest file that stores content hashes.
+const SYNC_MANIFEST: &str = ".nexus/sync-manifest.json";
+
+/// Load the sync manifest (file_key → { hash, target_path }).
+fn load_manifest(workspace: &Path) -> serde_json::Value {
+    let path = workspace.join(SYNC_MANIFEST);
+    if path.exists() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(val) = serde_json::from_str(&content) {
+                return val;
+            }
+        }
+    }
+    serde_json::json!({})
+}
+
+/// Save the sync manifest.
+fn save_manifest(workspace: &Path, manifest: &serde_json::Value) -> anyhow::Result<()> {
+    let path = workspace.join(SYNC_MANIFEST);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(manifest)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+/// `nexus sync push <file>`: upload local agent file changes to the platform.
+/// Every failure is returned as an error; the caller prints it.
+pub async fn push(
+    api_url: &str,
+    cli_project_id: Option<&str>,
+    file_key: &str,
+) -> anyhow::Result<()> {
+    let workspace = std::env::current_dir()?;
+
+    let project_id = config::resolve_project_id(cli_project_id, Some(&workspace))?;
+    let token = resolve_token().ok_or_else(|| {
+        anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
+    })?;
+    let client = NexusClient::new(api_url, Some(token))?;
+
+    // Look up target path from manifest
+    let manifest = load_manifest(&workspace);
+    let target_path = manifest[file_key]["target_path"].as_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "File '{}' not found in sync manifest. Run 'nexus pull' first.",
+            file_key
+        )
+    })?;
+
+    let local_path = workspace.join(target_path);
+    if !local_path.exists() {
+        anyhow::bail!("Local file not found: {}", target_path);
+    }
+
+    let content = fs::read_to_string(&local_path)?;
+    let local_hash = sha256_hex(&content);
+
+    println!(
+        "{} Pushing {} to platform...",
+        style(">>").bold().cyan(),
+        style(file_key).bold()
+    );
+
+    match client
+        .sync_file(
+            &project_id,
+            file_key,
+            "push",
+            Some(&content),
+            Some(&local_hash),
+        )
+        .await
+    {
+        Ok(resp) => {
+            // Update manifest with new hash
+            let mut manifest = load_manifest(&workspace);
+            if let Some(entry) = manifest.get_mut(file_key) {
+                entry["hash"] = serde_json::json!(resp.new_hash.as_deref().unwrap_or(&local_hash));
+            }
+            save_manifest(&workspace, &manifest)?;
+
+            println!(
+                "   {} {} pushed successfully.",
+                style("OK").bold().green(),
+                file_key
+            );
+            if let Some(msg) = &resp.message {
+                println!("   {}", style(msg).dim());
+            }
+        }
+        Err(e) => return Err(anyhow::anyhow!("Push failed: {e}")),
+    }
+
+    Ok(())
+}
+
+/// Public accessor for the sync manifest, used by pull.rs for local-modification detection.
+pub fn load_manifest_pub(workspace: &Path) -> serde_json::Value {
+    load_manifest(workspace)
+}
+
+/// Update the sync manifest after a `nexus pull` writes agent files.
+/// Called from pull.rs to record content hashes for each exported file.
+pub fn update_manifest_after_pull(
+    workspace: &Path,
+    file_key: &str,
+    target_path: &str,
+    content_hash: &str,
+) -> anyhow::Result<()> {
+    let mut manifest = load_manifest(workspace);
+    let obj = manifest
+        .as_object_mut()
+        .expect("manifest should be an object");
+    obj.insert(
+        file_key.to_string(),
+        serde_json::json!({
+            "target_path": target_path,
+            "hash": content_hash,
+        }),
+    );
+    save_manifest(workspace, &manifest)
+}
+
+/// Record a devbox workspace file (`devbox.json`, a script) as last written
+/// by pull. The `kind` marker lets a later pull find the workspace files it
+/// wrote and remove the ones the fork no longer contains.
+pub fn update_workspace_manifest_after_pull(
+    workspace: &Path,
+    path: &str,
+    content_hash: &str,
+) -> anyhow::Result<()> {
+    let mut manifest = load_manifest(workspace);
+    let obj = manifest
+        .as_object_mut()
+        .expect("manifest should be an object");
+    obj.insert(
+        path.to_string(),
+        serde_json::json!({
+            "target_path": path,
+            "hash": content_hash,
+            "kind": WORKSPACE_KIND,
+        }),
+    );
+    save_manifest(workspace, &manifest)
+}
+
+/// `kind` of sync-manifest entries for devbox workspace files.
+const WORKSPACE_KIND: &str = "workspace";
+
+/// `kind` of sync-manifest entries for machine-local scripts
+/// (`ws_export.local_scripts`).
+const LOCAL_SCRIPT_KIND: &str = "local_script";
+
+/// Default path of the machine-local script; the backend rejects it in a
+/// workspace push.
+const DEFAULT_LOCAL_SCRIPT: &str = "scripts/devbox/init/local.sh";
+
+/// Record a machine-local script as last written by pull.
+pub fn update_local_script_manifest_after_pull(
+    workspace: &Path,
+    path: &str,
+    content_hash: &str,
+) -> anyhow::Result<()> {
+    let mut manifest = load_manifest(workspace);
+    let obj = manifest
+        .as_object_mut()
+        .expect("manifest should be an object");
+    obj.insert(
+        path.to_string(),
+        serde_json::json!({
+            "target_path": path,
+            "hash": content_hash,
+            "kind": LOCAL_SCRIPT_KIND,
+        }),
+    );
+    save_manifest(workspace, &manifest)
+}
+
+/// The machine-local scripts recorded in the sync manifest, as
+/// `(target_path, hash)`.
+pub fn local_script_manifest_entries(manifest: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(obj) = manifest.as_object() else {
+        return Vec::new();
+    };
+    obj.values()
+        .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some(LOCAL_SCRIPT_KIND))
+        .filter_map(|e| {
+            Some((
+                e.get("target_path")?.as_str()?.to_string(),
+                e.get("hash")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// Whether `path` is a machine-local script: the default path or one pull
+/// recorded as such. These are never pushed, shown or diffed.
+pub fn is_local_script(manifest: &serde_json::Value, path: &str) -> bool {
+    path == DEFAULT_LOCAL_SCRIPT
+        || local_script_manifest_entries(manifest)
+            .iter()
+            .any(|(p, _)| p == path)
+}
+
+/// The devbox workspace files recorded in the sync manifest, as
+/// `(target_path, hash)`. Entries written before the `kind` marker existed
+/// are recognized by their shape: keyed by their own path, and
+/// `devbox.json` or below `scripts/devbox/`.
+pub fn workspace_manifest_entries(manifest: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(obj) = manifest.as_object() else {
+        return Vec::new();
+    };
+    obj.iter()
+        .filter_map(|(key, entry)| {
+            let target = entry.get("target_path")?.as_str()?;
+            let hash = entry.get("hash")?.as_str()?;
+            let kind = entry.get("kind").and_then(|k| k.as_str());
+            let marked = kind == Some(WORKSPACE_KIND);
+            let legacy = kind.is_none()
+                && key == target
+                && (target == "devbox.json"
+                    || target.starts_with(&format!("{}/", super::push::SCRIPTS_DIR)));
+            (marked || legacy).then(|| (target.to_string(), hash.to_string()))
+        })
+        .collect()
+}
+
+/// Drop the sync-manifest entries whose `target_path` matches `remove`
+/// (e.g. files of a projection that was just removed). Returns the number
+/// of entries dropped; the manifest is only rewritten when that is > 0.
+pub fn remove_manifest_entries(
+    workspace: &Path,
+    remove: impl Fn(&str) -> bool,
+) -> anyhow::Result<usize> {
+    let mut manifest = load_manifest(workspace);
+    let Some(obj) = manifest.as_object_mut() else {
+        return Ok(0);
+    };
+    let before = obj.len();
+    obj.retain(|key, entry| {
+        let target = entry
+            .get("target_path")
+            .and_then(|t| t.as_str())
+            .unwrap_or(key);
+        !remove(target)
+    });
+    let dropped = before - obj.len();
+    if dropped > 0 {
+        save_manifest(workspace, &manifest)?;
+    }
+    Ok(dropped)
+}

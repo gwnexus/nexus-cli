@@ -1,0 +1,2313 @@
+//! API response types for the Nexus platform.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+// ---------------------------------------------------------------------------
+// Identity (GET /api/mcp/identity)
+// ---------------------------------------------------------------------------
+
+/// Project membership entry from the identity endpoint.
+/// Note: These come directly from Supabase and use snake_case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMembership {
+    pub project_id: String,
+    pub role: String,
+}
+
+/// Agent assignment entry from the identity endpoint.
+/// Note: These come directly from Supabase and use snake_case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentAssignment {
+    pub project_id: String,
+    pub agent_id: String,
+    pub agent_owner: Option<String>,
+}
+
+/// Identity response returned by `GET /api/mcp/identity`.
+///
+/// This is a flat JSON object (not wrapped in a `user` key).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityResponse {
+    pub user_id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub is_platform_admin: bool,
+    pub is_platform_owner: bool,
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub memberships: Vec<ProjectMembership>,
+    #[serde(default)]
+    pub agent_assignments: Vec<AgentAssignment>,
+}
+
+// ---------------------------------------------------------------------------
+// Legacy auth types (kept for backward compat, delegates to IdentityResponse)
+// ---------------------------------------------------------------------------
+
+/// Authentication status -- legacy wrapper around IdentityResponse fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthStatus {
+    pub user_id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub platform_role: String,
+}
+
+impl From<&IdentityResponse> for AuthStatus {
+    fn from(id: &IdentityResponse) -> Self {
+        let role = if id.is_platform_owner {
+            "platform_owner"
+        } else if id.is_platform_admin {
+            "platform_admin"
+        } else {
+            "member"
+        };
+        Self {
+            user_id: id.user_id.clone(),
+            email: id.email.clone(),
+            display_name: id.display_name.clone(),
+            platform_role: role.to_string(),
+        }
+    }
+}
+
+/// Wrapper for auth status API response (legacy).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthStatusResponse {
+    pub user: AuthStatus,
+}
+
+// ---------------------------------------------------------------------------
+// Skill list (POST /api/mcp/skills  action=sk_list)
+// ---------------------------------------------------------------------------
+
+/// A single skill summary returned by `sk_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSummary {
+    pub id: String,
+    pub skill_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub auto_generate_command: Option<bool>,
+    pub command_slug: Option<String>,
+    pub version: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Global switch, independent of `status`: a disabled skill is left out
+    /// of every export. `None` on older backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+/// Response from `sk_list` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillListResponse {
+    pub action: String,
+    pub count: usize,
+    pub skills: Vec<SkillSummary>,
+}
+
+// ---------------------------------------------------------------------------
+// Skill export (POST /api/mcp/skills  action=sk_export)
+// ---------------------------------------------------------------------------
+
+/// Project summary included in the skill export response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillExportProject {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+}
+
+/// A single skill resource file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillResource {
+    pub filename: String,
+    pub body: String,
+}
+
+/// A single exported skill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedSkill {
+    pub skill_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub version: i64,
+    pub body: Option<String>,
+    pub command_slug: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub resources: Vec<SkillResource>,
+    /// `model` (default; the model may load the skill on its own) or
+    /// `user` (only invoked explicitly). Absent on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<String>,
+}
+
+impl ExportedSkill {
+    /// Whether only the user may invoke this skill (`invocation == "user"`).
+    pub fn user_invoked(&self) -> bool {
+        self.invocation
+            .as_deref()
+            .is_some_and(|i| i.eq_ignore_ascii_case("user"))
+    }
+}
+
+/// Response from `sk_export` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillExportResponse {
+    pub action: String,
+    pub project: SkillExportProject,
+    pub skills: Vec<ExportedSkill>,
+    pub count: usize,
+    /// Executable items of this export (`skill_script`). Empty on older
+    /// servers.
+    #[serde(default)]
+    pub executables: Vec<ExportedExecutable>,
+}
+
+/// One executable item the server declares for an export: hooks, settings
+/// commands, plugins, MCP servers, layouts, scripts. `sha256` is advisory;
+/// the CLI fingerprints what it writes itself and compares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportedExecutable {
+    /// `claude_hook`, `claude_status_line`, `claude_plugin`,
+    /// `claude_marketplace`, `mcp_server`, `zellij_layout`,
+    /// `opencode_plugin`, `agent_script`, `devbox_script`,
+    /// `devbox_config` or `skill_script`. Open-ended.
+    pub kind: String,
+    /// Stable per kind (hook plugin name, server name, file path, ...).
+    pub id: String,
+    /// Repo-relative file the item lands in.
+    #[serde(default)]
+    pub target_path: String,
+    /// Effective command line for hooks, status line and MCP servers.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Hex SHA-256 over the file body or the canonical JSON of the item.
+    #[serde(default)]
+    pub sha256: String,
+}
+
+// ---------------------------------------------------------------------------
+// Directive export (POST /api/mcp/directives  action=directive_export)
+// ---------------------------------------------------------------------------
+
+/// A single exported directive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedDirective {
+    pub id: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub category: String,
+    pub priority: String,
+    /// `must` | `should`. Absent on
+    /// older servers: derived from `priority` (high/urgent = must).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    /// `mandatory` | `flag` | `template` | `project` (informational).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+impl ExportedDirective {
+    /// Whether this is a MUST rule: `level` when sent, else `priority`
+    /// high/urgent.
+    pub fn is_must(&self) -> bool {
+        match self.level.as_deref() {
+            Some(level) => level.eq_ignore_ascii_case("must"),
+            None => matches!(self.priority.as_str(), "high" | "urgent"),
+        }
+    }
+}
+
+/// Response from `directive_export` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectiveExportResponse {
+    pub action: String,
+    pub project: SkillExportProject,
+    pub directives: Vec<ExportedDirective>,
+    pub count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Agent file export (POST /api/mcp/agent-files  action=af_export)
+// ---------------------------------------------------------------------------
+
+/// MCP server configuration for a plugin (e.g. task-master-ai, nexus-headroom).
+///
+/// The `command` field is normalised to a `Vec<String>` on deserialisation.
+/// The API may send it as either a plain string (`"headroom"`) or an array
+/// (`["headroom", "mcp", "serve"]`).  Both forms are accepted via the custom
+/// `StringOrVec` deserializer so that the CLI never fails on the array form.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// Executable + optional sub-command arguments from the platform.
+    /// Deserialized from either `"cmd"` (string) or `["cmd", "arg1", ...]` (array).
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
+    pub command: Vec<String>,
+    /// Extra arguments appended after `command` when building the full argv.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Secret env-var names whose values are resolved at runtime via `{env:KEY}`.
+    #[serde(default)]
+    pub env_keys: Vec<String>,
+    /// Inline environment variables delivered directly (e.g. HEADROOM_* from
+    /// the platform).  Written into opencode.json `environment` block verbatim.
+    #[serde(default)]
+    pub environment: std::collections::HashMap<String, String>,
+}
+
+/// Serde helper: deserialise a JSON value that is either a plain string or an
+/// array of strings into `Vec<String>`.
+///
+/// * `"headroom"` → `["headroom"]`
+/// * `["headroom", "mcp", "serve"]` → `["headroom", "mcp", "serve"]`
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{SeqAccess, Visitor};
+    use std::fmt;
+
+    struct StringOrVec;
+
+    impl<'de> Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a string or an array of strings")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_string()])
+        }
+
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Vec<String>, E> {
+            Ok(vec![v])
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                out.push(s);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
+}
+
+/// A single exported agent file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedAgentFile {
+    pub file_key: String,
+    pub target_path: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub category: String,
+    pub version: i64,
+    pub body: String,
+    /// SHA-256 hash of the final exported body (after template substitution + directive injection).
+    #[serde(default)]
+    pub content_hash: Option<String>,
+    /// The agent_file UUID in project_agent_files (for sync operations).
+    #[serde(default)]
+    pub agent_file_id: Option<String>,
+}
+
+/// LLM provider configuration (e.g. DGX Spark local models).
+///
+/// Stored as opaque JSON: the API delivers the exact opencode.json provider
+/// format, so the CLI passes it through without interpretation.
+pub type ProviderConfig = serde_json::Value;
+
+/// A program an enabled agent plugin needs (e.g. a language server), from
+/// `af_export.claude_plugin_requirements`. The CLI only warns when it is
+/// missing; it never blocks a start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRequirement {
+    /// Plugin id (e.g. "pyright-lsp").
+    pub plugin: String,
+    /// Program the plugin starts (e.g. "pyright-langserver").
+    pub binary: String,
+    /// nixpkgs package that provides `binary`; absent when none exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devbox_package: Option<String>,
+}
+
+/// A prerequisite tool required by this project's plugin configuration.
+/// Returned by af_export so the CLI can warn or prompt the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Prerequisite {
+    /// Binary name (e.g. "rtk", "headroom").
+    pub tool: String,
+    /// Shell command to verify the tool is available (e.g. "rtk --version").
+    pub check_command: String,
+    /// Human-readable install hint shown when the tool is missing.
+    pub install_hint: String,
+    /// Which plugin or feature requires this tool.
+    pub required_by: String,
+}
+
+/// Response from `af_export` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentFileExportResponse {
+    pub project_id: String,
+    pub project_name: String,
+    pub agent_files: Vec<ExportedAgentFile>,
+    pub count: usize,
+    /// The agentic root directory for this project (e.g. ".claude" or ".nexus").
+    /// Defaults to ".claude" if not present in the server response.
+    #[serde(default = "default_agentic_root")]
+    pub agentic_root: String,
+    /// Tool flavor: "opencode", "claude-cli", or "both".
+    #[serde(default)]
+    pub agent_owner: Option<String>,
+    /// Active plugins for this project (e.g. ["taskmaster-ai"]).
+    #[serde(default)]
+    pub plugins: Vec<String>,
+    /// Plugin MCP server configs keyed by server name (e.g. "task-master-ai").
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
+    /// LLM provider configs keyed by provider name (e.g. "dgx-spark").
+    /// The API uses the singular key "provider" matching the opencode.json schema.
+    #[serde(default, alias = "providers")]
+    pub provider: HashMap<String, ProviderConfig>,
+    /// The authenticated API token echoed back from the request.
+    /// Use this value directly in opencode.json rather than reading credentials.toml.
+    /// Present only when the server supports auth_token echo (v0.7.4+).
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// Tools that must be installed for this project's plugins to work.
+    /// The CLI should check each and warn/prompt when a binary is missing.
+    #[serde(default)]
+    pub prerequisites: Vec<Prerequisite>,
+    /// Actors assigned to this project (delivered as profile markdown files).
+    /// Written to `<agentic_root>/actors/<slug>.md` during pull.
+    #[serde(default)]
+    pub actors: Vec<ExportedActorFile>,
+    /// Flat map of non-sensitive, platform-managed env vars for `.nexus/env`.
+    /// Written by `nexus pull` / `nexus init`; read by `nexus run` and dbx_init.sh.
+    /// Absent when no plugin provides env vars.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub plugin_env: HashMap<String, String>,
+    /// OpenCode agent configs to merge into `opencode.json` `"agent"` section.
+    /// Delivered by the backend when actors have opencode-compatible agent definitions.
+    #[serde(default)]
+    pub opencode_agents: Option<serde_json::Value>,
+    /// Global default model for opencode.json (local-first).
+    /// Written as top-level `"model"` key in opencode.json when present.
+    #[serde(default)]
+    pub opencode_default_model: Option<String>,
+    /// Default agent for opencode.json ("nexus-plan" for actor-based projects).
+    #[serde(default)]
+    pub opencode_default_agent: Option<String>,
+    /// Model routes map for .nexus/generated/model-routes.json.
+    /// Key is route alias, value is route metadata.
+    #[serde(default)]
+    pub model_routes: Option<serde_json::Value>,
+    /// Paths to merge into `opencode.json`'s top-level `"instructions"` array.
+    /// Typically `["<agentic_root>/AGENTS.md"]`, so OpenCode loads the
+    /// project's agent policy deterministically at session start instead of
+    /// relying on its own upward AGENTS.md auto-discovery, which has no
+    /// awareness of the `agentic_root` convention (default `.nexus/`).
+    #[serde(default)]
+    pub opencode_instructions: Option<Vec<String>>,
+    /// Warnings about model routing / provider configuration diverging from
+    /// what the generated `opencode.json` can actually serve (e.g. an agent's
+    /// model uses a provider Nexus cannot verify, or a route-alias migration
+    /// hasn't been applied on this backend). Absent when there is nothing to
+    /// report. The CLI renders these verbatim and gates the `opencode.json`
+    /// write on operator confirmation rather than re-deriving the analysis
+    /// client-side (only the backend knows execution_mode/agent_mode/gateway
+    /// availability).
+    #[serde(default)]
+    pub export_warnings: Option<Vec<ExportWarning>>,
+    /// Runtime-neutral project spec.
+    /// Additive field: a `schema_version`-tagged JSON object projecting the
+    /// same underlying data (`model_routes`, `actors`, `primary_agents`,
+    /// `terminal_runtime`, etc.) into a shape shared by all terminal
+    /// renderers. Kept as an untyped `serde_json::Value` since the schema is
+    /// server-owned and may gain fields; consumers should read only the
+    /// sub-keys they need rather than assuming an exhaustive shape.
+    #[serde(default)]
+    pub runtime_spec: Option<serde_json::Value>,
+    /// Claude Code hook adapter scripts. Additive field: mirrors how OpenCode plugin sources are
+    /// already embedded server-side (`headroom-intercept-plugin.ts` etc.)
+    /// and written out to `.opencode/plugins/*.ts` -- nexus-app/
+    /// nexus-oc-plugins own the bundled script content and versioning;
+    /// nexus-cli is a thin consumer that writes each `body` to its
+    /// `target_path` and wires `hook_events` into `.claude/settings.json`.
+    #[serde(default)]
+    pub claude_hook_adapters: Option<Vec<ClaudeHookAdapter>>,
+    /// Generic `.claude/settings.json` merge spec (Claude Code Experience,
+    /// CCX). Additive field; `None` for backends that don't send it yet.
+    #[serde(default)]
+    pub claude_settings: Option<ClaudeSettingsSpec>,
+    /// Markdown to maintain inside the root `CLAUDE.md` between
+    /// `<!-- BEGIN:nexus-managed -->`/`<!-- END:nexus-managed -->` markers.
+    /// Everything outside the markers is user-owned
+    /// and never rewritten by the CLI.
+    #[serde(default)]
+    pub claude_md_managed_block: Option<String>,
+    /// Claude Code subagents for session-lane actors, with Claude
+    /// frontmatter (`name`, `description`, `model`, `tools`). When present
+    /// they replace the raw actor markdown under `.claude/agents/`.
+    #[serde(default)]
+    pub claude_agents: Option<Vec<ClaudeAgentFile>>,
+    /// Gateway-lane actors: never session subagents, started as their own
+    /// `claude` process against the gateway (`nexus actors run`).
+    #[serde(default)]
+    pub claude_lane_actors: Option<Vec<ClaudeLaneActor>>,
+    /// Base URL of the gateway's Anthropic Messages surface for the local
+    /// lane (`ANTHROPIC_BASE_URL`).
+    #[serde(default)]
+    pub claude_lane_base_url: Option<String>,
+    /// Effective confidentiality level of the project and customer
+    /// (e.g. `internal`, `vs-nfd`, `eu-secret`). Informational only.
+    #[serde(default)]
+    pub effective_classification: Option<String>,
+    /// Gateway classification derived from the effective level:
+    /// `public`, `internal`, `confidential` or `restricted`. Restricted
+    /// projects get no delegate subagents for gateway-lane actors.
+    #[serde(default)]
+    pub effective_gateway_classification: Option<String>,
+    /// Claude Code Experience bundle metadata. `None` when CCX is disabled or this is not a Claude
+    /// project; then nothing CCX-specific happens and any existing lock is
+    /// left untouched. When present, `agent_files` entries with category
+    /// `"claude_experience"` are reconciled against the CCX lock instead of
+    /// being written unconditionally.
+    #[serde(default)]
+    pub ccx: Option<CcxBundleInfo>,
+    /// What `nexus run` starts for this project. `None` on older backends; then `agent_owner`
+    /// decides.
+    #[serde(default)]
+    pub run_target: Option<RunTarget>,
+    /// Per-caller workspace layout. Rendered for the calling user, so it is written to a
+    /// git-excluded path and never committed. When present,
+    /// `run_target.layout` points to `claude_workspace.path`.
+    #[serde(default)]
+    pub claude_workspace: Option<ClaudeWorkspace>,
+    /// Programs the project's enabled agent plugins need. Absent (empty) on
+    /// older backends and when no enabled plugin needs one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_plugin_requirements: Vec<PluginRequirement>,
+    /// Paths the server wants in `.git/info/exclude`: always the personal files; for `shadow`
+    /// `ai`/`nexus` also the agentic paths (`.claude/`, `<agentic_root>/`, `AGENTS.md`,
+    /// `CLAUDE.md`, `opencode.json`, `.opencode/`); while `shadow_workspace` is true also the
+    /// workspace paths (`devbox.json`, `devbox.lock`, `.devbox/`, the fork's scripts path).
+    #[serde(default)]
+    pub git_exclude: Vec<String>,
+    /// Project shadow level `off` | `ai` | `nexus` (`policy.shadow`).
+    #[serde(default)]
+    pub shadow: Option<String>,
+    /// Effective workspace shadow: `policy.shadow_workspace` when set, else the workspace
+    /// fork's `shadow_mode`. `None` on older backends; then the CLI keeps its local block.
+    #[serde(default)]
+    pub shadow_workspace: Option<bool>,
+    /// What `nexus shadow check` and the commit-msg hook enforce. Present
+    /// only when the shadow level is not `off`; older backends omit it.
+    #[serde(default)]
+    pub shadow_guard: Option<ShadowGuard>,
+    /// Executable items of this export, sorted by kind and id. Empty on
+    /// older servers.
+    #[serde(default)]
+    pub executables: Vec<ExportedExecutable>,
+}
+
+/// `af_export.shadow_guard`: content rules for a shadowed project. The
+/// backend owns the patterns; the CLI applies them as sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowGuard {
+    /// `ai` or `nexus`.
+    pub level: String,
+    /// Install the commit-msg hook (on unless the project switched it off).
+    #[serde(default = "default_true")]
+    pub commit_msg_hook: bool,
+    /// The agentic paths of the shadow exclude list.
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
+    #[serde(default)]
+    pub patterns: Vec<ShadowPattern>,
+}
+
+/// One content rule: a portable regex (RE2 subset), applied only in the
+/// listed scopes (`commit_message`, `tracked_files`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowPattern {
+    pub id: String,
+    pub regex: String,
+    /// `"i"` for case-insensitive, otherwise empty.
+    #[serde(default)]
+    pub flags: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Human-readable name of what the pattern finds.
+    #[serde(default)]
+    pub message: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `af_export.claude_workspace` (schema `nexus.claude-workspace.v1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeWorkspace {
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// `"zellij"` or `"none"`.
+    #[serde(default)]
+    pub multiplexer: Option<String>,
+    /// Workspace-relative target, e.g. `.nexus/claude/workspace.local.kdl`.
+    pub path: String,
+    /// The rendered layout.
+    pub body: String,
+    /// SHA-256 (hex) of `body`.
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// `standard` | `focus` | `review` | `custom`.
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// Which level decided the layout: `user` | `project` | `system`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Host tools the layout needs (e.g. `zellij`, `lazygit`, `ccusage`).
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// Which observer the `observer` pane runs: `nexus` (default) or
+    /// `agenthud` (experimental). Free-form so future values parse; the CLI
+    /// only displays it.
+    #[serde(default)]
+    pub observer_provider: Option<String>,
+    /// Per-caller Zellij config, present only
+    /// when the caller has Zellij settings. `nexus run` passes it to
+    /// `zellij --config`; it replaces the global config for that session.
+    #[serde(default)]
+    pub zellij_config: Option<ZellijConfigFile>,
+}
+
+/// `af_export.claude_workspace.zellij_config`: a complete, rendered Zellij
+/// config written to a git-excluded path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZellijConfigFile {
+    /// Workspace-relative target, e.g. `.nexus/claude/zellij.local.kdl`.
+    pub path: String,
+    pub body: String,
+    /// SHA-256 (hex) of `body`.
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+impl ClaudeWorkspace {
+    /// The observer provider when it is not the default `nexus`.
+    pub fn non_default_observer(&self) -> Option<&str> {
+        self.observer_provider
+            .as_deref()
+            .filter(|p| !p.is_empty() && *p != "nexus")
+    }
+}
+
+/// `GET /api/mcp/projects/{id}/settings` (and the 200 body of `PATCH`):
+/// backend project settings for `nexus env`.
+/// Keys, types and allowed values come from `schema`; the CLI hardcodes none.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSettingsResponse {
+    #[serde(default)]
+    pub project_id: String,
+    pub revision: String,
+    pub settings: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub run_target: Option<RunTarget>,
+    #[serde(default)]
+    pub claude_experience_explicit: bool,
+    #[serde(default)]
+    pub can_write: bool,
+    #[serde(default)]
+    pub schema: Vec<SettingSchema>,
+    /// PATCH only: applied (or previewed) changes; empty means no-op.
+    #[serde(default)]
+    pub changes: Vec<SettingChange>,
+    #[serde(default)]
+    pub dry_run: bool,
+    /// PATCH only: agent files the change assigns / unassigns (e.g. an
+    /// executioner switch). `None` on older backends.
+    #[serde(default)]
+    pub agent_files: Option<AgentFilesDelta>,
+}
+
+/// `agent_files` of a settings PATCH: file keys by direction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentFilesDelta {
+    #[serde(default)]
+    pub assign: Vec<String>,
+    #[serde(default)]
+    pub unassign: Vec<String>,
+}
+
+/// One entry of the settings `schema`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingSchema {
+    pub key: String,
+    /// `"enum"`, `"bool"` or `"string"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub values: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub nullable: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingChange {
+    pub key: String,
+    #[serde(default)]
+    pub from: serde_json::Value,
+    #[serde(default)]
+    pub to: serde_json::Value,
+}
+
+/// Outcome of `PATCH /api/mcp/projects/{id}/settings`, per the backend
+/// contract: 200, 400 with field details, 403, 409 with the new revision.
+#[derive(Debug, Clone)]
+pub enum SettingsPatchOutcome {
+    Applied(Box<ProjectSettingsResponse>),
+    Invalid {
+        error: String,
+        details: Vec<(String, String)>,
+    },
+    Forbidden(String),
+    Conflict {
+        error: String,
+        revision: Option<String>,
+    },
+}
+
+/// One confidentiality level as the hub lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassificationLevel {
+    pub value: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    /// `public` | `internal` | `confidential` | `restricted`.
+    #[serde(default)]
+    pub gateway_classification: Option<String>,
+}
+
+/// A confidentiality-gate action with its display label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassificationGateAction {
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// The customer of a project and its level (read-only in the CLI).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassificationCustomer {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
+/// `GET /api/mcp/projects/{id}/classification`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationResponse {
+    #[serde(default)]
+    pub project_slug: Option<String>,
+    #[serde(default)]
+    pub project_level: Option<String>,
+    #[serde(default)]
+    pub customer: Option<ClassificationCustomer>,
+    pub effective_level: String,
+    /// `project` | `customer` | `default`: where the effective level comes
+    /// from.
+    #[serde(default)]
+    pub effective_source: Option<String>,
+    pub gateway_classification: String,
+    /// `rendered` | `suppressed`, as the hub decides it.
+    #[serde(default)]
+    pub delegates: Option<String>,
+    /// Labels for the gate action ids in `blocked_actions`.
+    #[serde(default)]
+    pub actions: Vec<ClassificationGateAction>,
+    /// Whether the caller may change the level (`project.manage`).
+    #[serde(default)]
+    pub can_write: Option<bool>,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub mapping_version: Option<u32>,
+    /// External services the confidentiality gate blocks at this level.
+    #[serde(default)]
+    pub blocked_actions: Vec<String>,
+    /// Model profiles the gateway may route this project to, when sent.
+    #[serde(default)]
+    pub allowed_profiles: Option<Vec<String>>,
+    /// The project level was forced (`set --force`) and overrides the
+    /// customer level, also below it. Older hubs do not send it.
+    #[serde(default, rename = "override")]
+    pub project_override: bool,
+    pub revision: String,
+    #[serde(default)]
+    pub levels: Vec<ClassificationLevel>,
+}
+
+/// One side (`before`/`after`) of a classification change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationState {
+    #[serde(default)]
+    pub project_level: Option<String>,
+    #[serde(default)]
+    pub effective_level: Option<String>,
+    #[serde(default)]
+    pub effective_source: Option<String>,
+    #[serde(default)]
+    pub gateway_classification: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub blocked_actions: Vec<String>,
+    /// See [`ClassificationResponse::project_override`].
+    #[serde(default, rename = "override")]
+    pub project_override: bool,
+}
+
+/// What a classification change does, as the hub computes it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationImpact {
+    #[serde(default)]
+    pub project_level_changed: Option<bool>,
+    #[serde(default)]
+    pub effective_level_changed: Option<bool>,
+    /// The override flag flips (forced on, or back off without `force`).
+    #[serde(default)]
+    pub override_changed: Option<bool>,
+    #[serde(default)]
+    pub gateway_classification_changed: bool,
+    /// The gateway class goes down (e.g. restricted to confidential).
+    #[serde(default)]
+    pub downgrade: bool,
+    /// `rendered` | `suppressed` after the change.
+    #[serde(default)]
+    pub delegates: Option<String>,
+    #[serde(default)]
+    pub newly_allowed_actions: Vec<String>,
+    #[serde(default)]
+    pub newly_blocked_actions: Vec<String>,
+}
+
+/// `PATCH /api/mcp/projects/{id}/classification` (plan or applied change).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationPatchResponse {
+    #[serde(default)]
+    pub applied: bool,
+    #[serde(default)]
+    pub before: ClassificationState,
+    #[serde(default)]
+    pub after: ClassificationState,
+    #[serde(default)]
+    pub impact: ClassificationImpact,
+    /// e.g. `customer_dominates`.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub revision: Option<String>,
+}
+
+/// Result of a classification PATCH; the 4xx cases the CLI acts on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClassificationPatchOutcome {
+    Done(Box<ClassificationPatchResponse>),
+    /// 400: unknown level or malformed request.
+    Invalid(String),
+    Forbidden(String),
+    /// 409: changed since the plan was made.
+    Conflict(String),
+    /// 422: a downgrade needs a reason.
+    ReasonRequired(String),
+}
+
+/// `af_export.run_target`: `{ tool: "opencode"|"claude", workspace:
+/// "none"|"zellij", layout?, config?, tool_args? }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunTarget {
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Workspace-relative layout file, for `workspace: "zellij"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    /// Workspace-relative Zellij config file (`claude_workspace.zellij_config`),
+    /// set only together with `workspace: "zellij"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
+    /// Extra arguments for the tool in a plain (non-zellij) launch, e.g.
+    /// `["--chrome"]`. The CLI passes only allow-listed entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_args: Vec<String>,
+}
+
+/// `af_export.ccx`: identifies the CCX bundle revision being delivered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CcxBundleInfo {
+    pub bundle: String,
+    pub version: String,
+    pub revision: String,
+    #[serde(default)]
+    pub compatibility: CcxBundleCompatibility,
+}
+
+/// `af_export.ccx.compatibility`: supported Claude Code version range
+/// (space-separated comparators, e.g. `">=2.1.257 <3.0.0"`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CcxBundleCompatibility {
+    #[serde(default, rename = "claudeCode")]
+    pub claude_code: Option<String>,
+}
+
+/// Generic, forward-compatible `.claude/settings.json` merge spec.
+/// `managed_keys` lists dot-paths into
+/// `settings.json` that Nexus owns (e.g. `"permissions.deny"`); `values`
+/// carries the JSON value to set at each path. Kept untyped per key
+/// (`serde_json::Value`) since the Claude Code settings schema is
+/// server-owned and evolves independently of the CLI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeSettingsSpec {
+    pub managed_keys: Vec<String>,
+    pub values: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ClaudeSettingsSpec {
+    /// The value for a managed dot-path. The backend sends `values` nested
+    /// (`{"permissions": {"deny": [...]}}` for `"permissions.deny"`); a
+    /// literal dotted key is accepted as well. Looking up only the dotted
+    /// key silently dropped every nested managed setting.
+    pub fn value(&self, path: &str) -> Option<&serde_json::Value> {
+        if let Some(v) = self.values.get(path) {
+            return Some(v);
+        }
+        let mut parts = path.split('.');
+        let mut current = self.values.get(parts.next()?)?;
+        for part in parts {
+            current = current.as_object()?.get(part)?;
+        }
+        Some(current)
+    }
+}
+
+/// A single Claude Code hook adapter script to materialize on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeHookAdapter {
+    /// Canonical plugin name (e.g. "session-guard", "headroom-intercept",
+    /// "compaction-plus", "routing-guard", "cost-control").
+    pub plugin_name: String,
+    /// Path, relative to the project root, where the adapter script should
+    /// be written (e.g. ".claude/hooks/nexus-session-guard.mjs").
+    pub target_path: String,
+    /// The bundled adapter script source (single file, `core/*` deps
+    /// inlined). Read via stdin at runtime by the script itself -- the
+    /// only CLI argument the script needs is the hook subcommand (see
+    /// `ClaudeHookEvent::event`).
+    pub body: String,
+    /// Hook event registrations this adapter should be wired to in
+    /// `.claude/settings.json`'s `hooks` block. One adapter may register
+    /// against multiple events (e.g. `headroom-intercept` on both
+    /// `PostToolUse` and `Stop`).
+    pub hook_events: Vec<ClaudeHookEvent>,
+}
+
+/// A single Claude Code hook event registration for a `ClaudeHookAdapter`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeHookEvent {
+    /// Claude Code hook event name in the platform's own PascalCase
+    /// (e.g. "PreToolUse", "PostToolUse", "Stop", "SessionStart",
+    /// "UserPromptSubmit", "PreCompact"). Converted to kebab-case by the
+    /// CLI when building the invocation command (`PostToolUse` ->
+    /// `post-tool-use`), per the adapters' own `process.argv[2]` contract.
+    pub event: String,
+    /// Optional tool/command matcher (Claude Code hook matcher syntax,
+    /// e.g. `"Edit|Write|Bash"` or `"nexus_.*|headroom_.*"`). Omitted for
+    /// events that don't use one (`SessionStart`, `Stop`,
+    /// `UserPromptSubmit` per the current adapters).
+    #[serde(default)]
+    pub matcher: Option<String>,
+    /// Optional timeout in seconds for the hook command. None of the
+    /// current adapters set one; reserved for future use.
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
+/// A single warning surfaced by `af_export` about model routing / provider
+/// divergence. `code` is open-ended (the backend may add new codes); unknown
+/// codes should render generically rather than error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportWarning {
+    /// Warning code, e.g. `"unverifiable_provider"`, `"route_alias_missing"`,
+    /// `"gateway_unavailable"`, `"execution_mode_divergence"`.
+    pub code: String,
+    /// Human-readable, single-line, already user-facing message.
+    pub message: String,
+    /// Agent/slot the warning applies to, if any.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// The model id that triggered the warning, if any.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Suggested operator action, phrased as something to do.
+    #[serde(default)]
+    pub hint: Option<String>,
+    /// Runtime the warning applies to (`opencode` | `claude_code`); `None`
+    /// applies to every runtime.
+    #[serde(default)]
+    pub runtime: Option<String>,
+}
+
+fn default_agentic_root() -> String {
+    ".nexus".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
+
+/// Project summary returned by listing endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    pub id: String,
+    pub name: String,
+    pub slug: Option<String>,
+    pub description: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    /// Tool flavor: "opencode", "claude-cli", or "both".
+    pub agent_owner: Option<String>,
+    /// Agentic root directory (e.g. ".claude" or ".nexus").
+    pub agentic_root: Option<String>,
+    /// Per-project git identity config.
+    pub git_config: Option<GitConfig>,
+    /// Effective per-project `gh` CLI profile, superseding
+    /// `git_config.gh`. `None`
+    /// (or the field missing entirely) means: do not touch `gh` or its
+    /// environment at all.
+    #[serde(default)]
+    pub gh_effective: Option<GhEffective>,
+}
+
+/// Per-project git identity settings (auto-applied by init/pull).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitConfig {
+    pub user_name: Option<String>,
+    pub user_email: Option<String>,
+    pub signing_key: Option<String>,
+    pub commit_gpgsign: Option<bool>,
+    /// Whether Claude Code should add a `Co-Authored-By: Claude ...`
+    /// trailer to commits (uninverted, Claude Code's own semantics: `true`
+    /// means the trailer is added). `None` for projects created before this
+    /// field existed on the backend; rendered as suppressed (`false`) by
+    /// the Claude Code renderer, not left to Claude Code's own default.
+    #[serde(default)]
+    pub include_co_authored_by: Option<bool>,
+    /// Per-project GitHub CLI (`gh`) profile.
+    /// `None` for projects that have not configured one.
+    #[serde(default)]
+    pub gh: Option<GhConfig>,
+}
+
+/// Per-project GitHub CLI (`gh`) profile.
+///
+/// The GitHub token itself never leaves the operator's machine and never
+/// passes through the Nexus backend: this only records which local `gh`
+/// profile (a dedicated `GH_CONFIG_DIR`) a project should use, so multiple
+/// projects can cleanly use different GitHub identities on the same
+/// machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhConfig {
+    /// Lower-cased hostname; `github.com` unless this is a GitHub
+    /// Enterprise Server project. Validated and normalized server-side.
+    #[serde(default = "default_gh_host")]
+    pub host: String,
+    /// Expected GitHub login for this profile (informational; used by
+    /// `nexus git verify` to detect a mismatched login). Validated
+    /// server-side.
+    pub user: Option<String>,
+    /// Local `gh` CLI profile name (`^[a-z0-9][a-z0-9._-]{0,63}$`,
+    /// validated server-side). Always present when `gh` is present;
+    /// defaults to the lower-cased login on the backend.
+    pub profile: String,
+}
+
+fn default_gh_host() -> String {
+    "github.com".to_string()
+}
+
+/// Effective per-project `gh` CLI profile, the
+/// canonical input for `nexus run`'s gh handling and `nexus git verify`,
+/// superseding `git_config.gh` (kept for backward
+/// deserialization compatibility but no longer read).
+///
+/// `source` describes where the seeding token should come from if the
+/// local profile has no login yet: `"auto"` (try the OS keyring first,
+/// then `GH_TOKEN`, then `GITHUB_TOKEN`), `"keyring"` (keyring only),
+/// `"env:<VAR>"` (a specific named env var only), or `"prompt"` (never
+/// import a token; the profile is seeded only by `nexus git login`).
+/// `origin` records whether this effective value is pinned by the project,
+/// comes from the caller's account bound to the project, or is the
+/// caller's default (`"project"` / `"binding"` / `"user"`), for the login
+/// status line.
+///
+/// The optional fields are absent on older backends; the CLI then makes no
+/// transport or commit identity changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GhEffective {
+    /// Lower-cased hostname; `github.com` unless this is a GitHub
+    /// Enterprise Server project.
+    pub host: String,
+    /// Expected GitHub login for this profile.
+    pub user: Option<String>,
+    /// Local `gh` CLI profile name.
+    pub profile: String,
+    /// Where to source a seeding token from if the profile is empty:
+    /// `"auto"` | `"keyring"` | `"env:<VAR>"` | `"prompt"`.
+    pub source: String,
+    /// Where this value came from: `"project"` | `"binding"` | `"user"`.
+    pub origin: String,
+    /// File name of a private key inside `~/.ssh` for git over SSH (never
+    /// a path; validated server-side and again by the CLI).
+    #[serde(default)]
+    pub ssh_key: Option<String>,
+    /// Default repository for `gh` as `owner/name`.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Commit author name of this account (personal data: local git
+    /// config only).
+    #[serde(default)]
+    pub commit_name: Option<String>,
+    /// Commit author email of this account (personal data: local git
+    /// config only).
+    #[serde(default)]
+    pub commit_email: Option<String>,
+}
+
+/// Wrapper for project list API response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectListResponse {
+    pub projects: Vec<ProjectSummary>,
+}
+
+/// Single project detail response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectDetailResponse {
+    pub project: ProjectSummary,
+}
+
+/// Response from `GET /api/mcp/projects/{id}/preflight`.
+///
+/// This is the same endpoint the `nexus-headroom-intercept` OpenCode plugin
+/// calls at load time to gate transform-mode compression. Reusing it here lets
+/// `nexus run`'s pre-launch "Headroom" check live-verify reachability +
+/// project enablement instead of only checking whether HEADROOM_MODE=transform
+/// is set locally (a stale/invalid token caused
+/// the plugin to silently downgrade to observe mode while this env-var-only
+/// check kept reporting PASS).
+///
+/// Hubs from 0.20.0 also report the environment variables and settings the
+/// selected plugins need (`checks`, `config_checks`) and developer tool
+/// settings (`dev_tools`). Older hubs leave these out, so they are optional.
+/// The CLI never sends local variable names: it calls the endpoint without
+/// `env_keys` and evaluates `checks[].env_var` locally.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpPreflightResponse {
+    pub project_id: String,
+    #[serde(default)]
+    pub plugins: Vec<String>,
+    #[serde(default)]
+    pub headroom_enabled: bool,
+    /// Environment variables the selected plugins need; `None` on hubs
+    /// before 0.20.0.
+    #[serde(default)]
+    pub checks: Option<Vec<PluginEnvCheck>>,
+    /// Plugin settings that must be set on the hub.
+    #[serde(default)]
+    pub config_checks: Option<Vec<PluginConfigCheck>>,
+    #[serde(default)]
+    pub all_required_ok: Option<bool>,
+    #[serde(default)]
+    pub dev_tools: Option<DevTools>,
+}
+
+/// One environment variable a plugin needs. `status` is the hub's view and
+/// is always `missing` when no names were sent; the CLI decides locally.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PluginEnvCheck {
+    pub plugin: String,
+    pub env_var: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// One plugin setting on the hub: `ok`, `missing` or `invalid` (with a
+/// message).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PluginConfigCheck {
+    pub plugin: String,
+    pub setting: String,
+    pub status: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Developer tool settings of the project.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DevTools {
+    #[serde(default)]
+    pub sentry: Option<SentryDevTool>,
+}
+
+/// Sentry developer tool settings (read-only MCP server).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SentryDevTool {
+    #[serde(default)]
+    pub organization_slug: Option<String>,
+    #[serde(default)]
+    pub project_slug: Option<String>,
+    #[serde(default = "default_sentry_host")]
+    pub host: String,
+    #[serde(default = "default_sentry_token_env")]
+    pub token_env: String,
+    #[serde(default)]
+    pub required_scopes: Vec<String>,
+}
+
+fn default_sentry_host() -> String {
+    "sentry.io".to_string()
+}
+
+fn default_sentry_token_env() -> String {
+    "SENTRY_ACCESS_TOKEN".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Import (POST /api/mcp/import  action=import)
+// ---------------------------------------------------------------------------
+
+/// A detected agentic file to import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportAgenticFile {
+    pub file_key: String,
+    pub target_path: String,
+    pub body: String,
+    pub category: String,
+}
+
+/// A directive extracted from an agentic file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportDirective {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub category: String,
+    pub priority: String,
+    pub source_file: String,
+}
+
+/// A referenced document resolved from Markdown links.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportReferencedDoc {
+    pub title: String,
+    pub body: String,
+    pub source_path: String,
+}
+
+/// Request payload for `POST /api/mcp/import`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportPayload {
+    pub action: String,
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    pub agentic_files: Vec<ImportAgenticFile>,
+    pub directives: Vec<ImportDirective>,
+    pub referenced_docs: Vec<ImportReferencedDoc>,
+}
+
+/// Summary counts returned by the import endpoint.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportSummary {
+    pub agentic_files_ingested: u32,
+    pub directives_created: u32,
+    pub docs_ingested: u32,
+}
+
+/// Response from the import endpoint.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportResponse {
+    pub action: String,
+    pub project_id: String,
+    pub summary: ImportSummary,
+}
+
+// ---------------------------------------------------------------------------
+// Tasks (POST /api/mcp/tasks  action=task_list)
+// ---------------------------------------------------------------------------
+
+/// A single task summary returned by `task_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub priority: String,
+    pub assignee: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response from `task_list` action.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskListResponse {
+    pub action: String,
+    pub project_id: String,
+    pub count: usize,
+    pub tasks: Vec<TaskSummary>,
+}
+
+/// A Dispatch row from `dispatch_inbox` / `dispatch_outbox`
+/// (`POST /api/mcp/dispatches`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchSummary {
+    pub id: String,
+    pub source_project_id: String,
+    pub target_project_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub priority: String,
+    pub status: String,
+    #[serde(default)]
+    pub blocking: bool,
+    #[serde(default)]
+    pub due_at: Option<String>,
+    #[serde(default)]
+    pub resolved_at: Option<String>,
+    #[serde(default)]
+    pub closed_at: Option<String>,
+    pub created_at: String,
+    /// Moves with every new message; the "last activity" of a Dispatch.
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+/// Response from `dispatch_inbox` / `dispatch_outbox`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchListResponse {
+    #[serde(default)]
+    pub dispatches: Vec<DispatchSummary>,
+    /// Project ids the result covers, own project first (with
+    /// `project_scope: "linked"`); empty from hubs without the scope.
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+/// One message of a Dispatch timeline (`dispatch_get`); the body is not
+/// kept, a runner only needs who wrote it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchMessageRef {
+    pub id: String,
+    #[serde(default)]
+    pub author_project_id: Option<String>,
+    #[serde(default)]
+    pub message_type: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+/// Response from `dispatch_get`, reduced to the Dispatch and its message
+/// authors.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchGetResponse {
+    pub dispatch: DispatchSummary,
+    #[serde(default)]
+    pub messages: Vec<DispatchMessageRef>,
+}
+
+/// One entry of the Dispatch event feed (`dispatch_events`): metadata only,
+/// never a message body. `id` is the cursor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchEvent {
+    pub id: i64,
+    pub dispatch_id: String,
+    #[serde(default)]
+    pub source_project_id: Option<String>,
+    #[serde(default)]
+    pub target_project_id: Option<String>,
+    #[serde(default)]
+    pub previous_target_project_id: Option<String>,
+    pub event_type: String,
+    #[serde(default)]
+    pub status_from: Option<String>,
+    #[serde(default)]
+    pub status_to: Option<String>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub message_type: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// Bound projects the event concerns (runner feed without `project_id`).
+    #[serde(default)]
+    pub bound_project_ids: Vec<String>,
+}
+
+/// Response from `dispatch_events`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchEventsResponse {
+    #[serde(default)]
+    pub projects: Vec<String>,
+    #[serde(default)]
+    pub next_cursor: i64,
+    #[serde(default)]
+    pub has_more: bool,
+    #[serde(default)]
+    pub events: Vec<DispatchEvent>,
+}
+
+/// A runtime the runner reports: `claude_code` with its version and the
+/// capabilities a probe confirmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerRuntime {
+    pub runtime: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// A project binding in `runner_register`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerProjectRequest {
+    pub project_id: String,
+    pub mode: String,
+    pub runtime: String,
+    /// sha256 of the repository path, never the path itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_path_hash: Option<String>,
+}
+
+/// Request body of `runner_register` (personal access token).
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerRegisterRequest {
+    pub machine_id: String,
+    pub name: String,
+    pub cli_version: String,
+    pub runtimes: Vec<RunnerRuntime>,
+    pub projects: Vec<RunnerProjectRequest>,
+    pub expires_in_days: u32,
+}
+
+/// A binding as the hub describes it: requested and effective mode, the
+/// switch that blocks it, and the progress the runner reported.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunnerBinding {
+    pub project_id: String,
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub mode_requested: Option<String>,
+    #[serde(default)]
+    pub mode_effective: Option<String>,
+    #[serde(default)]
+    pub writes_allowed: bool,
+    #[serde(default)]
+    pub blocked_by: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<i64>,
+    #[serde(default)]
+    pub latest_event_id: Option<i64>,
+    #[serde(default)]
+    pub lag: Option<i64>,
+    #[serde(default)]
+    pub delivered_total: Option<i64>,
+    #[serde(default)]
+    pub failed_total: Option<i64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Response from `runner_register`. `token` is shown this once.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunnerRegisterResponse {
+    pub runner_id: String,
+    pub token: String,
+    #[serde(default)]
+    pub token_prefix: Option<String>,
+    #[serde(default)]
+    pub token_expires_at: Option<String>,
+    #[serde(default)]
+    pub replaced: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub platform_enabled: bool,
+    #[serde(default)]
+    pub projects: Vec<RunnerBinding>,
+}
+
+/// Response from `runner_heartbeat`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RunnerHeartbeatResponse {
+    #[serde(default)]
+    pub runner_id: String,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub platform_enabled: bool,
+    #[serde(default)]
+    pub projects: Vec<RunnerBinding>,
+}
+
+/// One runner in `runner_list`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunnerInfo {
+    pub id: String,
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub cli_version: Option<String>,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+    #[serde(default)]
+    pub token_prefix: Option<String>,
+    #[serde(default)]
+    pub token_expires_at: Option<String>,
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
+    #[serde(default)]
+    pub stale: Option<bool>,
+    #[serde(default)]
+    pub platform_enabled: Option<bool>,
+    #[serde(default)]
+    pub projects: Vec<RunnerBinding>,
+}
+
+/// Response from `runner_list`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunnerListResponse {
+    #[serde(default)]
+    pub runners: Vec<RunnerInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// Generic error
+// ---------------------------------------------------------------------------
+
+/// A single workspace file in the export response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceScript {
+    pub target_path: String,
+    pub body: String,
+    #[serde(default)]
+    pub executable: bool,
+}
+
+/// The composed workspace template (devbox.json or similar).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceTemplate {
+    pub target_path: String,
+    pub body: String,
+    pub provider: String,
+}
+
+/// Response from `wf_export` action (POST /api/mcp/workspace-files).
+/// Legacy v1 format: kept for backward compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceExportResponse {
+    pub action: String,
+    pub project_id: String,
+    /// Whether workspace provisioning is enabled for this project.
+    /// If false, no workspace files will be provisioned.
+    #[serde(default)]
+    pub workspace_provisioning_enabled: Option<bool>,
+    #[serde(default)]
+    pub shadow_mode: bool,
+    #[serde(default)]
+    pub scripts_path: String,
+    pub workspace: Option<WorkspaceTemplate>,
+    #[serde(default)]
+    pub scripts: Vec<WorkspaceScript>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace v2 – Blueprint + Fork architecture
+// ---------------------------------------------------------------------------
+
+/// A workspace fork summary from `GET /api/projects/:id/workspace-forks`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForkSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub source_version: i64,
+    #[serde(default)]
+    pub shadow_mode: bool,
+    #[serde(default)]
+    pub upstream_changed: bool,
+    #[serde(default)]
+    pub scripts_path: Option<String>,
+}
+
+/// Response from `GET /api/projects/:id/workspace-forks`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForksResponse {
+    pub forks: Vec<WorkspaceForkSummary>,
+    #[serde(default)]
+    pub count: usize,
+}
+
+/// Export metadata from `POST /api/projects/:id/workspace-forks/:forkId/export`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForkExportMeta {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub fork_id: Option<String>,
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+    #[serde(default)]
+    pub version: i64,
+    #[serde(default)]
+    pub shadow_mode: bool,
+    #[serde(default)]
+    pub scripts_path: String,
+    #[serde(default)]
+    pub upstream_changed: bool,
+    /// One-line hint how a shadowed project treats the devbox files; `None`
+    /// for unshadowed projects and on older backends.
+    #[serde(default)]
+    pub shadow_notice: Option<String>,
+}
+
+impl WorkspaceForkExportMeta {
+    /// The shadow notice, unless it is missing or blank.
+    pub fn shadow_notice(&self) -> Option<&str> {
+        self.shadow_notice
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+    }
+}
+
+/// A script entry in the v2 fork export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForkExportScript {
+    pub path: String,
+    pub body: String,
+    #[serde(default)]
+    pub executable: bool,
+}
+
+/// Response from `POST /api/projects/:id/workspace-forks/:forkId/export`
+/// or from `POST /api/mcp/agent-files` with `action: "ws_export"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceForkExportResponse {
+    pub devbox_json: String,
+    #[serde(default)]
+    pub scripts: Vec<WorkspaceForkExportScript>,
+    pub meta: WorkspaceForkExportMeta,
+    /// Present in ws_export (MCP) responses
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Present in ws_export (MCP) responses
+    #[serde(default)]
+    pub fork_id: Option<String>,
+    /// Present in ws_export (MCP) responses
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+    /// Name of the active fork; `None` on backends that do not send it.
+    #[serde(default)]
+    pub fork_name: Option<String>,
+    /// Executable items of this export (`devbox_script`, `devbox_config`).
+    /// Empty on older servers.
+    #[serde(default)]
+    pub executables: Vec<ExportedExecutable>,
+    /// Machine-local scripts (repo-relative path to body): written on pull,
+    /// git-excluded, never pushed. `None` on backends without the field;
+    /// an empty map means none are delivered (and earlier ones go).
+    #[serde(default)]
+    pub local_scripts: Option<std::collections::BTreeMap<String, String>>,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Push (POST /api/mcp/agent-files  action=ws_push)
+// ---------------------------------------------------------------------------
+
+/// Response from `ws_push` action: push local workspace changes as a new fork.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacePushResponse {
+    pub action: String,
+    pub project_id: String,
+    pub fork_id: String,
+    pub fork_name: String,
+    pub version: i64,
+    pub previous_fork_id: String,
+    pub previous_fork_name: String,
+    pub files_pushed: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent File Status (POST /api/mcp/agent-files  action=af_status)
+// ---------------------------------------------------------------------------
+
+/// A file that differs between local and remote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusModifiedFile {
+    pub path: String,
+    pub local_hash: String,
+    pub remote_hash: String,
+    pub category: String,
+}
+
+/// A file that exists locally but not on the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusNewFile {
+    pub path: String,
+}
+
+/// A file that exists on the server but not locally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusDeletedFile {
+    pub path: String,
+    pub remote_hash: String,
+    pub category: String,
+}
+
+/// A file that is unchanged between local and remote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusUnchangedFile {
+    pub path: String,
+    pub category: String,
+}
+
+/// Response from `af_status` action: compare local vs server file hashes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileStatusResponse {
+    pub action: String,
+    pub project_id: String,
+    pub modified: Vec<StatusModifiedFile>,
+    pub new_local: Vec<StatusNewFile>,
+    pub deleted_local: Vec<StatusDeletedFile>,
+    pub unchanged: Vec<StatusUnchangedFile>,
+    #[serde(default)]
+    pub server_file_count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Actors (POST /api/mcp/actors  action=actor_list / actor_get)
+// ---------------------------------------------------------------------------
+
+/// Avatar metadata for an actor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorAvatar {
+    /// Avatar style (e.g. "dicebear", "custom", "ai-generated").
+    #[serde(default)]
+    pub style: Option<String>,
+    /// Seed used for DiceBear generation.
+    #[serde(default)]
+    pub seed: Option<String>,
+    /// S3/CDN URL for the cached avatar SVG.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Content hash of the avatar SVG (for cache invalidation).
+    #[serde(default)]
+    pub content_hash: Option<String>,
+}
+
+/// A single actor summary returned by `actor_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorSummary {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub model_routing: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<ActorAvatar>,
+    #[serde(default)]
+    pub status: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response from `actor_list` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorListResponse {
+    pub action: String,
+    pub project_id: String,
+    pub count: usize,
+    pub actors: Vec<ActorSummary>,
+}
+
+/// Full actor profile returned by `actor_get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorProfile {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Full Markdown profile body for the actor.
+    #[serde(default)]
+    pub profile_body: Option<String>,
+    #[serde(default)]
+    pub model_routing: Option<String>,
+    #[serde(default)]
+    pub permissions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub avatar: Option<ActorAvatar>,
+    #[serde(default)]
+    pub status: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response from `actor_get` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorGetResponse {
+    pub action: String,
+    pub project_id: String,
+    pub actor: ActorProfile,
+}
+
+/// Response from actor avatar operations (generate/reset).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorAvatarResponse {
+    pub action: String,
+    pub actor_id: String,
+    #[serde(default)]
+    pub avatar: Option<ActorAvatar>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// A Claude Code subagent file from af_export (`claude_agents`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeAgentFile {
+    pub slug: String,
+    /// `.claude/agents/<slug>.md`
+    #[serde(default)]
+    pub path: String,
+    pub body: String,
+}
+
+/// A gateway-lane actor from af_export (`claude_lane_actors`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeLaneActor {
+    pub slug: String,
+    /// Model ID the gateway resolves (`--model`).
+    pub profile_slug: String,
+    /// Actor profile markdown (without frontmatter).
+    #[serde(default)]
+    pub body: String,
+    /// Context window of the model, for `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+}
+
+/// An exported actor file entry from af_export (actor profiles delivered during pull).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedActorFile {
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    /// Markdown content for `.nexus/actors/<slug>.md`
+    pub body: String,
+    #[serde(default)]
+    pub avatar: Option<ActorAvatar>,
+    /// Model route alias used by this actor.
+    #[serde(default)]
+    pub route_alias: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Model Routes
+// ---------------------------------------------------------------------------
+
+/// A model route entry from the route catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoute {
+    pub alias: String,
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub deprecated: bool,
+    #[serde(default)]
+    pub deprecated_message: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Actor import (POST /api/mcp/actors  action=actor_import)
+// ---------------------------------------------------------------------------
+
+/// A single actor profile to import into the Actor Registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorImportEntry {
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub model_routing: Option<String>,
+    /// Legacy routing key. The hub no longer stores it; it binds the actor to
+    /// the Model Profile with the same slug instead.
+    #[serde(default)]
+    pub route_alias: Option<String>,
+    /// Model Profile slug the actor routes through (preferred over
+    /// `route_alias`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_profile: Option<String>,
+    /// Full Markdown profile body.
+    #[serde(default)]
+    pub profile_body: Option<String>,
+}
+
+/// Request payload for actor import.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActorImportPayload {
+    pub action: String,
+    pub project_id: String,
+    pub actors: Vec<ActorImportEntry>,
+}
+
+/// Response from actor import.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActorImportResponse {
+    pub action: String,
+    pub project_id: String,
+    pub imported: usize,
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Imported actors whose Model Profile matched no active profile; they
+    /// run on the project default.
+    #[serde(default)]
+    pub unbound_profiles: Vec<UnboundProfile>,
+}
+
+/// An imported actor without an active Model Profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnboundProfile {
+    pub slug: String,
+    #[serde(default)]
+    pub model_profile: Option<String>,
+}
+
+/// Response from actor export action.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActorExportResponse {
+    pub action: String,
+    pub project_id: String,
+    /// OpenCode-compatible agent configuration.
+    #[serde(default)]
+    pub opencode_agents: Option<serde_json::Value>,
+    /// Target `claude`: subagent files, same shape as in af_export.
+    #[serde(default)]
+    pub claude_agents: Vec<ClaudeAgentFile>,
+    /// Target `claude`: gateway-lane actors (without `context_window`).
+    #[serde(default)]
+    pub claude_lane_actors: Vec<ClaudeLaneActor>,
+    /// Target `claude`: the session-lane primary actor, informational only.
+    #[serde(default)]
+    pub claude_main_agent: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub count: usize,
+}
+
+/// Generic API error shape returned by the Nexus server.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiError {
+    pub error: Option<String>,
+    pub message: Option<String>,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(msg) = &self.message {
+            write!(f, "{}", msg)
+        } else if let Some(err) = &self.error {
+            write!(f, "{}", err)
+        } else {
+            write!(f, "unknown API error")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sync protocol (POST /api/mcp/agent-files  action=af_sync_check/af_sync/af_sync_status)
+// ---------------------------------------------------------------------------
+
+/// A single file hash entry sent by the client for sync check.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncFileHash {
+    pub file_key: String,
+    pub local_hash: String,
+}
+
+/// Per-file sync result from af_sync_check.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncCheckResult {
+    pub file_key: String,
+    pub status: String,
+    pub local_hash: Option<String>,
+    pub remote_hash: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Response from `af_sync_check` action.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncCheckResponse {
+    pub action: String,
+    pub project_id: String,
+    pub results: Vec<SyncCheckResult>,
+    #[serde(default)]
+    pub deprecated_skills: Vec<String>,
+}
+
+/// Per-file sync status from af_sync_status.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncStatusEntry {
+    pub file_key: String,
+    pub name: String,
+    pub sync_status: String,
+    pub content_hash: Option<String>,
+    pub last_synced_at: Option<String>,
+    #[serde(default)]
+    pub body_override_source: Option<String>,
+}
+
+/// Response from `af_sync_status` action.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncStatusResponse {
+    pub action: String,
+    pub project_id: String,
+    pub files: Vec<SyncStatusEntry>,
+    pub count: usize,
+}
+
+/// Response from `af_sync` action (push or pull direction).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncResponse {
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub project_id: String,
+    pub file_key: String,
+    pub direction: String,
+    /// Hash of the stored body (`content_hash` in the backend response).
+    #[serde(default, alias = "content_hash")]
+    pub new_hash: Option<String>,
+    #[serde(default)]
+    pub sync_status: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Project inference tokens (nxs_proj_*)
+// ---------------------------------------------------------------------------
+
+/// Optional profile ceiling for an issued project inference token.
+///
+/// Tighten-only: `inherit` keeps the project policy, `restrict` narrows it to
+/// the listed profile slugs. Serialized only when explicitly requested.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileCeiling {
+    /// Ceiling mode: `inherit` or `restrict`.
+    pub mode: String,
+
+    /// Profile slugs the token is restricted to (only meaningful for `restrict`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
+}
+
+/// Request body for `POST /api/projects/:projectId/inference-tokens`.
+///
+/// `runtime_id` is a logical runtime name (e.g. `developer-workstation`),
+/// not a device attestation. All other fields are optional and default to
+/// inheriting the project policy server-side.
+#[derive(Debug, Clone, Serialize)]
+pub struct InferenceTokenIssueRequest {
+    pub runtime_id: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_ceiling: Option<ProfileCeiling>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_ceiling_ref: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// Response from issuing or rotating a project inference token.
+///
+/// The raw `token` value is returned exactly once and can never be retrieved
+/// again. Callers must persist it immediately.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InferenceTokenResponse {
+    /// The raw `nxs_proj_*` token. Shown once, never retrievable again.
+    pub token: String,
+
+    /// Stable identifier for the token record (used for rotate/revoke).
+    pub token_id: String,
+
+    /// Non-secret display prefix (safe to print / store in listings).
+    #[serde(default)]
+    pub token_prefix: Option<String>,
+
+    /// Logical runtime name the token was issued for.
+    #[serde(default)]
+    pub runtime_id: Option<String>,
+
+    /// Optional ISO 8601 expiry timestamp.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+
+    /// Optional server-side advisory (e.g. missing-expiry warning).
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+/// A single project inference token record as returned by the list endpoint.
+///
+/// Never contains the raw secret: only metadata.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InferenceTokenInfo {
+    pub token_id: String,
+
+    #[serde(default)]
+    pub token_prefix: Option<String>,
+
+    #[serde(default)]
+    pub runtime_id: Option<String>,
+
+    /// Lifecycle status: `active`, `expired`, or `revoked`.
+    #[serde(default)]
+    pub status: Option<String>,
+
+    #[serde(default)]
+    pub created_at: Option<String>,
+
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// Response from `GET /api/projects/:projectId/inference-tokens`.
+///
+/// The server may return either a bare array or an object with a `tokens`
+/// field; `#[serde(default)]` keeps deserialization tolerant.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InferenceTokenListResponse {
+    #[serde(default)]
+    pub tokens: Vec<InferenceTokenInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // T1: McpServerConfig with string command deserializes to Vec<String>
+    #[test]
+    fn test_mcp_server_config_string_command() {
+        let json = r#"{"command": "headroom"}"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.command, vec!["headroom"]);
+        assert!(cfg.args.is_empty());
+        assert!(cfg.env_keys.is_empty());
+        assert!(cfg.environment.is_empty());
+    }
+
+    // T2: McpServerConfig with array command deserializes to Vec<String>
+    #[test]
+    fn test_mcp_server_config_array_command() {
+        let json = r#"{"command": ["headroom", "mcp", "serve"]}"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.command, vec!["headroom", "mcp", "serve"]);
+    }
+
+    // T3: McpServerConfig with environment map deserializes correctly
+    #[test]
+    fn test_mcp_server_config_with_environment() {
+        let json = r#"{
+            "command": ["headroom", "mcp", "serve"],
+            "environment": {
+                "HEADROOM_MODE": "transform",
+                "HEADROOM_DEBUG": "false"
+            }
+        }"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.command, vec!["headroom", "mcp", "serve"]);
+        assert_eq!(
+            cfg.environment.get("HEADROOM_MODE").map(|s| s.as_str()),
+            Some("transform")
+        );
+        assert_eq!(
+            cfg.environment.get("HEADROOM_DEBUG").map(|s| s.as_str()),
+            Some("false")
+        );
+    }
+
+    // T4: Full af_export with nexus-headroom (array command + environment) round-trips
+    #[test]
+    fn test_af_export_with_headroom_mcp_server() {
+        let json = r#"{
+            "project_id": "test-proj-id",
+            "project_name": "Test Project",
+            "agent_files": [],
+            "count": 0,
+            "mcp_servers": {
+                "nexus-headroom": {
+                    "command": ["headroom", "mcp", "serve"],
+                    "args": [],
+                    "env_keys": [],
+                    "environment": {
+                        "HEADROOM_MODE": "transform",
+                        "HEADROOM_REQUIRE_PREFLIGHT": "true"
+                    }
+                }
+            },
+            "plugin_env": {
+                "HEADROOM_MODE": "transform"
+            }
+        }"#;
+        let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
+        let headroom = resp.mcp_servers.get("nexus-headroom").unwrap();
+        assert_eq!(headroom.command, vec!["headroom", "mcp", "serve"]);
+        assert_eq!(
+            headroom
+                .environment
+                .get("HEADROOM_MODE")
+                .map(|s| s.as_str()),
+            Some("transform")
+        );
+        assert_eq!(
+            headroom
+                .environment
+                .get("HEADROOM_REQUIRE_PREFLIGHT")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            resp.plugin_env.get("HEADROOM_MODE").map(|s| s.as_str()),
+            Some("transform")
+        );
+    }
+}
+
+#[cfg(test)]
+mod claude_settings_spec_tests {
+    use super::ClaudeSettingsSpec;
+
+    fn spec(values: serde_json::Value) -> ClaudeSettingsSpec {
+        ClaudeSettingsSpec {
+            managed_keys: vec!["permissions.deny".into()],
+            values: values.as_object().unwrap().clone(),
+        }
+    }
+
+    #[test]
+    fn value_resolves_nested_and_dotted_keys() {
+        let nested = spec(serde_json::json!({"permissions": {"deny": ["a"]}}));
+        assert_eq!(
+            nested.value("permissions.deny"),
+            Some(&serde_json::json!(["a"]))
+        );
+        let dotted = spec(serde_json::json!({"permissions.deny": ["b"]}));
+        assert_eq!(
+            dotted.value("permissions.deny"),
+            Some(&serde_json::json!(["b"]))
+        );
+        assert_eq!(nested.value("permissions.allow"), None);
+        assert_eq!(nested.value("model"), None);
+    }
+}
+
+/// Code-free summary of a repository, sent to
+/// `POST /api/mcp/projects/{id}/code-signals`.
+///
+/// Holds only marker file paths, extension counts and totals; never file
+/// contents, other file names, the repository root path or remotes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeSignals {
+    /// Always `"cli"`.
+    pub source: String,
+    pub cli_version: String,
+    /// RFC 3339 timestamp (UTC, seconds).
+    pub scanned_at: String,
+    /// Number of tracked files.
+    pub file_count: usize,
+    /// True when no tracked file exists besides Nexus-managed ones.
+    pub empty: bool,
+    /// Workspace-relative paths of known marker files.
+    pub markers: Vec<String>,
+    /// Tracked files per lowercase extension (`""` for none).
+    pub extensions: std::collections::BTreeMap<String, usize>,
+}
+
+/// Response of the code-signals endpoint.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CodeSignalsResponse {
+    #[serde(default)]
+    pub stored: bool,
+    /// Number of project improvements the hub suggests from the signals.
+    #[serde(default)]
+    pub suggestions: u32,
+}

@@ -1,0 +1,390 @@
+//! Preflight check command.
+//!
+//! Verifies the user's environment is ready for Nexus development:
+//! - Required tools (git, node, npm/npx)
+//! - Nexus authentication
+//! - API reachability
+//! - Project workspace state
+//! - MCP server availability
+
+use console::style;
+use nexus_core::api::NexusClient;
+use nexus_core::auth::{mask_token, resolve_token};
+use nexus_core::config::Config;
+use std::process::Command as Proc;
+
+/// Result of a single preflight check.
+#[derive(Debug)]
+pub(crate) enum CheckResult {
+    /// Informational row (counts as passed).
+    Info(String),
+    Pass(String),
+    Warn(String),
+    Fail(String),
+}
+
+impl CheckResult {
+    pub(crate) fn is_fail(&self) -> bool {
+        matches!(self, CheckResult::Fail(_))
+    }
+    pub(crate) fn is_warn(&self) -> bool {
+        matches!(self, CheckResult::Warn(_))
+    }
+    pub(crate) fn level(&self) -> &'static str {
+        match self {
+            CheckResult::Info(_) => "info",
+            CheckResult::Pass(_) => "pass",
+            CheckResult::Warn(_) => "warn",
+            CheckResult::Fail(_) => "fail",
+        }
+    }
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            CheckResult::Info(m)
+            | CheckResult::Pass(m)
+            | CheckResult::Warn(m)
+            | CheckResult::Fail(m) => m,
+        }
+    }
+}
+
+/// Display a single check result line.
+pub(crate) fn print_check(label: &str, result: &CheckResult) {
+    let (icon, msg) = match result {
+        CheckResult::Info(m) => (style("INFO").bold().blue(), m.as_str()),
+        CheckResult::Pass(m) => (style("PASS").bold().green(), m.as_str()),
+        CheckResult::Warn(m) => (style("WARN").bold().yellow(), m.as_str()),
+        CheckResult::Fail(m) => (style("FAIL").bold().red(), m.as_str()),
+    };
+    println!("  {} {:<20} {}", icon, label, msg);
+}
+
+/// Run a command and capture stdout (first line, trimmed).
+pub(crate) fn cmd_version(bin: &str, args: &[&str]) -> Option<String> {
+    Proc::new(bin).args(args).output().ok().and_then(|o| {
+        if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            // Take first line only
+            Some(s.lines().next().unwrap_or("").to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Check: git
+fn check_git() -> CheckResult {
+    match cmd_version("git", &["--version"]) {
+        Some(v) => CheckResult::Pass(v),
+        None => CheckResult::Fail("git not found -- install from https://git-scm.com".into()),
+    }
+}
+
+/// Check: Node.js
+fn check_node() -> CheckResult {
+    match cmd_version("node", &["--version"]) {
+        Some(v) => {
+            // Minimum: v18
+            let major = v
+                .trim_start_matches('v')
+                .split('.')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            if major >= 18 {
+                CheckResult::Pass(format!("node {}", v))
+            } else {
+                CheckResult::Warn(format!("node {} (>= v18 recommended)", v))
+            }
+        }
+        None => CheckResult::Fail("node not found -- install from https://nodejs.org".into()),
+    }
+}
+
+/// Check: npm / npx
+fn check_npm() -> CheckResult {
+    match cmd_version("npm", &["--version"]) {
+        Some(v) => CheckResult::Pass(format!("npm {}", v)),
+        None => CheckResult::Fail("npm not found".into()),
+    }
+}
+
+/// Check: npx available
+fn check_npx() -> CheckResult {
+    match cmd_version("npx", &["--version"]) {
+        Some(v) => CheckResult::Pass(format!("npx {}", v)),
+        None => CheckResult::Warn("npx not found -- MCP server binary download may fail".into()),
+    }
+}
+
+/// Check: Claude Code CLI.
+///
+/// Only meaningful for projects whose `agent_owner` includes `claude-cli`
+/// OpenCode-only projects must not be told to
+/// install a binary they never launch, so callers skip the check entirely by
+/// passing a flavor that does not want Claude.
+fn check_claude() -> CheckResult {
+    match cmd_version("claude", &["--version"]) {
+        Some(v) => CheckResult::Pass(v),
+        None => CheckResult::Fail(
+            "claude not found -- install from https://claude.com/product/claude-code".into(),
+        ),
+    }
+}
+
+/// Does the linked project's `agent_owner` include Claude Code?
+fn project_wants_claude() -> bool {
+    matches!(
+        nexus_core::config::load_agent_owner(None).as_deref(),
+        Some("claude-cli") | Some("both")
+    )
+}
+
+/// Check: Nexus CLI config
+fn check_config() -> (CheckResult, Option<Config>) {
+    match Config::load_effective(None) {
+        Ok(cfg) => (
+            CheckResult::Pass(format!(
+                "api_url={}, mcp_source={}",
+                cfg.api_url, cfg.mcp_source
+            )),
+            Some(cfg),
+        ),
+        Err(e) => (
+            CheckResult::Warn(format!("Could not load config: {}", e)),
+            None,
+        ),
+    }
+}
+
+/// Check: Nexus auth credentials (env var > credentials.toml)
+fn check_credentials() -> (CheckResult, Option<String>) {
+    match resolve_token() {
+        Some(token) => {
+            let prefix = mask_token(&token);
+            let from_env = std::env::var("NEXUS_PRIVATE_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some();
+            let label = if from_env {
+                format!("{} (env)", prefix)
+            } else {
+                prefix
+            };
+            (CheckResult::Pass(label), Some(token))
+        }
+        None => (
+            CheckResult::Warn("Not authenticated -- run 'nexus login'".into()),
+            None,
+        ),
+    }
+}
+
+/// Check: API reachability (requires auth)
+async fn check_api(api_url: &str, token: Option<String>) -> CheckResult {
+    if token.is_none() {
+        return CheckResult::Warn("Skipped (no credentials)".into());
+    }
+
+    match NexusClient::new(api_url, token) {
+        Ok(client) => match client.auth_status().await {
+            Ok(status) => CheckResult::Pass(format!(
+                "{} ({})",
+                status.user.email, status.user.platform_role
+            )),
+            Err(e) => CheckResult::Fail(format!("API error: {}", e)),
+        },
+        Err(e) => CheckResult::Fail(format!("Client error: {}", e)),
+    }
+}
+
+/// Check: project workspace (.nexus/ directory)
+fn check_workspace() -> CheckResult {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let nexus_dir = cwd.join(".nexus");
+    let config_file = nexus_dir.join("config.toml");
+
+    if !nexus_dir.exists() {
+        return CheckResult::Warn("No .nexus/ directory -- run 'nexus init' to scaffold".into());
+    }
+
+    match nexus_core::config::load_linked_project(None) {
+        Ok(Some(project)) => CheckResult::Pass(format!("{} ({})", project.name, project.id)),
+        Ok(None) => {
+            if config_file.exists() {
+                CheckResult::Warn(
+                    "Workspace exists but no project linked -- run 'nexus link'".into(),
+                )
+            } else {
+                CheckResult::Warn("Workspace exists but no config.toml".into())
+            }
+        }
+        Err(e) => CheckResult::Warn(format!("Could not read project config: {}", e)),
+    }
+}
+
+/// Check: MCP server config files
+fn check_mcp_configs() -> CheckResult {
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    // Check common MCP config locations
+    let locations = [
+        (".mcp.json", "Claude Code"),
+        ("opencode.json", "OpenCode"),
+        (".cursor/mcp.json", "Cursor"),
+    ];
+
+    let mut found = Vec::new();
+    for (path, name) in &locations {
+        if cwd.join(path).exists() {
+            found.push(*name);
+        }
+    }
+
+    if found.is_empty() {
+        CheckResult::Warn("No MCP configs found -- run 'nexus init' to generate".into())
+    } else {
+        CheckResult::Pass(format!("Configured for: {}", found.join(", ")))
+    }
+}
+
+/// Run all preflight checks.
+pub async fn run(api_url: &str, live: bool) -> anyhow::Result<()> {
+    println!();
+    println!("{} Nexus Preflight Check", style(">>").bold().cyan());
+    println!();
+
+    // ── Tool checks ──
+    println!("  {}", style("Tools").bold().underlined());
+    let git = check_git();
+    print_check("git", &git);
+    let node = check_node();
+    print_check("node", &node);
+    let npm = check_npm();
+    print_check("npm", &npm);
+    let npx = check_npx();
+    print_check("npx", &npx);
+    // Only surfaced for claude-cli / both projects: an OpenCode-only workspace
+    // has no reason to require the Claude binary.
+    let claude = project_wants_claude().then(check_claude);
+    if let Some(ref c) = claude {
+        print_check("claude", c);
+    }
+    println!();
+
+    // ── Config & Auth ──
+    println!("  {}", style("Configuration").bold().underlined());
+    let (config_check, _config) = check_config();
+    print_check("config", &config_check);
+    let (creds_check, token) = check_credentials();
+    print_check("credentials", &creds_check);
+    let api_check = check_api(api_url, token.clone()).await;
+    print_check("api", &api_check);
+    println!();
+
+    // ── Workspace ──
+    println!("  {}", style("Workspace").bold().underlined());
+    let workspace = check_workspace();
+    print_check("project", &workspace);
+    let mcp = check_mcp_configs();
+    print_check("mcp-configs", &mcp);
+    println!();
+
+    // ── Plugins ──
+    println!("  {}", style("Plugins").bold().underlined());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let project_id = nexus_core::config::load_linked_project(None)
+        .ok()
+        .flatten()
+        .map(|p| p.id);
+    let plugin_checks =
+        super::plugin_env::checks(api_url, token.as_deref(), project_id.as_deref(), &cwd, live)
+            .await;
+    for (label, c) in &plugin_checks {
+        print_check(label, c);
+    }
+    println!();
+
+    // ── Summary ──
+    let mut all_checks: Vec<&CheckResult> = vec![
+        &git,
+        &node,
+        &npm,
+        &npx,
+        &config_check,
+        &creds_check,
+        &api_check,
+        &workspace,
+        &mcp,
+    ];
+    if let Some(ref c) = claude {
+        all_checks.push(c);
+    }
+    all_checks.extend(plugin_checks.iter().map(|(_, c)| c));
+    let fail_count = all_checks.iter().filter(|c| c.is_fail()).count();
+    let warn_count = all_checks
+        .iter()
+        .filter(|c| matches!(c, CheckResult::Warn(_)))
+        .count();
+    let pass_count = all_checks.len() - fail_count - warn_count;
+
+    if fail_count > 0 {
+        println!(
+            "  {} {} passed, {} warnings, {} failed",
+            style("RESULT").bold().red(),
+            pass_count,
+            warn_count,
+            fail_count,
+        );
+        println!("  Fix the failures above before continuing.");
+    } else if warn_count > 0 {
+        println!(
+            "  {} {} passed, {} warnings",
+            style("RESULT").bold().yellow(),
+            pass_count,
+            warn_count,
+        );
+        println!("  Everything essential is ready. Resolve warnings for the best experience.");
+    } else {
+        println!(
+            "  {} All {} checks passed",
+            style("RESULT").bold().green(),
+            pass_count,
+        );
+    }
+    println!();
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_result_is_fail() {
+        assert!(CheckResult::Fail("x".into()).is_fail());
+        assert!(!CheckResult::Pass("x".into()).is_fail());
+        assert!(!CheckResult::Warn("x".into()).is_fail());
+    }
+
+    #[test]
+    fn test_check_git_available() {
+        // git should be available in any CI/dev environment
+        let result = check_git();
+        assert!(matches!(result, CheckResult::Pass(_)));
+    }
+
+    #[test]
+    fn test_cmd_version_returns_first_line() {
+        let v = cmd_version("echo", &["hello\nworld"]);
+        assert!(v.is_some());
+        assert_eq!(v.unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_cmd_version_missing_binary() {
+        let v = cmd_version("__nonexistent_binary_42__", &["--version"]);
+        assert!(v.is_none());
+    }
+}
