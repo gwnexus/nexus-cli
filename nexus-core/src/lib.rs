@@ -11,8 +11,10 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod fsutil;
 pub mod hash;
 pub mod machine;
+pub mod secret;
 pub mod update_check;
 
 // Re-exports for convenience

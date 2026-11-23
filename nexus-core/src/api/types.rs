@@ -383,7 +383,7 @@ pub struct AgentFileExportResponse {
     /// Use this value directly in opencode.json rather than reading credentials.toml.
     /// Present only when the server supports auth_token echo (v0.7.4+).
     #[serde(default)]
-    pub auth_token: Option<String>,
+    pub auth_token: Option<crate::secret::Secret>,
     /// Tools that must be installed for this project's plugins to work.
     /// The CLI should check each and warn/prompt when a binary is missing.
     #[serde(default)]
@@ -1460,7 +1460,7 @@ pub struct RunnerBinding {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunnerRegisterResponse {
     pub runner_id: String,
-    pub token: String,
+    pub token: crate::secret::Secret,
     #[serde(default)]
     pub token_prefix: Option<String>,
     #[serde(default)]
@@ -2097,7 +2097,7 @@ pub struct InferenceTokenIssueRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct InferenceTokenResponse {
     /// The raw `nxs_proj_*` token. Shown once, never retrievable again.
-    pub token: String,
+    pub token: crate::secret::Secret,
 
     /// Stable identifier for the token record (used for rotate/revoke).
     pub token_id: String,

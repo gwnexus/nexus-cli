@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Credential and state files are written atomically and owner-only.** Credentials, project tokens, the global config and the Dispatch runner files go through a new temporary file (created exclusively with mode 0600) that replaces the old file in one step. An existing file with wider permissions no longer keeps them, a symlink at the destination is replaced instead of written through, and a failed save leaves the previous file intact.
+- **Tokens no longer appear in debug output.** The API token echoed by the export, the runner registration token and project inference tokens print as `[REDACTED]` in `Debug` output.
+- **`nexus login` refuses unsafe local destinations.** Without `--global`, login stops before asking for the token when `.nexus/credentials.toml` is tracked by git or `.nexus` is a symlink, and names the fix. A local credentials file whose loose permissions cannot be tightened to 0600 is ignored with a warning instead of being read.
+
 ## [0.50.0] - 2026-11-22
 
 ### Changed

@@ -267,12 +267,8 @@ impl Config {
             }
         }
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, &content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        }
+        // Atomic and owner-only: a failed save keeps the previous file.
+        crate::fsutil::write_private_atomic(&path, content.as_bytes())?;
         Ok(())
     }
 

@@ -740,7 +740,11 @@ fn test_agent_file_export_response_auth_token_present() {
     }"#;
 
     let resp: AgentFileExportResponse = serde_json::from_str(json).unwrap();
-    assert_eq!(resp.auth_token, Some("nxs_pat_testtoken123".to_string()));
+    assert_eq!(
+        resp.auth_token.as_ref().map(|t| t.expose()),
+        Some("nxs_pat_testtoken123")
+    );
+    assert!(!format!("{resp:?}").contains("nxs_pat_testtoken123"));
 }
 
 #[test]
@@ -943,7 +947,8 @@ fn test_inference_token_response_deserialize() {
         "warning": "no expiry recommended"
     }"#;
     let resp: InferenceTokenResponse = serde_json::from_str(json).unwrap();
-    assert_eq!(resp.token, "nxs_proj_abcdefghijklmnop");
+    assert_eq!(resp.token.expose(), "nxs_proj_abcdefghijklmnop");
+    assert!(!format!("{resp:?}").contains("nxs_proj_abcdefghijklmnop"));
     assert_eq!(resp.token_id, "11111111-2222-3333-4444-555555555555");
     assert_eq!(resp.token_prefix.as_deref(), Some("nxs_proj_abcd"));
     assert_eq!(resp.runtime_id.as_deref(), Some("developer-workstation"));
@@ -956,7 +961,7 @@ fn test_inference_token_response_minimal() {
     // Only the mandatory fields are present.
     let json = r#"{ "token": "nxs_proj_x", "token_id": "abc" }"#;
     let resp: InferenceTokenResponse = serde_json::from_str(json).unwrap();
-    assert_eq!(resp.token, "nxs_proj_x");
+    assert_eq!(resp.token.expose(), "nxs_proj_x");
     assert!(resp.token_prefix.is_none());
     assert!(resp.expires_at.is_none());
     assert!(resp.warning.is_none());
