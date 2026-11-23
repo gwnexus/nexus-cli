@@ -66,13 +66,28 @@ impl Error {
 }
 
 impl From<toml::de::Error> for Error {
+    /// Only the message: the `Display` text quotes the offending source
+    /// line, which may hold a token.
     fn from(err: toml::de::Error) -> Self {
-        Error::Toml(err.to_string())
+        Error::Toml(err.message().to_string())
     }
 }
 
 impl From<toml::ser::Error> for Error {
     fn from(err: toml::ser::Error) -> Self {
         Error::Toml(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_toml_error_omits_the_source_line() {
+        let raw = "token = \"tok-SYNTHETIC-123\" junk\n";
+        let err: Error = toml::from_str::<toml::Value>(raw).unwrap_err().into();
+        let text = err.to_string();
+        assert!(!text.contains("tok-SYNTHETIC-123"), "{text}");
     }
 }

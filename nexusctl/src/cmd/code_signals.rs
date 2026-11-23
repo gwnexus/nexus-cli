@@ -194,9 +194,12 @@ pub(crate) fn enabled(config: &Config, opt_out: Option<&str>) -> bool {
     config.code_signals && !opted_out
 }
 
-/// [`enabled`] with the effective config and the environment.
+/// [`enabled`] with the effective config and the environment; off when
+/// the config cannot be read (its defaults would turn reports on).
 fn enabled_here(workspace: &Path) -> bool {
-    let config = Config::load_effective(Some(workspace)).unwrap_or_default();
+    let Ok(config) = Config::load_effective(Some(workspace)) else {
+        return false;
+    };
     enabled(&config, std::env::var(OPT_OUT_ENV).ok().as_deref())
 }
 
@@ -617,6 +620,15 @@ mod tests {
 
         let outside = tempfile::tempdir().unwrap();
         assert!(tracked_files(outside.path()).is_empty());
+    }
+
+    #[test]
+    fn test_unreadable_config_turns_reports_off() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join(".nexus")).unwrap();
+        std::fs::write(ws.path().join(".nexus/config.toml"), "not [valid toml").unwrap();
+        assert!(Config::load_effective(Some(ws.path())).is_err());
+        assert!(!enabled_here(ws.path()));
     }
 
     #[test]

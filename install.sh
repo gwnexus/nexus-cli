@@ -160,10 +160,14 @@ for a in data.get('assets', []):
   trap "rm -rf '$tmp_dir'" EXIT
 
   # Private repo: download via API (browser_download_url requires browser auth)
+  # Integrity failures stop the installer: they are never a reason to
+  # fall back to a source build (this function runs under `if !`, where
+  # `set -e` does not apply, so every step is checked explicitly).
   auth_curl -fsSL \
     -H "Accept: application/octet-stream" \
     -o "${tmp_dir}/${asset_name}" \
-    "${api_base}/releases/assets/${asset_id}"
+    "${api_base}/releases/assets/${asset_id}" \
+    || die "Download of ${asset_name} failed"
 
   # Verify the checksum (mandatory: a release without it is not installed)
   local sha_id
@@ -184,18 +188,24 @@ for a in data.get('assets', []):
   auth_curl -fsSL \
     -H "Accept: application/octet-stream" \
     -o "${tmp_dir}/${asset_name}.sha256" \
-    "${api_base}/releases/assets/${sha_id}"
+    "${api_base}/releases/assets/${sha_id}" \
+    || die "Download of ${asset_name}.sha256 failed"
 
   info "Verifying SHA256 checksum..."
-  cd "$tmp_dir"
+  cd "$tmp_dir" || die "Cannot enter ${tmp_dir}"
   if command -v sha256sum &>/dev/null; then
-    sha256sum -c "${asset_name}.sha256"
+    sha256sum -c "${asset_name}.sha256" \
+      || die "Checksum verification of ${asset_name} failed; nothing was installed"
   elif command -v shasum &>/dev/null; then
-    shasum -a 256 -c "${asset_name}.sha256"
+    shasum -a 256 -c "${asset_name}.sha256" \
+      || die "Checksum verification of ${asset_name} failed; nothing was installed"
   else
     die "Neither sha256sum nor shasum found; cannot verify the download"
   fi
-  cd - >/dev/null
+  cd - >/dev/null || die "Cannot leave ${tmp_dir}"
+
+  tar -tzf "${tmp_dir}/${asset_name}" >/dev/null \
+    || die "Archive ${asset_name} is unreadable"
 
   # Extract: tar.gz contains nexus-<target>/nexus
   tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
