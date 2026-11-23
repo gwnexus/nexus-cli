@@ -877,12 +877,7 @@ pub async fn run(
     // The layout and config approved at the checks are checked again right
     // before the start: a file changed in between is not started.
     if launch.workspace {
-        for rel in run_target
-            .iter()
-            .flat_map(|t| [t.layout.as_deref(), t.config.as_deref()])
-            .flatten()
-            .filter(|rel| *rel != TEAM_LAYOUT)
-        {
+        for rel in &launch.approved_inputs {
             if !super::consent::approved_on_disk(&workspace, rel) {
                 anyhow::bail!(
                     "{rel} changed after the checks; not started (run nexus pull to review it)"
@@ -1292,6 +1287,10 @@ struct Launch {
     summary: String,
     workspace: bool,
     ignored_tool_args: Vec<String>,
+    /// Workspace files this launch passes to Zellij that need approval
+    /// (the project layout unless it is the team layout, and a project
+    /// config): checked again right before the start.
+    approved_inputs: Vec<String>,
 }
 
 /// `run_target.tool_args` entries `nexus run` passes to Claude Code. The
@@ -1621,6 +1620,7 @@ fn resolve_launch(
             summary,
             workspace: false,
             ignored_tool_args,
+            approved_inputs: Vec::new(),
         }
     };
 
@@ -1684,6 +1684,13 @@ fn resolve_launch(
         ZellijConfigSource::Global => String::new(),
     };
     let warn = !fallback_note.is_empty() || matches!(config, ZellijConfigSource::ProjectMissing(_));
+    let mut approved_inputs = Vec::new();
+    if layout_rel != TEAM_LAYOUT {
+        approved_inputs.push(layout_rel.to_string());
+    }
+    if let ZellijConfigSource::Project(ref rel) = config {
+        approved_inputs.push(rel.clone());
+    }
     Launch {
         tool: "zellij".to_string(),
         leading_args,
@@ -1694,6 +1701,7 @@ fn resolve_launch(
         summary: format!("zellij ({src})"),
         workspace: true,
         ignored_tool_args: Vec::new(),
+        approved_inputs,
     }
 }
 
@@ -4451,6 +4459,22 @@ mod tests {
         zellij: bool,
     ) -> Launch {
         resolve_launch(None, None, Some("claude-cli"), t, choice, ws, &host(zellij))
+    }
+
+    #[test]
+    fn test_launch_lists_the_inputs_to_recheck() {
+        let dir = with_layout("recheck");
+        // The team layout needs no recheck; a project config does.
+        let mut t = target("claude", Some("zellij"), Some(KDL));
+        std::fs::write(dir.join("cfg.kdl"), "theme \"x\"\n").unwrap();
+        t.config = Some("cfg.kdl".into());
+        let l = launch(None, Some(&t), &dir, true);
+        assert!(l.workspace);
+        if KDL == TEAM_LAYOUT {
+            assert_eq!(l.approved_inputs, ["cfg.kdl"]);
+        } else {
+            assert!(l.approved_inputs.contains(&"cfg.kdl".to_string()));
+        }
     }
 
     #[test]
