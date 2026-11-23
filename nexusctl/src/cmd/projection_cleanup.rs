@@ -1610,6 +1610,22 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_cleanup_keeps_opencode_json_when_git_cannot_tell() {
+        let dir = temp_dir("oc-indeterminate");
+        put(&dir, "opencode.json", "{}");
+        // A broken repository: git cannot answer whether the file is
+        // tracked, so it is kept as if it were.
+        put(&dir, ".git", "gitdir: /nonexistent/repo\n");
+        let report = run(&dir, Projection::OpenCode, &ctx(false));
+        assert_eq!(
+            kept(&report),
+            vec![("opencode.json".into(), KeepReason::Tracked)]
+        );
+        assert!(dir.join("opencode.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_opencode_cleanup_keeps_committed_opencode_json_without_force() {
         let dir = temp_dir("oc-tracked");
         put(&dir, "opencode.json", "{}");
