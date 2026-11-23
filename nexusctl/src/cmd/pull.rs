@@ -100,6 +100,24 @@ const PROTECTED_PATTERNS: &[&str] = &[
     "id_ed25519",
 ];
 
+/// [`is_protected_path`] for the file a write to `rel` would reach: the
+/// name as given and, when it exists, the name it resolves to (a symlink
+/// inside the workspace must not turn a protected file into a writable
+/// alias).
+pub(crate) fn is_protected_target(workspace: &Path, rel: &str) -> bool {
+    if is_protected_path(rel) {
+        return true;
+    }
+    let joined = workspace.join(rel);
+    let real = fs::canonicalize(&joined).ok().or_else(|| {
+        // A missing file under a symlinked directory: resolve the parent.
+        let parent = fs::canonicalize(joined.parent()?).ok()?;
+        Some(parent.join(joined.file_name()?))
+    });
+    real.and_then(|r| r.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .is_some_and(|name| is_protected_path(&name))
+}
+
 /// Check whether a target path matches a protected file pattern.
 /// Protected files are NEVER overwritten by pull, regardless of --force.
 pub fn is_protected_path(target_path: &str) -> bool {
@@ -400,6 +418,11 @@ pub(crate) fn write_plugin_env_file(
     let env_path = env_dir.join("env");
     let dotenv_path = env_dir.join(PLUGIN_DOTENV);
     let gitignore_path = env_dir.join(".gitignore");
+    // Fixed names under the agentic root: each must stay inside the
+    // workspace (no symlinked root or file leading out or into .git).
+    for name in ["env", PLUGIN_DOTENV, ".gitignore"] {
+        validate_agent_file_target_path(workspace, &format!("{agentic_root}/{name}"))?;
+    }
 
     if plugin_env.is_empty() {
         for (path, name) in [(&env_path, "env"), (&dotenv_path, PLUGIN_DOTENV)] {
@@ -998,7 +1021,7 @@ pub async fn run(
 
                     // Protected files (secrets/env scaffolds) are write-if-missing:
                     // an existing one is left alone without comment.
-                    if is_protected_path(&af.target_path) && target_path.exists() {
+                    if is_protected_target(&workspace, &af.target_path) && target_path.exists() {
                         continue;
                     }
 
@@ -1092,7 +1115,12 @@ pub async fn run(
     // Writes `.nexus/actors/<slug>.md` for each assigned actor and
     // `.nexus/generated/actors.json` with the full actor metadata.
     if let Some(Ok(ref af_export)) = Some(&af_export_result) {
-        if !af_export.actors.is_empty() {
+        let actors_ok = !af_export.actors.is_empty()
+            && safe_target(&workspace, &format!("{agentic_root}/actors"))
+            && safe_target(&workspace, &format!("{agentic_root}/generated/actors.json"))
+            && (!with_actor_assets
+                || safe_target(&workspace, &format!("{agentic_root}/actors/assets")));
+        if actors_ok {
             let actors_dir = workspace.join(&agentic_root).join("actors");
             fs::create_dir_all(&actors_dir)?;
 
@@ -3176,7 +3204,7 @@ pub fn write_agent_file(
     validate_agent_file_target_path(workspace, &af.target_path)?;
 
     // Protected file guard: never overwrite secrets/env files
-    if is_protected_path(&af.target_path) {
+    if is_protected_target(workspace, &af.target_path) {
         let target = workspace.join(&af.target_path);
         if target.exists() {
             anyhow::bail!(
@@ -6272,6 +6300,48 @@ mod tests {
         assert_eq!(content, "SECRET=value");
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_agent_file_refuses_an_alias_of_a_protected_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::write(ws.join(".env.local"), "SECRET=value").unwrap();
+        std::os::unix::fs::symlink(".env.local", ws.join("notes.md")).unwrap();
+        fs::create_dir_all(ws.join("real")).unwrap();
+        fs::write(ws.join("real/id_rsa"), "KEY").unwrap();
+        std::os::unix::fs::symlink("real", ws.join("docs")).unwrap();
+        let af = |target: &str| nexus_core::api::ExportedAgentFile {
+            file_key: "x".into(),
+            target_path: target.into(),
+            name: "x".into(),
+            description: None,
+            category: "config".into(),
+            version: 1,
+            body: "OVERWRITTEN=true".into(),
+            content_hash: None,
+            agent_file_id: None,
+        };
+        assert!(is_protected_target(ws, "notes.md"));
+        assert!(write_agent_file(ws, &af("notes.md")).is_err());
+        assert_eq!(
+            fs::read_to_string(ws.join(".env.local")).unwrap(),
+            "SECRET=value"
+        );
+        assert!(is_protected_target(ws, "docs/id_rsa"));
+        assert!(!is_protected_target(ws, "docs/readme.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plugin_env_refuses_a_symlinked_agentic_root() {
+        let outside = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join(".nexus")).unwrap();
+        let env = std::collections::HashMap::from([("A".to_string(), "1".to_string())]);
+        assert!(write_plugin_env_file(tmp.path(), &env, "p", ".nexus").is_err());
+        assert!(!outside.path().join("env").exists());
     }
 
     #[test]

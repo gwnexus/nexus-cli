@@ -1051,9 +1051,6 @@ fn append_gitignore(target: &Path) -> anyhow::Result<()> {
         }
     }
 
-    // Migrate: if .gitignore contains any of these entries, remove them
-    migrate_gitignore_entries(target);
-
     let ignores = r#"
 # Nexus CLI: local workspace
 .nexus/
@@ -1069,8 +1066,14 @@ opencode.json
 
     use std::io::Write;
     file.write_all(ignores.as_bytes())?;
+    file.sync_all()?;
 
     print_created(".git/info/exclude (appended)");
+
+    // Migrate: only once the local excludes are in place, remove the
+    // shared .gitignore entries (a failed write above keeps them, so a
+    // previously ignored file never becomes stageable).
+    migrate_gitignore_entries(target);
 
     Ok(())
 }
@@ -2462,6 +2465,19 @@ mod tests {
         );
 
         // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_gitignore_entries_stay_when_the_exclude_cannot_be_written() {
+        let dir = temp_project_dir("exclude-fails");
+        fs::write(dir.join(".gitignore"), "target/\n.env.local\n").unwrap();
+        // An exclude path that cannot be opened for appending.
+        let _ = fs::remove_file(dir.join(".git/info/exclude"));
+        fs::create_dir_all(dir.join(".git/info/exclude")).unwrap();
+        assert!(append_gitignore(&dir).is_err());
+        let gi = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert!(gi.lines().any(|l| l == ".env.local"), "{gi}");
         let _ = fs::remove_dir_all(&dir);
     }
 

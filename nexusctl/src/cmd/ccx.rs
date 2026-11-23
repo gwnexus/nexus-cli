@@ -122,6 +122,7 @@ pub fn lock_path(workspace: &Path, agentic_root: &str) -> PathBuf {
 /// exists but fails to parse, since a corrupt lock should not block a
 /// pull -- it is treated the same as "no lock yet" and will be rewritten.
 pub fn load_lock(workspace: &Path, agentic_root: &str) -> Option<CcxLock> {
+    super::pull::validate_agent_file_target_path(workspace, &lock_rel(agentic_root)).ok()?;
     let path = lock_path(workspace, agentic_root);
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
@@ -131,15 +132,29 @@ pub fn load_lock(workspace: &Path, agentic_root: &str) -> Option<CcxLock> {
 /// directory, then rename over the target), so a crash mid-write can
 /// never leave a corrupt or half-written lock behind.
 pub fn save_lock(workspace: &Path, agentic_root: &str, lock: &CcxLock) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    super::pull::validate_agent_file_target_path(workspace, &lock_rel(agentic_root))?;
     let path = lock_path(workspace, agentic_root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("lock path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
     let content = serde_json::to_string_pretty(lock)? + "\n";
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, content)?;
-    std::fs::rename(&tmp_path, &path)?;
+    // A fresh, exclusively created temp file: never an existing path or
+    // symlink, and never shared with a concurrent writer.
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".manifest.lock.")
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(&path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// [`lock_path`] relative to the workspace.
+pub(crate) fn lock_rel(agentic_root: &str) -> String {
+    format!("{agentic_root}/claude/manifest.lock.json")
 }
 
 /// Record `settings` as the new "previously managed" state in the CCX
@@ -941,6 +956,28 @@ mod tests {
         save_lock(&dir, ".nexus", &sample_lock()).unwrap();
         assert!(!dir.join(".nexus/claude/manifest.lock.json.tmp").exists());
         assert!(dir.join(".nexus/claude/manifest.lock.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_lock_ignores_a_planted_tmp_symlink_and_refuses_a_symlinked_dir() {
+        let dir = tmp_dir("planted-tmp");
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        std::fs::create_dir_all(dir.join(".nexus/claude")).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join(".nexus/claude/manifest.lock.json.tmp"))
+            .unwrap();
+        save_lock(&dir, ".nexus", &sample_lock()).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(load_lock(&dir, ".nexus"), Some(sample_lock()));
+        // A `claude` directory linked out of the workspace.
+        std::fs::remove_dir_all(dir.join(".nexus/claude")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join(".nexus/claude")).unwrap();
+        assert!(save_lock(&dir, ".nexus", &sample_lock()).is_err());
+        assert!(!outside.path().join("manifest.lock.json").exists());
+        assert_eq!(load_lock(&dir, ".nexus"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
