@@ -232,7 +232,7 @@ pub fn validate_agent_file_target_path(workspace: &Path, target_path: &str) -> a
 /// system: `.git` in any letter case (case-insensitive macOS and Windows),
 /// with the trailing dots or spaces Windows strips, or as its 8.3 short
 /// name `GIT~1`.
-fn is_git_dir_name(seg: &str) -> bool {
+pub(crate) fn is_git_dir_name(seg: &str) -> bool {
     let trimmed = seg.trim_end_matches(['.', ' ']);
     let lower = if trimmed.is_empty() { seg } else { trimmed }.to_ascii_lowercase();
     lower == ".git" || lower == "git~1"

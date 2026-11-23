@@ -39,7 +39,10 @@ pub fn run(force: bool) -> anyhow::Result<()> {
 
     // .nexus/: remove all contents EXCEPT config.toml (user-managed project config)
     let nexus_dir = cwd.join(".nexus");
-    if nexus_dir.exists() {
+    if is_symlink(&nexus_dir) {
+        // Its entries live elsewhere: only the link goes.
+        to_remove.push((nexus_dir.clone(), RemovalKind::Full));
+    } else if nexus_dir.exists() {
         if let Ok(entries) = fs::read_dir(&nexus_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
@@ -78,7 +81,7 @@ pub fn run(force: bool) -> anyhow::Result<()> {
 
         // Remove only Nexus-managed files from .claude/ if any exist
         let claude_dir = cwd.join(".claude");
-        if claude_dir.exists() {
+        if claude_dir.exists() && !is_symlink(&claude_dir) {
             let managed = collect_managed_files(&claude_dir);
             for m in managed {
                 to_remove.push((m, RemovalKind::ManagedFile));
@@ -286,12 +289,38 @@ enum RemovalKind {
     ManagedFile,
 }
 
+/// Whether `path` itself is a symlink (not followed).
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Whether a directory between `root` and `path` (exclusive) is a
+/// symlink: removing through it would reach files outside the workspace.
+fn crosses_symlink(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    let parts: Vec<_> = rel.components().collect();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        current.push(part);
+        if is_symlink(&current) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Collect all Nexus-managed files inside a directory (recursively).
+/// Linked directories are not entered.
 fn collect_managed_files(dir: &Path) -> Vec<PathBuf> {
     let mut managed = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_symlink()) {
+                continue;
+            }
             if path.is_dir() {
                 managed.extend(collect_managed_files(&path));
             } else if is_managed_file(&path) {
@@ -308,7 +337,7 @@ fn count_non_managed_files(dir: &Path) -> usize {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 count += count_non_managed_files(&path);
             } else if !is_managed_file(&path) {
                 count += 1;
@@ -328,9 +357,26 @@ fn is_dir_empty(dir: &Path) -> bool {
 /// Remove a single file or directory.
 fn remove_entry(path: &Path) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
-    let relative = path.strip_prefix(&cwd).unwrap_or(path);
+    remove_entry_in(&cwd, path)
+}
 
-    if path.is_dir() {
+/// [`remove_entry`] relative to `root`: refuses a path whose parent
+/// directories cross a symlink, and removes a symlink itself (never what
+/// it points to).
+fn remove_entry_in(root: &Path, path: &Path) -> anyhow::Result<()> {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    if crosses_symlink(root, path) {
+        println!(
+            "   {} {} skipped: its path crosses a symlink",
+            style("!").bold().yellow(),
+            relative.display()
+        );
+        return Ok(());
+    }
+    if is_symlink(path) {
+        fs::remove_file(path)?;
+        println!("   {} {}", style("x").bold().red(), relative.display());
+    } else if path.is_dir() {
         fs::remove_dir_all(path)?;
         println!("   {} {}/", style("x").bold().red(), relative.display());
     } else if path.exists() {
@@ -365,6 +411,29 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_deinit_does_not_reach_through_symlinks() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        fs::write(outside.path().join("keep.md"), "<!-- nexus-managed -->").unwrap();
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join(".claude/linked")).unwrap();
+        // Linked directories are not entered when collecting.
+        assert!(collect_managed_files(&root.join(".claude"))
+            .iter()
+            .all(|p| !p.starts_with(root.join(".claude/linked"))));
+        // A path through a linked directory is skipped.
+        remove_entry_in(root, &root.join(".claude/linked/keep.md")).unwrap();
+        assert!(outside.path().join("keep.md").exists());
+        // A linked root is removed as a link; its target stays.
+        std::os::unix::fs::symlink(outside.path(), root.join(".nexus")).unwrap();
+        remove_entry_in(root, &root.join(".nexus")).unwrap();
+        assert!(!root.join(".nexus").exists());
+        assert!(outside.path().join("keep.md").exists());
     }
 
     #[test]

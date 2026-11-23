@@ -119,6 +119,10 @@ pub enum KeepReason {
     Unmanaged,
     /// Tracked in git (only for root files Nexus does not track itself).
     Tracked,
+    /// Holds git metadata (a nested repository); never removed whole.
+    GitMetadata,
+    /// Its path crosses a symlink; left alone.
+    Linked,
 }
 
 impl KeepReason {
@@ -127,6 +131,8 @@ impl KeepReason {
             KeepReason::Modified => "modified locally",
             KeepReason::Unmanaged => "not managed by Nexus",
             KeepReason::Tracked => "tracked in git",
+            KeepReason::GitMetadata => "contains a nested git repository",
+            KeepReason::Linked => "path crosses a symlink",
         }
     }
 }
@@ -321,14 +327,32 @@ fn through_symlink(workspace: &Path, rel: &str) -> bool {
     false
 }
 
+/// Whether git may track `rel`: a check git cannot answer counts as
+/// tracked, so the file is kept.
 fn is_git_tracked(workspace: &Path, rel: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["ls-files", "--error-unmatch", "--", rel])
-        .current_dir(workspace)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    nexus_core::config::trust::is_git_tracked(&workspace.join(rel))
+}
+
+/// Whether the tree at `dir` holds git metadata (`.git` in any spelling)
+/// at any depth. Symlinks are not followed; an unreadable directory
+/// counts as holding it, so nothing is removed blindly.
+fn contains_git_metadata(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir());
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        if super::pull::is_git_dir_name(&entry.file_name().to_string_lossy()) {
+            return true;
+        }
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        if is_dir && contains_git_metadata(&entry.path()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn plan_opencode(workspace: &Path, ctx: &CleanupContext, records: &Records) -> Vec<Action> {
@@ -511,7 +535,15 @@ fn plan_claude(
     let root = ctx.agentic_root.as_str();
     let mut actions: Vec<Action> = Vec::new();
     let mut planned: HashSet<String> = HashSet::new();
-    let lock = ccx::load_lock(workspace, root);
+    // A lock reached through a symlink is not read (see `apply`).
+    let lock_linked = through_symlink(workspace, &ccx::lock_rel(root))
+        || fs::symlink_metadata(ccx::lock_path(workspace, root))
+            .is_ok_and(|m| m.file_type().is_symlink());
+    let lock = if lock_linked {
+        None
+    } else {
+        ccx::load_lock(workspace, root)
+    };
     let mut kept_lock = lock.clone().map(|mut l| {
         l.files.clear();
         l.hooks.clear();
@@ -520,6 +552,14 @@ fn plan_claude(
         l
     });
     let mut keep_any_lock_entry = false;
+    // A linked mixed file is never rewritten (see `apply`): plan it as
+    // kept, and keep what its later cleanup needs (the lock records, and
+    // the hook adapters its registrations point to).
+    let linked = |rel: &str| {
+        through_symlink(workspace, rel)
+            || fs::symlink_metadata(workspace.join(rel)).is_ok_and(|m| m.file_type().is_symlink())
+    };
+    let settings_linked = linked(".claude/settings.json");
 
     let remove_or_keep = |path: String, pristine: bool| {
         if pristine || ctx.force {
@@ -567,6 +607,18 @@ fn plan_claude(
                 continue;
             }
             planned.insert(entry.target_path.clone());
+            if settings_linked {
+                // Its registration stays in the linked settings file.
+                if let Some(kl) = kept_lock.as_mut() {
+                    kl.hooks.insert(entry.target_path.clone(), entry.clone());
+                    keep_any_lock_entry = true;
+                }
+                actions.push(Action::Keep {
+                    path: entry.target_path.clone(),
+                    reason: KeepReason::Linked,
+                });
+                continue;
+            }
             let Ok(bytes) = fs::read(workspace.join(&entry.target_path)) else {
                 continue;
             };
@@ -653,7 +705,20 @@ fn plan_claude(
 
     // .claude/settings.json: only the Nexus-managed parts.
     let settings_rel = ".claude/settings.json";
-    if !ctx.keep.contains(settings_rel) {
+    if settings_linked && !ctx.keep.contains(settings_rel) {
+        if workspace.join(settings_rel).exists() {
+            actions.push(Action::Keep {
+                path: settings_rel.into(),
+                reason: KeepReason::Linked,
+            });
+        }
+        if let (Some(kl), Some(l)) = (kept_lock.as_mut(), lock.as_ref()) {
+            if l.settings.is_some() {
+                kl.settings = l.settings.clone();
+                keep_any_lock_entry = true;
+            }
+        }
+    } else if !ctx.keep.contains(settings_rel) {
         if let Some(settings) = fs::read_to_string(workspace.join(settings_rel))
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
@@ -677,7 +742,12 @@ fn plan_claude(
     }
 
     // .mcp.json: only the Nexus servers.
-    if !ctx.keep.contains(".mcp.json") {
+    if linked(".mcp.json") && workspace.join(".mcp.json").exists() {
+        actions.push(Action::Keep {
+            path: ".mcp.json".into(),
+            reason: KeepReason::Linked,
+        });
+    } else if !ctx.keep.contains(".mcp.json") {
         if let Some(mcp) = fs::read_to_string(workspace.join(".mcp.json"))
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
@@ -702,7 +772,18 @@ fn plan_claude(
 
     // Root CLAUDE.md: the managed block, and the bootstrap template when
     // nothing else remains.
-    if !ctx.keep.contains("CLAUDE.md") {
+    if linked("CLAUDE.md") && workspace.join("CLAUDE.md").exists() {
+        actions.push(Action::Keep {
+            path: "CLAUDE.md".into(),
+            reason: KeepReason::Linked,
+        });
+        if let (Some(kl), Some(l)) = (kept_lock.as_mut(), lock.as_ref()) {
+            if l.claude_md_block_sha256.is_some() {
+                kl.claude_md_block_sha256 = l.claude_md_block_sha256.clone();
+                keep_any_lock_entry = true;
+            }
+        }
+    } else if !ctx.keep.contains("CLAUDE.md") {
         if let Ok(content) = fs::read_to_string(workspace.join("CLAUDE.md")) {
             // Either wording may have been written, depending on whether the
             // directives rules file was exported at creation time.
@@ -986,7 +1067,7 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
         | Action::Rewrite { path, .. } = action
         {
             if through_symlink(workspace, path) {
-                report.kept.push((path.clone(), KeepReason::Unmanaged));
+                report.kept.push((path.clone(), KeepReason::Linked));
                 continue;
             }
         }
@@ -1006,6 +1087,16 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
                 if !target.exists() {
                     continue;
                 }
+                // The directory itself a symlink: remove_dir_all would
+                // not follow it, but its contents are not ours either.
+                if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+                    report.kept.push((path.clone(), KeepReason::Linked));
+                    continue;
+                }
+                if contains_git_metadata(&target) {
+                    report.kept.push((path.clone(), KeepReason::GitMetadata));
+                    continue;
+                }
                 fs::remove_dir_all(&target)?;
                 removed_dirs.push(path.clone());
                 report.removed.push((path.clone(), note));
@@ -1015,7 +1106,13 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
                 content,
                 note,
             } => {
-                fs::write(workspace.join(path), content)?;
+                // Never write through a symlink at the file itself.
+                let target = workspace.join(path);
+                if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+                    report.kept.push((path.clone(), KeepReason::Linked));
+                    continue;
+                }
+                fs::write(&target, content)?;
                 report.rewritten.push((path.clone(), note));
             }
             Action::Keep { path, reason } => report.kept.push((path.clone(), *reason)),
@@ -1025,6 +1122,14 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
     let root = ctx.agentic_root.as_str();
     match &plan.lock_after {
         LockAfter::Untouched => {}
+        // A lock path through a symlink is neither read, deleted nor
+        // saved; the lock stays as it is and the report says so.
+        _ if through_symlink(workspace, &ccx::lock_rel(root))
+            || fs::symlink_metadata(ccx::lock_path(workspace, root))
+                .is_ok_and(|m| m.file_type().is_symlink()) =>
+        {
+            report.kept.push((ccx::lock_rel(root), KeepReason::Linked));
+        }
         LockAfter::Delete => {
             let lock = ccx::lock_path(workspace, root);
             if lock.exists() {
@@ -1389,6 +1494,102 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_keeps_a_directory_with_a_nested_repository() {
+        let dir = temp_dir("oc-nested-git");
+        opencode_projection(&dir);
+        put(
+            &dir,
+            ".opencode/vendor/x/.git/HEAD",
+            "ref: refs/heads/main\n",
+        );
+        let report = run(&dir, Projection::OpenCode, &ctx(true));
+        assert!(report
+            .kept
+            .iter()
+            .any(|(p, r)| p == ".opencode/" && *r == KeepReason::GitMetadata));
+        assert!(dir.join(".opencode/vendor/x/.git/HEAD").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_leaves_a_linked_lock_alone() {
+        let dir = temp_dir("linked-lock");
+        let outside = tempfile::tempdir().unwrap();
+        put(outside.path(), "manifest.lock.json", "{}");
+        fs::create_dir_all(dir.join(".nexus")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join(".nexus/claude")).unwrap();
+        let plan = Plan {
+            projection: Projection::Claude,
+            actions: Vec::new(),
+            lock_after: LockAfter::Delete,
+        };
+        let report = apply(&dir, &plan, &ctx(true)).unwrap();
+        assert!(report
+            .kept
+            .iter()
+            .any(|(p, r)| p == ".nexus/claude/manifest.lock.json" && *r == KeepReason::Linked));
+        assert!(outside.path().join("manifest.lock.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_does_not_rewrite_a_linked_file() {
+        let dir = temp_dir("linked-rewrite");
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("mcp.json"), "{\"mcpServers\":{}}").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("mcp.json"), dir.join(".mcp.json")).unwrap();
+        let plan = Plan {
+            projection: Projection::Claude,
+            actions: vec![Action::Rewrite {
+                path: ".mcp.json".into(),
+                content: "{}".into(),
+                note: "test",
+            }],
+            lock_after: LockAfter::Untouched,
+        };
+        let report = apply(&dir, &plan, &ctx(true)).unwrap();
+        assert!(report
+            .kept
+            .iter()
+            .any(|(p, r)| p == ".mcp.json" && *r == KeepReason::Linked));
+        assert_eq!(
+            fs::read_to_string(outside.path().join("mcp.json")).unwrap(),
+            "{\"mcpServers\":{}}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_claude_cleanup_with_linked_settings_keeps_hooks_and_lock_records() {
+        let dir = temp_dir("cc-linked-settings");
+        claude_projection(&dir);
+        // The operator keeps settings elsewhere in the workspace and links it.
+        fs::create_dir_all(dir.join("user")).unwrap();
+        fs::rename(
+            dir.join(".claude/settings.json"),
+            dir.join("user/settings.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../user/settings.json", dir.join(".claude/settings.json"))
+            .unwrap();
+        let before = read(&dir, "user/settings.json");
+        let report = run(&dir, Projection::Claude, &ctx(true));
+        assert_eq!(read(&dir, "user/settings.json"), before);
+        assert!(dir.join(".claude/hooks/nexus-session-guard.mjs").exists());
+        assert!(report
+            .kept
+            .iter()
+            .any(|(p, r)| p == ".claude/settings.json" && *r == KeepReason::Linked));
+        let lock = ccx::load_lock(&dir, ".nexus").unwrap();
+        assert!(lock.settings.is_some());
+        assert_eq!(lock.hooks.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_opencode_cleanup_all_pristine_removes_empty_directory() {
         let dir = temp_dir("oc-pristine");
         put(&dir, ".opencode/commands/a.md", CMD_A);
@@ -1405,6 +1606,22 @@ mod tests {
         assert!(!dir.join("opencode.json").exists());
         let second = plan(&dir, Projection::OpenCode, &ctx(false));
         assert!(second.actions.is_empty() && !second.has_leftovers());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_opencode_cleanup_keeps_opencode_json_when_git_cannot_tell() {
+        let dir = temp_dir("oc-indeterminate");
+        put(&dir, "opencode.json", "{}");
+        // A broken repository: git cannot answer whether the file is
+        // tracked, so it is kept as if it were.
+        put(&dir, ".git", "gitdir: /nonexistent/repo\n");
+        let report = run(&dir, Projection::OpenCode, &ctx(false));
+        assert_eq!(
+            kept(&report),
+            vec![("opencode.json".into(), KeepReason::Tracked)]
+        );
+        assert!(dir.join("opencode.json").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
