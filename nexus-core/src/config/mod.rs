@@ -583,23 +583,29 @@ pub fn confined_project_config_path(from: Option<&std::path::Path>) -> Result<Pa
     let Ok(base_real) = std::fs::canonicalize(base) else {
         return Ok(path);
     };
-    // The deepest existing part of the path decides where it leads.
-    let existing = [path.as_path(), path.parent().unwrap_or(base)]
-        .into_iter()
-        .find(|p| std::fs::symlink_metadata(p).is_ok());
-    let Some(existing) = existing else {
-        return Ok(path);
-    };
-    let escapes = match std::fs::canonicalize(existing) {
-        Ok(real) => match real.strip_prefix(&base_real) {
-            Ok(rel) => rel.components().any(|c| c.as_os_str() == ".git"),
+    // The git directory as it resolves (it may itself be a symlink).
+    let git_real = std::fs::canonicalize(base.join(".git")).ok();
+    let escapes = |p: &std::path::Path| -> bool {
+        if std::fs::symlink_metadata(p).is_err() {
+            return false;
+        }
+        match std::fs::canonicalize(p) {
+            Ok(real) => match real.strip_prefix(&base_real) {
+                Ok(rel) => {
+                    rel.components().any(|c| c.as_os_str() == ".git")
+                        || git_real.as_deref().is_some_and(|g| real.starts_with(g))
+                }
+                Err(_) => true,
+            },
+            // A dangling symlink: nothing to read, and a write would
+            // create its target wherever it points.
             Err(_) => true,
-        },
-        // A dangling symlink: nothing to read, and a write would create
-        // its target wherever it points.
-        Err(_) => std::fs::symlink_metadata(existing).is_ok_and(|m| m.file_type().is_symlink()),
+        }
     };
-    if escapes {
+    // The directory and the file each: a `.nexus` outside the workspace
+    // with a `config.toml` pointing back inside is refused too.
+    let nexus_dir = path.parent().unwrap_or(base);
+    if escapes(nexus_dir) || escapes(&path) {
         return Err(Error::Config(format!(
             "{} resolves outside the workspace or into .git; refusing to use it \
              (replace the symlink with a regular file)",

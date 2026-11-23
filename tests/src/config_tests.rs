@@ -530,3 +530,29 @@ fn test_project_config_symlink_out_of_the_workspace_is_refused() {
     std::fs::copy(&target, ws3.path().join(".nexus/config.toml")).unwrap();
     assert!(load_project_config(Some(ws3.path())).unwrap().is_some());
 }
+
+#[cfg(unix)]
+#[test]
+fn test_project_config_dir_outside_or_into_a_linked_git_is_refused() {
+    use nexus_core::config::load_project_config;
+    // `.nexus` outside the workspace, its config.toml pointing back in.
+    let ws = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("real.toml"), "").unwrap();
+    std::os::unix::fs::symlink(
+        ws.path().join("real.toml"),
+        outside.path().join("config.toml"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(outside.path(), ws.path().join(".nexus")).unwrap();
+    assert!(load_project_config(Some(ws.path())).is_err());
+    // `.git` is a symlink to an in-workspace directory; the config links
+    // into it.
+    let ws2 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws2.path().join("gitdata")).unwrap();
+    std::fs::write(ws2.path().join("gitdata/config"), "").unwrap();
+    std::os::unix::fs::symlink(ws2.path().join("gitdata"), ws2.path().join(".git")).unwrap();
+    std::fs::create_dir_all(ws2.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink("../.git/config", ws2.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws2.path())).is_err());
+}

@@ -36,6 +36,19 @@ pub fn approved_origins<'a>(
         .collect()
 }
 
+/// Environment variables that point git at another repository, index or
+/// object store; removed for the tracking check.
+pub const GIT_LOCATION_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
 /// Whether git tracks `path`: `Some(true)` tracked, `Some(false)` confirmed
 /// untracked (or outside any repository), `None` when git could not tell
 /// (not installed, unreadable index, refused repository). Parent
@@ -59,22 +72,19 @@ pub fn git_tracking(path: &Path) -> Option<bool> {
         Ok(_) => true,
         Err(e) => e.kind() != std::io::ErrorKind::NotFound,
     };
-    if !dir.ancestors().any(has_git_entry) {
+    // Git runs in the resolved directory: scan the ancestors it sees too.
+    let real_dir = std::fs::canonicalize(dir).ok();
+    let found = dir.ancestors().any(has_git_entry)
+        || real_dir
+            .as_deref()
+            .is_some_and(|d| d.ancestors().any(has_git_entry));
+    if !found {
         return Some(false);
     }
     let mut git = std::process::Command::new("git");
     // The repository around the path answers, not one the environment
     // points to (another index or git directory could miss the path).
-    for var in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    ] {
+    for var in GIT_LOCATION_VARS {
         git.env_remove(var);
     }
     let status = git
@@ -221,12 +231,11 @@ mod tests {
     fn test_is_git_tracked() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(args)
-                .output()
-                .unwrap()
+            let mut cmd = std::process::Command::new("git");
+            for var in GIT_LOCATION_VARS {
+                cmd.env_remove(var);
+            }
+            cmd.arg("-C").arg(dir.path()).args(args).output().unwrap()
         };
         let file = dir.path().join(".nexus").join("config.toml");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -250,6 +259,27 @@ mod tests {
         // Tracked in the index after its directory was removed.
         std::fs::remove_dir_all(dir.path().join(".nexus")).unwrap();
         assert!(is_git_tracked(&file), "tracked, directory missing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_git_tracking_through_a_symlinked_directory() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let mut cmd = std::process::Command::new("git");
+            for var in GIT_LOCATION_VARS {
+                cmd.env_remove(var);
+            }
+            cmd.arg("-C").arg(repo.path()).args(args).output().unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(repo.path().join("sub/.nexus")).unwrap();
+        std::fs::write(repo.path().join("sub/.nexus/config.toml"), "x").unwrap();
+        git(&["add", "sub/.nexus/config.toml"]);
+        let aliases = tempfile::tempdir().unwrap();
+        let alias = aliases.path().join("alias");
+        std::os::unix::fs::symlink(repo.path().join("sub"), &alias).unwrap();
+        assert_eq!(git_tracking(&alias.join(".nexus/config.toml")), Some(true));
     }
 
     #[test]
