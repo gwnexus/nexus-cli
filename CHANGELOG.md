@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Refused hook changes stay refused.** When a hook change is refused, the hook keeps the event registrations already in `.claude/settings.json`; proposed events are no longer registered. A refused hook without readable local settings is left out of the pull.
 - **Plain text in terminal views and session notes.** `nexus dispatch status` strips control characters from the project name, runner state and note, and refresh errors. The `nexus reload` note to running sessions uses fixed instruction text with counts; changed instruction files appear only as a quoted list of plain paths, plugin versions not at all.
 - **Lane cache stays in the workspace.** `nexus pull` no longer writes or removes the lane cache through a symlink, outside the workspace, or when git tracks it (reported).
+- **Release integrity.** The installer stops when a release download or its checksum verification fails, instead of continuing or falling back to a source build. The release workflow grants repository write access only to the job that publishes, and pins every action to a full commit SHA.
+- **No file content in TOML errors.** A config or token file that does not parse is reported with the parser message only; the offending source line (which may hold a token) is no longer printed.
+- **Code signals stay off when the config cannot be read.** Automatic code-signal reports are skipped when the effective configuration fails to load, instead of falling back to defaults that enable them.
 
 ## [0.50.0] - 2026-11-22
 

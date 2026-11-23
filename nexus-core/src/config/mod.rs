@@ -246,7 +246,9 @@ impl Config {
     /// Returns `Default` if the file does not exist.
     pub fn load() -> Result<Self, Error> {
         let path = Self::path()?;
-        if !path.exists() {
+        // Defaults only for a file that is confirmed absent: one that
+        // cannot be checked is an error (defaults turn reports on).
+        if !path.try_exists()? {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(&path)?;
@@ -634,7 +636,7 @@ pub fn confined_project_config_path(from: Option<&std::path::Path>) -> Result<Pa
 /// Returns `None` if the file does not exist.
 pub fn load_project_config(from: Option<&std::path::Path>) -> Result<Option<ProjectConfig>, Error> {
     let path = confined_project_config_path(from)?;
-    if !path.exists() {
+    if !path.try_exists()? {
         return Ok(None);
     }
     let content = std::fs::read_to_string(&path)?;

@@ -127,8 +127,13 @@ try_binary_download() {
 
   if [ "$http_code" != "200" ]; then
     rm -f "$release_file"
-    warn "No release found (HTTP ${http_code}) -- falling back to source build"
-    return 1
+    # Only "no release published" falls back to a build; any other
+    # failure (auth, server, network) stops.
+    if [ "$http_code" = "404" ]; then
+      warn "No release found (HTTP 404) -- falling back to source build"
+      return 1
+    fi
+    die "Release lookup failed (HTTP ${http_code}); nothing was installed"
   fi
 
   release_json="$(cat "$release_file")"
@@ -141,12 +146,16 @@ try_binary_download() {
     | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-for a in data.get('assets', []):
+assets = data['assets']
+if not isinstance(assets, list):
+    sys.exit('release metadata has no asset list')
+for a in assets:
     if a['name'] == '${asset_name}':
         print(a['id'])
         break
-" 2>/dev/null || echo "")"
+")" || die "Cannot read the release metadata (python3 is required)"
 
+  # Only a lookup that worked and found no binary falls back to a build.
   if [ -z "$asset_id" ]; then
     warn "No asset '${asset_name}' in release -- falling back to source build"
     return 1
@@ -160,10 +169,14 @@ for a in data.get('assets', []):
   trap "rm -rf '$tmp_dir'" EXIT
 
   # Private repo: download via API (browser_download_url requires browser auth)
+  # Integrity failures stop the installer: they are never a reason to
+  # fall back to a source build (this function runs under `if !`, where
+  # `set -e` does not apply, so every step is checked explicitly).
   auth_curl -fsSL \
     -H "Accept: application/octet-stream" \
     -o "${tmp_dir}/${asset_name}" \
-    "${api_base}/releases/assets/${asset_id}"
+    "${api_base}/releases/assets/${asset_id}" \
+    || die "Download of ${asset_name} failed"
 
   # Verify the checksum (mandatory: a release without it is not installed)
   local sha_id
@@ -171,34 +184,56 @@ for a in data.get('assets', []):
     | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-for a in data.get('assets', []):
+assets = data['assets']
+if not isinstance(assets, list):
+    sys.exit('release metadata has no asset list')
+for a in assets:
     if a['name'] == '${asset_name}.sha256':
         print(a['id'])
         break
-" 2>/dev/null || echo "")"
+")" || die "Cannot read the release metadata (python3 is required)"
 
   if [ -z "$sha_id" ]; then
-    warn "No checksum '${asset_name}.sha256' in release -- falling back to source build"
-    return 1
+    die "No checksum '${asset_name}.sha256' in release; nothing was installed"
   fi
   auth_curl -fsSL \
     -H "Accept: application/octet-stream" \
     -o "${tmp_dir}/${asset_name}.sha256" \
-    "${api_base}/releases/assets/${sha_id}"
+    "${api_base}/releases/assets/${sha_id}" \
+    || die "Download of ${asset_name}.sha256 failed"
 
   info "Verifying SHA256 checksum..."
-  cd "$tmp_dir"
+  # The archive is hashed here and compared with the one line of the
+  # checksum file that names it (comment lines ignored); other lines play
+  # no part.
+  local expected actual
+  expected="$(awk -v name="${asset_name}" \
+    '!/^#/ && ($2 == name || $2 == "*" name) { print tolower($1); exit }' \
+    "${tmp_dir}/${asset_name}.sha256")" \
+    || die "Cannot read the checksum file"
+  case "$expected" in
+    *[!0-9a-f]* | "") die "Checksum file does not list ${asset_name}; nothing was installed" ;;
+  esac
+  [ "${#expected}" -eq 64 ] \
+    || die "Checksum file does not list ${asset_name}; nothing was installed"
   if command -v sha256sum &>/dev/null; then
-    sha256sum -c "${asset_name}.sha256"
+    actual="$(sha256sum "${tmp_dir}/${asset_name}" | awk '{ print tolower($1) }')" \
+      || die "Cannot hash ${asset_name}"
   elif command -v shasum &>/dev/null; then
-    shasum -a 256 -c "${asset_name}.sha256"
+    actual="$(shasum -a 256 "${tmp_dir}/${asset_name}" | awk '{ print tolower($1) }')" \
+      || die "Cannot hash ${asset_name}"
   else
     die "Neither sha256sum nor shasum found; cannot verify the download"
   fi
-  cd - >/dev/null
+  [ "$actual" = "$expected" ] \
+    || die "Checksum verification of ${asset_name} failed; nothing was installed"
+
+  tar -tzf "${tmp_dir}/${asset_name}" >/dev/null \
+    || die "Archive ${asset_name} is unreadable"
 
   # Extract: tar.gz contains nexus-<target>/nexus
-  tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
+  tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir" \
+    || die "Extracting ${asset_name} failed; nothing was installed"
 
   local extracted_binary="${tmp_dir}/nexus-${TARGET}/${BINARY_NAME}"
   if [ ! -f "$extracted_binary" ]; then

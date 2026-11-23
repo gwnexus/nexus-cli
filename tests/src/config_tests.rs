@@ -586,3 +586,24 @@ fn test_project_config_into_a_gitfile_directory_is_refused() {
     std::os::unix::fs::symlink("../admin/config", ws3.path().join(".nexus/config.toml")).unwrap();
     assert!(load_project_config(Some(ws3.path())).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn test_load_effective_errors_when_the_local_config_cannot_be_checked() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir("unsearchable-config");
+    fs::create_dir_all(dir.join(".nexus")).unwrap();
+    fs::write(dir.join(".nexus/config.toml"), "[config]\n").unwrap();
+    fs::set_permissions(dir.join(".nexus"), fs::Permissions::from_mode(0o000)).unwrap();
+    // Root can search any directory; the check is meaningless there.
+    let searchable = fs::metadata(dir.join(".nexus/config.toml")).is_ok();
+    let result = Config::load_effective(Some(&dir));
+    fs::set_permissions(dir.join(".nexus"), fs::Permissions::from_mode(0o755)).unwrap();
+    if !searchable {
+        assert!(result.is_err(), "{result:?}");
+    }
+    // A missing file still means defaults.
+    fs::remove_file(dir.join(".nexus/config.toml")).unwrap();
+    assert!(Config::load_effective(Some(&dir)).is_ok());
+    let _ = fs::remove_dir_all(&dir);
+}
