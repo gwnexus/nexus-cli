@@ -166,7 +166,7 @@ fn test_identity_response_deserialize() {
         "displayName": "Patrick",
         "isPlatformAdmin": true,
         "isPlatformOwner": true,
-        "tenantId": "20c72e35-d4d8-4e40-a7be-efff14d8eaff",
+        "tenantId": "22222222-3333-4444-8555-666666666666",
         "memberships": [
             {"project_id": "11111111-2222-4333-8444-555555555555", "role": "owner"}
         ],
@@ -183,7 +183,7 @@ fn test_identity_response_deserialize() {
     assert!(identity.is_platform_owner);
     assert_eq!(
         identity.tenant_id.as_deref(),
-        Some("20c72e35-d4d8-4e40-a7be-efff14d8eaff")
+        Some("22222222-3333-4444-8555-666666666666")
     );
     assert_eq!(identity.memberships.len(), 1);
     assert_eq!(identity.memberships[0].role, "owner");
@@ -339,7 +339,7 @@ fn test_exported_skill_without_body() {
 #[test]
 fn test_exported_directive_deserialize() {
     let json = r#"{
-        "id": "0a0df02f-edc8-4f1a-a1f7-43be3cbca2f9",
+        "id": "33333333-4444-4555-8666-777777777777",
         "title": "Use HTTPS everywhere",
         "body": "All production endpoints must use HTTPS.",
         "category": "security",
@@ -347,7 +347,7 @@ fn test_exported_directive_deserialize() {
     }"#;
 
     let d: ExportedDirective = serde_json::from_str(json).unwrap();
-    assert_eq!(d.id, "0a0df02f-edc8-4f1a-a1f7-43be3cbca2f9");
+    assert_eq!(d.id, "33333333-4444-4555-8666-777777777777");
     assert_eq!(d.title, "Use HTTPS everywhere");
     assert_eq!(
         d.body.as_deref(),
@@ -622,9 +622,9 @@ fn test_exported_agent_file_serialize_roundtrip() {
 fn test_provider_config_deserialize_opencode_format() {
     let json = r#"{
         "npm": "@ai-sdk/openai-compatible",
-        "name": "DGX Spark (HomeLab)",
+        "name": "DGX Spark (local)",
         "options": {
-            "baseURL": "http://10.0.10.121/v1"
+            "baseURL": "http://192.0.2.10/v1"
         },
         "models": {
             "nexus-coder-main": {
@@ -635,8 +635,8 @@ fn test_provider_config_deserialize_opencode_format() {
 
     let cfg: ProviderConfig = serde_json::from_str(json).unwrap();
     assert_eq!(cfg["npm"], "@ai-sdk/openai-compatible");
-    assert_eq!(cfg["name"], "DGX Spark (HomeLab)");
-    assert_eq!(cfg["options"]["baseURL"], "http://10.0.10.121/v1");
+    assert_eq!(cfg["name"], "DGX Spark (local)");
+    assert_eq!(cfg["options"]["baseURL"], "http://192.0.2.10/v1");
     assert_eq!(
         cfg["models"]["nexus-coder-main"]["name"],
         "Nexus Coder Main"
@@ -647,9 +647,9 @@ fn test_provider_config_deserialize_opencode_format() {
 fn test_provider_config_serialize_roundtrip() {
     let cfg: ProviderConfig = serde_json::json!({
         "npm": "@ai-sdk/openai-compatible",
-        "name": "DGX Spark (HomeLab)",
+        "name": "DGX Spark (local)",
         "options": {
-            "baseURL": "http://10.0.10.121/v1"
+            "baseURL": "http://192.0.2.10/v1"
         },
         "models": {
             "nexus-coder-main": {
@@ -673,9 +673,9 @@ fn test_agent_file_export_response_with_provider() {
         "provider": {
             "dgx-spark": {
                 "npm": "@ai-sdk/openai-compatible",
-                "name": "DGX Spark (HomeLab)",
+                "name": "DGX Spark (local)",
                 "options": {
-                    "baseURL": "http://10.0.10.121/v1"
+                    "baseURL": "http://192.0.2.10/v1"
                 },
                 "models": {
                     "nexus-coder-main": {
@@ -690,7 +690,7 @@ fn test_agent_file_export_response_with_provider() {
     assert_eq!(resp.provider.len(), 1);
     let spark = resp.provider.get("dgx-spark").unwrap();
     assert_eq!(spark["npm"], "@ai-sdk/openai-compatible");
-    assert_eq!(spark["options"]["baseURL"], "http://10.0.10.121/v1");
+    assert_eq!(spark["options"]["baseURL"], "http://192.0.2.10/v1");
 }
 
 #[test]

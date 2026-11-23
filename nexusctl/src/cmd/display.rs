@@ -78,7 +78,7 @@ mod tests {
     #[tokio::test]
     async fn resolves_name_from_local_link_without_network_call() {
         let workspace = tempfile::tempdir().unwrap();
-        let project_id = "3273a55a-1e2f-43d7-9c2d-75035e902959";
+        let project_id = "44444444-5555-4666-8777-888888888888";
 
         save_project_config(
             Some(workspace.path()),

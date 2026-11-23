@@ -318,7 +318,7 @@ Multiple stashes can coexist; `pop` always restores the most recent one.
       "environment": {
         "NEXUS_API_URL": "https://nexus.gatewarden.eu",
         "NEXUS_PRIVATE_TOKEN": "nxs_pat_...",
-        "NEXUS_PROJECT_ID": "07303f0c-3713-4cb0-b03e-35f4db0c1acb"
+        "NEXUS_PROJECT_ID": "11111111-2222-4333-8444-555555555555"
       }
     }
   },
@@ -395,7 +395,7 @@ General
                    Token: nxs_pat_****9f3c (global)
 
   Project:         OK My Project (my-project)
-                   ID: 07303f0c-3713-4cb0-b03e-35f4db0c1acb
+                   ID: 11111111-2222-4333-8444-555555555555
 
   Environment:     Claude Code (workspace zellij) (start with nexus run)
 

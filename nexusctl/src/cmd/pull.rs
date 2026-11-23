@@ -6589,7 +6589,7 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_project-id-token",
-            "07303f0c-3713-4cb0-b03e-35f4db0c1acb",
+            "11111111-2222-4333-8444-555555555555",
             McpSource::Npm,
             None,
             ".nexus",
@@ -6607,7 +6607,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(
             parsed["mcp"]["nexus"]["environment"]["NEXUS_PROJECT_ID"],
-            "07303f0c-3713-4cb0-b03e-35f4db0c1acb"
+            "11111111-2222-4333-8444-555555555555"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -6926,7 +6926,7 @@ mod tests {
             &dir,
             "https://nexus.gatewarden.eu",
             "nxs_pat_project-id-token",
-            "07303f0c-3713-4cb0-b03e-35f4db0c1acb",
+            "11111111-2222-4333-8444-555555555555",
             McpSource::Npm,
             Some("claude-cli"),
             ".nexus",
@@ -6943,7 +6943,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap();
         assert_eq!(
             mcp["mcpServers"]["nexus"]["env"]["NEXUS_PROJECT_ID"],
-            "07303f0c-3713-4cb0-b03e-35f4db0c1acb"
+            "11111111-2222-4333-8444-555555555555"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -7282,9 +7282,9 @@ mod tests {
             "dgx-spark".to_string(),
             serde_json::json!({
                 "npm": "@ai-sdk/openai-compatible",
-                "name": "DGX Spark (HomeLab)",
+                "name": "DGX Spark (local)",
                 "options": {
-                    "baseURL": "http://10.0.10.121/v1"
+                    "baseURL": "http://192.0.2.10/v1"
                 },
                 "models": {
                     "nexus-coder-main": {
@@ -7329,8 +7329,8 @@ mod tests {
             .expect("dgx-spark provider must exist");
 
         assert_eq!(spark["npm"], "@ai-sdk/openai-compatible");
-        assert_eq!(spark["name"], "DGX Spark (HomeLab)");
-        assert_eq!(spark["options"]["baseURL"], "http://10.0.10.121/v1");
+        assert_eq!(spark["name"], "DGX Spark (local)");
+        assert_eq!(spark["options"]["baseURL"], "http://192.0.2.10/v1");
         assert_eq!(
             spark["models"]["nexus-coder-main"]["name"],
             "Nexus Coder Main"

@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn test_report_state_round_trip_and_safe_names() {
         let dir = tempfile::tempdir().unwrap();
-        let id = "7c3e9a21-4b6d-4f80-9e12-3a5b7c9d1e2f";
+        let id = "55555555-6666-4777-8888-999999999999";
         assert_eq!(last_report(dir.path(), id), None);
         record_report(dir.path(), id, 42);
         assert_eq!(last_report(dir.path(), id), Some(42));
