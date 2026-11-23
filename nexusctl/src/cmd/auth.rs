@@ -26,7 +26,10 @@ pub async fn login(api_url: &str, global: bool) -> anyhow::Result<()> {
         "Enter your personal access token (starts with '{}').",
         TOKEN_PREFIX
     );
-    println!("You can generate one at: {}/dashboard/settings", api_url);
+    println!(
+        "You can generate one at: {}/dashboard/settings",
+        nexus_core::secret::redact_url(api_url)
+    );
     println!();
 
     // Store credentials at the requested scope only; check the local

@@ -498,6 +498,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_unreadable_config_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.kdl");
+        let bytes = [0x66u8, 0xff, 0xfe, 0x0a];
+        std::fs::write(&path, bytes).unwrap();
+        assert!(write_fix(&path, "copy_command \"pbcopy\"").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no backup"
+        );
+    }
+
+    #[test]
     fn test_backup_is_private_and_never_overwritten() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("config.kdl.bak-2026-01-01");

@@ -96,9 +96,9 @@ pub(crate) fn guard(cli: &Cli) -> anyhow::Result<()> {
         return Ok(());
     }
     // Read the config once: the URL checked here is the URL used later.
-    let Ok(effective) = Config::load_effective_with_provenance(None) else {
-        return Ok(());
-    };
+    // A config that cannot be read stops the command: skipping the check
+    // here would let a later read pick an unchecked URL.
+    let effective = Config::load_effective_with_provenance(None)?;
     let Some(u) = unapproved(&effective) else {
         let _ = CHECKED_API_URL.set(effective.config.api_url.clone());
         return Ok(());

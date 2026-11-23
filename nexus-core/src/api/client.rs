@@ -850,7 +850,9 @@ impl NexusClient {
                     return Err(response_too_large());
                 }
             }
-            return serde_json::from_slice(&body)
+            // An empty success body (for example on DELETE) reads as `null`.
+            let bytes: &[u8] = if body.is_empty() { b"null" } else { &body };
+            return serde_json::from_slice(bytes)
                 .map_err(|e| Error::Api(format!("invalid response body: {e}")));
         }
         if status == StatusCode::PAYLOAD_TOO_LARGE {

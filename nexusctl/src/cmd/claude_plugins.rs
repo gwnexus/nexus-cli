@@ -247,15 +247,21 @@ pub fn marketplace_source_arg(entry: &serde_json::Value) -> Option<String> {
     (!arg.is_empty()
         && !arg.starts_with('-')
         && !arg.chars().any(char::is_control)
-        && !source_has_credentials(&arg))
+        && !source_has_credentials(kind, &arg))
     .then_some(arg)
 }
 
-/// Whether a marketplace source carries credentials: a password in any
-/// URL, a user name in an http(s) URL, or `user:secret@` in the scp-like
-/// git form. `git@host:org/repo` (an SSH user, no secret) is fine.
-fn source_has_credentials(arg: &str) -> bool {
-    if arg.contains("://") {
+/// Whether a marketplace source carries credentials. Local `directory` and
+/// `file` paths never do (a `:` or `@` there is path text). For the others:
+/// a `scheme://` URL with a password, or with a user name over http(s);
+/// any other form (scp-like `user@host:path`, `owner/repo`) with a
+/// `user:secret@` part. `git@host:org/repo` and `ssh://git@host/...` (an
+/// SSH user without a secret) are fine.
+fn source_has_credentials(kind: &str, arg: &str) -> bool {
+    if matches!(kind, "directory" | "file") {
+        return false;
+    }
+    if has_url_scheme(arg) {
         return match reqwest::Url::parse(arg) {
             Ok(u) => {
                 u.password().is_some()
@@ -266,6 +272,15 @@ fn source_has_credentials(arg: &str) -> bool {
     }
     arg.split_once('@')
         .is_some_and(|(user, _)| user.contains(':'))
+}
+
+/// Whether `arg` starts with `scheme://` (RFC 3986 scheme characters).
+fn has_url_scheme(arg: &str) -> bool {
+    arg.split_once("://").is_some_and(|(scheme, _)| {
+        let mut chars = scheme.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
 }
 
 /// Parse `claude plugin list --json` (an array of `{ id, scope,
@@ -899,6 +914,15 @@ mod tests {
         assert!(src("git", "url", "git@git.example.invalid:org/m.git").is_some());
         assert!(src("git", "url", "ssh://git@git.example.invalid/m.git").is_some());
         assert!(src("git", "url", "https://git.example.invalid/m.git").is_some());
+        // `://` later in an scp-like source does not make it a URL.
+        assert!(src(
+            "git",
+            "url",
+            "user:pw@git.example.invalid:org/https://m.git"
+        )
+        .is_none());
+        // Local paths are path text, not credentials.
+        assert!(src("directory", "path", "./marketplaces/team:tools@local").is_some());
     }
     use std::cell::RefCell;
 

@@ -241,10 +241,14 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
                     .remove(&project_id)
                     .unwrap_or_default();
                 let failed = revoke_all(&client, &project_id, &ids).await;
-                finish_revocations(&mut store, &project_id, failed)?;
+                // Keep the unconfirmed ids before touching the workspace, so
+                // a failed cleanup there loses nothing.
+                record_pending(&mut store, &project_id, failed.clone());
+                store.save()?;
                 if owns_workspace && workspace_env_token(&workspace)?.is_some() {
                     clear_env_token(&workspace)?;
                 }
+                report_unconfirmed(&failed)?;
                 println!(
                     "{} Pending revocations confirmed.",
                     style("OK").bold().green()
@@ -273,13 +277,22 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
     // are kept for the next unlink, which retries them.
     let token = require_token()?;
     let client = NexusClient::new(api_url, Some(token))?;
-    let ids: Vec<String> = [
+    // Ids an earlier unlink could not confirm are retried with these.
+    let mut ids: Vec<String> = store
+        .pending_revocations
+        .remove(&project_id)
+        .unwrap_or_default();
+    for id in [
         Some(entry.token_id.clone()),
         entry.previous_token_id.clone(),
     ]
     .into_iter()
     .flatten()
-    .collect();
+    {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
     let failed = revoke_all(&client, &project_id, &ids).await;
 
     // Workspace first: when it fails, the store entry stays and a retry
@@ -334,6 +347,11 @@ fn finish_revocations(
 ) -> anyhow::Result<()> {
     record_pending(store, project_id, failed.clone());
     store.save()?;
+    report_unconfirmed(&failed)
+}
+
+/// An error when revocations are still unconfirmed (local state is done).
+fn report_unconfirmed(failed: &[String]) -> anyhow::Result<()> {
     if !failed.is_empty() {
         anyhow::bail!(
             "the hub did not confirm the revocation of {} token(s); local state is cleared, \
