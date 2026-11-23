@@ -556,3 +556,17 @@ fn test_project_config_dir_outside_or_into_a_linked_git_is_refused() {
     std::os::unix::fs::symlink("../.git/config", ws2.path().join(".nexus/config.toml")).unwrap();
     assert!(load_project_config(Some(ws2.path())).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn test_project_config_into_a_gitfile_directory_is_refused() {
+    use nexus_core::config::load_project_config;
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join("admin")).unwrap();
+    std::fs::write(ws.path().join("admin/config.toml"), "").unwrap();
+    std::fs::write(ws.path().join(".git"), "gitdir: admin\n").unwrap();
+    std::fs::create_dir_all(ws.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink("../admin/config.toml", ws.path().join(".nexus/config.toml"))
+        .unwrap();
+    assert!(load_project_config(Some(ws.path())).is_err());
+}

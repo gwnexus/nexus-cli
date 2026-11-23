@@ -738,6 +738,10 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
+    // A refused .nexus/config.toml is an error, not "no project linked".
+    if cli_project_id.is_none() {
+        config::confined_project_config_path(Some(&workspace))?;
+    }
     // Resolve project ID from CLI flag or linked project
     let project_id = match config::resolve_project_id(cli_project_id, Some(&workspace)) {
         Ok(id) => id,

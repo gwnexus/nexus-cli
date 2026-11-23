@@ -583,8 +583,21 @@ pub fn confined_project_config_path(from: Option<&std::path::Path>) -> Result<Pa
     let Ok(base_real) = std::fs::canonicalize(base) else {
         return Ok(path);
     };
-    // The git directory as it resolves (it may itself be a symlink).
-    let git_real = std::fs::canonicalize(base.join(".git")).ok();
+    // The git directory as it resolves: a symlink, or a `.git` file
+    // pointing elsewhere (`gitdir: <path>`).
+    let git_entry = base.join(".git");
+    let git_real = if std::fs::metadata(&git_entry).is_ok_and(|m| m.is_file()) {
+        std::fs::read_to_string(&git_entry)
+            .ok()
+            .and_then(|c| {
+                c.lines()
+                    .find_map(|l| l.strip_prefix("gitdir:"))
+                    .map(|p| base.join(p.trim()))
+            })
+            .and_then(|p| std::fs::canonicalize(p).ok())
+    } else {
+        std::fs::canonicalize(&git_entry).ok()
+    };
     let escapes = |p: &std::path::Path| -> bool {
         if std::fs::symlink_metadata(p).is_err() {
             return false;
