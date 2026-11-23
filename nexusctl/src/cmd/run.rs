@@ -874,6 +874,22 @@ pub async fn run(
     }
 
     // ── 8. Launch the tool ───────────────────────────────────────────────────
+    // The layout and config approved at the checks are checked again right
+    // before the start: a file changed in between is not started.
+    if launch.workspace {
+        for rel in run_target
+            .iter()
+            .flat_map(|t| [t.layout.as_deref(), t.config.as_deref()])
+            .flatten()
+            .filter(|rel| *rel != TEAM_LAYOUT)
+        {
+            if !super::consent::approved_on_disk(&workspace, rel) {
+                anyhow::bail!(
+                    "{rel} changed after the checks; not started (run nexus pull to review it)"
+                );
+            }
+        }
+    }
     if use_exec {
         exec_tool(effective_tool, args)
     } else {

@@ -393,23 +393,31 @@ struct RegisteredMarketplace {
 /// without a trailing `/` or `.git`; GitHub repos ignore case.
 fn location_key(source: &serde_json::Value) -> Option<String> {
     let kind = source.get("source")?.as_str()?;
-    let loc = ["repo", "url", "path"]
-        .iter()
-        .find_map(|k| source.get(*k).and_then(|v| v.as_str()))?;
-    let loc = loc.trim().trim_end_matches('/');
-    // `.git` is a repository suffix only for remote sources; in a local
-    // path it names another directory.
-    let loc = if matches!(kind, "directory" | "file") {
-        loc
-    } else {
-        loc.strip_suffix(".git").unwrap_or(loc)
+    let text = |k: &str| source.get(k).and_then(|v| v.as_str()).map(str::trim);
+    let trim = |loc: &str| -> String {
+        let loc = loc.trim_end_matches('/');
+        // `.git` is a repository suffix only for remote sources; in a local
+        // path it names another directory.
+        let loc = if matches!(kind, "directory" | "file") {
+            loc
+        } else {
+            loc.strip_suffix(".git").unwrap_or(loc)
+        };
+        if kind == "github" {
+            loc.to_ascii_lowercase()
+        } else {
+            loc.to_string()
+        }
     };
-    let loc = if kind == "github" {
-        loc.to_ascii_lowercase()
-    } else {
-        loc.to_string()
-    };
-    Some(format!("{kind}:{loc}"))
+    if matches!(kind, "directory" | "file") {
+        return Some(format!("{kind}:{}", trim(text("path")?)));
+    }
+    let loc = trim(text("repo").or_else(|| text("url"))?);
+    // A remote source may name a catalog other than the default one.
+    Some(match text("path").filter(|p| !p.is_empty()) {
+        Some(path) => format!("{kind}:{loc}#{path}"),
+        None => format!("{kind}:{loc}"),
+    })
 }
 
 /// Why the registration of a declared marketplace does not match what the
@@ -491,18 +499,31 @@ fn catalog_version(location: &Path, plugin: &str) -> Option<String> {
         .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(plugin))?;
     // Claude Code takes the plugin's own manifest first: the version
     // approved must be the version installed.
+    // A bare source (no `./`) lives under `metadata.pluginRoot`.
+    let root = catalog
+        .get("metadata")
+        .and_then(|m| m.get("pluginRoot"))
+        .and_then(|r| r.as_str())
+        .unwrap_or("");
+    let inside = |p: &Path| {
+        p.components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    };
     let manifest = entry
         .get("source")
         .and_then(|s| s.as_str())
-        .map(Path::new)
-        .filter(|source| {
-            source.components().all(|c| {
-                matches!(
-                    c,
-                    std::path::Component::Normal(_) | std::path::Component::CurDir
-                )
-            })
+        .map(|s| {
+            if s.starts_with("./") || root.is_empty() {
+                PathBuf::from(s)
+            } else {
+                Path::new(root).join(s)
+            }
         })
+        .filter(|source| inside(source) && inside(Path::new(root)))
         .and_then(|source| {
             read(
                 location
@@ -599,6 +620,17 @@ fn refresh(
     if !approve(&plugin.id, &from, &to) {
         return PluginState::Deferred(format!(
             "{to} available ({from} installed), not approved; run nexus run on a terminal to review it"
+        ));
+    }
+    // The update installs what the checkout offers then: if it moved while
+    // the question was open, the approved version is not what would land.
+    let now = market
+        .install_location
+        .as_deref()
+        .and_then(|l| catalog_version(l, name));
+    if now.as_deref() != Some(to.as_str()) {
+        return PluginState::Deferred(format!(
+            "the marketplace checkout changed after {to} was approved; run nexus run again"
         ));
     }
     match cli.run(&[
@@ -1499,6 +1531,21 @@ mod tests {
     }
 
     #[test]
+    fn test_catalog_version_uses_the_plugin_root() {
+        let dir = checkout("plugin-root", "1.1.3");
+        std::fs::write(
+            dir.join(".claude-plugin/marketplace.json"),
+            r#"{"metadata":{"pluginRoot":"./plugins"},"plugins":[{"name":"nexus-core","version":"1.1.2","source":"nexus-core"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog_version(&dir, "nexus-core").as_deref(),
+            Some("1.1.3")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn test_location_key_normalizes() {
         let key = |v: serde_json::Value| location_key(&v);
         assert_eq!(
@@ -1512,6 +1559,13 @@ mod tests {
         assert_ne!(
             key(serde_json::json!({"source": "github", "repo": "a/b"})),
             key(serde_json::json!({"source": "git", "url": "a/b"}))
+        );
+        // A custom catalog path is part of the source.
+        assert_ne!(
+            key(
+                serde_json::json!({"source": "github", "repo": "o/r", "path": "approved/marketplace.json"})
+            ),
+            key(serde_json::json!({"source": "github", "repo": "o/r"}))
         );
         assert_ne!(
             key(serde_json::json!({"source": "directory", "path": "/srv/market"})),
