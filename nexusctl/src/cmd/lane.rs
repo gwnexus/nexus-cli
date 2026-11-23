@@ -116,10 +116,13 @@ pub(crate) fn sync_cache(
     if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Ok(CacheSync::Refused("a symlink"));
     }
-    // Tracked even when deleted from the working tree; an indeterminate
-    // answer does not block a fresh cache.
-    if config::trust::git_tracking(&path) == Some(true) {
-        return Ok(CacheSync::Refused("tracked by git"));
+    // Tracked even when deleted from the working tree. An indeterminate
+    // answer protects an existing cache, but does not block a fresh one.
+    let exists = fs::symlink_metadata(&path).is_ok();
+    match config::trust::git_tracking(&path) {
+        Some(true) => return Ok(CacheSync::Refused("tracked by git")),
+        None if exists => return Ok(CacheSync::Refused("git cannot tell whether it is tracked")),
+        _ => {}
     }
     let Some(cache) = cache_from_export(export) else {
         if path.is_file() {
@@ -485,8 +488,13 @@ async fn lane_for(
     project_id: &str,
     slug: &str,
 ) -> Option<LaneCache> {
-    let cached =
-        load_cache(workspace, agentic_root).filter(|c| c.project_id.as_deref() == Some(project_id));
+    // The cache checks run git: off the async worker.
+    let (ws, root) = (workspace.to_path_buf(), agentic_root.to_string());
+    let cached = tokio::task::spawn_blocking(move || load_cache(&ws, &root))
+        .await
+        .ok()
+        .flatten()
+        .filter(|c| c.project_id.as_deref() == Some(project_id));
     if cached
         .as_ref()
         .is_some_and(|c| c.actors.iter().any(|a| a.slug == slug))
@@ -495,8 +503,19 @@ async fn lane_for(
     }
     let client = NexusClient::new(api_url, Some(resolve_token()?)).ok()?;
     let export = client.export_agent_files(project_id).await.ok()?;
-    let _ = sync_cache(workspace, agentic_root, &export);
-    load_cache(workspace, agentic_root)
+    let (ws, root, exp) = (
+        workspace.to_path_buf(),
+        agentic_root.to_string(),
+        export.clone(),
+    );
+    let synced = tokio::task::spawn_blocking(move || {
+        let _ = sync_cache(&ws, &root, &exp);
+        load_cache(&ws, &root)
+    })
+    .await
+    .ok()
+    .flatten();
+    synced
         .filter(|c| c.project_id.as_deref() == Some(project_id))
         .or_else(|| cache_from_export(&export))
         .or(cached)
@@ -1201,6 +1220,16 @@ mod tests {
             CacheSync::Refused("tracked by git")
         );
         assert!(!cache_path(ws, ".nexus").exists());
+
+        // An existing cache in a repository git cannot read is kept.
+        fs::write(cache_path(ws, ".nexus"), "{}\n").unwrap();
+        fs::remove_dir_all(ws.join(".git")).unwrap();
+        fs::write(ws.join(".git"), "gitdir: /nonexistent/repo\n").unwrap();
+        assert!(matches!(
+            sync_cache(ws, ".nexus", &export(None, None)).unwrap(),
+            CacheSync::Refused(_)
+        ));
+        assert!(cache_path(ws, ".nexus").exists());
 
         // A symlink at the cache path, even to a file inside the workspace.
         let dir = tempfile::tempdir().unwrap();
