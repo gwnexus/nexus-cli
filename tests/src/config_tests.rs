@@ -500,3 +500,33 @@ fn test_config_code_signals_defaults_on_for_older_files() {
     let config: Config = toml::from_str("code_signals = false\n").unwrap();
     assert!(!config.code_signals);
 }
+
+#[cfg(unix)]
+#[test]
+fn test_project_config_symlink_out_of_the_workspace_is_refused() {
+    use nexus_core::config::{load_project_config, update_run_target};
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("victim.toml");
+    std::fs::write(
+        &target,
+        "[project]\nid = \"p\"\nslug = \"s\"\nname = \"n\"\n",
+    )
+    .unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".nexus")).unwrap();
+    std::os::unix::fs::symlink(&target, ws.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws.path())).is_err());
+    assert!(update_run_target(Some(ws.path()), None).is_err());
+    assert!(std::fs::read_to_string(&target)
+        .unwrap()
+        .contains("id = \"p\""));
+    // A symlinked .nexus directory is refused too.
+    let ws2 = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), ws2.path().join(".nexus")).unwrap();
+    assert!(load_project_config(Some(ws2.path())).is_err());
+    // A regular file inside the workspace still works.
+    let ws3 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws3.path().join(".nexus")).unwrap();
+    std::fs::copy(&target, ws3.path().join(".nexus/config.toml")).unwrap();
+    assert!(load_project_config(Some(ws3.path())).unwrap().is_some());
+}

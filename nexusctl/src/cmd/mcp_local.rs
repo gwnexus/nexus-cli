@@ -183,12 +183,31 @@ async fn headroom_intercept_retrieve(
     }
 
     let project_id = current_project_id(workspace)?;
+    if !nexus_core::config::is_path_component_id(&project_id) {
+        return Err(format!("invalid linked project id '{project_id}'"));
+    }
 
-    let cache_path: PathBuf = workspace
-        .join(".nexus")
-        .join("headroom-cache")
-        .join(&project_id)
-        .join(format!("{}.json", hash));
+    let cache_root = workspace.join(".nexus").join("headroom-cache");
+    let cache_dir = cache_root.join(&project_id);
+    let cache_path: PathBuf = cache_dir.join(format!("{}.json", hash));
+    // Only the linked project's own cache: no symlink out of it (into
+    // another project's cache or elsewhere).
+    let confined = match (
+        std::fs::canonicalize(&cache_dir),
+        std::fs::canonicalize(&cache_path),
+    ) {
+        (Ok(dir), Ok(file)) => {
+            dir == cache_root
+                .canonicalize()
+                .unwrap_or_default()
+                .join(&project_id)
+                && file.parent() == Some(dir.as_path())
+        }
+        _ => false,
+    };
+    if !confined {
+        return Err(format!("no cached content for hash '{hash}'"));
+    }
 
     let raw = tokio::fs::read_to_string(&cache_path)
         .await
@@ -461,6 +480,49 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"nexus_headroom_intercept_retrieve"));
         assert!(names.contains(&"nexus_cost_summary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_headroom_intercept_retrieve_stays_in_the_project_cache() {
+        let tmp = std::env::temp_dir().join(format!(
+            "nexus-mcp-local-test-{}-confined",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join(".nexus").join("headroom-cache");
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        std::fs::write(
+            root.join("other").join("abc123.json"),
+            r#"{"hash":"abc123","length":1,"estimatedTokens":1,"storedAt":"x","content":"foreign"}"#,
+        )
+        .unwrap();
+        let config = |id: &str| {
+            std::fs::write(
+                tmp.join(".nexus").join("config.toml"),
+                format!("[project]\nid = \"{id}\"\nname = \"T\"\nslug = \"t\"\n"),
+            )
+            .unwrap()
+        };
+        let args = json!({ "hash": "abc123" });
+        let get = || headroom_intercept_retrieve(&tmp, &args);
+        // An id that is not one component.
+        config("../headroom-cache/other");
+        assert!(get().await.is_err());
+        // The project's cache directory is a symlink to another project's.
+        config("mine");
+        std::os::unix::fs::symlink(root.join("other"), root.join("mine")).unwrap();
+        assert!(get().await.is_err());
+        // A cache file symlinked to another project's entry.
+        std::fs::remove_file(root.join("mine")).unwrap();
+        std::fs::create_dir_all(root.join("mine")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("other").join("abc123.json"),
+            root.join("mine").join("abc123.json"),
+        )
+        .unwrap();
+        assert!(get().await.is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[tokio::test]

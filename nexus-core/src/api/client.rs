@@ -57,6 +57,20 @@ impl std::fmt::Debug for NexusClient {
     }
 }
 
+/// Whether an avatar may be downloaded from `url`: the API host, one of
+/// its subdomains, or the storage CDN.
+fn avatar_host_allowed(url: &Url, api_host: &str) -> bool {
+    if !matches!(url.scheme(), "https" | "http") {
+        return false;
+    }
+    let host = url.host_str().unwrap_or("");
+    !host.is_empty()
+        && (host == api_host
+            || host.ends_with(&format!(".{api_host}"))
+            || host.ends_with(".supabase.co")
+            || host.ends_with(".supabase.in"))
+}
+
 impl NexusClient {
     /// Create a new Nexus API client.
     ///
@@ -487,25 +501,33 @@ impl NexusClient {
     /// Only allows downloads from the same host as the configured API base URL.
     pub async fn download_actor_avatar(&self, url: &str) -> Result<Vec<u8>, Error> {
         // Validate URL domain matches the API host to prevent SSRF
-        if let (Ok(avatar_url), Ok(api_url)) = (Url::parse(url), Url::parse(&self.base_url)) {
-            let api_host = api_url.host_str().unwrap_or("");
-            let avatar_host = avatar_url.host_str().unwrap_or("");
-            // Allow same host or known CDN subdomains
-            if avatar_host != api_host
-                && !avatar_host.ends_with(&format!(".{}", api_host))
-                && !avatar_host.ends_with(".supabase.co")
-                && !avatar_host.ends_with(".supabase.in")
-            {
-                return Err(Error::Api(format!(
-                    "Avatar URL host '{}' not allowed (expected '{}')",
-                    avatar_host, api_host
-                )));
-            }
-        } else {
+        let (Ok(avatar_url), Ok(api_url)) = (Url::parse(url), Url::parse(&self.base_url)) else {
             return Err(Error::Api(format!("Invalid avatar URL: {}", url)));
+        };
+        let api_host = api_url.host_str().unwrap_or("").to_string();
+        if !avatar_host_allowed(&avatar_url, &api_host) {
+            return Err(Error::Api(format!(
+                "Avatar URL host '{}' not allowed (expected '{}')",
+                avatar_url.host_str().unwrap_or(""),
+                api_host
+            )));
         }
-
-        let resp = self.client.get(url).send().await?;
+        // Every redirect target passes the same host check; the shared
+        // client would follow any redirect.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error("too many avatar redirects")
+                } else if avatar_host_allowed(attempt.url(), &api_host) {
+                    attempt.follow()
+                } else {
+                    attempt.error("avatar redirect to a host that is not allowed")
+                }
+            }))
+            .build()?;
+        let resp = client.get(url).send().await?;
         if !resp.status().is_success() {
             return Err(Error::Api(format!(
                 "Avatar download failed: HTTP {}",

@@ -234,7 +234,9 @@ pub async fn run(
             // Cache the flavor in .nexus/config.toml so launch-time commands
             // (`nexus run`, `nexus preflight`) can pick the right artifacts and
             // binary offline.
-            let _ = config::update_agent_owner(Some(&target), tool_flavor.as_deref());
+            if let Err(e) = config::update_agent_owner(Some(&target), tool_flavor.as_deref()) {
+                eprintln!("  warning: .nexus/config.toml not updated: {e}");
+            }
             let is_claude = config::is_claude_owner(tool_flavor.as_deref());
             create_runtime_dir(&target, is_claude)?;
             let agentic_root = project_detail

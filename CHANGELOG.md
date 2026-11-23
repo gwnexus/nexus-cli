@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Fixed write destinations stay in the workspace.** `nexus pull` and `nexus init` check the plugin env files, actor profiles, routing tables, `.claude/settings.json`, `CLAUDE.md` and the CCX lock before reading or writing them: a symlink out of the workspace or into `.git` is refused. A symlink inside the workspace no longer turns a protected file (for example `.env.local`) into a writable alias.
 - **The CCX lock is written through a fresh temporary file**, created exclusively next to the lock, so an existing path or a concurrent writer cannot redirect it.
 - **Shared ignore rules are removed only after the local excludes are written.** When `.git/info/exclude` cannot be written, `.gitignore` keeps its entries.
+- **A failed git check no longer counts as untracked.** When git cannot tell whether a project config or credentials file is tracked (git missing, broken repository, refused ownership), the file is treated as chosen by the repository: a pinned API URL needs approval and a local credential is not used.
+- **Avatar downloads follow only allowed redirects.** Each redirect target passes the same host check as the avatar URL.
+- **`.nexus/config.toml` stays in the workspace.** A config or `.nexus` directory that is a symlink out of the workspace or into `.git` is refused for reads and for the cached values `nexus pull` writes, with a warning.
+- **Ids from the hub and the project config stay single path components.** The dispatch runner skips project ids that are not a plain name, and the local MCP cache tool reads only the linked project's own cache (no symlinks out of it).
+- **`.vault/` is checked as a directory.** A rule set that ignores files in `.vault/` but reopens a subdirectory no longer counts as ignored; `nexus init` adds the directory exclusion.
 
 ## [0.50.0] - 2026-11-22
 
