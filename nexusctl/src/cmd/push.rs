@@ -85,10 +85,23 @@ fn collect_script_hashes(workspace: &Path, dir: &Path, hashes: &mut HashMap<Stri
 /// payload read afterwards (it vanished or became a symlink in between):
 /// the fork is built from the upload alone, so it would drop the file.
 fn ensure_payload_complete(
+    workspace: &Path,
     selected: &[String],
     devbox_json: Option<&serde_json::Value>,
     scripts: Option<&HashMap<String, String>>,
 ) -> anyhow::Result<()> {
+    // A devbox.json that is there but does not parse is the user's to
+    // fix; retrying would fail the same way.
+    if devbox_json.is_none() && selected.iter().any(|p| p == "devbox.json") {
+        let path = workspace.join("devbox.json");
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+            if let Ok(raw) = fs::read_to_string(&path) {
+                if let Err(e) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    anyhow::bail!("push stopped: devbox.json is not valid JSON ({e}); fix it and run nexus push again");
+                }
+            }
+        }
+    }
     let prefix = format!("{SCRIPTS_DIR}/");
     let missing: Vec<&str> = selected
         .iter()
@@ -349,7 +362,12 @@ async fn adopt_local_push(
                 .collect::<HashMap<_, _>>()
         })
         .filter(|files| !files.is_empty());
-    ensure_payload_complete(&keys, devbox_json.as_ref(), script_files.as_ref())?;
+    ensure_payload_complete(
+        workspace,
+        &keys,
+        devbox_json.as_ref(),
+        script_files.as_ref(),
+    )?;
 
     let result = client
         .workspace_push(project_id, devbox_json, script_files, fork_name)
@@ -600,7 +618,12 @@ pub async fn run(
         .filter(|files| !files.is_empty() || !deleted.is_empty())
         .or_else(|| (!deleted.is_empty()).then(HashMap::new));
     let selected: Vec<String> = tracked.iter().cloned().collect();
-    ensure_payload_complete(&selected, devbox_json.as_ref(), script_files.as_ref())?;
+    ensure_payload_complete(
+        &workspace,
+        &selected,
+        devbox_json.as_ref(),
+        script_files.as_ref(),
+    )?;
 
     let result = client
         .workspace_push(&project_id, devbox_json, script_files, fork_name)
@@ -716,13 +739,16 @@ mod tests {
         let scripts = HashMap::from([("a.sh".to_string(), "x".to_string())]);
         let devbox = serde_json::json!({});
         let sel = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ws = tempfile::tempdir().unwrap();
         assert!(ensure_payload_complete(
+            ws.path(),
             &sel(&["devbox.json", "scripts/devbox/a.sh"]),
             Some(&devbox),
             Some(&scripts)
         )
         .is_ok());
         let err = ensure_payload_complete(
+            ws.path(),
             &sel(&["devbox.json", "scripts/devbox/a.sh", "scripts/devbox/b.sh"]),
             None,
             Some(&scripts),
@@ -734,6 +760,12 @@ mod tests {
             "{err}"
         );
         assert!(!err.contains("a.sh,"), "{err}");
+        // A malformed devbox.json is reported as such.
+        fs::write(ws.path().join("devbox.json"), "{ not json").unwrap();
+        let err = ensure_payload_complete(ws.path(), &sel(&["devbox.json"]), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not valid JSON"), "{err}");
     }
 
     #[test]
