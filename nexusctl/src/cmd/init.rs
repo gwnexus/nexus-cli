@@ -1457,23 +1457,28 @@ fn approved_config_plugins(
 ) -> (HashMap<String, PluginDef>, HashMap<String, String>) {
     let mut names: Vec<&String> = plugins.keys().collect();
     names.sort();
-    let approved: HashMap<String, PluginDef> = names
-        .into_iter()
-        .filter(|name| {
-            let item = super::consent::config_item(
-                super::consent::Kind::OpencodePlugin,
-                name,
-                PROJECT_CONFIG,
-                config_plugin_content(target, &plugins[*name]),
-            );
-            consent.local(&item)
-        })
-        .map(|name| (name.clone(), plugins[name].clone()))
-        .collect();
-    let digests = approved
-        .iter()
-        .filter_map(|(name, def)| Some((name.clone(), local_plugin_digest(target, def)?)))
-        .collect();
+    let mut approved = HashMap::new();
+    let mut digests = HashMap::new();
+    for name in names {
+        let def = &plugins[name];
+        // Read once: the digest shown and approved is the one the
+        // installer compares against.
+        let digest = (def.source == "local")
+            .then(|| local_plugin_digest(target, def))
+            .flatten();
+        let item = super::consent::config_item(
+            super::consent::Kind::OpencodePlugin,
+            name,
+            PROJECT_CONFIG,
+            config_plugin_content(def, digest.as_deref()),
+        );
+        if consent.local(&item) {
+            approved.insert(name.clone(), def.clone());
+            if let Some(d) = digest {
+                digests.insert(name.clone(), d);
+            }
+        }
+    }
     (approved, digests)
 }
 
@@ -1487,7 +1492,7 @@ fn local_plugin_digest(target: &Path, def: &PluginDef) -> Option<String> {
 
 /// What a `[plugins]` entry installs, for the prompt: its definition and,
 /// for a local source, a hash of the file, so a changed file asks again.
-fn config_plugin_content(target: &Path, def: &PluginDef) -> String {
+fn config_plugin_content(def: &PluginDef, local_digest: Option<&str>) -> String {
     let mut out = format!(
         "source: {}\nurl: {}\npath: {}\nfilename: {}\n",
         def.source,
@@ -1496,8 +1501,10 @@ fn config_plugin_content(target: &Path, def: &PluginDef) -> String {
         def.filename.as_deref().unwrap_or("-"),
     );
     if def.source == "local" {
-        let digest = local_plugin_digest(target, def).unwrap_or_else(|| "-".to_string());
-        out.push_str(&format!("content sha256: {digest}\n"));
+        out.push_str(&format!(
+            "content sha256: {}\n",
+            local_digest.unwrap_or("-")
+        ));
     }
     out
 }
@@ -2119,9 +2126,11 @@ mod tests {
             path: Some("tools/p.ts".into()),
             filename: Some("p.ts".into()),
         };
-        let before = config_plugin_content(dir.path(), &def);
+        let content =
+            |d: &PluginDef| config_plugin_content(d, local_plugin_digest(dir.path(), d).as_deref());
+        let before = content(&def);
         fs::write(dir.path().join("tools/p.ts"), "export const a = 2;\n").unwrap();
-        assert_ne!(before, config_plugin_content(dir.path(), &def));
+        assert_ne!(before, content(&def));
     }
 
     #[test]
