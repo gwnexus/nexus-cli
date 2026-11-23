@@ -359,6 +359,63 @@ pub fn gh_verify_login(
     }
 }
 
+/// [`gh_verify_login`] with a deadline: `None` when `gh` did not answer in
+/// time (the child is killed). For checks that must not delay a launch.
+pub fn gh_verify_login_within(
+    profile_dir: &Path,
+    host: &str,
+    expected_user: Option<&str>,
+    timeout: std::time::Duration,
+) -> Option<GhVerifyStatus> {
+    use std::io::Read as _;
+    let spawned = without_token_env(Command::new("gh"))
+        .env("GH_CONFIG_DIR", profile_dir)
+        .args(["api", "user", "--jq", ".login", "--hostname", host])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Some(GhVerifyStatus::GhNotFound)
+        }
+        Err(_) => return Some(GhVerifyStatus::NotLoggedIn),
+    };
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(_) => return Some(GhVerifyStatus::NotLoggedIn),
+        }
+    };
+    // Read on a helper thread: a descendant that keeps the pipe open must
+    // not hold the caller past the deadline.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(mut stdout) = stdout {
+            let _ = stdout.read_to_end(&mut out);
+        }
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(timeout.saturating_sub(start.elapsed()))
+        .ok()?;
+    Some(classify_gh_verify_output(
+        status.success(),
+        &out,
+        expected_user,
+    ))
+}
+
 /// Pure core of [`gh_verify_login`]: classify a `gh api user` invocation's
 /// result into a [`GhVerifyStatus`], given its exit success and raw stdout,
 /// without shelling out. Split out so tests can exercise every branch
@@ -428,27 +485,38 @@ fn resolve_gh_seed_token_with(
     }
 }
 
-/// Look up a cached token in the OS keyring via `gh auth token`, run
-/// against the operator's *default* `gh` config (no `GH_CONFIG_DIR`
-/// override).
+/// Look up a cached token in the OS keyring via `gh auth token
+/// --secure-storage`, run against the operator's *default* `gh` config (no
+/// `GH_CONFIG_DIR` override) and without the token environment variables,
+/// so neither an ambient `GH_TOKEN` nor a plaintext config token can stand
+/// in for the keyring. A `gh` without that flag fails and yields `None`.
 fn keyring_token(host: &str, user: Option<&str>) -> Option<String> {
-    let mut cmd = Command::new("gh");
-    cmd.args(["auth", "token", "--hostname", host]);
+    keyring_token_command(host, user)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let token = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if token.is_empty() {
+                    None
+                } else {
+                    Some(token)
+                }
+            } else {
+                None
+            }
+        })
+}
+
+fn keyring_token_command(host: &str, user: Option<&str>) -> Command {
+    let mut cmd = without_token_env(Command::new("gh"));
+    cmd.env_remove("GH_CONFIG_DIR");
+    cmd.args(["auth", "token", "--secure-storage", "--hostname", host]);
     if let Some(u) = user {
         cmd.args(["--user", u]);
     }
-    cmd.output().ok().and_then(|o| {
-        if o.status.success() {
-            let token = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if token.is_empty() {
-                None
-            } else {
-                Some(token)
-            }
-        } else {
-            None
-        }
-    })
+    cmd.stdin(std::process::Stdio::null());
+    cmd
 }
 
 /// Verify a candidate seed token by asking `gh` who it belongs to, without
@@ -577,6 +645,35 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn test_keyring_token_command_uses_secure_storage_only() {
+        let cmd = keyring_token_command("github.com", Some("octocat"));
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "auth",
+                "token",
+                "--secure-storage",
+                "--hostname",
+                "github.com",
+                "--user",
+                "octocat"
+            ]
+        );
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        for var in GH_TOKEN_ENV_VARS.iter().chain(["GH_CONFIG_DIR"].iter()) {
+            assert!(removed.iter().any(|r| r == var), "{var} not removed");
+        }
+    }
 
     fn tmp_dir(suffix: &str) -> std::path::PathBuf {
         let dir =

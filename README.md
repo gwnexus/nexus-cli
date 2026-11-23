@@ -472,7 +472,9 @@ Once the profile is logged in as the expected account, `nexus pull`,
 - **Transport identity** (local git config only): with an SSH key on the
   account, `core.sshCommand = ssh -i ~/.ssh/<key> -o IdentitiesOnly=yes`;
   for HTTPS remotes, a credential helper that runs
-  `gh auth git-credential` with the profile. `gh repo set-default` points
+  `gh auth git-credential` with the profile and without `GH_TOKEN`,
+  `GITHUB_TOKEN` and their Enterprise variants, so a token in the shell
+  cannot stand in for the profile's account. `gh repo set-default` points
   at the configured repository, or at `origin`.
 - **Commit identity**: `user.name` / `user.email` of the account, each only
   when the project does not set its own.

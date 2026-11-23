@@ -96,6 +96,52 @@ fn gh_env_plan_for(gh: &nexus_core::api::GhEffective, profile_dir: &Path) -> GhE
     }
 }
 
+/// Outcome for a profile that already has a login: `Ready` only when no
+/// user is expected or the active login is that user. Otherwise the
+/// environment stays untouched (`Fallback`), so the session never acts as
+/// another account.
+fn cached_gh_outcome(
+    workspace: &Path,
+    gh: &nexus_core::api::GhEffective,
+    git_config: Option<&nexus_core::api::GitConfig>,
+    dir: &Path,
+) -> GhOutcome {
+    let active = match gh.user.as_deref() {
+        None => None,
+        // Bounded: a stalled `gh api user` must not delay the launch.
+        Some(expected) => match git::gh_verify_login_within(
+            dir,
+            &gh.host,
+            Some(expected),
+            std::time::Duration::from_secs(5),
+        ) {
+            None => {
+                return GhOutcome::Fallback {
+                    warning: gh_login_hint(gh, "the cached login could not be checked in time"),
+                }
+            }
+            Some(git::GhVerifyStatus::Ok { active }) => Some(active),
+            Some(git::GhVerifyStatus::Mismatch { active, .. }) => {
+                return GhOutcome::Fallback {
+                    warning: gh_login_hint(
+                        gh,
+                        &format!("the cached login is {active}, not {expected}"),
+                    ),
+                }
+            }
+            Some(git::GhVerifyStatus::NotLoggedIn | git::GhVerifyStatus::GhNotFound) => {
+                return GhOutcome::Fallback {
+                    warning: gh_login_hint(gh, "the cached login could not be verified"),
+                }
+            }
+        },
+    };
+    GhOutcome::Ready {
+        plan: gh_env_plan_for(gh, dir),
+        status_line: gh_status_line(workspace, gh, git_config, dir, active.as_deref()),
+    }
+}
+
 fn gh_login_hint(gh: &nexus_core::api::GhEffective, reason: &str) -> String {
     format!(
         "gh profile '{}' not logged in to {} ({reason}) -- run: {}",
@@ -515,11 +561,15 @@ pub async fn run(
         )?),
         None => None,
     };
+    // A profile with a login that was rejected (another account, or not
+    // verifiable) is not "empty": Phase B must not replace its warning by
+    // seeding.
+    let mut gh_cached_login = false;
     let mut gh_outcome: GhOutcome = match (&gh_effective, &gh_profile_dir) {
-        (Some(gh), Some(dir)) if git::gh_is_authenticated(dir, &gh.host) => GhOutcome::Ready {
-            plan: gh_env_plan_for(gh, dir),
-            status_line: gh_status_line(&workspace, gh, git_config.as_ref(), dir, None),
-        },
+        (Some(gh), Some(dir)) if git::gh_is_authenticated(dir, &gh.host) => {
+            gh_cached_login = true;
+            cached_gh_outcome(&workspace, gh, git_config.as_ref(), dir)
+        }
         (Some(gh), Some(_)) => GhOutcome::Fallback {
             warning: gh_login_hint(gh, "no cached login yet"),
         },
@@ -529,7 +579,7 @@ pub async fn run(
     // ── 5. Dry-run / show-env output ─────────────────────────────────────────
     if dry_run || show_env {
         print_env_table(&workspace, effective_tool, &to_inject, &skipped, args);
-        print_gh_env_plan(&gh_outcome);
+        print_gh_env_plan(&gh_outcome, &to_inject);
         if dry_run {
             return Ok(());
         }
@@ -621,7 +671,7 @@ pub async fn run(
     // a keyring lookup, an interactive Y/n prompt unless `--yes`, and a
     // `gh auth login --with-token` call. The seed token is never logged.
     if let (Some(gh), Some(dir)) = (&gh_effective, &gh_profile_dir) {
-        if matches!(gh_outcome, GhOutcome::Fallback { .. }) {
+        if !gh_cached_login && matches!(gh_outcome, GhOutcome::Fallback { .. }) {
             gh_outcome = seed_gh_profile(&workspace, gh, git_config.as_ref(), dir, assume_yes)?;
         }
     }
@@ -763,14 +813,21 @@ pub async fn run(
         if let Some(host) = &plan.host_override {
             env::set_var("GH_HOST", host);
         }
-        for var in &plan.tokens_to_remove {
+        // Checked now, after the env files were injected: a token from
+        // `.env.nexus.local` would otherwise win over the profile.
+        let present: Vec<&str> = GH_TOKEN_ENV_VARS
+            .iter()
+            .copied()
+            .filter(|v| env::var_os(v).is_some())
+            .collect();
+        for var in &present {
             env::remove_var(var);
         }
-        if !plan.tokens_to_remove.is_empty() {
+        if !present.is_empty() {
             println!(
                 "   {} removed {} from the environment (per-project gh profile active)",
                 style("~").bold().yellow(),
-                plan.tokens_to_remove.join(", ")
+                present.join(", ")
             );
         }
     }
@@ -972,11 +1029,19 @@ fn warn_mcp_sync_failed(rel: &str, error: &str) {
 /// Value of an injected env var as shown in the env table: secrets
 /// (names with TOKEN, SECRET, PASSWORD, KEY, AUTH or CREDENTIAL) are masked,
 /// long values are shortened.
+#[cfg(test)]
 fn env_display_value(key: &str, value: &str) -> String {
+    env_display_value_from(key, value, "")
+}
+
+/// Like [`env_display_value`]; every value from the secrets file
+/// `.env.nexus.local` is masked, whatever its key.
+fn env_display_value_from(key: &str, value: &str, source: &str) -> String {
     let upper = key.to_ascii_uppercase();
-    let secret = ["TOKEN", "SECRET", "PASSWORD", "KEY", "AUTH", "CREDENTIAL"]
-        .iter()
-        .any(|w| upper.contains(w));
+    let secret = source == ".env.nexus.local"
+        || ["TOKEN", "SECRET", "PASSWORD", "KEY", "AUTH", "CREDENTIAL"]
+            .iter()
+            .any(|w| upper.contains(w));
     if secret {
         mask_token(value)
     } else if value.chars().count() > 40 {
@@ -1010,7 +1075,7 @@ fn print_env_table(
             skipped.len()
         );
         for (k, v, source) in to_inject {
-            let display_val = env_display_value(k, v);
+            let display_val = env_display_value_from(k, v, source);
             println!(
                 "     {:<36} = {:<20}  [{}]",
                 style(k).bold(),
@@ -1043,7 +1108,20 @@ fn print_env_table(
 /// `GH_HOST`, if overridden) that will be set, and the *names* of any
 /// ambient token env vars that will be removed from the child (never the
 /// values). No-op when no `gh` profile is configured for this project.
-fn print_gh_env_plan(outcome: &GhOutcome) {
+/// The gh token variables the launch removes: those in the shell plus those
+/// the env files would inject (removal happens after injection).
+fn removed_gh_tokens(
+    shell: &[&'static str],
+    to_inject: &[(String, String, &str)],
+) -> Vec<&'static str> {
+    GH_TOKEN_ENV_VARS
+        .iter()
+        .copied()
+        .filter(|v| shell.contains(v) || to_inject.iter().any(|(k, _, _)| k == v))
+        .collect()
+}
+
+fn print_gh_env_plan(outcome: &GhOutcome, to_inject: &[(String, String, &str)]) {
     match outcome {
         GhOutcome::NotConfigured => {}
         GhOutcome::Ready { plan, status_line } => {
@@ -1056,11 +1134,9 @@ fn print_gh_env_plan(outcome: &GhOutcome) {
             if let Some(host) = &plan.host_override {
                 println!("     {:<36} = {}", style("GH_HOST").bold(), host);
             }
-            if !plan.tokens_to_remove.is_empty() {
-                println!(
-                    "     removed from child env: {}",
-                    plan.tokens_to_remove.join(", ")
-                );
+            let removed = removed_gh_tokens(&plan.tokens_to_remove, to_inject);
+            if !removed.is_empty() {
+                println!("     removed from child env: {}", removed.join(", "));
             }
             println!();
         }
@@ -3285,6 +3361,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_removed_gh_tokens_include_pending_injections() {
+        let inject = vec![("GH_TOKEN".to_string(), "x".to_string(), ".env.nexus.local")];
+        assert_eq!(
+            removed_gh_tokens(&["GITHUB_TOKEN"], &inject),
+            ["GH_TOKEN", "GITHUB_TOKEN"]
+        );
+        assert!(removed_gh_tokens(&[], &[]).is_empty());
+    }
+
+    #[test]
     fn test_dispatch_pane_follows_flag_then_policy() {
         assert_eq!(
             DispatchPane::decide(Some(true), Some("off")),
@@ -3315,6 +3401,10 @@ mod tests {
             "https://example.test"
         );
         assert_eq!(env_display_value("LONG", &"y".repeat(50)), "yyyyyyyy...");
+        // Values from the secrets file are masked whatever the key.
+        let url = "postgres://db.example.invalid/app";
+        assert!(!env_display_value_from("DB_URL", url, ".env.nexus.local").contains("db.example"));
+        assert_eq!(env_display_value_from("DB_URL", url, "plugin"), url);
     }
     use std::fs;
     use std::path::PathBuf;
