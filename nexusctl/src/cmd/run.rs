@@ -169,6 +169,13 @@ fn gh_status_line(
     )
 }
 
+/// The answer to the import prompt: Enter (an empty line) or y/yes. EOF
+/// (`read == 0`) is no answer and declines.
+fn import_confirmed(read: usize, line: &str) -> bool {
+    let answer = line.trim().to_lowercase();
+    read > 0 && (answer.is_empty() || answer == "y" || answer == "yes")
+}
+
 /// Attempt to seed an empty gh profile.
 ///
 /// Has real side effects (a keyring lookup, an interactive Y/n prompt
@@ -214,6 +221,11 @@ fn seed_gh_profile(
     }
 
     if !assume_yes {
+        // Without a terminal nobody can answer: closed or piped stdin is
+        // never taken as a yes.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return Ok(fallback("no terminal to confirm the import (use --yes)"));
+        }
         println!(
             "   Import GitHub login {} from {} into profile {}? [Y/n] ",
             style(&active).bold(),
@@ -221,9 +233,8 @@ fn seed_gh_profile(
             gh.profile
         );
         let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf)?;
-        let answer = buf.trim().to_lowercase();
-        if !(answer.is_empty() || answer == "y" || answer == "yes") {
+        let read = std::io::stdin().read_line(&mut buf)?;
+        if !import_confirmed(read, &buf) {
             return Ok(fallback("import declined"));
         }
     }
@@ -3236,6 +3247,15 @@ fn resolve_project_name(workspace: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_import_prompt_eof_declines() {
+        assert!(!import_confirmed(0, ""));
+        assert!(import_confirmed(1, "\n"));
+        assert!(import_confirmed(2, "y\n"));
+        assert!(!import_confirmed(2, "n\n"));
+    }
+
     #[test]
     fn test_refused_env_var_blocks_code_loading_and_credential_redirects() {
         for key in [

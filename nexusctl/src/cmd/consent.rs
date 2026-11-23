@@ -120,8 +120,13 @@ pub struct Item {
 }
 
 impl Item {
+    /// The record key. An MCP server is approved per destination: the same
+    /// server in `.mcp.json` and in `opencode.json` are separate approvals.
     fn key(&self) -> String {
-        format!("{}:{}", self.kind.as_str(), self.id)
+        match self.kind {
+            Kind::McpServer => format!("{}:{}:{}", self.kind.as_str(), self.target_path, self.id),
+            _ => format!("{}:{}", self.kind.as_str(), self.id),
+        }
     }
 
     fn label(&self) -> String {
@@ -193,14 +198,20 @@ fn get_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(value, |v, part| v.get(part))
 }
 
-fn read_json(path: &Path) -> Value {
-    fs::read_to_string(path)
-        .ok()
+/// A workspace JSON file, through [`read_file`]'s path check: a file
+/// outside the workspace or behind a symlink reads as `Null`, like an
+/// unreadable one.
+fn read_json(workspace: &Path, rel: &str) -> Value {
+    read_file(workspace, rel)
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(Value::Null)
 }
 
+/// The local copy of a target, only when the target passes the writers'
+/// path check: a target outside the workspace or behind a symlink has no
+/// local copy, so its content is never read or shown.
 fn read_file(workspace: &Path, rel: &str) -> Option<String> {
+    pull::validate_agent_file_target_path(workspace, rel).ok()?;
     fs::read_to_string(workspace.join(rel)).ok()
 }
 
@@ -306,7 +317,7 @@ pub fn collect_agent_export(
         return items;
     }
 
-    let settings = read_json(&workspace.join(".claude").join("settings.json"));
+    let settings = read_json(workspace, ".claude/settings.json");
     for (i, a) in af.claude_hook_adapters.iter().flatten().enumerate() {
         let content = hook_content(&a.body, adapter_events(a));
         let local = read_file(workspace, &a.target_path)
@@ -316,7 +327,9 @@ pub fn collect_agent_export(
             id: a.plugin_name.clone(),
             target_path: a.target_path.clone(),
             command: None,
-            fingerprint: sha256_hex(&content),
+            // The destination is part of what is written: a moved hook is
+            // a changed hook.
+            fingerprint: sha256_hex(&format!("{}\n{content}", a.target_path)),
             installed: local.as_deref() == Some(content.as_str()),
             content,
             local,
@@ -359,6 +372,26 @@ pub fn collect_agent_export(
 }
 
 /// Settings commands, plugins and marketplaces of the settings spec.
+/// The entries of a managed map such as `enabledPlugins`, whether the whole
+/// map is managed or single entries arrive as dotted keys
+/// (`enabledPlugins.core@nexus`): the renderer writes both.
+fn managed_entries(spec: &ClaudeSettingsSpec, parent: &str) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    let prefix = format!("{parent}.");
+    for key in &spec.managed_keys {
+        if key == parent {
+            if let Some(map) = spec.value(parent).and_then(Value::as_object) {
+                out.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        } else if let Some(id) = key.strip_prefix(&prefix) {
+            if let Some(v) = spec.value(key) {
+                out.insert(id.to_string(), v.clone());
+            }
+        }
+    }
+    out
+}
+
 fn collect_settings(spec: &ClaudeSettingsSpec, settings: &Value) -> Vec<Item> {
     const TARGET: &str = ".claude/settings.json";
     let mut items = Vec::new();
@@ -406,9 +439,9 @@ fn collect_settings(spec: &ClaudeSettingsSpec, settings: &Value) -> Vec<Item> {
         });
     }
 
-    let managed = |key: &str| spec.managed_keys.iter().any(|k| k == key);
-    if managed("enabledPlugins") {
-        if let Some(plugins) = spec.value("enabledPlugins").and_then(Value::as_object) {
+    {
+        let plugins = managed_entries(spec, "enabledPlugins");
+        {
             for (id, value) in plugins.iter().filter(|(_, v)| **v != Value::Bool(false)) {
                 let local = settings.get("enabledPlugins").and_then(|p| p.get(id));
                 items.push(Item {
@@ -428,12 +461,10 @@ fn collect_settings(spec: &ClaudeSettingsSpec, settings: &Value) -> Vec<Item> {
             }
         }
     }
-    if managed("extraKnownMarketplaces") {
-        if let Some(markets) = spec
-            .value("extraKnownMarketplaces")
-            .and_then(Value::as_object)
+    {
+        let markets = managed_entries(spec, "extraKnownMarketplaces");
         {
-            for (name, entry) in markets {
+            for (name, entry) in &markets {
                 let local = settings
                     .get("extraKnownMarketplaces")
                     .and_then(|m| m.get(name));
@@ -589,10 +620,13 @@ pub fn collect_workspace_v1(workspace: &Path, export: &WorkspaceExportResponse) 
 // Hooks and MCP servers
 // ---------------------------------------------------------------------------
 
+/// One hook registration as shown and fingerprinted. The matcher is JSON:
+/// a string is quoted, a missing matcher is `null`, so `"-"` and no
+/// matcher never read the same.
 fn event_line(event: &str, matcher: Option<&str>, timeout: Option<u64>) -> String {
     format!(
         "{event} matcher={} timeout={}",
-        matcher.unwrap_or("-"),
+        serde_json::to_string(&matcher).unwrap_or_default(),
         timeout.map_or_else(|| "-".to_string(), |t| t.to_string())
     )
 }
@@ -690,7 +724,7 @@ fn local_mcp(workspace: &Path, is_claude: bool, name: &str) -> Option<McpServerC
     } else {
         ("opencode.json", "mcp")
     };
-    let root = read_json(&workspace.join(file));
+    let root = read_json(workspace, file);
     let entry = root.get(block)?.get(name)?;
     let strings = |v: Option<&Value>| -> Vec<String> {
         v.and_then(Value::as_array)
@@ -1267,6 +1301,19 @@ fn remove_value(map: &mut serde_json::Map<String, Value>, path: &str) {
 
 /// Keep the local value of a keyed-map entry, or leave the entry out.
 fn hold_entry(spec: &mut ClaudeSettingsSpec, map_key: &str, id: &str, local: Option<&Value>) {
+    // An entry sent as a dotted key: keep the local value, or drop the key
+    // (the renderer skips a managed key without a value).
+    let dotted = format!("{map_key}.{id}");
+    if spec.values.contains_key(&dotted) {
+        match local {
+            Some(v) => {
+                spec.values.insert(dotted, v.clone());
+            }
+            None => {
+                spec.values.remove(&dotted);
+            }
+        }
+    }
     if let Some(map) = spec.values.get_mut(map_key).and_then(Value::as_object_mut) {
         match local {
             Some(v) => {
@@ -1285,7 +1332,7 @@ fn hold_agent_export(
     refused: &[&Item],
     is_claude: bool,
 ) {
-    let settings = read_json(&workspace.join(".claude").join("settings.json"));
+    let settings = read_json(workspace, ".claude/settings.json");
     let mut drop_files = Vec::new();
     let mut drop_hooks = Vec::new();
     for item in refused {
@@ -1598,7 +1645,7 @@ mod tests {
         store.save().unwrap();
         let loaded = store_in(cfg.path(), a.path());
         assert_eq!(
-            loaded.data.items.get("mcp_server:x"),
+            loaded.data.items.get("mcp_server:.mcp.json:x"),
             Some(&Record {
                 sha256: "f".into(),
                 server_sha256: Some("theirs".into())
@@ -1733,8 +1780,8 @@ mod tests {
         }
         assert!(refused.contains(&"mcp_server fresh".to_string()));
         let saved = store_in(cfg.path(), ws.path());
-        assert!(saved.data.items.contains_key("mcp_server:kept"));
-        assert!(!saved.data.items.contains_key("mcp_server:fresh"));
+        assert!(saved.data.items.contains_key("mcp_server:.mcp.json:kept"));
+        assert!(!saved.data.items.contains_key("mcp_server:.mcp.json:fresh"));
     }
 
     #[test]
@@ -1874,7 +1921,89 @@ mod tests {
         let items = collect_agent_export(ws.path(), &export, true, ".nexus");
         let hook = items.iter().find(|i| i.kind == Kind::ClaudeHook).unwrap();
         assert!(!hook.installed);
-        assert!(hook.content.contains("Stop matcher=Bash"));
+        assert!(hook.content.contains("Stop matcher=\"Bash\""));
+    }
+
+    #[test]
+    fn test_dotted_plugin_and_marketplace_keys_need_consent() {
+        let mut spec: ClaudeSettingsSpec = serde_json::from_value(json!({
+            "managed_keys": ["enabledPlugins.core@nexus", "extraKnownMarketplaces.nexus"],
+            "values": {
+                "enabledPlugins.core@nexus": true,
+                "extraKnownMarketplaces": { "nexus": { "source": { "source": "github", "repo": "o/r" } } }
+            }
+        }))
+        .unwrap();
+        let items = collect_settings(&spec, &Value::Null);
+        let ids: Vec<(Kind, &str)> = items.iter().map(|i| (i.kind, i.id.as_str())).collect();
+        assert!(ids.contains(&(Kind::ClaudePlugin, "core@nexus")), "{ids:?}");
+        assert!(ids.contains(&(Kind::ClaudeMarketplace, "nexus")), "{ids:?}");
+        // Refused without a local value: neither form is written.
+        hold_entry(&mut spec, "enabledPlugins", "core@nexus", None);
+        hold_entry(&mut spec, "extraKnownMarketplaces", "nexus", None);
+        assert!(spec.value("enabledPlugins.core@nexus").is_none());
+        assert!(spec.value("extraKnownMarketplaces.nexus").is_none());
+    }
+
+    #[test]
+    fn test_missing_matcher_differs_from_a_dash() {
+        assert_ne!(
+            event_line("Stop", None, None),
+            event_line("Stop", Some("-"), None)
+        );
+        assert_eq!(
+            event_line("Stop", None, None),
+            "Stop matcher=null timeout=-"
+        );
+    }
+
+    #[test]
+    fn test_moved_hook_changes_the_fingerprint() {
+        let ws = tempfile::tempdir().unwrap();
+        let fp = |export: &AgentFileExportResponse| {
+            collect_agent_export(ws.path(), export, true, ".nexus")
+                .into_iter()
+                .find(|i| i.kind == Kind::ClaudeHook)
+                .unwrap()
+                .fingerprint
+        };
+        let mut moved = agent_export();
+        moved.claude_hook_adapters.as_mut().unwrap()[0].target_path =
+            ".claude/hooks/elsewhere.mjs".into();
+        assert_ne!(fp(&agent_export()), fp(&moved));
+    }
+
+    #[test]
+    fn test_mcp_approval_is_per_destination() {
+        let ws = tempfile::tempdir().unwrap();
+        let key = |is_claude| {
+            collect_agent_export(ws.path(), &agent_export(), is_claude, ".nexus")
+                .into_iter()
+                .find(|i| i.kind == Kind::McpServer)
+                .map(|i| i.key())
+        };
+        let (claude, opencode) = (key(true), key(false));
+        assert!(claude.is_some());
+        assert_ne!(claude, opencode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlinked_target_is_not_read() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "private\n").unwrap();
+        std::fs::create_dir_all(ws.path().join(".claude")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.path().join(".claude/hooks")).unwrap();
+        assert_eq!(read_file(ws.path(), ".claude/hooks/secret.txt"), None);
+        assert_eq!(read_file(ws.path(), "../secret.txt"), None);
+        std::fs::write(outside.path().join("settings.json"), r#"{"hooks":{}}"#).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("settings.json"),
+            ws.path().join(".claude/settings.json"),
+        )
+        .unwrap();
+        assert_eq!(read_json(ws.path(), ".claude/settings.json"), Value::Null);
     }
 
     #[test]
