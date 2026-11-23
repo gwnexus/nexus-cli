@@ -826,13 +826,24 @@ impl NexusClient {
         }
 
         let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.handle_response_inner(resp, true).await
     }
 
     /// Map HTTP response status to typed errors or deserialize the body.
     async fn handle_response<T: serde::de::DeserializeOwned>(
         &self,
+        resp: reqwest::Response,
+    ) -> Result<T, Error> {
+        self.handle_response_inner(resp, false).await
+    }
+
+    /// `empty_as_null`: an empty success body reads as JSON `null` (DELETE
+    /// answers may have no body); elsewhere it stays an error, so an empty
+    /// body never passes for a valid empty result.
+    async fn handle_response_inner<T: serde::de::DeserializeOwned>(
+        &self,
         mut resp: reqwest::Response,
+        empty_as_null: bool,
     ) -> Result<T, Error> {
         let status = resp.status();
 
@@ -850,8 +861,11 @@ impl NexusClient {
                     return Err(response_too_large());
                 }
             }
-            // An empty success body (for example on DELETE) reads as `null`.
-            let bytes: &[u8] = if body.is_empty() { b"null" } else { &body };
+            let bytes: &[u8] = if body.is_empty() && empty_as_null {
+                b"null"
+            } else {
+                &body
+            };
             return serde_json::from_slice(bytes)
                 .map_err(|e| Error::Api(format!("invalid response body: {e}")));
         }

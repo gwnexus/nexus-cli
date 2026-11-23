@@ -251,16 +251,14 @@ pub fn marketplace_source_arg(entry: &serde_json::Value) -> Option<String> {
     .then_some(arg)
 }
 
-/// Whether a marketplace source carries credentials. Local `directory` and
-/// `file` paths never do (a `:` or `@` there is path text). For the others:
+/// Whether a marketplace source carries credentials. Every `scheme://`
+/// value is checked as a URL, also when declared as `directory` or `file`;
+/// a plain local path never is (a `:` or `@` there is path text). Otherwise:
 /// a `scheme://` URL with a password, or with a user name over http(s);
 /// any other form (scp-like `user@host:path`, `owner/repo`) with a
 /// `user:secret@` part. `git@host:org/repo` and `ssh://git@host/...` (an
 /// SSH user without a secret) are fine.
 fn source_has_credentials(kind: &str, arg: &str) -> bool {
-    if matches!(kind, "directory" | "file") {
-        return false;
-    }
     if has_url_scheme(arg) {
         return match reqwest::Url::parse(arg) {
             Ok(u) => {
@@ -269,6 +267,10 @@ fn source_has_credentials(kind: &str, arg: &str) -> bool {
             }
             Err(_) => arg.contains('@'),
         };
+    }
+    // Local paths without a scheme: a `:` or `@` there is path text.
+    if matches!(kind, "directory" | "file") {
+        return false;
     }
     arg.split_once('@')
         .is_some_and(|(user, _)| user.contains(':'))
@@ -923,6 +925,8 @@ mod tests {
         .is_none());
         // Local paths are path text, not credentials.
         assert!(src("directory", "path", "./marketplaces/team:tools@local").is_some());
+        // A URL declared as a path is still checked.
+        assert!(src("directory", "path", "https://u:p@m.example.invalid/m.git").is_none());
     }
     use std::cell::RefCell;
 
