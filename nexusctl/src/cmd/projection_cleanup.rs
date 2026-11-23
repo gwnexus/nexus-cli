@@ -119,6 +119,10 @@ pub enum KeepReason {
     Unmanaged,
     /// Tracked in git (only for root files Nexus does not track itself).
     Tracked,
+    /// Holds git metadata (a nested repository); never removed whole.
+    GitMetadata,
+    /// Its path crosses a symlink; left alone.
+    Linked,
 }
 
 impl KeepReason {
@@ -127,6 +131,8 @@ impl KeepReason {
             KeepReason::Modified => "modified locally",
             KeepReason::Unmanaged => "not managed by Nexus",
             KeepReason::Tracked => "tracked in git",
+            KeepReason::GitMetadata => "contains a nested git repository",
+            KeepReason::Linked => "path crosses a symlink",
         }
     }
 }
@@ -321,14 +327,32 @@ fn through_symlink(workspace: &Path, rel: &str) -> bool {
     false
 }
 
+/// Whether git may track `rel`: a check git cannot answer counts as
+/// tracked, so the file is kept.
 fn is_git_tracked(workspace: &Path, rel: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["ls-files", "--error-unmatch", "--", rel])
-        .current_dir(workspace)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    nexus_core::config::trust::is_git_tracked(&workspace.join(rel))
+}
+
+/// Whether the tree at `dir` holds git metadata (`.git` in any spelling)
+/// at any depth. Symlinks are not followed; an unreadable directory
+/// counts as holding it, so nothing is removed blindly.
+fn contains_git_metadata(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir());
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        if super::pull::is_git_dir_name(&entry.file_name().to_string_lossy()) {
+            return true;
+        }
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        if is_dir && contains_git_metadata(&entry.path()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn plan_opencode(workspace: &Path, ctx: &CleanupContext, records: &Records) -> Vec<Action> {
@@ -511,7 +535,15 @@ fn plan_claude(
     let root = ctx.agentic_root.as_str();
     let mut actions: Vec<Action> = Vec::new();
     let mut planned: HashSet<String> = HashSet::new();
-    let lock = ccx::load_lock(workspace, root);
+    // A lock reached through a symlink is not read (see `apply`).
+    let lock_linked = through_symlink(workspace, &ccx::lock_rel(root))
+        || fs::symlink_metadata(ccx::lock_path(workspace, root))
+            .is_ok_and(|m| m.file_type().is_symlink());
+    let lock = if lock_linked {
+        None
+    } else {
+        ccx::load_lock(workspace, root)
+    };
     let mut kept_lock = lock.clone().map(|mut l| {
         l.files.clear();
         l.hooks.clear();
@@ -986,7 +1018,7 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
         | Action::Rewrite { path, .. } = action
         {
             if through_symlink(workspace, path) {
-                report.kept.push((path.clone(), KeepReason::Unmanaged));
+                report.kept.push((path.clone(), KeepReason::Linked));
                 continue;
             }
         }
@@ -1004,6 +1036,16 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
             Action::RemoveDir { path, note } => {
                 let target = workspace.join(path.trim_end_matches('/'));
                 if !target.exists() {
+                    continue;
+                }
+                // The directory itself a symlink: remove_dir_all would
+                // not follow it, but its contents are not ours either.
+                if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+                    report.kept.push((path.clone(), KeepReason::Linked));
+                    continue;
+                }
+                if contains_git_metadata(&target) {
+                    report.kept.push((path.clone(), KeepReason::GitMetadata));
                     continue;
                 }
                 fs::remove_dir_all(&target)?;
@@ -1025,6 +1067,14 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
     let root = ctx.agentic_root.as_str();
     match &plan.lock_after {
         LockAfter::Untouched => {}
+        // A lock path through a symlink is neither read, deleted nor
+        // saved; the lock stays as it is and the report says so.
+        _ if through_symlink(workspace, &ccx::lock_rel(root))
+            || fs::symlink_metadata(ccx::lock_path(workspace, root))
+                .is_ok_and(|m| m.file_type().is_symlink()) =>
+        {
+            report.kept.push((ccx::lock_rel(root), KeepReason::Linked));
+        }
         LockAfter::Delete => {
             let lock = ccx::lock_path(workspace, root);
             if lock.exists() {
@@ -1385,6 +1435,46 @@ mod tests {
         assert!(pulled.keys().all(|k| !k.starts_with(".opencode/")));
         // Nothing left afterwards.
         assert!(!plan(&dir, Projection::OpenCode, &ctx(true)).has_leftovers());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cleanup_keeps_a_directory_with_a_nested_repository() {
+        let dir = temp_dir("oc-nested-git");
+        opencode_projection(&dir);
+        put(
+            &dir,
+            ".opencode/vendor/x/.git/HEAD",
+            "ref: refs/heads/main\n",
+        );
+        let report = run(&dir, Projection::OpenCode, &ctx(true));
+        assert!(report
+            .kept
+            .iter()
+            .any(|(p, r)| p == ".opencode/" && *r == KeepReason::GitMetadata));
+        assert!(dir.join(".opencode/vendor/x/.git/HEAD").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_leaves_a_linked_lock_alone() {
+        let dir = temp_dir("linked-lock");
+        let outside = tempfile::tempdir().unwrap();
+        put(outside.path(), "manifest.lock.json", "{}");
+        fs::create_dir_all(dir.join(".nexus")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join(".nexus/claude")).unwrap();
+        let plan = Plan {
+            projection: Projection::Claude,
+            actions: Vec::new(),
+            lock_after: LockAfter::Delete,
+        };
+        let report = apply(&dir, &plan, &ctx(true)).unwrap();
+        assert!(report
+            .kept
+            .iter()
+            .any(|(p, r)| p == ".nexus/claude/manifest.lock.json" && *r == KeepReason::Linked));
+        assert!(outside.path().join("manifest.lock.json").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

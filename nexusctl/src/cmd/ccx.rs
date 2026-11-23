@@ -561,6 +561,21 @@ pub fn apply_file_plans(
 
     for plan in plans {
         let path = workspace.join(&plan.target_path);
+        // Checked again right before the change: the tree may have moved
+        // since planning (a directory replaced by a symlink). A refused
+        // path is left alone and keeps its previous lock entry.
+        if let Err(e) = super::pull::validate_agent_file_target_path(workspace, &plan.target_path) {
+            println!("   {} {e}", console::style("!").bold().yellow());
+            if let Some(locked) = &plan.locked {
+                files.insert(plan.target_path.clone(), entry(plan, locked.clone()));
+            }
+            outcomes.push(FileOutcome {
+                target_path: plan.target_path.clone(),
+                state: plan.state,
+                action: FileAction::Kept,
+            });
+            continue;
+        }
         let action = if plan.state == FileState::Orphaned {
             let pristine = match (&plan.local, &plan.locked) {
                 (Some(local), Some(locked)) => sha256_hex_bytes(local) == *locked,
@@ -585,7 +600,8 @@ pub fn apply_file_plans(
                 FileState::Unmanaged => force == ForceMode::ForceUnmanaged,
                 FileState::Clean | FileState::Adopt | FileState::Orphaned => false,
             };
-            let protected = super::pull::is_protected_path(&plan.target_path) && path.exists();
+            let protected =
+                super::pull::is_protected_target(workspace, &plan.target_path) && path.exists();
             if overwrite && !protected {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -1402,6 +1418,24 @@ mod tests {
         // The file that was written is recognised as clean next time.
         let out = pull(&dir, &[ccx_file(RULE, "v2\n")], ForceMode::None);
         assert_eq!(out[0].state, FileState::Clean);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_apply_rechecks_paths_changed_after_planning() {
+        let dir = tmp_dir("apply-recheck");
+        let outside = tempfile::tempdir().unwrap();
+        let files = [ccx_file(RULE, "v1\n")];
+        let desired: Vec<&ExportedAgentFile> = files.iter().collect();
+        let plans = plan_files(&dir, &desired, None, &serde_json::json!({})).unwrap();
+        // After planning, `.claude` becomes a link out of the workspace.
+        std::fs::remove_dir_all(dir.join(".claude")).ok();
+        std::os::unix::fs::symlink(outside.path(), dir.join(".claude")).unwrap();
+        let (out, lock_files) = apply_file_plans(&dir, &plans, ForceMode::None).unwrap();
+        assert_eq!(out[0].action, FileAction::Kept);
+        assert!(lock_files.is_empty());
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
