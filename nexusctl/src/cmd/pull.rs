@@ -679,8 +679,8 @@ fn drop_unused_nexus_env(workspace: &Path) -> anyhow::Result<Vec<String>> {
         let before = env.len();
         env.retain(|k, _| !UNUSED_NEXUS_ENV_KEYS.contains(&k.as_str()));
         if env.len() != before {
-            fs::write(&path, serde_json::to_string_pretty(&root)? + "\n")?;
-            shadow::protect_token_file(workspace, rel, &[rel]);
+            let out = serde_json::to_string_pretty(&root)? + "\n";
+            shadow::write_token_file(workspace, rel, &out, &[rel])?;
             changed.push(rel.to_string());
         }
     }
@@ -3642,16 +3642,21 @@ fn write_mcp_configs(
             let opencode_json = serde_json::Value::Object(opencode_obj);
             let opencode_content = serde_json::to_string_pretty(&opencode_json)? + "\n";
             let unchanged = content_matches(&opencode_path, &opencode_content);
-            if !unchanged {
-                fs::write(&opencode_path, &opencode_content)?;
+            // Token-bearing: git-excluded first, then written owner-only.
+            if unchanged {
+                shadow::protect_token_file(
+                    workspace,
+                    "opencode.json",
+                    &["opencode.json", "opencode.jsonc"],
+                );
+            } else {
+                shadow::write_token_file(
+                    workspace,
+                    "opencode.json",
+                    &opencode_content,
+                    &["opencode.json", "opencode.jsonc"],
+                )?;
             }
-
-            // SEC-002: ensure token-bearing config files are git-excluded
-            shadow::protect_token_file(
-                workspace,
-                "opencode.json",
-                &["opencode.json", "opencode.jsonc"],
-            );
 
             let verb = if exists { "updated" } else { "created" };
             let mut extras = Vec::new();
@@ -3795,12 +3800,17 @@ fn write_mcp_configs(
             });
             let claude_mcp_content = serde_json::to_string_pretty(&claude_mcp_json)? + "\n";
             let unchanged = content_matches(&claude_mcp_path, &claude_mcp_content);
-            if !unchanged {
-                fs::write(&claude_mcp_path, &claude_mcp_content)?;
+            // Token-bearing: git-excluded first, then written owner-only.
+            if unchanged {
+                shadow::protect_token_file(workspace, ".mcp.json", &[".mcp.json"]);
+            } else {
+                shadow::write_token_file(
+                    workspace,
+                    ".mcp.json",
+                    &claude_mcp_content,
+                    &[".mcp.json"],
+                )?;
             }
-
-            // SEC-002: ensure token-bearing config files are git-excluded
-            shadow::protect_token_file(workspace, ".mcp.json", &[".mcp.json"]);
 
             let verb = if exists { "updated" } else { "created" };
             if !unchanged {

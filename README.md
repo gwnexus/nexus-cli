@@ -190,6 +190,13 @@ CI, set `NEXUS_PROJECT_TOKEN` directly in the environment; it always takes
 precedence over the local store. The PAT remains the long-lived bootstrap
 credential; project tokens are shorter-lived and rotate independently.
 
+`.env.nexus.local` is added to `.git/info/exclude` before the token is
+written (owner-only, in one step); when git tracks the file, the command
+stops and names the fix instead. `rotate` and `unlink` change the
+workspace file only when the workspace is linked to the selected project,
+and `rotate --finalize` refuses while the workspace still holds the previous
+token.
+
 ### Workspace Files: Status, Diff, Push, Reset, Stash
 
 One command per activity; each classifies every file itself:

@@ -121,8 +121,21 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
         anyhow::anyhow!("No project token stored for this project. Run 'nexus project link' first.")
     })?;
 
+    let workspace = std::env::current_dir()?;
+    let owns_workspace = workspace_linked_to(&workspace, &project_id);
+
     if finalize {
         if let Some(prev_id) = current.previous_token_id.clone() {
+            // The workspace must already use the replacement: revoking the
+            // previous token while `.env.nexus.local` still holds it would
+            // cut this workspace off.
+            if owns_workspace && workspace_env_token(&workspace).is_some_and(|t| t != current.token)
+            {
+                anyhow::bail!(
+                    "{ENV_LOCAL_FILE} still holds the previous project token; run \
+                     nexus project rotate again (or fix the file) before --finalize"
+                );
+            }
             println!(
                 "{} Finalizing rotation: revoking previous token {}...",
                 style(">>").bold().cyan(),
@@ -170,8 +183,11 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
         &runtime,
         Some(current.token_id.clone()),
     )?;
-    let workspace = std::env::current_dir()?;
-    sync_env_token(&workspace, issued.token.expose())?;
+    if owns_workspace {
+        sync_env_token(&workspace, issued.token.expose())?;
+    } else {
+        print_workspace_skipped(&project_id);
+    }
 
     println!();
     println!("{} Token rotated.", style("OK").bold().green());
@@ -230,7 +246,11 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
     store.save()?;
 
     let workspace = std::env::current_dir()?;
-    clear_env_token(&workspace)?;
+    if workspace_linked_to(&workspace, &project_id) {
+        clear_env_token(&workspace)?;
+    } else {
+        print_workspace_skipped(&project_id);
+    }
 
     println!();
     println!(
@@ -618,78 +638,67 @@ fn unix_to_rfc3339(secs: u64) -> String {
 
 // -- Workspace env exposure --------------------------------------------------
 
-/// Write `NEXUS_PROJECT_TOKEN` into the workspace `.env.nexus.local`.
+/// Whether the workspace at `workspace` is linked to `project_id`. Only then
+/// may `rotate` and `unlink` change its `.env.nexus.local`.
+fn workspace_linked_to(workspace: &Path, project_id: &str) -> bool {
+    config::resolve_project_id(None, Some(workspace)).is_ok_and(|id| id == project_id)
+}
+
+fn print_workspace_skipped(project_id: &str) {
+    println!(
+        "   {} This workspace is not linked to project {}; its {ENV_LOCAL_FILE} was left unchanged.",
+        style("--").bold().yellow(),
+        style(project_id).dim()
+    );
+}
+
+/// The `NEXUS_PROJECT_TOKEN` value in the workspace `.env.nexus.local`.
+fn workspace_env_token(workspace: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(workspace.join(ENV_LOCAL_FILE)).ok()?;
+    let prefix = format!("{PROJECT_TOKEN_ENV}=");
+    content
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix(&prefix))
+        .map(|v| v.trim().to_string())
+        .next_back()
+}
+
+/// Write `NEXUS_PROJECT_TOKEN` into the workspace `.env.nexus.local`:
+/// git-excluded first, then atomically with mode 0600. Refused when git
+/// tracks the file (an exclude does not untrack it).
 fn sync_env_token(workspace: &Path, token: &str) -> anyhow::Result<()> {
-    ensure_env_local_ignored(workspace);
     let path = workspace.join(ENV_LOCAL_FILE);
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if nexus_core::config::trust::is_git_tracked(&path) {
+        anyhow::bail!(
+            "{ENV_LOCAL_FILE} is tracked by git, so the project token would be committed; \
+             untrack it with git rm --cached {ENV_LOCAL_FILE}, then run this command again \
+             (the token is stored in the canonical store already)"
+        );
+    }
+    let existing = read_env_local(&path)?;
     let updated = upsert_env_var(&existing, PROJECT_TOKEN_ENV, token);
-    write_env_local(&path, &updated)?;
-    Ok(())
+    super::shadow::write_token_file(workspace, ENV_LOCAL_FILE, &updated, &[ENV_LOCAL_FILE])
 }
 
 /// Remove `NEXUS_PROJECT_TOKEN` from the workspace `.env.nexus.local`.
 fn clear_env_token(workspace: &Path) -> anyhow::Result<()> {
     let path = workspace.join(ENV_LOCAL_FILE);
-    let Ok(existing) = std::fs::read_to_string(&path) else {
+    if !path.exists() {
         return Ok(());
-    };
+    }
+    let existing = read_env_local(&path)?;
     let updated = remove_env_var(&existing, PROJECT_TOKEN_ENV);
-    write_env_local(&path, &updated)?;
+    nexus_core::fsutil::write_private_atomic(&path, updated.as_bytes())?;
     Ok(())
 }
 
-/// Write the secrets file with restrictive permissions (0600 on Unix).
-fn write_env_local(path: &Path, content: &str) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, content)?;
-    }
-    Ok(())
-}
-
-/// Guarantee `.env.nexus.local` is git-excluded via `.git/info/exclude`.
-///
-/// Best-effort: silently no-ops outside a git repository.
-fn ensure_env_local_ignored(workspace: &Path) {
-    let git_dir = workspace.join(".git");
-    if !git_dir.is_dir() {
-        return;
-    }
-    let info_dir = git_dir.join("info");
-    if std::fs::create_dir_all(&info_dir).is_err() {
-        return;
-    }
-    let exclude_path = info_dir.join("exclude");
-    let content = std::fs::read_to_string(&exclude_path).unwrap_or_default();
-    if content.lines().any(|l| l.trim() == ENV_LOCAL_FILE) {
-        return;
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&exclude_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(
-            file,
-            "\n# Nexus CLI: project token secret\n{}",
-            ENV_LOCAL_FILE
-        );
+/// The current `.env.nexus.local`, empty when it does not exist. Any other
+/// read error stops the write, so other entries in the file are not lost.
+fn read_env_local(path: &Path) -> anyhow::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(anyhow::anyhow!("failed to read {}: {e}", path.display())),
     }
 }
 
@@ -837,5 +846,51 @@ mod tests {
     fn test_remove_env_var_empties_file() {
         let out = remove_env_var("NEXUS_PROJECT_TOKEN=x\n", "NEXUS_PROJECT_TOKEN");
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn test_workspace_env_token_reads_the_last_value() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(workspace_env_token(dir.path()), None);
+        std::fs::write(
+            dir.path().join(ENV_LOCAL_FILE),
+            "OTHER=1\nNEXUS_PROJECT_TOKEN=old\nNEXUS_PROJECT_TOKEN=new\n",
+        )
+        .unwrap();
+        assert_eq!(workspace_env_token(dir.path()).as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn test_sync_env_token_keeps_other_entries_and_refuses_tracked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(ws)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        std::fs::write(ws.join(ENV_LOCAL_FILE), "OTHER=1\n").unwrap();
+        sync_env_token(ws, "nxs_proj_abcdefghijkl").unwrap();
+        let body = std::fs::read_to_string(ws.join(ENV_LOCAL_FILE)).unwrap();
+        assert!(body.contains("OTHER=1"), "{body}");
+        assert!(body.contains("NEXUS_PROJECT_TOKEN=nxs_proj_abcdefghijkl"));
+        let exclude = std::fs::read_to_string(ws.join(".git/info/exclude")).unwrap();
+        assert!(exclude.lines().any(|l| l.trim() == ENV_LOCAL_FILE));
+        // Tracked: refused, file unchanged.
+        git(&["add", "-f", ENV_LOCAL_FILE]);
+        let err = sync_env_token(ws, "nxs_proj_zzzzzzzzzzzz")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("git rm --cached"), "{err}");
+        assert!(!std::fs::read_to_string(ws.join(ENV_LOCAL_FILE))
+            .unwrap()
+            .contains("zzzz"));
     }
 }

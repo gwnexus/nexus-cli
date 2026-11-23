@@ -1276,13 +1276,13 @@ fn write_mcp_configs(
                 project_id = project_id,
             );
 
-            fs::write(&opencode_path, opencode_json)?;
-            // SEC-002: ensure token-bearing config files are git-excluded
-            shadow::protect_token_file(
+            // Token-bearing: git-excluded first, then written owner-only.
+            shadow::write_token_file(
                 target,
                 "opencode.json",
+                &opencode_json,
                 &["opencode.json", "opencode.jsonc"],
-            );
+            )?;
             println!(
                 "   {} opencode.json (MCP source: {})",
                 style("+").bold().green(),
@@ -1332,9 +1332,8 @@ fn write_mcp_configs(
                 project_id = project_id,
             );
 
-            fs::write(&claude_mcp_path, claude_mcp_json)?;
-            // SEC-002: ensure token-bearing config files are git-excluded
-            shadow::protect_token_file(target, ".mcp.json", &[".mcp.json"]);
+            // Token-bearing: git-excluded first, then written owner-only.
+            shadow::write_token_file(target, ".mcp.json", &claude_mcp_json, &[".mcp.json"])?;
             println!(
                 "   {} .mcp.json (MCP source: {})",
                 style("+").bold().green(),
