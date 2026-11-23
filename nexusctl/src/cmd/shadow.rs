@@ -399,6 +399,16 @@ pub fn write_token_file(
     try_ensure_git_excluded_in(workspace, excludes, "token-bearing files")
         .map_err(exclude_failed)?;
     // A later `!` rule (or a .gitignore negation) can still un-ignore it.
+    // Inside a repository the answer must be known before the token lands.
+    let in_repo = exclude_file_for(workspace)
+        .map_err(exclude_failed)?
+        .is_some();
+    if in_repo && git_ignores(workspace, rel).is_none() {
+        anyhow::bail!(
+            "{rel} carries a token, but git could not confirm that it ignores the file \
+             (is git installed and the repository readable?); nothing was written"
+        );
+    }
     if git_ignores(workspace, rel) == Some(false) {
         write_excludes(workspace, excludes, "token-bearing files", true).map_err(exclude_failed)?;
         if git_ignores(workspace, rel) == Some(false) {

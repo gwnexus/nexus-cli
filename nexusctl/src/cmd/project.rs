@@ -122,7 +122,7 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
     })?;
 
     let workspace = std::env::current_dir()?;
-    let owns_workspace = workspace_linked_to(&workspace, &project_id);
+    let owns_workspace = workspace_linked_to(&workspace, &project_id)?;
 
     if finalize {
         if let Some(prev_id) = current.previous_token_id.clone() {
@@ -163,8 +163,11 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
     // A rotation is still pending: issuing another one would drop the
     // record of the token before it, which then could never be revoked.
     if current.previous_token_id.is_some() {
-        if owns_workspace && workspace_env_token(&workspace)?.is_some_and(|t| t != current.token) {
-            // The last rotation could not update the workspace; finish that.
+        if owns_workspace
+            && workspace_needs_sync(workspace_env_token(&workspace)?.as_deref(), &current.token)
+        {
+            // The last rotation could not update the workspace (wrong or
+            // missing token there); finish that.
             sync_env_token(&workspace, &current.token)?;
             println!(
                 "{} {ENV_LOCAL_FILE} now holds the replacement token from the pending rotation. \
@@ -226,7 +229,7 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
     let project_id = resolve_project_id(project_id)?;
     let mut store = ProjectTokenStore::load()?;
     let workspace = std::env::current_dir()?;
-    let owns_workspace = workspace_linked_to(&workspace, &project_id);
+    let owns_workspace = workspace_linked_to(&workspace, &project_id)?;
     let entry = match store.get(&project_id).cloned() {
         Some(e) => e,
         None => {
@@ -672,8 +675,9 @@ fn unix_to_rfc3339(secs: u64) -> String {
 
 /// Whether the workspace at `workspace` is linked to `project_id`. Only then
 /// may `rotate` and `unlink` change its `.env.nexus.local`.
-fn workspace_linked_to(workspace: &Path, project_id: &str) -> bool {
-    config::resolve_project_id(None, Some(workspace)).is_ok_and(|id| id == project_id)
+fn workspace_linked_to(workspace: &Path, project_id: &str) -> anyhow::Result<bool> {
+    // Only a missing link is "not linked"; an unreadable config is an error.
+    Ok(config::load_linked_project(Some(workspace))?.is_some_and(|p| p.id == project_id))
 }
 
 fn print_workspace_skipped(project_id: &str) {
@@ -682,6 +686,12 @@ fn print_workspace_skipped(project_id: &str) {
         style("--").bold().yellow(),
         style(project_id).dim()
     );
+}
+
+/// Whether the workspace token must be rewritten to `current` (it holds
+/// another token, or none because an earlier write failed).
+fn workspace_needs_sync(workspace_token: Option<&str>, current: &str) -> bool {
+    workspace_token != Some(current)
 }
 
 /// The `NEXUS_PROJECT_TOKEN` value in the workspace `.env.nexus.local` (the
@@ -922,6 +932,13 @@ mod tests {
             Some("a")
         );
         assert_eq!(env_var_value("OTHER=1\n", "NEXUS_PROJECT_TOKEN"), None);
+    }
+
+    #[test]
+    fn test_pending_rotation_resyncs_a_missing_or_old_workspace_token() {
+        assert!(workspace_needs_sync(None, "nxs_proj_new"));
+        assert!(workspace_needs_sync(Some("nxs_proj_old"), "nxs_proj_new"));
+        assert!(!workspace_needs_sync(Some("nxs_proj_new"), "nxs_proj_new"));
     }
 
     #[cfg(unix)]

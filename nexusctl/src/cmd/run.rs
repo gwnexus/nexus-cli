@@ -653,7 +653,17 @@ pub async fn run(
     // (`nexus login`), and every subsequent `nexus run` self-heals the rest.
     if let Some(token) = resolve_token() {
         let project_id = config::resolve_project_id(None, Some(&workspace)).ok();
-        match sync_mcp_credentials(&workspace, api_url, &token, project_id.as_deref()) {
+        // Runs git subprocesses: keep it off the async workers.
+        let sync = {
+            let (workspace, api_url) = (workspace.clone(), api_url.to_string());
+            tokio::task::spawn_blocking(move || {
+                sync_mcp_credentials(&workspace, &api_url, &token, project_id.as_deref())
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("credential sync task failed: {e}"))
+            .and_then(|r| r)
+        };
+        match sync {
             Ok(paths) if !paths.is_empty() => {
                 println!(
                     "   {} refreshed Nexus credentials in: {}",

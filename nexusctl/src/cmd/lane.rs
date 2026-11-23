@@ -189,6 +189,9 @@ fn display_url(url: &str) -> String {
             let _ = parsed.set_password(None);
             parsed.to_string()
         }
+        // `user:pw@host` without a scheme parses as an opaque URL whose
+        // "scheme" is the user name: no user info to mask, so hide it all.
+        Ok(parsed) if parsed.cannot_be_a_base() && url.contains('@') => "<invalid URL>".to_string(),
         Ok(_) => url.to_string(),
         // Unparseable: show it only when it cannot hide credentials.
         Err(_) if url.contains('@') => "<invalid URL>".to_string(),
@@ -443,8 +446,10 @@ fn write_settings(dir: &Path, env: &serde_json::Value) -> anyhow::Result<Setting
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let guard = SettingsFile(path.clone());
     let mut file = opts.open(&path)?;
+    // Armed only once the file is ours, so a name clash never deletes
+    // someone else's file.
+    let guard = SettingsFile(path.clone());
     file.write_all(serde_json::to_string(&serde_json::json!({ "env": env }))?.as_bytes())?;
     Ok(guard)
 }
@@ -852,6 +857,10 @@ mod tests {
             "https://gw.example.invalid"
         );
         assert_eq!(display_url("not a url @ secret"), "<invalid URL>");
+        assert_eq!(
+            display_url("alice:secret@gw.example.invalid"),
+            "<invalid URL>"
+        );
     }
 
     #[test]
