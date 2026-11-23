@@ -41,6 +41,10 @@ const SCRUBBED_ENV: &[&str] = &[
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LaneCache {
+    /// The project the cache was written for; a cache of another project
+    /// (after a relink) is never used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -63,10 +67,18 @@ pub(crate) fn load_cache(workspace: &Path, agentic_root: &str) -> Option<LaneCac
     serde_json::from_str(&raw).ok()
 }
 
+/// The lane cache when it belongs to the workspace's linked project; a cache
+/// from before a relink (or one without a project id) is ignored.
+fn load_project_cache(workspace: &Path, agentic_root: &str) -> Option<LaneCache> {
+    let project_id = config::resolve_project_id(None, Some(workspace)).ok()?;
+    load_cache(workspace, agentic_root).filter(|c| c.project_id.as_deref() == Some(&project_id))
+}
+
 /// The lane cache content of an export, `None` without lane actors.
 fn cache_from_export(export: &AgentFileExportResponse) -> Option<LaneCache> {
     let actors = export.claude_lane_actors.clone().unwrap_or_default();
     (!actors.is_empty()).then(|| LaneCache {
+        project_id: Some(export.project_id.clone()).filter(|id| !id.is_empty()),
         base_url: export
             .claude_lane_base_url
             .clone()
@@ -155,6 +167,10 @@ fn gateway_url_allowed(url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url) else {
         return false;
     };
+    // Credentials in the URL would be printed and logged with it.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
     match parsed.scheme() {
         "https" => parsed.host_str().is_some(),
         "http" => matches!(
@@ -162,6 +178,24 @@ fn gateway_url_allowed(url: &str) -> bool {
             Some("localhost") | Some("127.0.0.1") | Some("[::1]")
         ),
         _ => false,
+    }
+}
+
+/// `url` for display: user name and password replaced by `***`.
+fn display_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut parsed) if !parsed.username().is_empty() || parsed.password().is_some() => {
+            let _ = parsed.set_username("***");
+            let _ = parsed.set_password(None);
+            parsed.to_string()
+        }
+        // `user:pw@host` without a scheme parses as an opaque URL whose
+        // "scheme" is the user name: no user info to mask, so hide it all.
+        Ok(parsed) if parsed.cannot_be_a_base() && url.contains('@') => "<invalid URL>".to_string(),
+        Ok(_) => url.to_string(),
+        // Unparseable: show it only when it cannot hide credentials.
+        Err(_) if url.contains('@') => "<invalid URL>".to_string(),
+        Err(_) => url.to_string(),
     }
 }
 
@@ -381,7 +415,7 @@ impl Drop for SettingsFile {
     }
 }
 
-fn write_settings(dir: &Path, slug: &str, env: &serde_json::Value) -> anyhow::Result<SettingsFile> {
+fn write_settings(dir: &Path, env: &serde_json::Value) -> anyhow::Result<SettingsFile> {
     use std::io::Write as _;
     // Files of runs that were killed before they could clean up.
     if let Ok(entries) = fs::read_dir(dir) {
@@ -398,16 +432,24 @@ fn write_settings(dir: &Path, slug: &str, env: &serde_json::Value) -> anyhow::Re
             }
         }
     }
-    let path = dir.join(format!("{slug}-{}.json", std::process::id()));
+    // The name does not depend on the actor slug, and the file is created
+    // exclusively (owner-only before the token is written).
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("run-{}-{nanos}.json", std::process::id()));
     let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let guard = SettingsFile(path.clone());
     let mut file = opts.open(&path)?;
+    // Armed only once the file is ours, so a name clash never deletes
+    // someone else's file.
+    let guard = SettingsFile(path.clone());
     file.write_all(serde_json::to_string(&serde_json::json!({ "env": env }))?.as_bytes())?;
     Ok(guard)
 }
@@ -421,7 +463,8 @@ async fn lane_for(
     project_id: &str,
     slug: &str,
 ) -> Option<LaneCache> {
-    let cached = load_cache(workspace, agentic_root);
+    let cached =
+        load_cache(workspace, agentic_root).filter(|c| c.project_id.as_deref() == Some(project_id));
     if cached
         .as_ref()
         .is_some_and(|c| c.actors.iter().any(|a| a.slug == slug))
@@ -432,6 +475,7 @@ async fn lane_for(
     let export = client.export_agent_files(project_id).await.ok()?;
     let _ = sync_cache(workspace, agentic_root, &export);
     load_cache(workspace, agentic_root)
+        .filter(|c| c.project_id.as_deref() == Some(project_id))
         .or_else(|| cache_from_export(&export))
         .or(cached)
 }
@@ -472,8 +516,9 @@ pub async fn run(
     };
     if !gateway_url_allowed(&base_url) {
         anyhow::bail!(
-            "refusing to send the project token to {base_url} ({source}): the gateway URL \
-             must use https (http only for localhost)"
+            "refusing to send the project token to {} ({source}): the gateway URL \
+             must use https (http only for localhost) and carry no credentials",
+            display_url(&base_url)
         );
     }
     // Never fall back to a claude.ai login: without the project token the
@@ -498,14 +543,14 @@ pub async fn run(
         );
     }
     let env = lane_env(actor, &base_url, &token, session_id.as_deref());
-    let settings = write_settings(&settings_dir()?, slug, &env)?;
+    let settings = write_settings(&settings_dir()?, &env)?;
     if prompt.is_none() {
         println!(
             "{} Actor {}: model {} via {} ({source}), token {}",
             style(">>").bold().cyan(),
             style(slug).bold(),
             gateway_model(&actor.profile_slug),
-            base_url,
+            display_url(&base_url),
             mask_token(&token)
         );
     }
@@ -598,7 +643,7 @@ pub(crate) fn apply_actor_panes(
     agentic_root: &str,
     leading_args: &mut [String],
 ) -> anyhow::Result<CheckResult> {
-    let actors = load_cache(workspace, agentic_root)
+    let actors = load_project_cache(workspace, agentic_root)
         .map(|c| c.actors)
         .unwrap_or_default();
     if actors.is_empty() {
@@ -660,7 +705,8 @@ fn model_ids(body: &serde_json::Value) -> Vec<String> {
 /// Local-lane rows for `nexus doctor claude`; empty without lane actors.
 pub(crate) async fn doctor_checks(workspace: &Path) -> Vec<(&'static str, CheckResult)> {
     let agentic_root = super::run::resolve_agentic_root(workspace);
-    let Some(cache) = load_cache(workspace, &agentic_root).filter(|c| !c.actors.is_empty()) else {
+    let Some(cache) = load_project_cache(workspace, &agentic_root).filter(|c| !c.actors.is_empty())
+    else {
         return Vec::new();
     };
     let mut rows = vec![(
@@ -674,20 +720,26 @@ pub(crate) async fn doctor_checks(workspace: &Path) -> Vec<(&'static str, CheckR
                 .join(", "),
         ),
     )];
-    let token = config::resolve_project_id(None, Some(workspace))
-        .ok()
-        .and_then(|id| resolve_project_token(&id));
+    let cache_base = cache.base_url.as_deref();
+    let token = cache.project_id.as_deref().and_then(resolve_project_token);
+    // Only a well-formed project token is ever sent to the gateway.
+    let token_ok = token
+        .as_deref()
+        .is_some_and(|t| nexus_core::auth::validate_project_token_format(t).is_ok());
     rows.push((
         "lane token",
         match &token {
-            Some(t) => CheckResult::Pass(format!("project token {}", mask_token(t))),
+            Some(t) if token_ok => CheckResult::Pass(format!("project token {}", mask_token(t))),
+            Some(t) => CheckResult::Fail(format!(
+                "{} is not a project token (nxs_proj_*); check NEXUS_PROJECT_TOKEN",
+                mask_token(t)
+            )),
             None => CheckResult::Warn("no project token; run nexus project link".into()),
         },
     ));
+    let token = token.filter(|_| token_ok);
     let env_url = std::env::var(GATEWAY_URL_ENV).ok();
-    let Some((base, source)) =
-        resolve_base_url(None, env_url.as_deref(), cache.base_url.as_deref())
-    else {
+    let Some((base, source)) = resolve_base_url(None, env_url.as_deref(), cache_base) else {
         rows.push((
             "lane gateway",
             CheckResult::Warn(format!(
@@ -700,7 +752,9 @@ pub(crate) async fn doctor_checks(workspace: &Path) -> Vec<(&'static str, CheckR
         rows.push((
             "lane gateway",
             CheckResult::Fail(format!(
-                "{base} ({source}): the gateway URL must use https (http only for localhost)"
+                "{} ({source}): the gateway URL must use https (http only for localhost) \
+                 and carry no credentials",
+                display_url(&base)
             )),
         ));
         return rows;
@@ -793,6 +847,20 @@ mod tests {
         assert!(!gateway_url_allowed("http://localhost.evil.invalid"));
         assert!(!gateway_url_allowed("ftp://gw.example.invalid"));
         assert!(!gateway_url_allowed("not a url"));
+        // Credentials in the URL are refused and never displayed.
+        assert!(!gateway_url_allowed("https://user:pw@gw.example.invalid"));
+        assert!(!gateway_url_allowed("https://user@gw.example.invalid"));
+        let shown = display_url("https://user:pw@gw.example.invalid/v1");
+        assert!(!shown.contains("pw") && !shown.contains("user"), "{shown}");
+        assert_eq!(
+            display_url("https://gw.example.invalid"),
+            "https://gw.example.invalid"
+        );
+        assert_eq!(display_url("not a url @ secret"), "<invalid URL>");
+        assert_eq!(
+            display_url("alice:secret@gw.example.invalid"),
+            "<invalid URL>"
+        );
     }
 
     #[test]
@@ -1016,7 +1084,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = serde_json::json!({"ANTHROPIC_AUTH_TOKEN": "nxs_proj_x"});
         let path = {
-            let f = write_settings(dir.path(), "spark-coder", &env).unwrap();
+            let f = write_settings(dir.path(), &env).unwrap();
             let raw = fs::read_to_string(&f.0).unwrap();
             assert!(raw.contains("\"env\""));
             #[cfg(unix)]
@@ -1048,6 +1116,8 @@ mod tests {
             Some("https://gw.example.invalid")
         );
         assert_eq!(cache.actors[0].profile_slug, "local-coder-main");
+        // The cache records the project it belongs to.
+        assert_eq!(cache.project_id.as_deref(), Some(e.project_id.as_str()));
         // Older backend or no lane actors: the cache goes away.
         assert_eq!(
             sync_cache(ws, ".nexus", &export(None, None)).unwrap(),

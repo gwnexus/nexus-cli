@@ -653,7 +653,17 @@ pub async fn run(
     // (`nexus login`), and every subsequent `nexus run` self-heals the rest.
     if let Some(token) = resolve_token() {
         let project_id = config::resolve_project_id(None, Some(&workspace)).ok();
-        match sync_mcp_credentials(&workspace, api_url, &token, project_id.as_deref()) {
+        // Runs git subprocesses: keep it off the async workers.
+        let sync = {
+            let (workspace, api_url) = (workspace.clone(), api_url.to_string());
+            tokio::task::spawn_blocking(move || {
+                sync_mcp_credentials(&workspace, &api_url, &token, project_id.as_deref())
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("credential sync task failed: {e}"))
+            .and_then(|r| r)
+        };
+        match sync {
             Ok(paths) if !paths.is_empty() => {
                 println!(
                     "   {} refreshed Nexus credentials in: {}",
@@ -912,7 +922,13 @@ fn sync_mcp_credentials(
         if nexus_core::config::trust::is_git_tracked(&path) {
             continue;
         }
-        let raw = fs::read_to_string(&path)?;
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn_mcp_sync_failed(rel, &e.to_string());
+                continue;
+            }
+        };
         let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) else {
             continue;
         };
@@ -930,14 +946,23 @@ fn sync_mcp_credentials(
             }
         }
         if dirty {
-            let out = serde_json::to_string_pretty(&root)?;
-            fs::write(&path, out + "\n")?;
-            super::shadow::protect_token_file(workspace, rel, &[rel]);
-            changed.push(rel.to_string());
+            let out = serde_json::to_string_pretty(&root)? + "\n";
+            // One file failing does not keep the other one stale.
+            match super::shadow::write_token_file(workspace, rel, &out, &[rel]) {
+                Ok(()) => changed.push(rel.to_string()),
+                Err(e) => warn_mcp_sync_failed(rel, &e.to_string()),
+            }
         }
     }
 
     Ok(changed)
+}
+
+fn warn_mcp_sync_failed(rel: &str, error: &str) {
+    println!(
+        "   {} could not sync Nexus credentials into {rel}: {error}",
+        style("!").bold().yellow()
+    );
 }
 
 // ---------------------------------------------------------------------------
