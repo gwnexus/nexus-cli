@@ -552,6 +552,14 @@ fn plan_claude(
         l
     });
     let mut keep_any_lock_entry = false;
+    // A linked mixed file is never rewritten (see `apply`): plan it as
+    // kept, and keep what its later cleanup needs (the lock records, and
+    // the hook adapters its registrations point to).
+    let linked = |rel: &str| {
+        through_symlink(workspace, rel)
+            || fs::symlink_metadata(workspace.join(rel)).is_ok_and(|m| m.file_type().is_symlink())
+    };
+    let settings_linked = linked(".claude/settings.json");
 
     let remove_or_keep = |path: String, pristine: bool| {
         if pristine || ctx.force {
@@ -599,6 +607,18 @@ fn plan_claude(
                 continue;
             }
             planned.insert(entry.target_path.clone());
+            if settings_linked {
+                // Its registration stays in the linked settings file.
+                if let Some(kl) = kept_lock.as_mut() {
+                    kl.hooks.insert(entry.target_path.clone(), entry.clone());
+                    keep_any_lock_entry = true;
+                }
+                actions.push(Action::Keep {
+                    path: entry.target_path.clone(),
+                    reason: KeepReason::Linked,
+                });
+                continue;
+            }
             let Ok(bytes) = fs::read(workspace.join(&entry.target_path)) else {
                 continue;
             };
@@ -685,7 +705,20 @@ fn plan_claude(
 
     // .claude/settings.json: only the Nexus-managed parts.
     let settings_rel = ".claude/settings.json";
-    if !ctx.keep.contains(settings_rel) {
+    if settings_linked && !ctx.keep.contains(settings_rel) {
+        if workspace.join(settings_rel).exists() {
+            actions.push(Action::Keep {
+                path: settings_rel.into(),
+                reason: KeepReason::Linked,
+            });
+        }
+        if let (Some(kl), Some(l)) = (kept_lock.as_mut(), lock.as_ref()) {
+            if l.settings.is_some() {
+                kl.settings = l.settings.clone();
+                keep_any_lock_entry = true;
+            }
+        }
+    } else if !ctx.keep.contains(settings_rel) {
         if let Some(settings) = fs::read_to_string(workspace.join(settings_rel))
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
@@ -709,7 +742,12 @@ fn plan_claude(
     }
 
     // .mcp.json: only the Nexus servers.
-    if !ctx.keep.contains(".mcp.json") {
+    if linked(".mcp.json") && workspace.join(".mcp.json").exists() {
+        actions.push(Action::Keep {
+            path: ".mcp.json".into(),
+            reason: KeepReason::Linked,
+        });
+    } else if !ctx.keep.contains(".mcp.json") {
         if let Some(mcp) = fs::read_to_string(workspace.join(".mcp.json"))
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
@@ -734,7 +772,18 @@ fn plan_claude(
 
     // Root CLAUDE.md: the managed block, and the bootstrap template when
     // nothing else remains.
-    if !ctx.keep.contains("CLAUDE.md") {
+    if linked("CLAUDE.md") && workspace.join("CLAUDE.md").exists() {
+        actions.push(Action::Keep {
+            path: "CLAUDE.md".into(),
+            reason: KeepReason::Linked,
+        });
+        if let (Some(kl), Some(l)) = (kept_lock.as_mut(), lock.as_ref()) {
+            if l.claude_md_block_sha256.is_some() {
+                kl.claude_md_block_sha256 = l.claude_md_block_sha256.clone();
+                keep_any_lock_entry = true;
+            }
+        }
+    } else if !ctx.keep.contains("CLAUDE.md") {
         if let Ok(content) = fs::read_to_string(workspace.join("CLAUDE.md")) {
             // Either wording may have been written, depending on whether the
             // directives rules file was exported at creation time.
@@ -1509,6 +1558,34 @@ mod tests {
             fs::read_to_string(outside.path().join("mcp.json")).unwrap(),
             "{\"mcpServers\":{}}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_claude_cleanup_with_linked_settings_keeps_hooks_and_lock_records() {
+        let dir = temp_dir("cc-linked-settings");
+        claude_projection(&dir);
+        // The operator keeps settings elsewhere in the workspace and links it.
+        fs::create_dir_all(dir.join("user")).unwrap();
+        fs::rename(
+            dir.join(".claude/settings.json"),
+            dir.join("user/settings.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../user/settings.json", dir.join(".claude/settings.json"))
+            .unwrap();
+        let before = read(&dir, "user/settings.json");
+        let report = run(&dir, Projection::Claude, &ctx(true));
+        assert_eq!(read(&dir, "user/settings.json"), before);
+        assert!(dir.join(".claude/hooks/nexus-session-guard.mjs").exists());
+        assert!(report
+            .kept
+            .iter()
+            .any(|(p, r)| p == ".claude/settings.json" && *r == KeepReason::Linked));
+        let lock = ccx::load_lock(&dir, ".nexus").unwrap();
+        assert!(lock.settings.is_some());
+        assert_eq!(lock.hooks.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
