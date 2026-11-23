@@ -127,8 +127,13 @@ try_binary_download() {
 
   if [ "$http_code" != "200" ]; then
     rm -f "$release_file"
-    warn "No release found (HTTP ${http_code}) -- falling back to source build"
-    return 1
+    # Only "no release published" falls back to a build; any other
+    # failure (auth, server, network) stops.
+    if [ "$http_code" = "404" ]; then
+      warn "No release found (HTTP 404) -- falling back to source build"
+      return 1
+    fi
+    die "Release lookup failed (HTTP ${http_code}); nothing was installed"
   fi
 
   release_json="$(cat "$release_file")"
@@ -141,7 +146,7 @@ try_binary_download() {
     | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-for a in data.get('assets', []):
+for a in data['assets']:
     if a['name'] == '${asset_name}':
         print(a['id'])
         break
@@ -176,7 +181,7 @@ for a in data.get('assets', []):
     | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-for a in data.get('assets', []):
+for a in data['assets']:
     if a['name'] == '${asset_name}.sha256':
         print(a['id'])
         break
@@ -192,29 +197,34 @@ for a in data.get('assets', []):
     || die "Download of ${asset_name}.sha256 failed"
 
   info "Verifying SHA256 checksum..."
-  # The checksum tools only check the files the list names: it must name
-  # this archive.
-  awk -v name="${asset_name}" \
-    '$2 == name || $2 == "*" name { found = 1 } END { exit !found }' \
-    "${tmp_dir}/${asset_name}.sha256" \
+  # The archive is hashed here and compared with the one line of the
+  # checksum file that names it (comment lines ignored); other lines play
+  # no part.
+  local expected actual
+  expected="$(awk -v name="${asset_name}" \
+    '!/^#/ && ($2 == name || $2 == "*" name) { print tolower($1); exit }' \
+    "${tmp_dir}/${asset_name}.sha256")" \
+    || die "Cannot read the checksum file"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] \
     || die "Checksum file does not list ${asset_name}; nothing was installed"
-  cd "$tmp_dir" || die "Cannot enter ${tmp_dir}"
   if command -v sha256sum &>/dev/null; then
-    sha256sum -c "${asset_name}.sha256" \
-      || die "Checksum verification of ${asset_name} failed; nothing was installed"
+    actual="$(sha256sum "${tmp_dir}/${asset_name}" | awk '{ print tolower($1) }')" \
+      || die "Cannot hash ${asset_name}"
   elif command -v shasum &>/dev/null; then
-    shasum -a 256 -c "${asset_name}.sha256" \
-      || die "Checksum verification of ${asset_name} failed; nothing was installed"
+    actual="$(shasum -a 256 "${tmp_dir}/${asset_name}" | awk '{ print tolower($1) }')" \
+      || die "Cannot hash ${asset_name}"
   else
     die "Neither sha256sum nor shasum found; cannot verify the download"
   fi
-  cd - >/dev/null || die "Cannot leave ${tmp_dir}"
+  [ "$actual" = "$expected" ] \
+    || die "Checksum verification of ${asset_name} failed; nothing was installed"
 
   tar -tzf "${tmp_dir}/${asset_name}" >/dev/null \
     || die "Archive ${asset_name} is unreadable"
 
   # Extract: tar.gz contains nexus-<target>/nexus
-  tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
+  tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir" \
+    || die "Extracting ${asset_name} failed; nothing was installed"
 
   local extracted_binary="${tmp_dir}/nexus-${TARGET}/${BINARY_NAME}"
   if [ ! -f "$extracted_binary" ]; then
