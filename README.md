@@ -176,7 +176,7 @@ nexus project link --expires 30d           # set a lifetime (30d / 12h / 2w / IS
 nexus project rotate                        # rotate with zero-downtime overlap
 nexus project rotate --finalize             # revoke the previous token after overlap
 nexus project status                        # list issued tokens (never prints secrets)
-nexus project unlink                        # revoke and clear the local token
+nexus project unlink                        # revoke and clear the local token (run again to retry unconfirmed revocations)
 ```
 
 **Existing links:** run `nexus project link` in any already-linked workspace.
@@ -524,7 +524,9 @@ pre-launch check.
 
 **Sentry live check.** With the Sentry developer tool selected,
 `nexus preflight` calls `https://<host>/api/0/organizations/<org>/` with the
-local `SENTRY_ACCESS_TOKEN` (5 seconds, no redirects). The token is never
+local `SENTRY_ACCESS_TOKEN` (5 seconds, no redirects). When the hub names
+another variable, it is read only if its name starts with `SENTRY_`, so no
+other secret can be sent this way. The token is never
 sent to the Nexus API, and only to `sentry.io`, `*.sentry.io` or hosts you
 list in `NEXUS_TRUSTED_SENTRY_HOSTS` (comma-separated, exact `host[:port]`
 or `*.domain`); for any other host the check is skipped with a warning. An

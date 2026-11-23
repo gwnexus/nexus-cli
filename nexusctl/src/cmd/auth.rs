@@ -373,16 +373,49 @@ const MASK_WIDTH: usize = 40;
 /// `printf '%s' "$TOKEN" | nexus login`).
 fn read_token() -> anyhow::Result<String> {
     use std::io::IsTerminal;
-    let term = console::Term::stdout();
-    let token = if std::io::stdin().is_terminal() && term.is_term() {
-        read_masked(&term)?
-    } else {
-        read_line()?
+    let (stdout, stderr) = (console::Term::stdout(), console::Term::stderr());
+    let token = match token_input(
+        std::io::stdin().is_terminal(),
+        stdout.is_term(),
+        stderr.is_term(),
+    ) {
+        TokenInput::Masked(Stream::Stdout) => read_masked(&stdout)?,
+        TokenInput::Masked(Stream::Stderr) => read_masked(&stderr)?,
+        TokenInput::Piped => read_line()?,
+        TokenInput::Refuse => anyhow::bail!(
+            "refusing to read the token from the terminal without a terminal to mask it on; \
+             pipe it instead: printf '%s' \"$TOKEN\" | nexus login"
+        ),
     };
     if token.is_empty() {
         anyhow::bail!("No token provided");
     }
     Ok(token)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TokenInput {
+    Masked(Stream),
+    Piped,
+    Refuse,
+}
+
+/// How to read the token: typed on a terminal it is always masked (the
+/// prompt goes to whichever of stdout or stderr is a terminal, so a
+/// redirected stdout never turns echo back on); piped input is read as is.
+fn token_input(stdin_tty: bool, stdout_tty: bool, stderr_tty: bool) -> TokenInput {
+    match (stdin_tty, stdout_tty, stderr_tty) {
+        (false, _, _) => TokenInput::Piped,
+        (true, true, _) => TokenInput::Masked(Stream::Stdout),
+        (true, false, true) => TokenInput::Masked(Stream::Stderr),
+        (true, false, false) => TokenInput::Refuse,
+    }
 }
 
 /// Prompt text for `len` typed characters.
@@ -566,6 +599,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink"), "{err}");
+    }
+
+    #[test]
+    fn test_token_input_never_echoes_a_typed_token() {
+        assert_eq!(token_input(false, true, true), TokenInput::Piped);
+        assert_eq!(
+            token_input(true, true, false),
+            TokenInput::Masked(Stream::Stdout)
+        );
+        // stdout redirected: still masked, prompt on stderr.
+        assert_eq!(
+            token_input(true, false, true),
+            TokenInput::Masked(Stream::Stderr)
+        );
+        assert_eq!(token_input(true, false, false), TokenInput::Refuse);
     }
 
     #[test]

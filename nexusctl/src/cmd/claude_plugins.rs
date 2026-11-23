@@ -242,8 +242,30 @@ pub fn marketplace_source_arg(entry: &serde_json::Value) -> Option<String> {
         "directory" | "file" => source.get("path")?.as_str()?.to_string(),
         _ => return None,
     };
-    // Passed to `claude` as an argument: never as an option.
-    (!arg.is_empty() && !arg.starts_with('-') && !arg.chars().any(char::is_control)).then_some(arg)
+    // Passed to `claude` as an argument: never as an option, and never
+    // with credentials, which would be visible in the process list.
+    (!arg.is_empty()
+        && !arg.starts_with('-')
+        && !arg.chars().any(char::is_control)
+        && !source_has_credentials(&arg))
+    .then_some(arg)
+}
+
+/// Whether a marketplace source carries credentials: a password in any
+/// URL, a user name in an http(s) URL, or `user:secret@` in the scp-like
+/// git form. `git@host:org/repo` (an SSH user, no secret) is fine.
+fn source_has_credentials(arg: &str) -> bool {
+    if arg.contains("://") {
+        return match reqwest::Url::parse(arg) {
+            Ok(u) => {
+                u.password().is_some()
+                    || (matches!(u.scheme(), "http" | "https") && !u.username().is_empty())
+            }
+            Err(_) => arg.contains('@'),
+        };
+    }
+    arg.split_once('@')
+        .is_some_and(|(user, _)| user.contains(':'))
 }
 
 /// Parse `claude plugin list --json` (an array of `{ id, scope,
@@ -862,6 +884,22 @@ pub fn print_report(report: &SyncReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_marketplace_source_rejects_credentials() {
+        let src = |kind: &str, key: &str, value: &str| {
+            marketplace_source_arg(&serde_json::json!({"source": {"source": kind, key: value}}))
+        };
+        assert!(src("git", "url", "https://user:pw@git.example.invalid/m.git").is_none());
+        assert!(src("git", "url", "https://tok@git.example.invalid/m.git").is_none());
+        assert!(src("url", "url", "https://u:p@m.example.invalid/x.json").is_none());
+        assert!(src("git", "url", "user:pw@git.example.invalid:org/m.git").is_none());
+        assert!(src("git", "url", "ssh://git:pw@git.example.invalid/m.git").is_none());
+        // SSH users without a secret stay allowed.
+        assert!(src("git", "url", "git@git.example.invalid:org/m.git").is_some());
+        assert!(src("git", "url", "ssh://git@git.example.invalid/m.git").is_some());
+        assert!(src("git", "url", "https://git.example.invalid/m.git").is_some());
+    }
     use std::cell::RefCell;
 
     /// Scripted `claude`: answers by argument prefix, records every call.

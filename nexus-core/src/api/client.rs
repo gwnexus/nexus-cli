@@ -62,6 +62,14 @@ impl NexusClient {
     ///
     /// Enforces HTTPS for the base URL unless it targets localhost.
     pub fn new(base_url: &str, token: Option<String>) -> Result<Self, Error> {
+        // Credentials in the URL would show up in errors and logs; the API
+        // authenticates with the bearer token only.
+        if crate::secret::url_has_credentials(base_url) {
+            return Err(Error::Config(format!(
+                "API URL must not contain a user name or password: {}",
+                crate::secret::redact_url(base_url)
+            )));
+        }
         // Allow http for localhost/127.0.0.1 during development
         let is_local = match Url::parse(base_url) {
             Ok(u) => matches!(u.host_str(), Some("localhost") | Some("127.0.0.1")),
@@ -70,7 +78,7 @@ impl NexusClient {
         if !is_local && !base_url.starts_with("https://") {
             return Err(Error::Config(format!(
                 "API URL must use HTTPS: {}",
-                base_url
+                crate::secret::redact_url(base_url)
             )));
         }
 

@@ -1,7 +1,7 @@
 //! Command dispatcher and implementations.
 
 mod actors;
-mod api_trust;
+pub(crate) mod api_trust;
 pub(crate) mod auth;
 pub(crate) mod ccx;
 mod classification;

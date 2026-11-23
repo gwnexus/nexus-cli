@@ -26,15 +26,19 @@ fn sends_token(command: &Command) -> bool {
     )
 }
 
-/// The unapproved repository-pinned API URL in effect for `cli`, if any.
-pub(crate) fn unapproved(cli: &Cli) -> Option<UnapprovedApiUrl> {
-    let env_url = std::env::var("NEXUS_API_URL")
-        .ok()
-        .filter(|v| !v.is_empty());
-    if cli.api_url.is_some() || env_url.is_some() {
-        return None;
-    }
-    let effective = Config::load_effective_with_provenance(None).ok()?;
+/// The API URL the trust check approved for this process. Commands resolve
+/// their URL through [`crate::Cli::resolve_api_url`], which prefers this
+/// value over a fresh config read, so a config file changed after the check
+/// cannot redirect the token to an unchecked host.
+static CHECKED_API_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The API URL checked by [`guard`], when the config layer supplied it.
+pub(crate) fn checked_api_url() -> Option<&'static str> {
+    CHECKED_API_URL.get().map(String::as_str)
+}
+
+/// The unapproved repository-pinned API URL in `effective`, if any.
+fn unapproved(effective: &nexus_core::config::EffectiveConfig) -> Option<UnapprovedApiUrl> {
     if effective.api_url_source != ConfigSource::Local {
         return None;
     }
@@ -84,7 +88,19 @@ pub(crate) fn guard(cli: &Cli) -> anyhow::Result<()> {
     if !sends_token(&cli.command) {
         return Ok(());
     }
-    let Some(u) = unapproved(cli) else {
+    // An explicit URL (flag or environment) is the operator's own choice.
+    let env_url = std::env::var("NEXUS_API_URL")
+        .ok()
+        .filter(|v| !v.is_empty());
+    if cli.api_url.is_some() || env_url.is_some() {
+        return Ok(());
+    }
+    // Read the config once: the URL checked here is the URL used later.
+    let Ok(effective) = Config::load_effective_with_provenance(None) else {
+        return Ok(());
+    };
+    let Some(u) = unapproved(&effective) else {
+        let _ = CHECKED_API_URL.set(effective.config.api_url.clone());
         return Ok(());
     };
     eprintln!(
@@ -116,6 +132,7 @@ pub(crate) fn guard(cli: &Cli) -> anyhow::Result<()> {
         _ => u.origin.clone(),
     };
     std::env::set_var(TRUSTED_API_URLS_ENV, list);
+    let _ = CHECKED_API_URL.set(effective.config.api_url.clone());
     Ok(())
 }
 

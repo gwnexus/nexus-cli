@@ -71,12 +71,17 @@ impl std::fmt::Debug for ProjectTokenEntry {
 pub struct ProjectTokenStore {
     #[serde(default)]
     pub projects: HashMap<String, ProjectTokenEntry>,
+    /// Token ids per project whose revocation the hub did not confirm
+    /// (`nexus project unlink` retries them). Ids only, never token values.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub pending_revocations: HashMap<String, Vec<String>>,
 }
 
 impl std::fmt::Debug for ProjectTokenStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProjectTokenStore")
             .field("projects", &self.projects.keys().collect::<Vec<_>>())
+            .field("pending_revocations", &self.pending_revocations)
             .finish()
     }
 }
