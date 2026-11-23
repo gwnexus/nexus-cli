@@ -83,3 +83,32 @@ fn test_store_path_uses_config_dir() {
         s
     );
 }
+
+/// Serve one HTTP response with an empty body and the given status.
+async fn empty_body_stub(status: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = sock.read(&mut buf).await;
+        let resp = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        sock.write_all(resp.as_bytes()).await.unwrap();
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[tokio::test]
+async fn test_revoke_accepts_an_empty_success_body() {
+    let url = empty_body_stub("204 No Content").await;
+    let client = nexus_core::api::NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
+    client.revoke_inference_token("p1", "tok-1").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_list_rejects_an_empty_success_body() {
+    let url = empty_body_stub("200 OK").await;
+    let client = nexus_core::api::NexusClient::new(&url, Some("nxs_pat_test".into())).unwrap();
+    assert!(client.list_inference_tokens("p1").await.is_err());
+}

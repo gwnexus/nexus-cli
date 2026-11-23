@@ -110,6 +110,17 @@ pub(crate) fn evaluate(
 /// Whether the Sentry token may be sent to `host` (`host[:port]`, no
 /// scheme): `sentry.io` and `*.sentry.io` without a port, or an entry of
 /// `trusted` (exact `host[:port]` or `*.domain`).
+/// Whether the live check may read `name`: a `SENTRY_` variable (by default
+/// `SENTRY_ACCESS_TOKEN`) with a plain name.
+fn sentry_token_env_allowed(name: &str) -> bool {
+    name.strip_prefix("SENTRY_").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    })
+}
+
 pub(crate) fn sentry_host_trusted(host: &str, trusted: Option<&str>) -> bool {
     let host = host.trim().to_ascii_lowercase();
     if host.is_empty() {
@@ -193,6 +204,14 @@ pub(crate) async fn sentry_live(
             "Sentry live check skipped: no organization set in the Hub".into(),
         ));
     };
+    // The Hub names the variable; only a Sentry credential may leave the
+    // machine for this probe, never an arbitrary secret from the shell.
+    if !sentry_token_env_allowed(&s.token_env) {
+        return Some(CheckResult::Warn(format!(
+            "Sentry live check skipped: '{}' is not a Sentry token variable (SENTRY_*)",
+            clean(&s.token_env, 60)
+        )));
+    }
     let Some(token) = local_value(&s.token_env, files) else {
         return Some(CheckResult::Warn(format!(
             "Sentry live check skipped: {} not set",
@@ -266,6 +285,16 @@ pub(crate) async fn checks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sentry_token_env_allowed() {
+        assert!(sentry_token_env_allowed("SENTRY_ACCESS_TOKEN"));
+        assert!(sentry_token_env_allowed("SENTRY_AUTH_TOKEN"));
+        assert!(!sentry_token_env_allowed("GITHUB_TOKEN"));
+        assert!(!sentry_token_env_allowed("NEXUS_PRIVATE_TOKEN"));
+        assert!(!sentry_token_env_allowed("SENTRY_"));
+        assert!(!sentry_token_env_allowed("SENTRY_x"));
+    }
     use nexus_core::api::{DevTools, PluginConfigCheck, PluginEnvCheck};
 
     fn resp(checks: Option<Vec<PluginEnvCheck>>) -> McpPreflightResponse {
@@ -449,9 +478,18 @@ mod tests {
     async fn test_live_check_skips_without_token_or_org() {
         let files = HashMap::new();
         let mut s = sentry("sentry.io");
-        s.token_env = "NEXUS_TEST_SENTRY_TOKEN_UNSET_42".into();
+        s.token_env = "SENTRY_NEXUS_TEST_TOKEN_UNSET_42".into();
         let out = sentry_live(Some(&s), &files).await.unwrap();
         assert!(out.message().contains("not set"));
+        // A variable that is not a Sentry token is never read.
+        s.token_env = "GITHUB_TOKEN".into();
+        let out = sentry_live(Some(&s), &files).await.unwrap();
+        assert!(
+            out.message().contains("not a Sentry token"),
+            "{}",
+            out.message()
+        );
+        s.token_env = "SENTRY_NEXUS_TEST_TOKEN_UNSET_42".into();
         s.organization_slug = None;
         let out = sentry_live(Some(&s), &files).await.unwrap();
         assert!(out.message().contains("no organization"));

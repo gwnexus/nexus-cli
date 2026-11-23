@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **The API URL checked for trust is the one used.** The trust check reads the project config once and every command uses that URL, so a config changed after the check cannot send the token to an unchecked host.
+- **Typed tokens are always masked.** `nexus login` masks typed input also when stdout is redirected (the prompt moves to stderr) and refuses to read from a terminal it cannot mask on; piped input works as before.
+- **No credentials in URLs.** The API client refuses an API URL with a user name or password and never prints one; marketplace sources with credentials are rejected before they reach `claude` arguments (`git@host:repo` stays allowed).
+- **The Sentry live check reads only `SENTRY_*` variables**, so a hub setting cannot make it send another secret.
+- **`nexus project unlink` keeps unconfirmed revocations.** When the hub does not confirm a revocation, the token id is kept (ids only) and the next `unlink` retries it; the command reports the incomplete remote cleanup instead of succeeding.
+- **Zellij config backups are private and never overwritten.** A backup is created owner-only with a new name when one exists, and an unreadable config is no longer treated as missing.
 - **Credential and state files are written atomically and owner-only.** Credentials, project tokens, the global config and the Dispatch runner files go through a new temporary file (created exclusively with mode 0600) that replaces the old file in one step. An existing file with wider permissions no longer keeps them, a symlink at the destination is replaced instead of written through, and a failed save leaves the previous file intact.
 - **Tokens no longer appear in debug output.** The API token echoed by the export, the runner registration token and project inference tokens print as `[REDACTED]` in `Debug` output.
 - **`nexus login` refuses unsafe local destinations.** Without `--global`, login stops before asking for the token when `.nexus/credentials.toml` is tracked by git or `.nexus` is a symlink, and names the fix. A local credentials file whose loose permissions cannot be tightened to 0600 is ignored with a warning instead of being read.

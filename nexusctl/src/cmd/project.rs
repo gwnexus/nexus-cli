@@ -233,6 +233,28 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
     let entry = match store.get(&project_id).cloned() {
         Some(e) => e,
         None => {
+            // Revocations an earlier unlink could not confirm.
+            if store.pending_revocations.contains_key(&project_id) {
+                let client = NexusClient::new(api_url, Some(require_token()?))?;
+                let ids = store
+                    .pending_revocations
+                    .remove(&project_id)
+                    .unwrap_or_default();
+                let failed = revoke_all(&client, &project_id, &ids).await;
+                // Keep the unconfirmed ids before touching the workspace, so
+                // a failed cleanup there loses nothing.
+                record_pending(&mut store, &project_id, failed.clone());
+                store.save()?;
+                if owns_workspace && workspace_env_token(&workspace)?.is_some() {
+                    clear_env_token(&workspace)?;
+                }
+                report_unconfirmed(&failed)?;
+                println!(
+                    "{} Pending revocations confirmed.",
+                    style("OK").bold().green()
+                );
+                return Ok(());
+            }
             // An earlier unlink may have stopped before the workspace was
             // cleared; finish that part.
             if owns_workspace && workspace_env_token(&workspace)?.is_some() {
@@ -251,31 +273,27 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
         }
     };
 
-    // Best-effort revocation: clear local state even if the API call fails.
+    // Local state is cleared even when a revocation fails; unconfirmed ids
+    // are kept for the next unlink, which retries them.
     let token = require_token()?;
     let client = NexusClient::new(api_url, Some(token))?;
-
-    for token_id in [
+    // Ids an earlier unlink could not confirm are retried with these.
+    let mut ids: Vec<String> = store
+        .pending_revocations
+        .remove(&project_id)
+        .unwrap_or_default();
+    for id in [
         Some(entry.token_id.clone()),
         entry.previous_token_id.clone(),
     ]
     .into_iter()
     .flatten()
     {
-        match client.revoke_inference_token(&project_id, &token_id).await {
-            Ok(()) => println!(
-                "   {} Revoked token {}",
-                style("+").bold().green(),
-                style(&token_id).dim()
-            ),
-            Err(e) => println!(
-                "   {} Could not revoke {} ({}). Clearing locally anyway.",
-                style("!").bold().yellow(),
-                style(&token_id).dim(),
-                e
-            ),
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
+    let failed = revoke_all(&client, &project_id, &ids).await;
 
     // Workspace first: when it fails, the store entry stays and a retry
     // can finish the cleanup.
@@ -285,7 +303,7 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
         print_workspace_skipped(&project_id);
     }
     store.remove(&project_id);
-    store.save()?;
+    finish_revocations(&mut store, &project_id, failed)?;
 
     println!();
     println!(
@@ -294,6 +312,64 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
     );
 
     Ok(())
+}
+
+/// Revoke each id; returns the ids whose revocation was not confirmed.
+async fn revoke_all(client: &NexusClient, project_id: &str, ids: &[String]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for token_id in ids {
+        match client.revoke_inference_token(project_id, token_id).await {
+            Ok(()) => println!(
+                "   {} Revoked token {}",
+                style("+").bold().green(),
+                style(token_id).dim()
+            ),
+            Err(e) => {
+                println!(
+                    "   {} Could not revoke {} ({}).",
+                    style("!").bold().yellow(),
+                    style(token_id).dim(),
+                    e
+                );
+                failed.push(token_id.clone());
+            }
+        }
+    }
+    failed
+}
+
+/// Record unconfirmed revocations and save the store; an error tells the
+/// caller the remote side is not done yet.
+fn finish_revocations(
+    store: &mut ProjectTokenStore,
+    project_id: &str,
+    failed: Vec<String>,
+) -> anyhow::Result<()> {
+    record_pending(store, project_id, failed.clone());
+    store.save()?;
+    report_unconfirmed(&failed)
+}
+
+/// An error when revocations are still unconfirmed (local state is done).
+fn report_unconfirmed(failed: &[String]) -> anyhow::Result<()> {
+    if !failed.is_empty() {
+        anyhow::bail!(
+            "the hub did not confirm the revocation of {} token(s); local state is cleared, \
+             run nexus project unlink again to retry",
+            failed.len()
+        );
+    }
+    Ok(())
+}
+
+fn record_pending(store: &mut ProjectTokenStore, project_id: &str, failed: Vec<String>) {
+    if failed.is_empty() {
+        store.pending_revocations.remove(project_id);
+    } else {
+        store
+            .pending_revocations
+            .insert(project_id.to_string(), failed);
+    }
 }
 
 /// Run `nexus project status`: list issued tokens for the linked project.
@@ -821,6 +897,19 @@ fn remove_env_var(content: &str, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unconfirmed_revocations_are_kept_for_retry() {
+        let mut store = ProjectTokenStore::default();
+        record_pending(&mut store, "p1", vec!["tok-a".into()]);
+        assert_eq!(store.pending_revocations["p1"], ["tok-a"]);
+        let raw = serde_json::to_string(&store).unwrap();
+        let back: ProjectTokenStore = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.pending_revocations["p1"], ["tok-a"]);
+        record_pending(&mut store, "p1", Vec::new());
+        assert!(store.pending_revocations.is_empty());
+        assert!(!serde_json::to_string(&store).unwrap().contains("pending"));
+    }
 
     #[test]
     fn test_sanitize_runtime_id() {

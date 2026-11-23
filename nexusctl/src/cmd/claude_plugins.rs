@@ -242,8 +242,47 @@ pub fn marketplace_source_arg(entry: &serde_json::Value) -> Option<String> {
         "directory" | "file" => source.get("path")?.as_str()?.to_string(),
         _ => return None,
     };
-    // Passed to `claude` as an argument: never as an option.
-    (!arg.is_empty() && !arg.starts_with('-') && !arg.chars().any(char::is_control)).then_some(arg)
+    // Passed to `claude` as an argument: never as an option, and never
+    // with credentials, which would be visible in the process list.
+    (!arg.is_empty()
+        && !arg.starts_with('-')
+        && !arg.chars().any(char::is_control)
+        && !source_has_credentials(kind, &arg))
+    .then_some(arg)
+}
+
+/// Whether a marketplace source carries credentials. Every `scheme://`
+/// value is checked as a URL, also when declared as `directory` or `file`;
+/// a plain local path never is (a `:` or `@` there is path text). Otherwise:
+/// a `scheme://` URL with a password, or with a user name over http(s);
+/// any other form (scp-like `user@host:path`, `owner/repo`) with a
+/// `user:secret@` part. `git@host:org/repo` and `ssh://git@host/...` (an
+/// SSH user without a secret) are fine.
+fn source_has_credentials(kind: &str, arg: &str) -> bool {
+    if has_url_scheme(arg) {
+        return match reqwest::Url::parse(arg) {
+            Ok(u) => {
+                u.password().is_some()
+                    || (matches!(u.scheme(), "http" | "https") && !u.username().is_empty())
+            }
+            Err(_) => arg.contains('@'),
+        };
+    }
+    // Local paths without a scheme: a `:` or `@` there is path text.
+    if matches!(kind, "directory" | "file") {
+        return false;
+    }
+    arg.split_once('@')
+        .is_some_and(|(user, _)| user.contains(':'))
+}
+
+/// Whether `arg` starts with `scheme://` (RFC 3986 scheme characters).
+fn has_url_scheme(arg: &str) -> bool {
+    arg.split_once("://").is_some_and(|(scheme, _)| {
+        let mut chars = scheme.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
 }
 
 /// Parse `claude plugin list --json` (an array of `{ id, scope,
@@ -862,6 +901,33 @@ pub fn print_report(report: &SyncReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_marketplace_source_rejects_credentials() {
+        let src = |kind: &str, key: &str, value: &str| {
+            marketplace_source_arg(&serde_json::json!({"source": {"source": kind, key: value}}))
+        };
+        assert!(src("git", "url", "https://user:pw@git.example.invalid/m.git").is_none());
+        assert!(src("git", "url", "https://tok@git.example.invalid/m.git").is_none());
+        assert!(src("url", "url", "https://u:p@m.example.invalid/x.json").is_none());
+        assert!(src("git", "url", "user:pw@git.example.invalid:org/m.git").is_none());
+        assert!(src("git", "url", "ssh://git:pw@git.example.invalid/m.git").is_none());
+        // SSH users without a secret stay allowed.
+        assert!(src("git", "url", "git@git.example.invalid:org/m.git").is_some());
+        assert!(src("git", "url", "ssh://git@git.example.invalid/m.git").is_some());
+        assert!(src("git", "url", "https://git.example.invalid/m.git").is_some());
+        // `://` later in an scp-like source does not make it a URL.
+        assert!(src(
+            "git",
+            "url",
+            "user:pw@git.example.invalid:org/https://m.git"
+        )
+        .is_none());
+        // Local paths are path text, not credentials.
+        assert!(src("directory", "path", "./marketplaces/team:tools@local").is_some());
+        // A URL declared as a path is still checked.
+        assert!(src("directory", "path", "https://u:p@m.example.invalid/m.git").is_none());
+    }
     use std::cell::RefCell;
 
     /// Scripted `claude`: answers by argument prefix, records every call.

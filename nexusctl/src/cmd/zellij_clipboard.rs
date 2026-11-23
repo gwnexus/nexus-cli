@@ -367,10 +367,45 @@ pub(crate) fn apply_fix(current: Option<&str>, line: &str) -> Option<String> {
     Some(lines.join("\n") + "\n")
 }
 
+/// Write `text` to a new backup file at `base` (or `base.1`, `base.2`, ...
+/// when that exists): created exclusively and owner-only, so an earlier
+/// backup is never overwritten and a private config stays private.
+fn write_backup(base: &Path, text: &str) -> anyhow::Result<PathBuf> {
+    use std::io::Write as _;
+    for n in 0..100u32 {
+        let candidate = if n == 0 {
+            base.to_path_buf()
+        } else {
+            PathBuf::from(format!("{}.{n}", base.display()))
+        };
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&candidate) {
+            Ok(mut f) => {
+                f.write_all(text.as_bytes())?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    anyhow::bail!("no free backup name next to {}", base.display())
+}
+
 /// Write the fix: back up an existing file to `config.kdl.bak-<date>`
 /// first. Returns the backup path, if one was made.
 pub(crate) fn write_fix(path: &Path, line: &str) -> anyhow::Result<Option<PathBuf>> {
-    let current = std::fs::read_to_string(path).ok();
+    // Only a missing file is "no config"; an unreadable one is never replaced.
+    let current = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(anyhow::anyhow!("could not read {}: {e}", path.display())),
+    };
     let Some(next) = apply_fix(current.as_deref(), line) else {
         return Ok(None);
     };
@@ -383,9 +418,7 @@ pub(crate) fn write_fix(path: &Path, line: &str) -> anyhow::Result<Option<PathBu
                     .unwrap_or_else(|| "config.kdl".into()),
                 today()
             );
-            let backup = path.with_file_name(name);
-            std::fs::write(&backup, text)?;
-            Some(backup)
+            Some(write_backup(&path.with_file_name(name), text)?)
         }
         None => {
             if let Some(parent) = path.parent() {
@@ -463,6 +496,38 @@ pub(crate) fn run_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unreadable_config_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.kdl");
+        let bytes = [0x66u8, 0xff, 0xfe, 0x0a];
+        std::fs::write(&path, bytes).unwrap();
+        assert!(write_fix(&path, "copy_command \"pbcopy\"").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no backup"
+        );
+    }
+
+    #[test]
+    fn test_backup_is_private_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("config.kdl.bak-2026-01-01");
+        std::fs::write(&base, "older backup").unwrap();
+        let made = write_backup(&base, "current").unwrap();
+        assert_ne!(made, base);
+        assert_eq!(std::fs::read_to_string(&base).unwrap(), "older backup");
+        assert_eq!(std::fs::read_to_string(&made).unwrap(), "current");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&made).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
 
     fn mac_iterm() -> ClipboardHost {
         ClipboardHost {

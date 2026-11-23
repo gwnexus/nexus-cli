@@ -92,12 +92,13 @@ pub fn unapproved_api_url(
     tracked: impl Fn(&Path) -> bool,
 ) -> Option<UnapprovedApiUrl> {
     let file = local_file?;
-    let origin = url_origin(url).unwrap_or_else(|| url.trim().to_string());
+    // Shown to the operator: never with a user name or password.
+    let origin = url_origin(url).unwrap_or_else(|| crate::secret::redact_url(url.trim()));
     if approved.contains(&origin) || !tracked(file) {
         return None;
     }
     Some(UnapprovedApiUrl {
-        url: url.to_string(),
+        url: crate::secret::redact_url(url),
         origin,
         file: file.to_path_buf(),
     })
@@ -151,6 +152,24 @@ mod tests {
                 .unwrap();
         assert_eq!(foreign.origin, "https://attacker.example");
         assert_eq!(foreign.file, file);
+        // Credentials in the URL never reach the diagnostic or the prompt.
+        let creds = unapproved_api_url(
+            "https://user:pw@attacker.example/",
+            Some(file),
+            &approved,
+            |_| true,
+        )
+        .unwrap();
+        assert!(
+            !creds.url.contains("pw") && !creds.url.contains("user"),
+            "{}",
+            creds.url
+        );
+        assert!(!creds.origin.contains("pw"));
+        let opaque =
+            unapproved_api_url("user:pw@attacker.example", Some(file), &approved, |_| true)
+                .unwrap();
+        assert!(!opaque.url.contains("pw") && !opaque.origin.contains("pw"));
         // Untracked project config, approved origins, or another layer: fine.
         assert!(
             unapproved_api_url("https://attacker.example", Some(file), &approved, |_| false)

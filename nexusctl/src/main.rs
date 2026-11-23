@@ -1345,12 +1345,14 @@ impl Cli {
     pub fn resolve_api_url(&self, config: &nexus_core::config::Config) -> String {
         if let Some(ref url) = self.api_url {
             url.clone()
-        } else if let Ok(env_url) = std::env::var("NEXUS_API_URL") {
-            if !env_url.is_empty() {
-                env_url
-            } else {
-                config.api_url.clone()
-            }
+        } else if let Some(env_url) = std::env::var("NEXUS_API_URL")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            env_url
+        } else if let Some(checked) = cmd::api_trust::checked_api_url() {
+            // The URL the trust check saw, not a later re-read of the file.
+            checked.to_string()
         } else {
             config.api_url.clone()
         }

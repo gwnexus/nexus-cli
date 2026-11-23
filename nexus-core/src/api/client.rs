@@ -62,6 +62,14 @@ impl NexusClient {
     ///
     /// Enforces HTTPS for the base URL unless it targets localhost.
     pub fn new(base_url: &str, token: Option<String>) -> Result<Self, Error> {
+        // Credentials in the URL would show up in errors and logs; the API
+        // authenticates with the bearer token only.
+        if crate::secret::url_has_credentials(base_url) {
+            return Err(Error::Config(format!(
+                "API URL must not contain a user name or password: {}",
+                crate::secret::redact_url(base_url)
+            )));
+        }
         // Allow http for localhost/127.0.0.1 during development
         let is_local = match Url::parse(base_url) {
             Ok(u) => matches!(u.host_str(), Some("localhost") | Some("127.0.0.1")),
@@ -70,7 +78,7 @@ impl NexusClient {
         if !is_local && !base_url.starts_with("https://") {
             return Err(Error::Config(format!(
                 "API URL must use HTTPS: {}",
-                base_url
+                crate::secret::redact_url(base_url)
             )));
         }
 
@@ -818,13 +826,24 @@ impl NexusClient {
         }
 
         let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.handle_response_inner(resp, true).await
     }
 
     /// Map HTTP response status to typed errors or deserialize the body.
     async fn handle_response<T: serde::de::DeserializeOwned>(
         &self,
+        resp: reqwest::Response,
+    ) -> Result<T, Error> {
+        self.handle_response_inner(resp, false).await
+    }
+
+    /// `empty_as_null`: an empty success body reads as JSON `null` (DELETE
+    /// answers may have no body); elsewhere it stays an error, so an empty
+    /// body never passes for a valid empty result.
+    async fn handle_response_inner<T: serde::de::DeserializeOwned>(
+        &self,
         mut resp: reqwest::Response,
+        empty_as_null: bool,
     ) -> Result<T, Error> {
         let status = resp.status();
 
@@ -842,7 +861,12 @@ impl NexusClient {
                     return Err(response_too_large());
                 }
             }
-            return serde_json::from_slice(&body)
+            let bytes: &[u8] = if body.is_empty() && empty_as_null {
+                b"null"
+            } else {
+                &body
+            };
+            return serde_json::from_slice(bytes)
                 .map_err(|e| Error::Api(format!("invalid response body: {e}")));
         }
         if status == StatusCode::PAYLOAD_TOO_LARGE {
