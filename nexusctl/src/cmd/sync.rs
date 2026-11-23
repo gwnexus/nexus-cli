@@ -45,6 +45,7 @@ pub async fn push(
     api_url: &str,
     cli_project_id: Option<&str>,
     file_key: &str,
+    expected_path: &str,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -63,6 +64,15 @@ pub async fn push(
         )
     })?;
 
+    // The manifest entry must name the path the caller selected, so the
+    // upload is the file that was shown.
+    if expected_path != target_path {
+        anyhow::bail!(
+            "{file_key}: the sync manifest names {target_path}, not {expected_path}; run nexus pull"
+        );
+    }
+    // Only a file inside the workspace is read for the upload.
+    super::pull::validate_agent_file_target_path(&workspace, target_path)?;
     let local_path = workspace.join(target_path);
     if !local_path.exists() {
         anyhow::bail!("Local file not found: {}", target_path);

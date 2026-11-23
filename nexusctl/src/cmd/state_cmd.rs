@@ -391,7 +391,9 @@ pub async fn push(
                 e.path,
                 file_key
             );
-        } else if let Err(err) = super::sync::push(api_url, Some(&project_id), file_key).await {
+        } else if let Err(err) =
+            super::sync::push(api_url, Some(&project_id), file_key, &e.path).await
+        {
             println!("   {} {err}", style("!").bold().red());
             failed += 1;
         }

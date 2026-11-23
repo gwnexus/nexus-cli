@@ -199,6 +199,20 @@ fn still_tracked(guard: &ShadowGuard, tracked: &[String]) -> Vec<StillTracked> {
         .collect()
 }
 
+/// Read at most `limit` bytes; a file that grew past it since the size
+/// check is refused instead of read whole.
+fn read_capped(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(std::io::Error::other("file grew past the scan limit"));
+    }
+    Ok(bytes)
+}
+
 fn scan_files(root: &Path, guard: &ShadowGuard, tracked: &[String]) -> Vec<Hit> {
     let rules = compile(guard, SCOPE_FILES);
     if rules.is_empty() {
@@ -210,10 +224,16 @@ fn scan_files(root: &Path, guard: &ShadowGuard, tracked: &[String]) -> Vec<Hit> 
             continue;
         }
         let full = root.join(path);
-        if fs::metadata(&full).map_or(true, |m| !m.is_file() || m.len() > MAX_FILE_BYTES) {
+        // A tracked symlink is a link, not content: never followed. Parent
+        // directories must stay inside the worktree as well.
+        if fs::symlink_metadata(&full).map_or(true, |m| !m.is_file() || m.len() > MAX_FILE_BYTES)
+            || !super::pull::readable_inside(root, path)
+        {
             continue;
         }
-        let Ok(bytes) = fs::read(&full) else { continue };
+        let Ok(bytes) = read_capped(&full, MAX_FILE_BYTES) else {
+            continue;
+        };
         if bytes.iter().take(8000).any(|b| *b == 0) {
             continue; // binary
         }
@@ -648,6 +668,17 @@ pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>, a
     let Some(root) = repo_root(workspace) else {
         return;
     };
+    // The agentic root comes from the server: the cache path must stay
+    // inside the workspace (relative, outside .git, no symlink out).
+    if let Err(e) =
+        super::pull::validate_agent_file_target_path(workspace, &cache_rel_path(agentic_root))
+    {
+        println!(
+            "   {} shadow guard not cached: {e}",
+            style("!").bold().yellow()
+        );
+        return;
+    }
     let cache = workspace.join(cache_rel_path(agentic_root));
     let guard_rel = guard_rel_for(workspace, &root, agentic_root);
     let result = match guard {
@@ -966,6 +997,36 @@ mod tests {
         fs::remove_file(&hook).unwrap();
         std::os::unix::fs::symlink(&outside, &hook).unwrap();
         assert_eq!(hook_consent_item(&dir, ".nexus").unwrap().local, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_files_skips_linked_and_grown_files() {
+        let dir = repo("scan-links");
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("notes"), "secret-term\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("notes"), dir.join("linked")).unwrap();
+        fs::write(dir.join("plain"), "secret-term\n").unwrap();
+        let g = guard(vec![pat("p", r"secret-term", "", &[SCOPE_FILES])]);
+        let hits = scan_files(&dir, &g, &["linked".into(), "plain".into()]);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].location.starts_with("plain:"), "{hits:?}");
+        assert!(read_capped(&dir.join("plain"), 3).is_err());
+        assert_eq!(
+            read_capped(&dir.join("plain"), 64).unwrap(),
+            b"secret-term\n"
+        );
+    }
+
+    #[test]
+    fn test_sync_refuses_a_cache_outside_the_workspace() {
+        let dir = repo("cache-outside");
+        let g = guard(vec![]);
+        sync(&dir, "/tmp/elsewhere", Some(&g), false);
+        sync(&dir, "../escape", Some(&g), false);
+        assert!(!dir.join("../escape/generated/shadow-guard.json").exists());
+        sync(&dir, ".nexus", Some(&g), false);
+        assert!(dir.join(".nexus/generated/shadow-guard.json").exists());
     }
 
     #[test]

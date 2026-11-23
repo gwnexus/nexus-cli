@@ -23,7 +23,7 @@ pub fn collect_workspace_hashes(workspace: &Path) -> HashMap<String, String> {
 
     // devbox.json
     let devbox_path = workspace.join("devbox.json");
-    if devbox_path.exists() {
+    if devbox_path.exists() && super::pull::readable_inside(workspace, "devbox.json") {
         match fs::read_to_string(&devbox_path) {
             Ok(content) => {
                 hashes.insert("devbox.json".to_string(), sha256_hex(&content));
@@ -34,7 +34,7 @@ pub fn collect_workspace_hashes(workspace: &Path) -> HashMap<String, String> {
 
     // scripts/devbox/**, without the machine-local scripts
     let scripts_dir = workspace.join(SCRIPTS_DIR);
-    if scripts_dir.is_dir() {
+    if scripts_root_ok(workspace) {
         collect_script_hashes(workspace, &scripts_dir, &mut hashes);
     }
     let manifest = super::sync::load_manifest_pub(workspace);
@@ -43,14 +43,31 @@ pub fn collect_workspace_hashes(workspace: &Path) -> HashMap<String, String> {
     hashes
 }
 
+/// Whether the scripts directory is a real directory inside the
+/// workspace (not a symlink, not leading out of it).
+fn scripts_root_ok(workspace: &Path) -> bool {
+    let dir = workspace.join(SCRIPTS_DIR);
+    dir.is_dir()
+        && !fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink())
+        && super::pull::readable_inside(workspace, SCRIPTS_DIR)
+}
+
 /// Recursively collect script file hashes using workspace-relative paths.
+/// Symlinks are skipped (never followed), the same set as the upload.
 fn collect_script_hashes(workspace: &Path, dir: &Path, hashes: &mut HashMap<String, String>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // Git metadata of a nested repository is never content.
+            if super::pull::is_git_dir_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
                 collect_script_hashes(workspace, &path, hashes);
-            } else if path.is_file() {
+            } else if kind.is_file() {
                 match fs::read_to_string(&path) {
                     Ok(content) => {
                         let rel = path.strip_prefix(workspace).unwrap_or(&path);
@@ -64,24 +81,63 @@ fn collect_script_hashes(workspace: &Path, dir: &Path, hashes: &mut HashMap<Stri
     }
 }
 
+/// Stop when a file selected from the first scan is missing from the
+/// payload read afterwards (it vanished or became a symlink in between):
+/// the fork is built from the upload alone, so it would drop the file.
+fn ensure_payload_complete(
+    workspace: &Path,
+    selected: &[String],
+    devbox_json: Option<&serde_json::Value>,
+    scripts: Option<&HashMap<String, String>>,
+) -> anyhow::Result<()> {
+    // A devbox.json that is there but does not parse is the user's to
+    // fix; retrying would fail the same way.
+    if devbox_json.is_none() && selected.iter().any(|p| p == "devbox.json") {
+        let path = workspace.join("devbox.json");
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+            if let Ok(raw) = fs::read_to_string(&path) {
+                if let Err(e) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    anyhow::bail!("push stopped: devbox.json is not valid JSON ({e}); fix it and run nexus push again");
+                }
+            }
+        }
+    }
+    let prefix = format!("{SCRIPTS_DIR}/");
+    let missing: Vec<&str> = selected
+        .iter()
+        .filter(|path| match path.strip_prefix(&prefix) {
+            Some(rel) => !scripts.is_some_and(|s| s.contains_key(rel)),
+            None if path.as_str() == "devbox.json" => devbox_json.is_none(),
+            None => false,
+        })
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "push stopped: {} changed while reading (missing or now a symlink); nothing was pushed, run nexus push again",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// Read local workspace files for push payload.
 fn read_workspace_files(
     workspace: &Path,
 ) -> (Option<serde_json::Value>, Option<HashMap<String, String>>) {
     // Read devbox.json
-    let devbox_json = workspace
-        .join("devbox.json")
-        .exists()
-        .then(|| {
-            fs::read_to_string(workspace.join("devbox.json"))
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-        })
-        .flatten();
+    let devbox_json = (workspace.join("devbox.json").exists()
+        && super::pull::readable_inside(workspace, "devbox.json"))
+    .then(|| {
+        fs::read_to_string(workspace.join("devbox.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    })
+    .flatten();
 
     // Read script files
     let scripts_dir = workspace.join(SCRIPTS_DIR);
-    let script_files = if scripts_dir.is_dir() {
+    let script_files = if scripts_root_ok(workspace) {
         let mut files = HashMap::new();
         read_scripts_recursive(&scripts_dir, &scripts_dir, &mut files);
         let manifest = super::sync::load_manifest_pub(workspace);
@@ -100,14 +156,22 @@ fn read_workspace_files(
     (devbox_json, script_files)
 }
 
-/// Recursively read script files into a HashMap.
+/// Recursively read script files into a HashMap. Symlinks are skipped
+/// (never followed), as in [`collect_script_hashes`].
 fn read_scripts_recursive(base: &Path, dir: &Path, files: &mut HashMap<String, String>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // Git metadata of a nested repository is never content.
+            if super::pull::is_git_dir_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
                 read_scripts_recursive(base, &path, files);
-            } else if path.is_file() {
+            } else if kind.is_file() {
                 match fs::read_to_string(&path) {
                     Ok(content) => {
                         let rel = path.strip_prefix(base).unwrap_or(&path);
@@ -298,6 +362,12 @@ async fn adopt_local_push(
                 .collect::<HashMap<_, _>>()
         })
         .filter(|files| !files.is_empty());
+    ensure_payload_complete(
+        workspace,
+        &keys,
+        devbox_json.as_ref(),
+        script_files.as_ref(),
+    )?;
 
     let result = client
         .workspace_push(project_id, devbox_json, script_files, fork_name)
@@ -547,6 +617,13 @@ pub async fn run(
         // deleted; without deletions it would push nothing.
         .filter(|files| !files.is_empty() || !deleted.is_empty())
         .or_else(|| (!deleted.is_empty()).then(HashMap::new));
+    let selected: Vec<String> = tracked.iter().cloned().collect();
+    ensure_payload_complete(
+        &workspace,
+        &selected,
+        devbox_json.as_ref(),
+        script_files.as_ref(),
+    )?;
 
     let result = client
         .workspace_push(&project_id, devbox_json, script_files, fork_name)
@@ -603,6 +680,94 @@ fn is_dropped(key: &str, exported: Option<&[String]>, include_named: &[String]) 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn test_push_scans_do_not_follow_symlinks() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("x.sh"), "external").unwrap();
+        fs::write(outside.path().join("devbox.json"), "{\"external\": true}").unwrap();
+        fs::create_dir_all(ws.path().join(SCRIPTS_DIR)).unwrap();
+        fs::write(ws.path().join(SCRIPTS_DIR).join("ok.sh"), "inside").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("x.sh"),
+            ws.path().join(SCRIPTS_DIR).join("link.sh"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.path().join(SCRIPTS_DIR).join("dir"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("devbox.json"),
+            ws.path().join("devbox.json"),
+        )
+        .unwrap();
+        let hashes = collect_workspace_hashes(ws.path());
+        assert!(hashes.contains_key("scripts/devbox/ok.sh"));
+        assert_eq!(hashes.len(), 1, "{hashes:?}");
+        let (devbox, scripts) = read_workspace_files(ws.path());
+        assert!(devbox.is_none());
+        let scripts = scripts.unwrap();
+        assert_eq!(scripts.keys().collect::<Vec<_>>(), vec!["ok.sh"]);
+        // A linked scripts root is not scanned at all.
+        let ws2 = tempfile::tempdir().unwrap();
+        fs::create_dir_all(ws2.path().join("scripts")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws2.path().join(SCRIPTS_DIR)).unwrap();
+        assert!(collect_workspace_hashes(ws2.path()).is_empty());
+        assert!(read_workspace_files(ws2.path()).1.is_none());
+    }
+
+    #[test]
+    fn test_push_scans_skip_nested_git_metadata() {
+        let ws = tempfile::tempdir().unwrap();
+        let scripts = ws.path().join(SCRIPTS_DIR);
+        fs::create_dir_all(scripts.join("vendor/.git")).unwrap();
+        fs::write(scripts.join("vendor/.git/config"), "secret").unwrap();
+        fs::create_dir_all(scripts.join("other/.GIT")).unwrap();
+        fs::write(scripts.join("other/.GIT/config"), "secret").unwrap();
+        fs::write(scripts.join("vendor/run.sh"), "ok").unwrap();
+        let hashes = collect_workspace_hashes(ws.path());
+        assert_eq!(
+            hashes.keys().collect::<Vec<_>>(),
+            vec!["scripts/devbox/vendor/run.sh"]
+        );
+        let scripts = read_workspace_files(ws.path()).1.unwrap();
+        assert_eq!(scripts.keys().collect::<Vec<_>>(), vec!["vendor/run.sh"]);
+    }
+
+    #[test]
+    fn test_ensure_payload_complete_names_missing_files() {
+        let scripts = HashMap::from([("a.sh".to_string(), "x".to_string())]);
+        let devbox = serde_json::json!({});
+        let sel = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ws = tempfile::tempdir().unwrap();
+        assert!(ensure_payload_complete(
+            ws.path(),
+            &sel(&["devbox.json", "scripts/devbox/a.sh"]),
+            Some(&devbox),
+            Some(&scripts)
+        )
+        .is_ok());
+        let err = ensure_payload_complete(
+            ws.path(),
+            &sel(&["devbox.json", "scripts/devbox/a.sh", "scripts/devbox/b.sh"]),
+            None,
+            Some(&scripts),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("devbox.json") && err.contains("scripts/devbox/b.sh"),
+            "{err}"
+        );
+        assert!(!err.contains("a.sh,"), "{err}");
+        // A malformed devbox.json is reported as such.
+        fs::write(ws.path().join("devbox.json"), "{ not json").unwrap();
+        let err = ensure_payload_complete(ws.path(), &sel(&["devbox.json"]), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not valid JSON"), "{err}");
+    }
+
     #[test]
     fn test_fork_plan_names_the_archived_fork() {
         let [new, archived] = super::fork_plan_lines(Some("rust-toolchain"), Some("gitleaks"));

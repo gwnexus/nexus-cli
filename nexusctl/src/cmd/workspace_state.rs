@@ -416,7 +416,7 @@ pub async fn load(
         .or_else(|| config::load_agent_owner(Some(workspace)));
     let is_claude = config::is_claude_owner(owner.as_deref());
     let manifest = super::sync::load_manifest_pub(workspace);
-    let read = |p: &str| std::fs::read(workspace.join(p)).ok();
+    let read = |p: &str| read_inside(workspace, p);
     let mut entries = Vec::new();
 
     // Agent files (CCX files are handled against the lock below), one per
@@ -505,7 +505,7 @@ pub async fn load(
         }
 
         if let Some(block) = export.claude_md_managed_block.as_deref() {
-            let claude_md = std::fs::read_to_string(workspace.join("CLAUDE.md")).ok();
+            let claude_md = read_text_inside(workspace, "CLAUDE.md");
             let desired = claude_render::claude_md_desired_block_text(block);
             let local = claude_md
                 .as_deref()
@@ -604,7 +604,7 @@ pub async fn load(
                 super::pull::DroppedFile::Gone(_) => continue,
             };
             entries.push(Entry {
-                local: std::fs::read_to_string(workspace.join(&path)).ok(),
+                local: read_text_inside(workspace, &path),
                 path,
                 class: FileClass::Projection,
                 state,
@@ -694,6 +694,21 @@ pub async fn load(
     })
 }
 
+/// The local bytes at `rel`, or `None` when the path is not a readable
+/// workspace file (a backend path leading out of the workspace or into
+/// `.git`, through `..` or a symlink, is never read into a diff).
+fn read_inside(workspace: &Path, rel: &str) -> Option<Vec<u8>> {
+    if !super::pull::readable_inside(workspace, rel) {
+        return None;
+    }
+    std::fs::read(workspace.join(rel)).ok()
+}
+
+/// [`read_inside`] as text.
+fn read_text_inside(workspace: &Path, rel: &str) -> Option<String> {
+    read_inside(workspace, rel).and_then(|b| String::from_utf8(b).ok())
+}
+
 /// Generated devbox scripts are projections, every other workspace file is
 /// content.
 fn workspace_class(path: &str) -> FileClass {
@@ -726,7 +741,7 @@ async fn workspace_entries(
     let known: Vec<String> = desired.iter().map(|(p, _)| p.clone()).collect();
 
     for (path, body) in desired {
-        let local = std::fs::read(workspace.join(&path)).ok();
+        let local = read_inside(workspace, &path);
         if let Some(state) = classify_workspace_file(
             local.as_deref(),
             sync_manifest_hash(manifest, &path).as_deref(),
@@ -810,6 +825,23 @@ mod tests {
 
     fn h(s: &str) -> String {
         sha256_hex(s)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_inside_refuses_paths_out_of_the_workspace() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "external").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), ws.path().join("link")).unwrap();
+        std::fs::write(ws.path().join("plain"), "inside").unwrap();
+        assert_eq!(read_inside(ws.path(), "link"), None);
+        assert_eq!(read_inside(ws.path(), "../secret"), None);
+        assert_eq!(read_inside(ws.path(), "/etc/hosts"), None);
+        assert_eq!(
+            read_text_inside(ws.path(), "plain").as_deref(),
+            Some("inside")
+        );
     }
 
     #[test]
