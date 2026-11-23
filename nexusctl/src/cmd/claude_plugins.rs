@@ -16,7 +16,10 @@
 //!    declares an install command needs a person to confirm it;
 //! 4. updates a managed plugin installed at project scope for this
 //!    workspace when the registered marketplace checkout offers a newer
-//!    version (`claude plugin update <id> --scope project --json`). A
+//!    version (`claude plugin update <id> --scope project --json`) and the
+//!    operator approves that version (consent per revision). A marketplace
+//!    registered from another source or ref than declared is never used
+//!    to install or update. A
 //!    marketplace registered at another ref than the one the project
 //!    declares is left alone: the registration is shared by every project
 //!    on the machine, and Claude Code moves it to the declared ref when a
@@ -146,6 +149,9 @@ pub enum PluginState {
     },
     /// Install failed; the reason is shown, the launch goes on.
     Failed(String),
+    /// Not installed or updated: the marketplace registration does not
+    /// match the declaration, or a new revision is not approved.
+    Deferred(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,6 +384,47 @@ struct RegisteredMarketplace {
     name: String,
     git_ref: Option<String>,
     install_location: Option<PathBuf>,
+    /// Where it was registered from, normalized (see [`location_key`]).
+    location: Option<String>,
+}
+
+/// A comparable `kind:location` for a marketplace source: the kind
+/// (`github`, `git`, `url`, `directory`, `file`) and its repo, URL or path,
+/// without a trailing `/` or `.git`; GitHub repos ignore case.
+fn location_key(source: &serde_json::Value) -> Option<String> {
+    let kind = source.get("source")?.as_str()?;
+    let loc = ["repo", "url", "path"]
+        .iter()
+        .find_map(|k| source.get(*k).and_then(|v| v.as_str()))?;
+    let loc = loc.trim().trim_end_matches('/');
+    let loc = loc.strip_suffix(".git").unwrap_or(loc);
+    let loc = if kind == "github" {
+        loc.to_ascii_lowercase()
+    } else {
+        loc.to_string()
+    };
+    Some(format!("{kind}:{loc}"))
+}
+
+/// Why the registration of a declared marketplace does not match what the
+/// project declares (source or ref), or `None` when it matches or the
+/// marketplace is not declared.
+fn registration_mismatch(
+    market: &RegisteredMarketplace,
+    declared: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let entry = declared.get(&market.name)?;
+    let want = entry.get("source").and_then(location_key);
+    if let (Some(want), Some(have)) = (want, market.location.as_deref()) {
+        if want != have {
+            return Some(format!(
+                "marketplace {} is registered from {have}, the project declares {want}; \
+                 remove it with claude plugin marketplace remove {}",
+                market.name, market.name
+            ));
+        }
+    }
+    None
 }
 
 /// Registered marketplaces (`claude plugin marketplace list --json`).
@@ -402,15 +449,11 @@ fn list_marketplace_entries(cli: &dyn ClaudeCli) -> Option<Vec<RegisteredMarketp
                     name: text(m, "name")?,
                     git_ref: text(m, "ref"),
                     install_location: text(m, "installLocation").map(PathBuf::from),
+                    location: location_key(m),
                 })
             })
             .collect(),
     )
-}
-
-/// Registered marketplace names.
-fn list_marketplaces(cli: &dyn ClaudeCli) -> Option<BTreeSet<String>> {
-    list_marketplace_entries(cli).map(|m| m.into_iter().map(|m| m.name).collect())
 }
 
 /// The ref a project declares for a marketplace in `extraKnownMarketplaces`.
@@ -498,12 +541,16 @@ fn refresh(
     plugin: &InstalledPlugin,
     registered: &[RegisteredMarketplace],
     declared: &serde_json::Map<String, serde_json::Value>,
+    approve: &mut Approve<'_>,
 ) -> PluginState {
     let Some(market) =
         marketplace_of(&plugin.id).and_then(|name| registered.iter().find(|m| m.name == name))
     else {
         return PluginState::Present;
     };
+    if let Some(why) = registration_mismatch(market, declared) {
+        return PluginState::Deferred(why);
+    }
     if let (Some(want), Some(have)) = (
         declared_ref(declared, &market.name),
         market.git_ref.as_deref(),
@@ -527,6 +574,12 @@ fn refresh(
     };
     if is_newer(&to, &from) != Some(true) {
         return PluginState::Present;
+    }
+    // A new revision is new executable content: it needs consent.
+    if !approve(&plugin.id, &from, &to) {
+        return PluginState::Deferred(format!(
+            "{to} available ({from} installed), not approved; run nexus run on a terminal to review it"
+        ));
     }
     match cli.run(&[
         "plugin", "update", &plugin.id, "--scope", "project", "--json",
@@ -596,11 +649,32 @@ fn failure_reason(out: &CliOutput) -> String {
 /// Install the managed plugins that are missing; see the module docs.
 /// `previously_installed` is the CCX lock's plugin provenance; the
 /// returned map is the new provenance to record.
+/// Decides whether a plugin update (`id`, from, to) may run.
+type Approve<'a> = dyn FnMut(&str, &str, &str) -> bool + 'a;
+
+/// [`sync_with`] approving every update (tests).
+#[cfg(test)]
 pub fn sync(
     cli: &dyn ClaudeCli,
     workspace: &Path,
     spec: Option<&ClaudeSettingsSpec>,
     previously_installed: &BTreeMap<String, CcxLockPluginEntry>,
+) -> (SyncReport, BTreeMap<String, CcxLockPluginEntry>) {
+    sync_with(
+        cli,
+        workspace,
+        spec,
+        previously_installed,
+        &mut |_, _, _| true,
+    )
+}
+
+pub fn sync_with(
+    cli: &dyn ClaudeCli,
+    workspace: &Path,
+    spec: Option<&ClaudeSettingsSpec>,
+    previously_installed: &BTreeMap<String, CcxLockPluginEntry>,
+    approve: &mut Approve<'_>,
 ) -> (SyncReport, BTreeMap<String, CcxLockPluginEntry>) {
     let managed = managed_plugins(spec);
     let mut report = SyncReport::default();
@@ -641,9 +715,25 @@ pub fn sync(
     let needed: BTreeSet<&str> = missing.iter().filter_map(|id| marketplace_of(id)).collect();
     let mut failed_marketplaces: BTreeMap<String, String> = BTreeMap::new();
     if !needed.is_empty() {
-        let registered = list_marketplaces(cli).unwrap_or_default();
+        let entries = list_marketplace_entries(cli).unwrap_or_default();
         for name in needed {
-            let state = if registered.contains(name) {
+            let entry = entries.iter().find(|m| m.name == name);
+            // A registration from another source or ref than declared is
+            // never refreshed or installed from.
+            let mismatch = entry.and_then(|m| {
+                registration_mismatch(m, &declared).or_else(|| {
+                    match (declared_ref(&declared, name), m.git_ref.as_deref()) {
+                        (Some(want), Some(have)) if want != have => Some(format!(
+                            "marketplace {name} is registered at {have}, the project declares {want}"
+                        )),
+                        _ => None,
+                    }
+                })
+            });
+            let state = if let Some(why) = mismatch {
+                failed_marketplaces.insert(name.to_string(), why.clone());
+                MarketplaceState::Failed(why)
+            } else if entry.is_some() {
                 match cli.run(&["plugin", "marketplace", "update", name]) {
                     Ok(out) if out.success => MarketplaceState::Updated,
                     // A failed refresh is not fatal: the cached catalog
@@ -713,7 +803,7 @@ pub fn sync(
         }
         if !missing.contains(&id) {
             let state = match to_refresh.get(id) {
-                Some(p) => refresh(cli, p, &registered, &declared),
+                Some(p) => refresh(cli, p, &registered, &declared, approve),
                 None => PluginState::Present,
             };
             report.plugins.push(PluginOutcome {
@@ -782,7 +872,19 @@ pub fn sync_workspace(
     let cli = SystemClaude {
         workspace: workspace.to_path_buf(),
     };
-    let (report, provenance) = sync(&cli, workspace, spec, &previous);
+    // Plugin updates need consent per revision (asked on a terminal,
+    // refused otherwise); each version is asked once.
+    let mut gate = super::consent::Gate::open(workspace, false);
+    let mut approve = |id: &str, from: &str, to: &str| {
+        let item = super::consent::config_item(
+            super::consent::Kind::ClaudePlugin,
+            &format!("{id}#{to}"),
+            ".claude/settings.json",
+            format!("update {id} from {from} to {to}\n"),
+        );
+        gate.local(&item)
+    };
+    let (report, provenance) = sync_with(&cli, workspace, spec, &previous, &mut approve);
     if let Err(e) = super::ccx::record_plugins_in_lock(workspace, agentic_root, provenance) {
         println!(
             "   {} could not record plugin provenance in the CCX lock: {}",
@@ -874,6 +976,12 @@ pub fn print_report(report: &SyncReport) {
                 style(label("FAILED")).yellow(),
                 p.id,
                 style(reason).yellow()
+            ),
+            PluginState::Deferred(reason) => println!(
+                "  {} {}   {}",
+                style(label("DEFERRED")).cyan(),
+                p.id,
+                style(reason).dim()
             ),
         }
     }
@@ -1241,6 +1349,89 @@ mod tests {
         );
         assert!(cli.calls().iter().all(|c| !c.contains("-y")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_sync_defers_an_unapproved_update() {
+        let dir = checkout("unapproved", "1.1.2");
+        let cli = FakeClaude::new(vec![
+            ("plugin list --json", ok(&installed_here("1.1.1"))),
+            (
+                "plugin marketplace list --json",
+                ok(&registered("nexus-core--v1.1.1", &dir)),
+            ),
+        ]);
+        let s = spec(
+            serde_json::json!({"nexus-core@gatewarden-nexus": true}),
+            Some(gatewarden()),
+        );
+        let mut asked = Vec::new();
+        let (report, _) = sync_with(
+            &cli,
+            &ws(),
+            Some(&s),
+            &BTreeMap::new(),
+            &mut |id, from, to| {
+                asked.push(format!("{id} {from} {to}"));
+                false
+            },
+        );
+        assert_eq!(asked, ["nexus-core@gatewarden-nexus 1.1.1 1.1.2"]);
+        assert!(matches!(report.plugins[0].state, PluginState::Deferred(_)));
+        assert!(!cli.calls().iter().any(|c| c.starts_with("plugin update")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_sync_never_uses_a_marketplace_registered_elsewhere() {
+        let dir = checkout("elsewhere", "1.1.2");
+        let foreign = serde_json::json!([{
+            "name": "gatewarden-nexus", "source": "github",
+            "repo": "someone-else/look-alike", "ref": "nexus-core--v1.1.1",
+            "installLocation": dir.display().to_string()
+        }])
+        .to_string();
+        let s = spec(
+            serde_json::json!({"nexus-core@gatewarden-nexus": true}),
+            Some(gatewarden()),
+        );
+        // Installed: no update from the foreign checkout.
+        let cli = FakeClaude::new(vec![
+            ("plugin list --json", ok(&installed_here("1.1.1"))),
+            ("plugin marketplace list --json", ok(&foreign)),
+        ]);
+        let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
+        assert!(matches!(report.plugins[0].state, PluginState::Deferred(_)));
+        assert!(!cli.calls().iter().any(|c| c.starts_with("plugin update")));
+        // Missing: neither refreshed nor installed from it.
+        let cli = FakeClaude::new(vec![
+            ("plugin list --json", ok("[]")),
+            ("plugin marketplace list --json", ok(&foreign)),
+        ]);
+        let (report, _) = sync(&cli, &ws(), Some(&s), &BTreeMap::new());
+        assert!(matches!(report.plugins[0].state, PluginState::Failed(_)));
+        assert!(cli
+            .calls()
+            .iter()
+            .all(|c| !c.starts_with("plugin install") && !c.contains("marketplace update")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_location_key_normalizes() {
+        let key = |v: serde_json::Value| location_key(&v);
+        assert_eq!(
+            key(serde_json::json!({"source": "github", "repo": "GWNexus/Repo"})),
+            key(serde_json::json!({"source": "github", "repo": "gwnexus/repo"}))
+        );
+        assert_eq!(
+            key(serde_json::json!({"source": "git", "url": "https://h.example/r.git/"})),
+            Some("git:https://h.example/r".into())
+        );
+        assert_ne!(
+            key(serde_json::json!({"source": "github", "repo": "a/b"})),
+            key(serde_json::json!({"source": "git", "url": "a/b"}))
+        );
     }
 
     #[test]

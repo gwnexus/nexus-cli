@@ -322,7 +322,18 @@ pub async fn run(
             "   {} This workspace uses devbox, but no devbox shell is active.",
             style("!").bold().yellow()
         );
-        if assume_yes || confirm_default_yes("Start it and re-run nexus run inside it?")? {
+        // `devbox run` can run the init hooks of devbox.json: --yes only
+        // answers for a devbox.json approved as it is on disk.
+        let devbox_approved = super::consent::approved_on_disk(&workspace, "devbox.json");
+        if assume_yes && !devbox_approved {
+            println!(
+                "   {} devbox.json is not approved as it is (its init hooks run in devbox); confirm to start it",
+                style("!").bold().yellow()
+            );
+        }
+        if (assume_yes && devbox_approved)
+            || confirm_default_yes("Start it and re-run nexus run inside it?")?
+        {
             restart_in_devbox(&workspace)?;
         }
     }
@@ -455,6 +466,16 @@ pub async fn run(
             None => None,
         },
     };
+    // The backend (or the cache it filled) picks the program, layout and
+    // Zellij config: only known tools, and only files approved as they are.
+    let run_target = run_target.map(|t| {
+        let (vetted, notes) =
+            vet_run_target(t, |rel| super::consent::approved_on_disk(&workspace, rel));
+        for note in notes {
+            println!("   {} {note}", style("!").bold().yellow());
+        }
+        vetted
+    });
     let mut launch = resolve_launch(
         tool,
         default_tool,
@@ -1402,6 +1423,46 @@ fn tool_command_args(
     ([launch.leading_args.as_slice(), args].concat(), rows)
 }
 
+/// Programs `nexus run` starts when the backend selects them.
+const RUN_TARGET_TOOLS: &[&str] = &["claude", "opencode"];
+
+/// Drop what the backend selected but the operator has not approved: an
+/// unknown program (the default tool starts instead), and a layout or
+/// Zellij config file that is not on disk as approved (the team layout and
+/// the default config are used). Returns notes for what was dropped.
+fn vet_run_target(
+    mut target: nexus_core::api::RunTarget,
+    approved: impl Fn(&str) -> bool,
+) -> (nexus_core::api::RunTarget, Vec<String>) {
+    let mut notes = Vec::new();
+    if !target.tool.is_empty() && !RUN_TARGET_TOOLS.contains(&target.tool.as_str()) {
+        notes.push(format!(
+            "run target tool {:?} ignored: not a known tool (use --tool to start it)",
+            target.tool
+        ));
+        target.tool.clear();
+    }
+    if let Some(layout) = target.layout.take() {
+        if layout == TEAM_LAYOUT || approved(&layout) {
+            target.layout = Some(layout);
+        } else {
+            notes.push(format!(
+                "layout {layout} not used: not approved as it is (run nexus pull)"
+            ));
+        }
+    }
+    if let Some(config) = target.config.take() {
+        if approved(&config) {
+            target.config = Some(config);
+        } else {
+            notes.push(format!(
+                "Zellij config {config} not used: not approved as it is (run nexus pull)"
+            ));
+        }
+    }
+    (target, notes)
+}
+
 fn tool_label(tool: &str) -> String {
     match tool {
         "claude" => "Claude Code".into(),
@@ -1517,8 +1578,9 @@ fn resolve_launch(
     let cli_tool = cli_tool.filter(|t| !t.is_empty());
     let tool = match (cli_tool, run_target) {
         (Some(t), _) => t.to_string(),
-        (None, Some(target)) => target.tool.clone(),
-        (None, None) => resolve_effective_tool(None, configured_default, agent_owner),
+        // An empty tool: the backend chose none, or vet_run_target dropped it.
+        (None, Some(target)) if !target.tool.is_empty() => target.tool.clone(),
+        (None, _) => resolve_effective_tool(None, configured_default, agent_owner),
     };
     let (name, source) = workspace_choice.unwrap_or_else(|| {
         let project = run_target
@@ -3247,6 +3309,63 @@ fn resolve_project_name(workspace: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_vet_run_target_drops_unapproved_choices() {
+        let target = nexus_core::api::RunTarget {
+            tool: "/tmp/evil".into(),
+            workspace: Some("zellij".into()),
+            layout: Some(".nexus/personal/layout.kdl".into()),
+            config: Some(".nexus/personal/config.kdl".into()),
+            tool_args: vec![],
+        };
+        let (vetted, notes) = vet_run_target(target.clone(), |_| false);
+        assert!(vetted.tool.is_empty());
+        assert_eq!(vetted.layout, None);
+        assert_eq!(vetted.config, None);
+        assert_eq!(notes.len(), 3);
+        // Approved files and a known tool are kept; the team layout always.
+        let ok = nexus_core::api::RunTarget {
+            tool: "claude".into(),
+            ..target.clone()
+        };
+        let (vetted, notes) = vet_run_target(ok, |_| true);
+        assert_eq!(vetted.tool, "claude");
+        assert!(vetted.layout.is_some() && vetted.config.is_some());
+        assert!(notes.is_empty());
+        let team = nexus_core::api::RunTarget {
+            tool: "opencode".into(),
+            layout: Some(TEAM_LAYOUT.into()),
+            config: None,
+            ..target
+        };
+        assert_eq!(
+            vet_run_target(team, |_| false).0.layout.as_deref(),
+            Some(TEAM_LAYOUT)
+        );
+    }
+
+    #[test]
+    fn test_dropped_run_target_tool_falls_back_to_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = nexus_core::api::RunTarget {
+            tool: String::new(),
+            workspace: None,
+            layout: None,
+            config: None,
+            tool_args: vec![],
+        };
+        let launch = resolve_launch(
+            None,
+            Some("opencode"),
+            None,
+            Some(&target),
+            None,
+            dir.path(),
+            &ZellijHost::default(),
+        );
+        assert_eq!(launch.tool, "opencode");
+    }
 
     #[test]
     fn test_import_prompt_eof_declines() {
