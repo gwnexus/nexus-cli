@@ -1530,6 +1530,53 @@ fn hold_entry(spec: &mut ClaudeSettingsSpec, map_key: &str, id: &str, local: Opt
     }
 }
 
+/// The registrations `.claude/settings.json` holds for the hook script at
+/// `target` (entries whose command names it); `None` when the settings
+/// cannot be read, so a refused hook cannot be reconstructed.
+fn local_hook_events(
+    settings: &Value,
+    target: &str,
+) -> Option<Vec<nexus_core::api::ClaudeHookEvent>> {
+    let settings = settings.as_object()?;
+    let mut events: Vec<nexus_core::api::ClaudeHookEvent> = Vec::new();
+    let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
+        return Some(events);
+    };
+    for (event, entries) in hooks {
+        for entry in entries.as_array().into_iter().flatten() {
+            let Some(command) = entry
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|h| {
+                    h.get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| c.contains(target))
+                })
+            else {
+                continue;
+            };
+            let matcher = entry
+                .get("matcher")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if events
+                .iter()
+                .any(|e| &e.event == event && e.matcher == matcher)
+            {
+                continue;
+            }
+            events.push(nexus_core::api::ClaudeHookEvent {
+                event: event.clone(),
+                matcher,
+                timeout: command.get("timeout").and_then(Value::as_u64),
+            });
+        }
+    }
+    Some(events)
+}
+
 fn hold_agent_export(
     workspace: &Path,
     af: &mut AgentFileExportResponse,
@@ -1560,12 +1607,19 @@ fn hold_agent_export(
             },
             Slot::HookAdapter(i) => {
                 if let Some(adapters) = af.claude_hook_adapters.as_mut() {
-                    // The script on disk stays; its registrations follow the
-                    // export (only the first pull after an upgrade can get here
-                    // with a hook that was never accepted).
-                    match read_file(workspace, &adapters[*i].target_path) {
-                        Some(body) => adapters[*i].body = body,
-                        None => drop_hooks.push(*i),
+                    // The script on disk stays, and so do its registrations:
+                    // the events come from the local settings, never from the
+                    // refused export. Without either, the hook is dropped.
+                    let target = adapters[*i].target_path.clone();
+                    match (
+                        read_file(workspace, &target),
+                        local_hook_events(&settings, &target),
+                    ) {
+                        (Some(body), Some(events)) => {
+                            adapters[*i].body = body;
+                            adapters[*i].hook_events = events;
+                        }
+                        _ => drop_hooks.push(*i),
                     }
                 }
             }
@@ -2141,6 +2195,54 @@ mod tests {
         let hook = items.iter().find(|i| i.kind == Kind::ClaudeHook).unwrap();
         assert!(!hook.installed);
         assert!(hook.content.contains("Stop matcher=\"Bash\""));
+    }
+
+    #[test]
+    fn test_refused_hook_keeps_only_the_local_registrations() {
+        let cfg = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        write(
+            ws.path(),
+            ".claude/hooks/nexus-session-guard.mjs",
+            "guard()\n",
+        );
+        write(
+            ws.path(),
+            ".claude/settings.json",
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/nexus-session-guard.mjs\" stop"}]}]}}"#,
+        );
+        // The export adds an event the operator refuses.
+        let mut export = agent_export();
+        let adapter = &mut export.claude_hook_adapters.as_mut().unwrap()[0];
+        adapter.hook_events.push(nexus_core::api::ClaudeHookEvent {
+            event: "PreToolUse".into(),
+            matcher: Some("Bash".into()),
+            timeout: None,
+        });
+        let mut gate = Gate::with(store_in(cfg.path(), ws.path()), Answer::Refuse);
+        gate.exports(ws.path(), Some(&mut export), None, true, ".nexus");
+        let adapters = export.claude_hook_adapters.unwrap();
+        assert_eq!(adapters.len(), 1);
+        let events: Vec<(&str, Option<&str>)> = adapters[0]
+            .hook_events
+            .iter()
+            .map(|e| (e.event.as_str(), e.matcher.as_deref()))
+            .collect();
+        assert_eq!(events, vec![("Stop", None)]);
+        assert_eq!(adapters[0].body, "guard()\n");
+
+        // Without readable settings the refused hook is dropped.
+        let ws = tempfile::tempdir().unwrap();
+        write(
+            ws.path(),
+            ".claude/hooks/nexus-session-guard.mjs",
+            "guard()\n",
+        );
+        let mut export = agent_export();
+        export.claude_hook_adapters.as_mut().unwrap()[0].body = "changed()\n".into();
+        let mut gate = Gate::with(store_in(cfg.path(), ws.path()), Answer::Refuse);
+        gate.exports(ws.path(), Some(&mut export), None, true, ".nexus");
+        assert!(export.claude_hook_adapters.unwrap_or_default().is_empty());
     }
 
     #[test]

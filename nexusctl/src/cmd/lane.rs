@@ -93,6 +93,8 @@ pub(crate) enum CacheSync {
     Written(usize),
     Removed,
     Unchanged,
+    /// Left alone: outside the workspace, through a symlink, or tracked.
+    Refused(&'static str),
 }
 
 /// Write the lane actors of an export to the cache, or remove the cache
@@ -103,6 +105,17 @@ pub(crate) fn sync_cache(
     export: &AgentFileExportResponse,
 ) -> anyhow::Result<CacheSync> {
     let path = cache_path(workspace, agentic_root);
+    // The same rules as every other pulled file, and a tracked cache (which
+    // the reader ignores) is never overwritten or removed.
+    let rel = format!("{agentic_root}/{LANE_FILE}");
+    if super::pull::validate_agent_file_target_path(workspace, &rel).is_err() {
+        return Ok(CacheSync::Refused(
+            "outside the workspace or through a symlink",
+        ));
+    }
+    if fs::symlink_metadata(&path).is_ok() && config::trust::is_git_tracked(&path) {
+        return Ok(CacheSync::Refused("tracked by git"));
+    }
     let Some(cache) = cache_from_export(export) else {
         if path.is_file() {
             fs::remove_file(&path)?;
@@ -133,6 +146,10 @@ pub(crate) fn print_sync(agentic_root: &str, outcome: CacheSync) {
             style("-").red()
         ),
         CacheSync::Unchanged => {}
+        CacheSync::Refused(reason) => println!(
+            "   {} {agentic_root}/{LANE_FILE} not updated ({reason})",
+            style("!").bold().yellow()
+        ),
     }
 }
 
@@ -1127,6 +1144,49 @@ mod tests {
         assert_eq!(
             sync_cache(ws, ".nexus", &export(Some(vec![]), None)).unwrap(),
             CacheSync::Unchanged
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sync_cache_refuses_a_linked_root_and_a_tracked_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.join(".nexus")).unwrap();
+        let e = export(Some(vec![actor("spark-coder", "local-coder-main")]), None);
+        assert!(matches!(
+            sync_cache(ws, ".nexus", &e).unwrap(),
+            CacheSync::Refused(_)
+        ));
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        fs::create_dir_all(cache_path(ws, ".nexus").parent().unwrap()).unwrap();
+        fs::write(cache_path(ws, ".nexus"), "{}\n").unwrap();
+        let git = |args: &[&str]| {
+            let mut cmd = std::process::Command::new("git");
+            for var in nexus_core::config::trust::GIT_LOCATION_VARS {
+                cmd.env_remove(var);
+            }
+            assert!(cmd
+                .args(args)
+                .current_dir(ws)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-f", ".nexus"]);
+        assert_eq!(
+            sync_cache(ws, ".nexus", &export(None, None)).unwrap(),
+            CacheSync::Refused("tracked by git")
+        );
+        assert_eq!(
+            fs::read_to_string(cache_path(ws, ".nexus")).unwrap(),
+            "{}\n"
         );
     }
 
