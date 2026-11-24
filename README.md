@@ -1056,6 +1056,19 @@ workspace or into `.git` is not written):
 ```markdown
 ## Security
 
+- MUST: Never put secrets, credentials, tokens or private keys into output, logs, commits ...
+
+## Workflow
+
+- MUST: Track every working session in Nexus ...
+- SHOULD: ...
+```
+
+MUST/SHOULD comes from the directive's `level` (older servers: `priority`
+high/urgent = MUST). No rationale is sent to agents. Claude Code projects
+with CCX also get `.claude/rules/15-nexus-directives.md`, which Claude Code
+always loads; `.nexus/directives.md` is then the readable copy.
+
 **Screenshots stay in the local vault.** `nexus link` and `nexus init`
 create `.vault/` with `.vault/screenshots/`, the default output for browser
 screenshots, which can show customer data. When git does not ignore
@@ -1137,17 +1150,6 @@ cannot pre-approve anything; delete the file to be asked again. The backend
 also declares its executables with a hash; the CLI compares it with its own
 fingerprint, reports a difference and then asks, and points out items the
 backend did not declare.
-
-## Workflow
-
-- MUST: Track every working session in Nexus ...
-- SHOULD: ...
-```
-
-MUST/SHOULD comes from the directive's `level` (older servers: `priority`
-high/urgent = MUST). No rationale is sent to agents. Claude Code projects
-with CCX also get `.claude/rules/15-nexus-directives.md`, which Claude Code
-always loads; `.nexus/directives.md` is then the readable copy.
 
 ### Shadow Mode (`nexus shadow`)
 
