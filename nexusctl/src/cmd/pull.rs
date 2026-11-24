@@ -2761,7 +2761,14 @@ fn sync_local_scripts(
             .filter(|d| matches!(d, DroppedFile::KeepModified(_)))
             .map(|d| d.path().to_string()),
     );
-    super::shadow::apply_local_script_excludes(workspace, &excluded);
+    // Without the exclude rule a new script could be committed by accident.
+    if let Some(e) = super::shadow::apply_local_script_excludes(workspace, &excluded).error {
+        println!(
+            "   {} local scripts not synced: .git/info/exclude could not be updated ({e})",
+            style("!").bold().yellow()
+        );
+        return Ok(0);
+    }
 
     let mut written = 0;
     for (rel, body) in accepted.iter().filter(|(p, _)| !held.contains(*p)) {

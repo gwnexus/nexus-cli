@@ -976,13 +976,6 @@ pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>, a
     }
     let cache = workspace.join(cache_rel_path());
     let guard_rel = guard_rel_for(workspace, &root);
-    // A copy an earlier version cached under another agentic root.
-    let legacy = legacy_cache_rel_path(agentic_root);
-    if legacy != cache_rel_path()
-        && super::pull::validate_agent_file_target_path(workspace, &legacy).is_ok()
-    {
-        let _ = fs::remove_file(workspace.join(&legacy));
-    }
     let result = match guard {
         Some(g) => {
             let json = serde_json::to_string_pretty(g).unwrap_or_default() + "\n";
@@ -1011,13 +1004,40 @@ pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>, a
         }
     };
     match result {
-        Ok(action) => print_hook_action(&root, &action),
+        Ok(action) => {
+            print_hook_action(&root, &action);
+            // The hook no longer reads an older cache location now.
+            remove_legacy_cache(workspace, agentic_root);
+        }
         Err(e) => println!(
             "   {} shadow guard commit-msg hook: {}",
             style("!").bold().yellow(),
             e
         ),
     }
+}
+
+/// Remove the copy an earlier version cached under another agentic root,
+/// once the hook was updated. A copy git tracks (or may track) stays.
+fn remove_legacy_cache(workspace: &Path, agentic_root: &str) {
+    let legacy = legacy_cache_rel_path(agentic_root);
+    if legacy == cache_rel_path()
+        || super::pull::validate_agent_file_target_path(workspace, &legacy).is_err()
+    {
+        return;
+    }
+    let path = workspace.join(&legacy);
+    if fs::symlink_metadata(&path).is_err() {
+        return;
+    }
+    if nexus_core::config::trust::git_tracking(&path) != Some(false) {
+        println!(
+            "   {} {legacy}: old shadow guard cache, kept because git tracks it; remove it by hand",
+            style("i").bold().blue()
+        );
+        return;
+    }
+    let _ = fs::remove_file(&path);
 }
 
 /// The effective shadow state, for `nexus shadow status` and
@@ -1420,14 +1440,28 @@ mod tests {
     }
 
     /// Another agentic root still caches the guard where `nexus shadow
-    /// check` reads it without the hub; an older copy under that root goes.
+    /// check` reads it without the hub; an older copy under that root goes
+    /// once the hook was updated, and only when git does not track it.
     #[test]
     fn test_guard_cache_is_found_for_any_agentic_root() {
         let dir = repo("cache-root");
         let legacy = dir.join(".agent/generated/shadow-guard.json");
         fs::create_dir_all(legacy.parent().unwrap()).unwrap();
         fs::write(&legacy, "{}").unwrap();
-        let g = guard(vec![]);
+        let mut g = guard(vec![]);
+        // The hook is not approved: an old hook may still read the copy.
+        g.commit_msg_hook = true;
+        sync(&dir, ".agent", Some(&g), false);
+        assert!(legacy.exists());
+        // Tracked by git: kept.
+        git(&dir, &["add", "-f", ".agent/generated/shadow-guard.json"]);
+        g.commit_msg_hook = false;
+        sync(&dir, ".agent", Some(&g), false);
+        assert!(legacy.exists());
+        git(
+            &dir,
+            &["rm", "-q", "--cached", ".agent/generated/shadow-guard.json"],
+        );
         sync(&dir, ".agent", Some(&g), false);
         assert!(!legacy.exists());
         assert!(dir.join(".nexus/generated/shadow-guard.json").exists());

@@ -135,7 +135,7 @@ fn local_on(target: LocalTarget, untrack: bool, hint_if_active: bool) -> anyhow:
     }
     let (start, end) = target.markers();
     let patterns = target.patterns();
-    let active = is_block_active(&exclude_path, start);
+    let active = is_block_active(&exclude_path, start)?;
     if active && !hint_if_active {
         return Ok(());
     }
@@ -179,13 +179,14 @@ pub fn off() -> anyhow::Result<()> {
     let repo = current_repo()?;
     let exclude_path = repo.exclude.clone();
 
-    if !is_block_active(&exclude_path, MARKER_START) {
+    // Read once: the marker check and the removal see the same text, and
+    // a file that cannot be read is reported instead of "not enabled".
+    let content = read_exclude(&exclude_path)?;
+    if !content.contains(MARKER_START) {
         println!("{} Shadow mode is not currently enabled.", style("○").dim());
         return Ok(());
     }
 
-    // Remove our block from the exclude file
-    let content = read_exclude(&exclude_path)?;
     let cleaned = remove_block(&content, MARKER_START, MARKER_END);
     fs::write(&exclude_path, &cleaned)?;
 
@@ -208,8 +209,8 @@ pub fn off() -> anyhow::Result<()> {
 fn local_status(server_level: bool) -> anyhow::Result<()> {
     let exclude_path = current_repo()?.exclude;
 
-    let agentic_active = is_block_active(&exclude_path, MARKER_START);
-    let workspace_active = is_block_active(&exclude_path, WS_MARKER_START);
+    let agentic_active = is_block_active(&exclude_path, MARKER_START)?;
+    let workspace_active = is_block_active(&exclude_path, WS_MARKER_START)?;
     let workspace_label = if server_level {
         "Workspace shadow (devbox files)"
     } else {
@@ -288,7 +289,8 @@ pub fn workspace_off() -> anyhow::Result<()> {
     let repo = current_repo()?;
     let exclude_path = repo.exclude.clone();
 
-    if !is_block_active(&exclude_path, WS_MARKER_START) {
+    let content = read_exclude(&exclude_path)?;
+    if !content.contains(WS_MARKER_START) {
         println!(
             "{} Workspace shadow is not currently enabled.",
             style("○").dim()
@@ -296,7 +298,6 @@ pub fn workspace_off() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let content = read_exclude(&exclude_path)?;
     let cleaned = remove_block(&content, WS_MARKER_START, WS_MARKER_END);
     fs::write(&exclude_path, &cleaned)?;
 
@@ -314,7 +315,7 @@ pub fn workspace_off() -> anyhow::Result<()> {
 /// Check whether workspace shadow is currently active.
 #[allow(dead_code)]
 pub fn is_workspace_shadow_active() -> anyhow::Result<bool> {
-    Ok(is_block_active(&current_repo()?.exclude, WS_MARKER_START))
+    Ok(is_block_active(&current_repo()?.exclude, WS_MARKER_START)?)
 }
 
 /// Protect a file that carries the API token (`.mcp.json`, `opencode.json`):
@@ -781,7 +782,7 @@ pub async fn set_level(
     api_url: &str,
     action: &str,
     assume_yes: bool,
-) -> anyhow::Result<Option<ServerExcludeReport>> {
+) -> anyhow::Result<Option<(ServerExcludeReport, String)>> {
     let level =
         policy_value(action).ok_or_else(|| anyhow::anyhow!("unknown shadow level '{action}'"))?;
     if !super::env_cmd::has_setting(api_url, "policy.shadow")
@@ -812,8 +813,8 @@ pub async fn set_level(
         let exclude_path = repo_at(&workspace)?
             .ok_or_else(|| anyhow::anyhow!("Not inside a Git repository."))?
             .exclude;
-        if is_block_active(&exclude_path, MARKER_START) {
-            let content = read_exclude(&exclude_path)?;
+        let content = read_exclude(&exclude_path)?;
+        if content.contains(MARKER_START) {
             fs::write(
                 &exclude_path,
                 remove_block(&content, MARKER_START, MARKER_END),
@@ -845,7 +846,7 @@ pub async fn set_level(
         export.shadow.as_deref().unwrap_or(level),
         export.shadow_guard.as_ref(),
     );
-    Ok(Some(report))
+    Ok(Some((report, agentic_root)))
 }
 
 // ---------------------------------------------------------------------------
@@ -928,6 +929,9 @@ pub async fn switch(
     };
     let has = |t| targets.contains(&t);
     let (agentic, nexus) = (has(ShadowTarget::Agentic), has(ShadowTarget::Nexus));
+    // An untrack refusal of one target does not stop the others: it is
+    // reported after every selected target was switched.
+    let mut refused: Option<anyhow::Error> = None;
     let settings = super::env_cmd::snapshot(api_url).await;
     let has_setting = |key: &str| {
         settings
@@ -969,15 +973,20 @@ pub async fn switch(
                 }
             } else {
                 let report = set_level(api_url, level, assume_yes).await?;
-                if let Some(report) = report.filter(|r| on && untrack && r.error.is_none()) {
-                    // Only the agentic and nexus paths: the workspace paths
-                    // are untracked when that target is switched.
+                if let Some((report, root)) =
+                    report.filter(|(r, _)| on && untrack && r.error.is_none())
+                {
+                    // Only the agentic and nexus paths: workspace paths are
+                    // untracked with their own target, and personal files
+                    // the list also carries are never untracked.
                     let entries: Vec<String> = report
                         .entries
                         .into_iter()
-                        .filter(|e| !is_workspace_entry(e))
+                        .filter(|e| is_agentic_entry(e, &root))
                         .collect();
-                    untrack_server_paths(&std::env::current_dir()?, &entries)?;
+                    if let Err(e) = untrack_server_paths(&std::env::current_dir()?, &entries) {
+                        refused = Some(e);
+                    }
                 }
             }
         } else {
@@ -999,7 +1008,9 @@ pub async fn switch(
                         style("i").bold().blue()
                     );
                     if on {
-                        local_on(LocalTarget::Agentic, untrack, true)?;
+                        if let Err(e) = local_on(LocalTarget::Agentic, untrack, true) {
+                            refused = Some(e);
+                        }
                     } else {
                         off()?;
                     }
@@ -1024,7 +1035,7 @@ pub async fn switch(
                     WORKSPACE_PATTERNS.join(", ")
                 );
             }
-            return Ok(());
+            return refused.map_or(Ok(()), Err);
         }
         if server {
             // The project setting decides; the server exclude list carries
@@ -1064,7 +1075,7 @@ pub async fn switch(
                 style("●").magenta().bold(),
                 style(if effective { "enabled" } else { "disabled" }).bold()
             );
-            return Ok(());
+            return refused.map_or(Ok(()), Err);
         }
         let exclude_path = current_repo()?.exclude;
         set_workspace_opt_out(&exclude_path, !on)?;
@@ -1078,7 +1089,7 @@ pub async fn switch(
             );
         }
     }
-    Ok(())
+    refused.map_or(Ok(()), Err)
 }
 
 /// Whether workspace shadow was switched off locally (`nexus shadow off
@@ -1349,16 +1360,21 @@ fn path_from_bytes(bytes: &[u8]) -> PathBuf {
 /// repository; an error when git metadata exists above `start` but git
 /// cannot resolve it.
 fn repo_at(start: &Path) -> std::io::Result<Option<Repo>> {
-    let out = super::shadow_guard::git_in(start)
-        .args(["rev-parse", "--show-toplevel", "--git-path", "info/exclude"])
-        .stderr(std::process::Stdio::null())
-        .output();
-    if let Some(out) = out.ok().filter(|o| o.status.success()) {
-        let mut lines = out.stdout.split(|b| *b == b'\n').filter(|l| !l.is_empty());
-        if let (Some(top), Some(exclude)) = (lines.next(), lines.next()) {
-            let exclude = path_from_bytes(exclude);
+    // One path per call: a path may itself contain a newline.
+    let ask = |args: &[&str]| -> Option<PathBuf> {
+        let out = super::shadow_guard::git_in(start)
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let raw = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
+        (!raw.is_empty()).then(|| path_from_bytes(raw))
+    };
+    if let Some(top) = ask(&["rev-parse", "--show-toplevel"]) {
+        if let Some(exclude) = ask(&["rev-parse", "--git-path", "info/exclude"]) {
             return Ok(Some(Repo {
-                work_tree: path_from_bytes(top),
+                work_tree: top,
                 // `--git-path` is relative to the directory git ran in.
                 exclude: if exclude.is_absolute() {
                     exclude
@@ -1405,9 +1421,10 @@ fn read_exclude(path: &Path) -> std::io::Result<String> {
     }
 }
 
-/// Check whether a marker block is present in the exclude file.
-fn is_block_active(exclude_path: &Path, marker_start: &str) -> bool {
-    read_exclude(exclude_path).is_ok_and(|content| content.contains(marker_start))
+/// Check whether a marker block is present in the exclude file (missing
+/// file: no); a file that cannot be read is an error.
+fn is_block_active(exclude_path: &Path, marker_start: &str) -> std::io::Result<bool> {
+    Ok(read_exclude(exclude_path)?.contains(marker_start))
 }
 
 /// Remove a marker-delimited block from file content.
@@ -1469,8 +1486,9 @@ struct UntrackReport {
     removed: usize,
     /// Files still tracked (nothing is untracked without `--untrack`).
     kept: Vec<String>,
-    /// The patterns those files belong to, for the hint.
-    kept_roots: Vec<String>,
+    /// The patterns those files belong to with their file count, for the
+    /// hint.
+    kept_roots: Vec<(String, usize)>,
     /// Patterns whose files git refused to untrack, with git's reason.
     failed: Vec<String>,
 }
@@ -1495,6 +1513,98 @@ fn tracked_matches(work_tree: &Path, pattern: &str) -> anyhow::Result<Vec<Vec<u8
         .collect())
 }
 
+/// Git's refusal, with the file names it lists, but without its advice to
+/// force the removal.
+fn git_refusal(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.contains("-f to force") && !l.starts_with("(use"))
+        .collect();
+    if lines.is_empty() {
+        "git rm failed".to_string()
+    } else {
+        lines.join(" ")
+    }
+}
+
+/// The `paths` (git's raw bytes) git ignores with the current ignore
+/// rules, as if they were untracked.
+fn effectively_ignored(work_tree: &Path, paths: &[Vec<u8>]) -> anyhow::Result<Vec<Vec<u8>>> {
+    use std::io::Write as _;
+    let mut child = super::shadow_guard::git_in(work_tree)
+        .args(["check-ignore", "--no-index", "-z", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let mut input = Vec::new();
+    for p in paths {
+        input.extend_from_slice(p);
+        input.push(0);
+    }
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(&input)?;
+    }
+    let out = child.wait_with_output()?;
+    // 0: some ignored, 1: none ignored, anything else: git failed.
+    match out.status.code() {
+        Some(0) | Some(1) => {}
+        _ => anyhow::bail!("git could not check the ignore rules"),
+    }
+    let listed: Vec<&[u8]> = out.stdout.split(|b| *b == 0).collect();
+    Ok(paths
+        .iter()
+        .filter(|p| listed.contains(&p.as_slice()))
+        .cloned()
+        .collect())
+}
+
+/// The `paths` whose staged content is not in `HEAD` and that have no
+/// copy in the work tree: untracking them would drop that content.
+fn staged_only_missing(work_tree: &Path, paths: &[Vec<u8>]) -> anyhow::Result<Vec<Vec<u8>>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let out = super::shadow_guard::git_in(work_tree)
+        .args([
+            "--literal-pathspecs",
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--",
+        ])
+        .args(paths.iter().map(|p| path_from_bytes(p)))
+        .stderr(std::process::Stdio::null())
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!("git could not compare the index with HEAD");
+    }
+    let staged: Vec<&[u8]> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
+    Ok(paths
+        .iter()
+        .filter(|p| staged.contains(&p.as_slice()))
+        .filter(|p| fs::symlink_metadata(work_tree.join(path_from_bytes(p))).is_err())
+        .cloned()
+        .collect())
+}
+
+/// Whether git tracks `path` itself or a file below it (a literal lookup,
+/// no ignore-pattern matching; false when git cannot tell).
+fn is_path_tracked(work_tree: &Path, path: &str) -> bool {
+    super::shadow_guard::git_in(work_tree)
+        .args(["--literal-pathspecs", "ls-files", "-z", "--", path])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
+
 /// Whether git tracks any file `pattern` covers (false when git cannot tell).
 fn is_pattern_tracked(work_tree: &Path, pattern: &str) -> bool {
     tracked_matches(work_tree, pattern).is_ok_and(|m| !m.is_empty())
@@ -1516,8 +1626,8 @@ fn untrack_patterns(
             continue;
         }
         if !untrack {
-            if !report.kept_roots.iter().any(|r| r.as_str() == *pat) {
-                report.kept_roots.push((*pat).to_string());
+            if !report.kept_roots.iter().any(|(r, _)| r.as_str() == *pat) {
+                report.kept_roots.push(((*pat).to_string(), matches.len()));
             }
             report.kept.extend(
                 matches
@@ -1526,21 +1636,42 @@ fn untrack_patterns(
             );
             continue;
         }
+        // Only files the exclude actually hides once untracked: a
+        // `.gitignore` negation (`!AGENTS.md`) would leave them visible.
+        let ignored = effectively_ignored(work_tree, &matches)?;
+        for m in matches.iter().filter(|m| !ignored.contains(m)) {
+            report.failed.push(format!(
+                "{}: still not ignored (a .gitignore rule re-includes it)",
+                String::from_utf8_lossy(m)
+            ));
+        }
+        // Staged content without a work tree copy and without a commit
+        // would be lost with its index entry.
+        let only_in_index = staged_only_missing(work_tree, &ignored)?;
+        for m in &only_in_index {
+            report.failed.push(format!(
+                "{}: staged, but neither committed nor on disk; commit or restore it first",
+                String::from_utf8_lossy(m)
+            ));
+        }
+        let selected: Vec<&Vec<u8>> = ignored
+            .iter()
+            .filter(|m| !only_in_index.contains(m))
+            .collect();
+        if selected.is_empty() {
+            continue;
+        }
         // Literal pathspecs: the names come from git and go back unchanged.
         let out = super::shadow_guard::git_in(work_tree)
             .args(["--literal-pathspecs", "rm", "--cached", "--quiet", "--"])
-            .args(matches.iter().map(|m| path_from_bytes(m)))
+            .args(selected.iter().map(|m| path_from_bytes(m)))
             .output()?;
         if out.status.success() {
-            report.removed += matches.len();
+            report.removed += selected.len();
         } else {
-            let reason = String::from_utf8_lossy(&out.stderr)
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("git rm failed")
-                .trim()
-                .to_string();
-            report.failed.push(format!("{pat}: {reason}"));
+            report
+                .failed
+                .push(format!("{pat}: {}", git_refusal(&out.stderr)));
         }
     }
     Ok(report)
@@ -1561,18 +1692,47 @@ fn finish_untrack(report: &UntrackReport) -> anyhow::Result<()> {
     for f in &report.failed {
         println!("  {} not untracked: {f}", style("!").bold().yellow());
     }
-    anyhow::bail!(
-        "git refused to untrack some files (staged changes that differ from HEAD and the work tree); \
-         commit or restore them, then run the command again"
-    )
+    anyhow::bail!("some files were not untracked (see above); fix them, then run the command again")
 }
 
-/// Whether `entry` is one of the workspace target's paths.
+/// An exclude entry without the spellings that select the same paths: a
+/// trailing `/`, `/*` or `/**` and a leading `**/`.
+fn normalized_entry(entry: &str) -> &str {
+    let mut e = entry.trim();
+    loop {
+        let next = e
+            .strip_suffix("/**")
+            .or_else(|| e.strip_suffix("/*"))
+            .or_else(|| e.strip_suffix('/'))
+            .unwrap_or(e);
+        if next == e {
+            break;
+        }
+        e = next;
+    }
+    e.strip_prefix("**/").unwrap_or(e)
+}
+
+/// Whether `entry` is one of the workspace target's paths (or a path below
+/// one).
 fn is_workspace_entry(entry: &str) -> bool {
-    let e = entry.trim().trim_end_matches('/');
-    WORKSPACE_PATTERNS
+    let e = normalized_entry(entry);
+    WORKSPACE_PATTERNS.iter().any(|p| {
+        let p = p.trim_end_matches('/');
+        e == p || (p.ends_with("devbox") && e.starts_with(&format!("{p}/")))
+    })
+}
+
+/// Whether `entry` belongs to the agentic or nexus target: an agentic file
+/// pattern, the agentic root, or a path below one of them.
+fn is_agentic_entry(entry: &str, agentic_root: &str) -> bool {
+    let e = normalized_entry(entry);
+    let root = agentic_root.trim_end_matches('/');
+    AGENTIC_PATTERNS
         .iter()
-        .any(|p| p.trim_end_matches('/') == e)
+        .map(|p| p.trim_end_matches('/'))
+        .chain(std::iter::once(root))
+        .any(|p| e == p || e.starts_with(&format!("{p}/")))
 }
 
 /// `--untrack` with server exclude entries: take every file they cover
@@ -1597,14 +1757,8 @@ fn print_tracked_hint(report: &UntrackReport, target: &str) {
         style("!").bold().yellow(),
         report.kept.len()
     );
-    for root in &report.kept_roots {
-        let clean = root.trim_end_matches('/');
-        let n = report
-            .kept
-            .iter()
-            .filter(|p| *p == clean || p.starts_with(&format!("{clean}/")))
-            .count();
-        if root.ends_with('/') {
+    for (root, n) in &report.kept_roots {
+        if root.ends_with('/') || *n > 1 {
             println!("      {root} ({n} file(s))");
         } else {
             println!("      {root}");
@@ -1613,13 +1767,23 @@ fn print_tracked_hint(report: &UntrackReport, target: &str) {
     let roots: Vec<&str> = report
         .kept_roots
         .iter()
-        .map(|r| r.trim_end_matches('/'))
+        .map(|(r, _)| r.trim_end_matches('/'))
         .collect();
+    // The manual git commands name the root paths; for matches in
+    // subdirectories (`sub/.claude/...`) only the Nexus command fits.
+    let at_root = report.kept.iter().all(|p| {
+        roots
+            .iter()
+            .any(|r| p == r || p.starts_with(&format!("{r}/")))
+    });
     println!("    Stop tracking them (they stay on disk; your next commit removes them from the repository, and a teammate's git pull deletes their copies until nexus pull restores them):");
     println!(
         "      {}",
         style(format!("nexus shadow on --target {target} --untrack")).bold()
     );
+    if !at_root {
+        return;
+    }
     println!(
         "      {}",
         style(format!(
@@ -1648,7 +1812,7 @@ fn untracked_patterns_in(patterns: &[&str], work_tree: &Path) -> Vec<String> {
         .iter()
         .map(|p| p.trim_end_matches('/'))
         .filter(|p| work_tree.join(p).exists())
-        .filter(|p| !is_pattern_tracked(work_tree, p))
+        .filter(|p| !is_path_tracked(work_tree, p))
         .map(str::to_string)
         .collect()
 }
@@ -1809,6 +1973,7 @@ mod tests {
         assert_eq!(report.removed, 0);
         assert_eq!(report.kept, vec!["AGENTS.md"]);
         assert!(index(path).contains(&"AGENTS.md".to_string()));
+        exclude_rules(path, &["AGENTS.md"]);
         let report = untrack_patterns(path, &["AGENTS.md"], true).unwrap();
         assert_eq!(report.removed, 1);
         assert!(!index(path).contains(&"AGENTS.md".to_string()));
@@ -1823,6 +1988,7 @@ mod tests {
         fs::write(path.join(".claude/plain.md"), "y").unwrap();
         git(path, &["add", "-A"]);
         git(path, &["commit", "-q", "-m", "more"]);
+        exclude_rules(path, &[".claude/"]);
         let report = untrack_patterns(path, &[".claude/"], true).unwrap();
         assert_eq!(report.removed, 2);
         assert!(report.failed.is_empty());
@@ -1838,11 +2004,95 @@ mod tests {
         fs::write(path.join("AGENTS.md"), "two").unwrap();
         git(path, &["add", "AGENTS.md"]);
         fs::write(path.join("AGENTS.md"), "three").unwrap();
+        exclude_rules(path, &["AGENTS.md"]);
         let report = untrack_patterns(path, &["AGENTS.md"], true).unwrap();
         assert_eq!(report.removed, 0);
         assert_eq!(report.failed.len(), 1);
         assert!(finish_untrack(&report).is_err());
         assert!(index(path).contains(&"AGENTS.md".to_string()));
+    }
+
+    /// Write `rules` to the repository's `info/exclude`, as the callers of
+    /// `untrack_patterns` do before untracking.
+    fn exclude_rules(path: &Path, rules: &[&str]) {
+        fs::create_dir_all(path.join(".git/info")).unwrap();
+        fs::write(path.join(".git/info/exclude"), rules.join("\n") + "\n").unwrap();
+    }
+
+    /// A `.gitignore` negation keeps a file visible: it is not untracked.
+    #[test]
+    fn test_untrack_skips_files_a_negation_re_includes() {
+        let dir = make_temp_repo_with_commit("AGENTS.md", "x");
+        let path = dir.path();
+        fs::write(path.join(".gitignore"), "!AGENTS.md\n").unwrap();
+        exclude_rules(path, &["AGENTS.md"]);
+        let report = untrack_patterns(path, &["AGENTS.md"], true).unwrap();
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+        assert!(index(path).contains(&"AGENTS.md".to_string()));
+    }
+
+    /// Staged content with no commit and no work tree copy keeps its index
+    /// entry; a staged file still on disk is untracked.
+    #[test]
+    fn test_untrack_keeps_staged_only_content_without_a_copy() {
+        let dir = make_temp_repo_with_commit("readme.txt", "root");
+        let path = dir.path();
+        fs::create_dir_all(path.join(".claude")).unwrap();
+        fs::write(path.join(".claude/settings.json"), "{}").unwrap();
+        fs::write(path.join(".claude/kept.json"), "{}").unwrap();
+        git(path, &["add", ".claude"]);
+        fs::remove_file(path.join(".claude/settings.json")).unwrap();
+        exclude_rules(path, &[".claude/"]);
+        let report = untrack_patterns(path, &[".claude/"], true).unwrap();
+        assert_eq!(report.removed, 1);
+        assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+        assert_eq!(index(path), vec![".claude/settings.json", "readme.txt"]);
+    }
+
+    #[test]
+    fn test_git_refusal_keeps_file_names_without_force_advice() {
+        let stderr = b"error: the following file has staged content different from both the\nfile and the HEAD:\n    .claude/settings.json\n(use -f to force removal)\n";
+        let r = git_refusal(stderr);
+        assert!(r.contains(".claude/settings.json"), "{r}");
+        assert!(!r.contains("force"), "{r}");
+    }
+
+    #[test]
+    fn test_entries_classify_spellings_alike() {
+        assert!(is_workspace_entry("scripts/devbox/**"));
+        assert!(is_workspace_entry("scripts/devbox/*"));
+        assert!(is_workspace_entry("scripts/devbox/local.sh"));
+        assert!(is_workspace_entry(".devbox/**"));
+        assert!(!is_workspace_entry("scripts/other/**"));
+        assert!(is_agentic_entry(".claude/**", ".nexus"));
+        assert!(is_agentic_entry(".nexus/claude/zellij.local.kdl", ".nexus"));
+        assert!(is_agentic_entry(".agent/", ".agent"));
+        assert!(is_agentic_entry("AGENTS.md", ".nexus"));
+        assert!(!is_agentic_entry(".env.nexus.local", ".nexus"));
+        assert!(!is_agentic_entry("devbox.json", ".nexus"));
+    }
+
+    /// The add hint names a root file even when only a nested file of the
+    /// same name is tracked.
+    #[test]
+    fn test_add_hint_uses_a_literal_tracking_lookup() {
+        let dir = make_temp_repo_with_commit("sub/AGENTS.md", "x");
+        let path = dir.path();
+        fs::write(path.join("AGENTS.md"), "root").unwrap();
+        assert_eq!(
+            untracked_patterns_in(&["AGENTS.md"], path),
+            vec!["AGENTS.md"]
+        );
+    }
+
+    #[test]
+    fn test_off_reports_an_unreadable_exclude_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exclude");
+        fs::write(&path, b"# >>> nexus shadow\n\xff\n").unwrap();
+        assert!(is_block_active(&path, MARKER_START).is_err());
+        assert!(!is_block_active(&dir.path().join("missing"), MARKER_START).unwrap());
     }
 
     /// After `off`, only existing untracked paths get a `git add` hint;
@@ -2160,9 +2410,11 @@ mod tests {
         let report = untrack_patterns(path, WORKSPACE_PATTERNS, false).unwrap();
         assert_eq!(report.removed, 0);
         assert_eq!(report.kept, vec!["devbox.json", "scripts/devbox/new.sh"]);
-        assert_eq!(report.kept_roots, vec!["devbox.json", "scripts/devbox/"]);
+        let roots: Vec<&str> = report.kept_roots.iter().map(|(r, _)| r.as_str()).collect();
+        assert_eq!(roots, vec!["devbox.json", "scripts/devbox/"]);
         assert_eq!(index(path).len(), 2);
 
+        exclude_rules(path, WORKSPACE_PATTERNS);
         let report = untrack_patterns(path, WORKSPACE_PATTERNS, true).unwrap();
         assert_eq!(report.removed, 2);
         assert!(report.kept.is_empty());
