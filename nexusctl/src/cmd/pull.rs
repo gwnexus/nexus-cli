@@ -34,6 +34,11 @@ use super::shadow;
 /// overwritten by `nexus pull`.
 pub(crate) const MANAGED_MARKER: &str = "source: nexus-platform";
 
+/// How every `<agentic_root>/TASKS.md` snapshot written by `write_tasks`
+/// begins; `nexus deinit` removes only a file that starts this way.
+pub(crate) const TASKS_SNAPSHOT_HEAD: &str =
+    "---\nsource: nexus-platform\n---\n\n# Active Tasks\n\n";
+
 // ---------------------------------------------------------------------------
 // URL allowlist for remote downloads (SEC-003)
 //
@@ -5384,6 +5389,12 @@ pub(crate) fn remove_generated_records_with(
     agentic_root: &str,
     remove: impl Fn(&str, Option<&str>) -> bool,
 ) -> anyhow::Result<usize> {
+    // A missing manifest has nothing to drop and is not created.
+    if fs::symlink_metadata(pull_manifest_path(workspace, agentic_root))
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(0);
+    }
     update_pull_manifest(workspace, agentic_root, |m| {
         let before = m.len();
         m.retain(|path, hash| !remove(path, Some(hash.as_str())));
@@ -5767,11 +5778,7 @@ pub fn write_tasks(
         pa.cmp(&pb).then_with(|| b.updated_at.cmp(&a.updated_at))
     });
 
-    let mut out = String::new();
-    out.push_str("---\n");
-    out.push_str("source: nexus-platform\n");
-    out.push_str("---\n\n");
-    out.push_str("# Active Tasks\n\n");
+    let mut out = String::from(TASKS_SNAPSHOT_HEAD);
     out.push_str(&format!(
         "> {} open task{} pulled from Nexus platform.\n\n",
         sorted.len(),

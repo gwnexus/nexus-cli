@@ -292,7 +292,9 @@ pub fn remove_manifest_entries_with(
     workspace: &Path,
     remove: impl Fn(&str, Option<&str>) -> bool,
 ) -> anyhow::Result<usize> {
-    update_manifest(workspace, |m| {
+    // Nothing to remove from a manifest that does not exist (deinit,
+    // cleanup): it is not created.
+    super::json_store::update_existing(&workspace.join(SYNC_MANIFEST), |m| {
         let before = m.len();
         m.retain(|key, entry| {
             let target = entry

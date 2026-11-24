@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`nexus init` writes the project name and id as quoted TOML strings,** so a name with quotes, backslashes or line breaks cannot break `.nexus/config.toml` or add keys.
 - **`nexus init` adds a Claude Code MCP server that differs only in its arguments** (several servers started through `npx`) instead of skipping it as a duplicate.
 - **The consent review offers the full diff** when an executable item's diff is longer than the 80-line preview, before asking whether to install it.
+- **`nexus deinit` keeps edited and foreign files under `.nexus/`.** It removed the agentic root's entries wholesale; now Nexus state (`generated/`, the sync manifest) goes, a file goes only when it is what Nexus recorded (or the task snapshot at the top of the root), and edited files, files Nexus did not write and links stay and are listed as kept. Directories left empty are removed.
+- **Removing records never creates a manifest.** A cleanup or `nexus deinit` on a workspace without a sync or pull manifest no longer leaves an empty manifest and its lock file behind.
 - **`nexus shadow on --untrack` removes only what stays hidden.** An agentic or nexus switch untracks only agentic paths (personal files such as `.env.nexus.local` stay tracked), a file a `.gitignore` negation re-includes and staged content with neither a commit nor a work tree copy keep their index entries, git's refusal names the files, the tracked-file hint offers only the Nexus command, and a refusal of one target no longer skips the other selected targets. `scripts/devbox/**` and similar spellings count as workspace paths (a leading `**/` does not).
 - **Shadow mode reports an exclude file it cannot read.** `nexus shadow off` and the status no longer read an unreadable `info/exclude` as "not enabled", and `nexus pull` skips machine-local scripts when their exclude rule cannot be written.
 - **An old shadow guard cache is removed only after the hook moved on,** never when git tracks it, a hook was left alone, the new cache could not be written, or both paths name the same file. A failed cache write, or a cache git tracks, leaves the hook unchanged; the hook falls back to the old cache in a linked worktree that was not pulled since.
@@ -79,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`nexus push` stops instead of publishing an incomplete fork.** A workspace file to push that cannot be read, or a current fork that cannot be fetched (other than "no fork yet"), stops the push with nothing published (generated scripts, which are never pushed, are skipped, and so are files the fork dropped unless they are named). A file unchanged locally whose fork version is newer goes into the new fork with the fork version instead of the stale local copy.
 - **A pushed agent file updates only its own record.** After `nexus push <file>` the new hash is recorded only if the record still names the uploaded file and version; otherwise pull is suggested.
 - **Optional fields are left out of requests.** The runner registration omits an unknown runtime version, and actor imports omit unset description, routing and profile fields instead of sending `null`.
+
+### Tests
+
+- **Functional tests run the real `nexus` binary** against a local fake backend in a temporary git workspace with its own home directory: pull (first pull, idempotence, dry run, local edits, dropped files, consent, scopes, task snapshot, user-managed directives, `opencode.json` settings, broken and unreadable files), push, status (including the legacy export fallback), diff, reset, stash, deinit, shadow and init.
 
 ## [0.51.0] - 2026-11-24
 
