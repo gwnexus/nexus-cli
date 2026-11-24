@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unchanged workspace scripts get their executable bit back,** and a script is recorded only once its mode is set.
 - **`opencode.json` keeps the operator's settings.** Without `--force`, pull updates only the keys Nexus writes (theme and other settings stay), leaves a file that cannot be parsed alone, and reconciles a changed default model or agent.
 - **`-y` no longer replaces `.mcp.json` or `opencode.json`.** Locally added MCP servers stay; only `--force` or `--force-unmanaged` rebuilds the files.
+- **`nexus pull` removes a dropped file only in the state it approved.** The removal compares the file and its record with the hash the plan was made from; a file changed in between is kept and reported, an unreadable one is named with its error. The output shows what was actually done, and a kept local script stays git-excluded.
+- **`nexus pull --scope` covers every part a scope writes.** `--scope workspace` applies the server's git excludes; Claude Code's `.claude/skills/` copies follow the `skills` scope; the dry run previews only the selected scopes, falls back to the legacy workspace export, and shows the task snapshot and executable-bit repairs.
+- **A declined or unusable `opencode.json` stays untouched.** The removal of unused MCP environment keys waits for the confirmation, and the Claude Code projection is kept while `opencode.json` could not be written.
+- **Executable-bit repair keeps file permissions.** Execute bits are added only where read bits are set (`0600` becomes `0700`); a script whose mode cannot be changed is reported and the pull continues.
+- **`TASKS.md` is cleared only when Nexus wrote it**, and is never written through a symlink or outside the workspace.
+- **Prerequisite checks time out after 5 seconds** instead of stalling the pull.
+- **An unreadable generated file is not offered for overwriting,** and a failed confirmation keeps the modified files.
 - **`nexus pull --scope` limits what is written.** Skills, directives, agent files (with runtime configs, plugins and the projection cleanup) and tasks are written only when their scope is selected.
 - **`TASKS.md` is refreshed when the last open task closes,** instead of listing it on.
 - **Optional fields are left out of requests.** The runner registration omits an unknown runtime version, and actor imports omit unset description, routing and profile fields instead of sending `null`.

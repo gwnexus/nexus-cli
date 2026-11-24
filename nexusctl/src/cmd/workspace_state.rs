@@ -603,8 +603,10 @@ pub async fn load(
             super::pull::plan_dropped_skill_files(workspace, &agentic_root, is_claude, &desired)
         {
             let (path, state) = match item {
-                super::pull::DroppedFile::Remove(p) => (p, State::Orphaned),
-                super::pull::DroppedFile::KeepModified(p) => (p, State::Dropped),
+                super::pull::DroppedFile::Remove(p, _) => (p, State::Orphaned),
+                super::pull::DroppedFile::KeepModified(p)
+                | super::pull::DroppedFile::Unreadable(p, _)
+                | super::pull::DroppedFile::Changed(p) => (p, State::Dropped),
                 super::pull::DroppedFile::Gone(_) => continue,
             };
             entries.push(Entry {
