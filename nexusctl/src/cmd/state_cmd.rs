@@ -337,10 +337,27 @@ pub async fn push(
     adopt_local: bool,
 ) -> anyhow::Result<()> {
     if adopt_local {
-        return super::push::run(api_url, cli_project_id, fork_name, dry_run, true, &[], None)
-            .await;
+        return super::push::run(
+            api_url,
+            cli_project_id,
+            fork_name,
+            dry_run,
+            true,
+            &[],
+            None,
+            false,
+        )
+        .await;
     }
     let (workspace, project_id, client) = connect(api_url, cli_project_id)?;
+    // One lock for the whole push: the state is checked, the agent files
+    // are uploaded and the workspace is pushed without another command
+    // (a reset, say) changing those files in between. A dry run takes none.
+    let _workspace_lock = if dry_run {
+        None
+    } else {
+        Some(super::pull::lock_workspace(&workspace)?)
+    };
     let state = workspace_state::load(&client, &project_id, &workspace).await?;
 
     let selected: Vec<&Entry> = match path {
@@ -429,6 +446,7 @@ pub async fn push(
             false,
             &include_named,
             selection.as_deref(),
+            true,
         )
         .await?;
     }

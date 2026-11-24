@@ -586,15 +586,30 @@ pub fn apply_server_excludes(workspace: &Path, paths: &[String]) -> ServerExclud
 }
 
 /// Rewrite the `.git/info/exclude` block for machine-local scripts so it
-/// holds exactly `paths` (an empty list removes the block). The block is
-/// the lifecycle source for these files, so a path listed elsewhere in the
-/// file is still written here.
+/// holds `paths` (an empty list removes the block), plus every path the
+/// block already lists whose file is still on disk: a script stays hidden
+/// from Git until it is gone, also when it was created again after pull
+/// removed it and no record names it any more. The block is the lifecycle
+/// source for these files, so a path listed elsewhere in the file is still
+/// written here.
 pub fn apply_local_script_excludes(workspace: &Path, paths: &[String]) -> ServerExcludeReport {
+    let mut keep = paths.to_vec();
+    if let Ok(Some(repo)) = repo_at(workspace) {
+        if let Ok(text) = read_exclude(&repo.exclude) {
+            for p in block_entries(&text, LOCAL_MARKER_START, LOCAL_MARKER_END) {
+                let on_disk = valid_exclude_path(&p)
+                    && fs::symlink_metadata(workspace.join(p.trim_start_matches('/'))).is_ok();
+                if on_disk && !keep.contains(&p) {
+                    keep.push(p);
+                }
+            }
+        }
+    }
     apply_exclude_block(
         workspace,
         LOCAL_MARKER_START,
         LOCAL_MARKER_END,
-        paths,
+        &keep,
         false,
     )
 }
@@ -2467,6 +2482,36 @@ mod tests {
         assert_eq!(policy_value("nexus"), Some("nexus"));
         assert_eq!(policy_value("off"), Some("off"));
         assert_eq!(policy_value("status"), None);
+    }
+
+    /// A local script listed in the block keeps its rule as long as it is
+    /// on disk, on every later update, even when no caller names it.
+    #[test]
+    fn test_local_script_rule_stays_while_the_file_is_on_disk() {
+        let dir = git_repo("local-scripts");
+        fs::create_dir_all(dir.join("scripts/local")).unwrap();
+        fs::write(dir.join("scripts/local/a.sh"), "#!/bin/sh\n").unwrap();
+        fs::write(dir.join("scripts/local/b.sh"), "#!/bin/sh\n").unwrap();
+        let both = ["scripts/local/a.sh", "scripts/local/b.sh"].map(String::from);
+        apply_local_script_excludes(&dir, &both);
+        // b was removed and created again; later updates name neither.
+        apply_local_script_excludes(&dir, &[]);
+        apply_local_script_excludes(&dir, &[]);
+        assert_eq!(
+            block_entries(&exclude_of(&dir), LOCAL_MARKER_START, LOCAL_MARKER_END),
+            both.to_vec()
+        );
+        // Once a file is gone, its rule goes with the next update.
+        fs::remove_file(dir.join("scripts/local/a.sh")).unwrap();
+        apply_local_script_excludes(&dir, &[]);
+        assert_eq!(
+            block_entries(&exclude_of(&dir), LOCAL_MARKER_START, LOCAL_MARKER_END),
+            vec!["scripts/local/b.sh"]
+        );
+        fs::remove_file(dir.join("scripts/local/b.sh")).unwrap();
+        apply_local_script_excludes(&dir, &[]);
+        assert!(!exclude_of(&dir).contains(LOCAL_MARKER_START));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

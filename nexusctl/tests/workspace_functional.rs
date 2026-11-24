@@ -179,6 +179,7 @@ fn workspace_writers_wait_for_the_workspace_lock() {
     use std::os::unix::io::AsRawFd;
     let (api, ws) = pulled();
     ws.write(SETUP, "#!/bin/sh\necho mine\n");
+    ws.write(".nexus/AGENTS.md", "# my edited agents\n");
     let lock = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -194,6 +195,8 @@ fn workspace_writers_wait_for_the_workspace_lock() {
     for args in [
         &["reset", SETUP][..],
         &["push"][..],
+        // Only an agent file: no workspace push follows.
+        &["push", ".nexus/AGENTS.md"][..],
         &["stash", "save"][..],
         &["pull", "--trust"][..],
     ] {
@@ -208,6 +211,10 @@ fn workspace_writers_wait_for_the_workspace_lock() {
     assert_eq!(snapshot(&ws), before, "a locked command wrote");
     // Exports may be read before the lock; nothing is pushed.
     assert!(api.pushes().is_empty(), "a locked push was sent");
+    assert!(
+        !api.writes().iter().any(|r| r.body.contains("\"af_sync\"")),
+        "a locked agent file push was sent"
+    );
     ws.nexus(&api, &["push", "--dry-run"]).assert_ok();
 
     drop(lock);
