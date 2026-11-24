@@ -506,8 +506,8 @@ fn legacy_guard_near(guard_path: &Path) -> Option<ShadowGuard> {
 const LEGACY_SEARCH_DEPTH: usize = 4;
 
 /// The first `<dir>/generated/shadow-guard.json` below `base` (sorted,
-/// breadth first, real directories only, `.git` and dependency folders
-/// skipped).
+/// breadth first, real directories only, `.git`, dependency folders and
+/// nested repositories skipped).
 fn find_legacy_cache(base: &Path, depth: usize) -> Option<ShadowGuard> {
     const SKIP: &[&str] = &[".git", "node_modules", "target", ".devbox"];
     let mut level = vec![base.to_path_buf()];
@@ -522,6 +522,9 @@ fn find_legacy_cache(base: &Path, depth: usize) -> Option<ShadowGuard> {
                 .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
                 .filter(|e| !SKIP.iter().any(|s| e.file_name() == *s))
                 .map(|e| e.path())
+                // A nested repository (submodule, linked worktree) has its
+                // own guard: never searched.
+                .filter(|d| fs::symlink_metadata(d.join(".git")).is_err())
                 .collect();
             dirs.sort();
             if let Some(g) = dirs
@@ -1530,6 +1533,17 @@ mod tests {
         let nested = dir.join("config/agent/generated/shadow-guard.json");
         fs::create_dir_all(nested.parent().unwrap()).unwrap();
         fs::write(&nested, serde_json::to_string(&contract_guard()).unwrap()).unwrap();
+        assert_eq!(check_message_file(&current, &msg).unwrap(), 1);
+        // A nested repository sorted first, with a permissive cache: the
+        // worktree's own rules still apply.
+        let child = dir.join("a-child");
+        fs::create_dir_all(child.join(".nexus/generated")).unwrap();
+        fs::write(child.join(".git"), "gitdir: elsewhere\n").unwrap();
+        fs::write(
+            child.join(".nexus/generated/shadow-guard.json"),
+            serde_json::to_string(&guard(vec![])).unwrap(),
+        )
+        .unwrap();
         assert_eq!(check_message_file(&current, &msg).unwrap(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
