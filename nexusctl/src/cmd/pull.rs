@@ -934,8 +934,34 @@ pub async fn run_with_root_hook(
     let explicit_force = ccx_force != super::ccx::ForceMode::None;
     let mut ws_report = WorkspaceSyncReport::default();
 
-    // Export skills (always needed for project_name)
-    let mut export = client.export_skills(&project_id).await?;
+    // Export skills (also the project name). Only the skills and agents
+    // scopes need it: a tasks or workspace pull goes on without it.
+    let mut export = match client.export_skills(&project_id).await {
+        Ok(export) => export,
+        Err(e) if !pull_scope("skills") && !pull_scope("agents") => {
+            println!(
+                "   {} skills export unavailable ({e}); not needed for this scope",
+                style("!").yellow()
+            );
+            let name = client
+                .get_project(&project_id)
+                .await
+                .map(|d| d.project.name)
+                .unwrap_or_else(|_| project_id.clone());
+            nexus_core::api::SkillExportResponse {
+                action: "sk_export".into(),
+                project: nexus_core::api::SkillExportProject {
+                    id: project_id.clone(),
+                    slug: String::new(),
+                    name,
+                },
+                skills: Vec::new(),
+                count: 0,
+                executables: Vec::new(),
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
     let project_name = export.project.name.clone();
 
     println!(
@@ -948,13 +974,14 @@ pub async fn run_with_root_hook(
     // Nothing above writes to the workspace.
     if dry_run {
         // The same scopes as a pull: only the selected parts are previewed.
-        let ws_export = if pull_scope("workspace") {
-            dry_run_workspace(&client, &project_id, &workspace).await?
-        } else {
-            None
-        };
         let mut items = Vec::new();
         let mut declared = Vec::new();
+        if pull_scope("workspace") {
+            let (ws_items, ws_declared) =
+                dry_run_workspace(&client, &project_id, &workspace).await?;
+            items.extend(ws_items);
+            declared.extend(ws_declared);
+        }
         if pull_scope("skills") {
             let desired = desired_skill_files(&export.skills, &agentic_root, is_claude);
             let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
@@ -983,10 +1010,6 @@ pub async fn run_with_root_hook(
                 &agentic_root,
             ));
             declared.extend(af_export.executables.iter().cloned());
-        }
-        if let Some(ref ws_export) = ws_export {
-            items.extend(super::consent::collect_workspace_v2(&workspace, ws_export));
-            declared.extend(ws_export.executables.iter().cloned());
         }
         super::consent::preview(&workspace, &items, &declared);
         return Ok(());
@@ -1018,37 +1041,22 @@ pub async fn run_with_root_hook(
             let mut generated: Vec<(String, String)> = Vec::new();
             for skill in &export.skills {
                 generated.extend(render_skill_files(skill, &agentic_root));
-                if !is_claude {
+                if is_claude {
+                    // Claude Code's native copies (`.claude/skills/`) follow
+                    // the skills scope and the same rules: a local edit is
+                    // kept without --force.
+                    generated.extend(
+                        claude_render::render_claude_skill_files(skill)
+                            .into_iter()
+                            .filter(|(p, _)| safe_target(&workspace, p)),
+                    );
+                } else {
                     generated.extend(render_command_file(skill, &agentic_root));
                 }
             }
             let (written, skipped) =
                 sync_generated_files(&workspace, &agentic_root, &generated, force)?;
             skipped_modified.extend(skipped);
-            // Claude Code's native copies (`.claude/skills/`) belong to the
-            // skills scope too, so a skills-only pull keeps them current and
-            // an agents-only pull leaves them alone.
-            if is_claude {
-                let mut native = 0;
-                for skill in &export.skills {
-                    if claude_render::write_claude_skill(&workspace, skill)? {
-                        native += 1;
-                    }
-                }
-                let rendered: Vec<(String, String)> = export
-                    .skills
-                    .iter()
-                    .flat_map(claude_render::render_claude_skill_files)
-                    .collect();
-                record_generated_many(&workspace, &agentic_root, &rendered)?;
-                if native > 0 {
-                    println!(
-                        "   {} .claude/skills/ ({} skill(s))",
-                        style("+").bold().green(),
-                        native
-                    );
-                }
-            }
 
             println!(
                 "   {} {} skill(s) synced ({})",
@@ -1903,8 +1911,11 @@ pub async fn run_with_root_hook(
             Ok(task_response) => {
                 let snapshot = workspace.join(&agentic_root).join("TASKS.md");
                 // Only a snapshot Nexus wrote is cleared; the operator's own
-                // TASKS.md stays.
-                if task_response.tasks.is_empty() && is_managed_file(&snapshot) {
+                // TASKS.md stays, and a symlink is never followed.
+                if task_response.tasks.is_empty()
+                    && !is_symlink(&snapshot)
+                    && is_managed_file(&snapshot)
+                {
                     // The last open task closed: the snapshot says so instead
                     // of listing it on.
                     write_tasks(&workspace, &task_response.tasks, &agentic_root)?;
@@ -2246,8 +2257,14 @@ pub async fn run_with_root_hook(
 
     // GitHub account of this project path: `.nexus/gh.env`, transport and
     // commit identity in the local git config. Pull never logs a profile
-    // in (`nexus git login` does). Applies to all tool flavors.
-    if let Ok(detail) = client.get_project(&project_id).await {
+    // in (`nexus git login` does). Applies to all tool flavors, with the
+    // "agents" scope like the git identity.
+    let detail = if pull_scope("agents") {
+        client.get_project(&project_id).await.ok()
+    } else {
+        None
+    };
+    if let Some(detail) = detail {
         let opts = super::gh_account::ApplyOptions {
             assume_yes: force,
             canonical_remotes: false,
@@ -2523,7 +2540,10 @@ fn needs_exec_repair(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 == 0)
+        fs::metadata(path).is_ok_and(|m| {
+            let mode = m.permissions().mode() & 0o7777;
+            exec_mode(mode) != mode
+        })
     }
     #[cfg(not(unix))]
     {
@@ -2601,8 +2621,8 @@ fn sync_file_as(
     let target = workspace.join(rel);
     // Only a missing file is "not there": an unreadable one is left alone,
     // with its record, instead of being replaced as if it were new.
-    let local = match read_existing(&target) {
-        Ok(local) => local.map(|b| String::from_utf8_lossy(&b).into_owned()),
+    let local_bytes = match read_existing(&target) {
+        Ok(local) => local,
         Err(e) => {
             println!(
                 "   {} skipped: {} (cannot be read: {})",
@@ -2614,6 +2634,9 @@ fn sync_file_as(
             return Ok(false);
         }
     };
+    let local = local_bytes
+        .as_ref()
+        .map(|b| String::from_utf8_lossy(b).into_owned());
     let recorded = super::ccx::sync_manifest_hash(manifest, rel);
     let action = decide_workspace_write(
         local.as_deref(),
@@ -2685,6 +2708,17 @@ fn sync_file_as(
             overwrote_modified,
             reverted_commit,
         } => {
+            // Re-read right before writing: a save during the git check
+            // or a prompt is kept.
+            if !matches!(read_existing(&target), Ok(ref now) if *now == local_bytes) {
+                println!(
+                    "   {} skipped: {} (changed during the pull)",
+                    style("!").bold().yellow(),
+                    rel
+                );
+                report.skipped_modified.push(rel.to_string());
+                return Ok(false);
+            }
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -2693,7 +2727,17 @@ fn sync_file_as(
                 nexus_core::hash::with_single_trailing_newline(body),
             )?;
             if executable && needs_exec_repair(&target) {
-                add_exec_bits(&target)?;
+                // The body is written; the record waits for the mode, so
+                // the next pull repairs it. The other files still sync.
+                if let Err(e) = add_exec_bits(&target) {
+                    println!(
+                        "   {} {} was written but cannot be made executable: {}",
+                        style("!").bold().yellow(),
+                        rel,
+                        e
+                    );
+                    return Ok(true);
+                }
             }
             // Recorded only once the file is complete, mode included.
             record();
@@ -2765,6 +2809,9 @@ pub(crate) enum DroppedFile {
     /// Planned for removal, but the file or its record changed before the
     /// removal: kept (an outcome of applying a plan, never planned).
     Changed(String),
+    /// The removal failed (the error): kept with its record, tried again on
+    /// the next pull (an outcome, never planned).
+    Failed(String, String),
     /// Already gone locally: only the manifest record is dropped.
     Gone(String),
 }
@@ -2805,6 +2852,7 @@ impl DroppedFile {
             | Self::KeepModified(p)
             | Self::Unreadable(p, _)
             | Self::Changed(p)
+            | Self::Failed(p, _)
             | Self::Gone(p) => p,
         }
     }
@@ -2835,13 +2883,9 @@ pub(crate) fn apply_dropped_workspace_files(
         },
         |_| workspace.to_path_buf(),
     )?;
-    let forget: Vec<&str> = outcomes
-        .iter()
-        .filter(|o| matches!(o, DroppedFile::Remove(..) | DroppedFile::Gone(_)))
-        .map(DroppedFile::path)
-        .collect();
+    let forget = forget_set(&outcomes);
     if !forget.is_empty() {
-        super::sync::remove_manifest_entries(workspace, |p| forget.contains(&p))?;
+        super::sync::remove_manifest_entries_with(workspace, |p, h| forget.matches(p, h))?;
     }
     Ok(outcomes)
 }
@@ -2859,16 +2903,29 @@ fn apply_dropped(
 ) -> anyhow::Result<Vec<DroppedFile>> {
     let mut outcomes = Vec::with_capacity(plan.len());
     for item in plan {
-        let DroppedFile::Remove(path, approved) = item else {
-            outcomes.push(item.clone());
-            continue;
+        let (path, approved) = match item {
+            DroppedFile::Remove(path, approved) => (path, approved),
+            // Back on disk since the plan: kept with its record.
+            DroppedFile::Gone(path) if fs::symlink_metadata(workspace.join(path)).is_ok() => {
+                outcomes.push(DroppedFile::Changed(path.clone()));
+                continue;
+            }
+            _ => {
+                outcomes.push(item.clone());
+                continue;
+            }
         };
         let target = workspace.join(path);
         match read_existing(&target) {
             Ok(Some(local)) if still_approved(path, approved, &local) => {
-                fs::remove_file(&target)?;
-                remove_empty_parents(&stop_at(path), &target);
-                outcomes.push(item.clone());
+                // One failed removal does not hide the ones done before.
+                match fs::remove_file(&target) {
+                    Ok(()) => {
+                        remove_empty_parents(&stop_at(path), &target);
+                        outcomes.push(item.clone());
+                    }
+                    Err(e) => outcomes.push(DroppedFile::Failed(path.clone(), e.to_string())),
+                }
             }
             Ok(Some(_)) => outcomes.push(DroppedFile::Changed(path.clone())),
             Ok(None) => outcomes.push(DroppedFile::Gone(path.clone())),
@@ -2876,6 +2933,43 @@ fn apply_dropped(
         }
     }
     Ok(outcomes)
+}
+
+/// The records to drop after applying a removal plan: a removed file only
+/// while its record still holds the approved hash (a newer pull may have
+/// recorded the path again meanwhile), a file already gone always.
+struct ForgetSet<'a> {
+    removed: Vec<(&'a str, &'a str)>,
+    gone: Vec<&'a str>,
+}
+
+impl ForgetSet<'_> {
+    fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.gone.is_empty()
+    }
+
+    fn matches(&self, path: &str, hash: Option<&str>) -> bool {
+        self.gone.contains(&path)
+            || self
+                .removed
+                .iter()
+                .any(|(p, h)| *p == path && Some(*h) == hash)
+    }
+}
+
+fn forget_set(outcomes: &[DroppedFile]) -> ForgetSet<'_> {
+    let mut set = ForgetSet {
+        removed: Vec::new(),
+        gone: Vec::new(),
+    };
+    for o in outcomes {
+        match o {
+            DroppedFile::Remove(p, h) => set.removed.push((p, h)),
+            DroppedFile::Gone(p) => set.gone.push(p),
+            _ => {}
+        }
+    }
+    set
 }
 
 /// The notice for a dropped file kept because it cannot be read or changed
@@ -2892,6 +2986,12 @@ fn kept_dropped_notice(item: &DroppedFile) -> Option<String> {
             "   {} {} (changed during the pull, not removed)",
             style("KEEP").bold().yellow(),
             path
+        )),
+        DroppedFile::Failed(path, e) => Some(format!(
+            "   {} {} (could not be removed: {}; tried again on the next pull)",
+            style("KEEP").bold().yellow(),
+            path,
+            e
         )),
         _ => None,
     }
@@ -3186,13 +3286,9 @@ pub(crate) fn apply_dropped_skill_files(
                 .unwrap_or_else(|| workspace.join(path))
         },
     )?;
-    let forget: Vec<&str> = outcomes
-        .iter()
-        .filter(|o| matches!(o, DroppedFile::Remove(..) | DroppedFile::Gone(_)))
-        .map(DroppedFile::path)
-        .collect();
+    let forget = forget_set(&outcomes);
     if !forget.is_empty() {
-        remove_generated_records(workspace, agentic_root, |p| forget.contains(&p))?;
+        remove_generated_records_with(workspace, agentic_root, |p, h| forget.matches(p, h))?;
     }
     Ok(outcomes)
 }
@@ -3396,7 +3492,10 @@ async fn dry_run_workspace(
     client: &NexusClient,
     project_id: &str,
     workspace: &Path,
-) -> anyhow::Result<Option<nexus_core::api::WorkspaceForkExportResponse>> {
+) -> anyhow::Result<(
+    Vec<super::consent::Item>,
+    Vec<nexus_core::api::ExportedExecutable>,
+)> {
     println!(
         "   {} Dry run: devbox workspace files and skill removals; nothing is written.",
         style("·").dim()
@@ -3408,7 +3507,7 @@ async fn dry_run_workspace(
                 "   {} No workspace fork assigned to this project.",
                 style("·").dim()
             );
-            return Ok(None);
+            return Ok(Default::default());
         }
         Err(e) => {
             // The same fallback a pull uses: the legacy workspace export.
@@ -3434,9 +3533,22 @@ async fn dry_run_workspace(
                             .iter()
                             .map(|s| (s.target_path.as_str(), s.body.as_str(), s.executable)),
                     );
-                    if preview_workspace_files(workspace, &manifest, &files) == 0 {
+                    let mut changes = preview_workspace_files(workspace, &manifest, &files);
+                    // The removals a v1 pull applies, as for v2 below.
+                    let exported: Vec<&str> = files.iter().map(|(p, _, _)| *p).collect();
+                    for item in plan_dropped_workspace_files(workspace, &manifest, &exported) {
+                        if !matches!(item, DroppedFile::Gone(_)) {
+                            print_dropped_workspace_file(&item);
+                            changes += 1;
+                        }
+                    }
+                    if changes == 0 {
                         println!("   {} Workspace files are up to date.", style("=").dim());
                     }
+                    return Ok((
+                        super::consent::collect_workspace_v1(workspace, &v1),
+                        Vec::new(),
+                    ));
                 }
                 Err(e) => println!(
                     "   {} Could not fetch workspace files: {}",
@@ -3444,7 +3556,7 @@ async fn dry_run_workspace(
                     e
                 ),
             }
-            return Ok(None);
+            return Ok(Default::default());
         }
     };
     let manifest = super::sync::load_manifest_pub(workspace);
@@ -3517,7 +3629,15 @@ async fn dry_run_workspace(
     if let Some(notice) = export.meta.shadow_notice() {
         println!("   {} {}", style("i").bold().blue(), notice);
     }
-    Ok(Some(export))
+    Ok((
+        super::consent::collect_workspace_v2(workspace, &export),
+        export.executables.clone(),
+    ))
+}
+
+/// Whether `path` itself is a symbolic link.
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// Check whether a file contains the `source: nexus-platform` marker,
@@ -4047,8 +4167,12 @@ fn write_mcp_configs(
             Ok(None)
         };
 
-        if let (true, Err(e)) = (needs_write, &existing_parsed) {
+        // A file that cannot be parsed is not a usable OpenCode config,
+        // also when nothing would be written to it.
+        if existing_parsed.is_err() {
             opencode_usable = false;
+        }
+        if let (true, Err(e)) = (needs_write, &existing_parsed) {
             println!(
                 "   {} opencode.json not updated: it cannot be read ({e}); fix it or use --force",
                 style("!").bold().yellow()
@@ -4741,6 +4865,11 @@ pub(crate) fn sync_personal_workspace_files(
                 style("!").bold().yellow(),
                 path
             ),
+            Ok(ZellijConfigRemoval::Unreadable(path, e)) => println!(
+                "   {} Zellij config {} is no longer sent by the project but cannot be read ({e}); kept, restore read access and pull again",
+                style("!").bold().yellow(),
+                path
+            ),
             Ok(ZellijConfigRemoval::None) => {}
             Err(e) => println!(
                 "   {} Zellij config not removed: {}",
@@ -4834,6 +4963,8 @@ pub(crate) enum ZellijConfigRemoval {
     Removed(String),
     /// Edited locally since the last pull; left on disk, no longer managed.
     KeptLocalEdit(String),
+    /// Cannot be read (path, error): left on disk with its record.
+    Unreadable(String, String),
 }
 
 /// The backend no longer sends `zellij_config`: remove the file a previous
@@ -4858,7 +4989,9 @@ pub(crate) fn remove_zellij_config(
             fs::remove_file(&target)?;
             ZellijConfigRemoval::Removed(path)
         }
-        Err(_) => ZellijConfigRemoval::None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ZellijConfigRemoval::None,
+        // Kept with its record, so a later pull still knows it owns it.
+        Err(e) => return Ok(ZellijConfigRemoval::Unreadable(path, e.to_string())),
     };
     write_pull_manifest(workspace, agentic_root, &recorded)?;
     Ok(outcome)
@@ -5055,9 +5188,18 @@ pub(crate) fn remove_generated_records(
     agentic_root: &str,
     remove: impl Fn(&str) -> bool,
 ) -> anyhow::Result<usize> {
+    remove_generated_records_with(workspace, agentic_root, |p, _| remove(p))
+}
+
+/// [`remove_generated_records`] with the recorded hash passed along.
+pub(crate) fn remove_generated_records_with(
+    workspace: &Path,
+    agentic_root: &str,
+    remove: impl Fn(&str, Option<&str>) -> bool,
+) -> anyhow::Result<usize> {
     let mut recorded = load_pull_manifest(workspace, agentic_root);
     let before = recorded.len();
-    recorded.retain(|path, _| !remove(path));
+    recorded.retain(|path, hash| !remove(path, Some(hash.as_str())));
     let dropped = before - recorded.len();
     if dropped > 0 {
         save_pull_manifest(workspace, agentic_root, &recorded)?;
@@ -5324,8 +5466,12 @@ pub fn write_tasks(
     tasks: &[nexus_core::api::TaskSummary],
     agentic_root: &str,
 ) -> anyhow::Result<()> {
-    // Inside the workspace, never through a symlink or into `.git`.
+    // Inside the workspace, never through a symlink or into `.git`; the
+    // snapshot itself is never a link (not even to another workspace file).
     validate_agent_file_target_path(workspace, &format!("{agentic_root}/TASKS.md"))?;
+    if is_symlink(&workspace.join(agentic_root).join("TASKS.md")) {
+        anyhow::bail!("{agentic_root}/TASKS.md is a symlink; not written");
+    }
     let dir = workspace.join(agentic_root);
     fs::create_dir_all(&dir)?;
 
@@ -9036,6 +9182,74 @@ mod tests {
             .collect();
         assert!(recorded.contains(&"scripts/devbox/a.sh".to_string()));
         assert!(!recorded.contains(&"scripts/devbox/b.sh".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_repair_detects_a_missing_owner_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sh");
+        fs::write(&path, "x").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o645)).unwrap();
+        assert!(needs_exec_repair(&path));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!needs_exec_repair(&path));
+    }
+
+    /// A file missing when planned but back before the removal keeps its
+    /// record.
+    #[test]
+    fn test_apply_dropped_rechecks_gone_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        pulled_workspace_file(dir, "scripts/devbox/a.sh", "a");
+        fs::remove_file(dir.join("scripts/devbox/a.sh")).unwrap();
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        let plan = plan_dropped_workspace_files(dir, &manifest, &["devbox.json"]);
+        assert_eq!(plan, vec![DroppedFile::Gone("scripts/devbox/a.sh".into())]);
+        fs::write(dir.join("scripts/devbox/a.sh"), "back\n").unwrap();
+        let outcomes = apply_dropped_workspace_files(dir, &plan).unwrap();
+        assert_eq!(
+            outcomes,
+            vec![DroppedFile::Changed("scripts/devbox/a.sh".into())]
+        );
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        assert_eq!(
+            super::super::sync::workspace_manifest_entries(&manifest).len(),
+            1
+        );
+    }
+
+    /// The forget step drops a record only while it holds the approved hash.
+    #[test]
+    fn test_forget_set_checks_the_recorded_hash() {
+        let outcomes = vec![
+            DroppedFile::Remove("a".into(), "h1".into()),
+            DroppedFile::Gone("b".into()),
+            DroppedFile::Changed("c".into()),
+        ];
+        let set = forget_set(&outcomes);
+        assert!(set.matches("a", Some("h1")));
+        assert!(!set.matches("a", Some("h2")));
+        assert!(set.matches("b", None));
+        assert!(!set.matches("c", Some("x")));
+    }
+
+    #[test]
+    fn test_remove_zellij_config_keeps_the_record_when_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let path = zellij_config_default_path(".nexus");
+        // A directory in place of the file: reading it fails, not NotFound.
+        fs::create_dir_all(ws.join(&path)).unwrap();
+        record_generated_many(ws, ".nexus", &[(path.clone(), "x".into())]).unwrap();
+        let outcome = remove_zellij_config(ws, ".nexus", false).unwrap();
+        assert!(
+            matches!(outcome, ZellijConfigRemoval::Unreadable(..)),
+            "{outcome:?}"
+        );
+        assert!(load_pull_manifest(ws, ".nexus").contains_key(&path));
     }
 
     #[test]

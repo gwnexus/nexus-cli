@@ -54,6 +54,8 @@ pub enum State {
     Orphaned,
     /// Workspace file the fork no longer contains, edited locally (kept).
     Dropped,
+    /// A file Nexus wrote that cannot be read (kept with its record).
+    Unreadable,
     /// A local file in the way of a projection file.
     Unmanaged,
     /// Local file already matches; only the lock would be recorded.
@@ -124,6 +126,9 @@ impl Entry {
             }
             (FileClass::Projection, State::Dropped) => {
                 "no longer exported, edited locally; delete it when no longer needed".into()
+            }
+            (_, State::Unreadable) => {
+                "cannot be read; restore read access, then run nexus pull again".into()
             }
             (_, State::Dropped) => {
                 format!("no longer in the workspace, edited locally; delete it, or nexus push {p} to add it back")
@@ -605,8 +610,9 @@ pub async fn load(
             let (path, state) = match item {
                 super::pull::DroppedFile::Remove(p, _) => (p, State::Orphaned),
                 super::pull::DroppedFile::KeepModified(p)
-                | super::pull::DroppedFile::Unreadable(p, _)
-                | super::pull::DroppedFile::Changed(p) => (p, State::Dropped),
+                | super::pull::DroppedFile::Changed(p)
+                | super::pull::DroppedFile::Failed(p, _) => (p, State::Dropped),
+                super::pull::DroppedFile::Unreadable(p, _) => (p, State::Unreadable),
                 super::pull::DroppedFile::Gone(_) => continue,
             };
             entries.push(Entry {
