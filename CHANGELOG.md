@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **One `nexus pull` at a time per workspace.** A second pull started while one is running stops with a hint to try again, so two runs never plan removals or record hashes from each other's half-written state.
+- **One `nexus pull` at a time per workspace.** The lock is taken before anything is fetched; a second pull started while one is running stops with a hint to try again, so two runs never apply an older export over a newer delivery or plan from each other's half-written records. A dry run takes no lock.
 - **A dropped file is removed only inside the workspace,** checked again right before the removal: a directory that became a link out of the workspace or into `.git` keeps the file and its record.
 - **`opencode.json` saved during a pull is kept.** If the file changed while pull merged its keys, it is left as saved and the next pull merges again; a file that cannot be parsed is always reported.
 - **`nexus shadow on --untrack` removes only what stays hidden.** An agentic or nexus switch untracks only agentic paths (personal files such as `.env.nexus.local` stay tracked), a file a `.gitignore` negation re-includes and staged content with neither a commit nor a work tree copy keep their index entries, git's refusal names the files, the tracked-file hint offers only the Nexus command, and a refusal of one target no longer skips the other selected targets. `scripts/devbox/**` and similar spellings count as workspace paths (a leading `**/` does not).

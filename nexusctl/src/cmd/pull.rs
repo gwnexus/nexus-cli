@@ -853,6 +853,27 @@ pub async fn run_with_root_hook(
         }
     };
 
+    // One pull at a time per workspace, taken before anything is fetched:
+    // two runs would each apply exports and records the other is changing
+    // (an older export over a newer delivery, removals, adopted hashes).
+    // Held until the run ends. A fixed path next to the project binding,
+    // independent of the export (and its agentic root), checked before it
+    // is created. A dry run writes nothing and takes no lock.
+    const RUN_LOCK: &str = ".nexus/pull.lock";
+    let _run_lock = if dry_run {
+        None
+    } else {
+        if let Err(e) = validate_agent_file_target_path(&workspace, RUN_LOCK) {
+            anyhow::bail!("{RUN_LOCK} cannot be used: {e}");
+        }
+        match super::json_store::try_run_lock(&workspace.join(RUN_LOCK))? {
+            Some(lock) => Some(lock),
+            None => anyhow::bail!(
+                "another nexus pull is running in this workspace; wait for it to finish, then try again"
+            ),
+        }
+    };
+
     // Resolve authentication token
     let token = resolve_token().ok_or_else(|| {
         anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
@@ -1017,24 +1038,6 @@ pub async fn run_with_root_hook(
         super::consent::preview(&workspace, &items, &declared);
         return Ok(());
     }
-
-    // One pull at a time per workspace: two runs would each plan from the
-    // records the other is changing (removals, adopted hashes). Held until
-    // the run ends. A fixed path next to the project binding, independent
-    // of the export (and its agentic root), checked before it is created.
-    const RUN_LOCK: &str = ".nexus/pull.lock";
-    if let Err(e) = validate_agent_file_target_path(&workspace, RUN_LOCK) {
-        anyhow::bail!("{RUN_LOCK} cannot be used: {e}");
-    }
-    let _run_lock = match super::json_store::try_run_lock(&workspace.join(RUN_LOCK))? {
-        Some(lock) => lock,
-        None => anyhow::bail!(
-            "another nexus pull is running in this workspace; wait for it to finish, then try again"
-        ),
-    };
-    // Read again under the lock: a pull that ran while this one fetched
-    // the exports may have recorded files since.
-    let manifest = super::sync::load_manifest_pub(&workspace);
 
     // Executable content (hooks, settings commands, plugins, MCP servers,
     // layouts, scripts) needs consent before anything is written; a refused
