@@ -465,11 +465,15 @@ impl ForceMode {
     }
 }
 
-/// The agent files governed by the CCX lock.
+/// The agent files governed by the CCX lock, one per target path: when
+/// the export names a path twice, the first row wins (as for other agent
+/// files), so each path is planned and recorded once.
 pub fn ccx_files(agent_files: &[ExportedAgentFile]) -> Vec<&ExportedAgentFile> {
+    let mut seen = std::collections::HashSet::new();
     agent_files
         .iter()
         .filter(|af| af.category == CCX_CATEGORY)
+        .filter(|af| seen.insert(af.target_path.as_str()))
         .collect()
 }
 
@@ -662,9 +666,13 @@ pub fn apply_file_plans(
     };
     // Keep the previous lock hash, so a local edit stays detectable as
     // drifted/conflict on the next pull.
+    // A hash this run already recorded for the path (a write) is never
+    // replaced by an older one.
     let keep_locked = |files: &mut BTreeMap<String, CcxLockFileEntry>, plan: &FilePlan| {
         if let Some(locked) = &plan.locked {
-            files.insert(plan.target_path.clone(), entry(plan, locked.clone()));
+            files
+                .entry(plan.target_path.clone())
+                .or_insert_with(|| entry(plan, locked.clone()));
         }
     };
     // Unchanged since planning: the same bytes, or still absent. A read
@@ -1787,6 +1795,25 @@ mod tests {
         assert!(matches!(&plans[0], Err((p, _)) if p == RULE));
         assert!(matches!(&plans[1], Ok(p) if p.state == FileState::Create));
         assert!(plan_files(&dir, &desired, None, &serde_json::json!({})).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_duplicate_ccx_paths_keep_the_written_hash() {
+        let dir = tmp_dir("duplicate-paths");
+        pull(&dir, &[ccx_file(RULE, "v1\n")], ForceMode::None);
+        // Two rows for one path: the first wins and is planned once.
+        let files = [ccx_file(RULE, "v2\n"), ccx_file(RULE, "v2b\n")];
+        assert_eq!(ccx_files(&files).len(), 1);
+        // Even when plans name a path twice, a later plan does not put the
+        // old hash back over the one this run wrote.
+        let lock = load_lock(&dir, ".nexus");
+        let desired: Vec<&ExportedAgentFile> = files.iter().collect();
+        let plans = plan_files(&dir, &desired, lock.as_ref(), &serde_json::json!({})).unwrap();
+        let applied = apply_file_plans(&dir, &plans, ForceMode::None, &Default::default());
+        assert_eq!(applied.outcomes[0].action, FileAction::Written);
+        assert_eq!(applied.outcomes[1].action, FileAction::Changed);
+        assert_eq!(applied.files[RULE].sha256, sha256_hex("v2\n"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
