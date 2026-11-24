@@ -244,6 +244,18 @@ pub async fn diff(api_url: &str, path: Option<&str>) -> anyhow::Result<i32> {
 /// edits show as `+`. Projection: local is the base, and `+` is what the
 /// next pull writes.
 fn entry_diff(e: &Entry) -> String {
+    // A workspace file compared with its record only: the backend version
+    // could not be fetched, so there is nothing to diff against (an empty
+    // body would show the whole file as added).
+    if matches!(e.kind, Kind::Workspace)
+        && e.desired.is_none()
+        && matches!(e.state, State::Modified | State::Drifted)
+    {
+        return format!(
+            "--- {} (backend)\n(backend version unavailable; changed locally since the last pull)\n",
+            e.path
+        );
+    }
     let local = e.local.as_deref().unwrap_or("");
     let desired = e.desired.as_deref().unwrap_or("");
     let local_label = format!(
@@ -682,6 +694,28 @@ mod tests {
         let out = entry_diff(&e);
         assert!(out.contains("+++ devbox.json (nexus)"), "{out}");
         assert!(out.contains("\n-mine"), "{out}");
+    }
+
+    #[test]
+    fn test_entry_diff_without_backend_version() {
+        // Compared with the record only: no diff against an empty body.
+        let e = Entry {
+            path: "scripts/devbox/setup.sh".into(),
+            class: FileClass::Content,
+            state: State::Modified,
+            kind: Kind::Workspace,
+            local: Some("echo mine\n".into()),
+            desired: None,
+        };
+        let out = entry_diff(&e);
+        assert!(out.contains("backend version unavailable"), "{out}");
+        assert!(!out.contains("+echo mine"), "{out}");
+        // A real removal (the export dropped the file) still diffs.
+        let e = Entry {
+            state: State::Dropped,
+            ..e
+        };
+        assert!(!entry_diff(&e).contains("unavailable"));
     }
 
     #[test]

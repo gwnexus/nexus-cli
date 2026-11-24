@@ -412,15 +412,15 @@ pub async fn load(
     workspace: &Path,
 ) -> anyhow::Result<WorkspaceState> {
     let export = client.export_agent_files(project_id).await?;
-    let agentic_root = if export.agentic_root.is_empty() {
-        ".nexus".to_string()
-    } else {
-        export.agentic_root.clone()
-    };
-    let owner = export
-        .agent_owner
-        .clone()
-        .or_else(|| config::load_agent_owner(Some(workspace)));
+    // The root and runtime pull would use (same fallbacks).
+    let agentic_root = super::pull::safe_agentic_root(workspace, &export.agentic_root);
+    let (owner, _) = super::pull::resolve_agent_owner(
+        client,
+        project_id,
+        export.agent_owner.clone(),
+        config::load_agent_owner(Some(workspace)),
+    )
+    .await;
     let is_claude = config::is_claude_owner(owner.as_deref());
     let manifest = super::sync::load_manifest_pub(workspace);
     let read = |p: &str| read_inside(workspace, p);
@@ -433,12 +433,7 @@ pub async fn load(
         if export.ccx.is_some() && af.category == ccx::CCX_CATEGORY {
             continue;
         }
-        let other_runtime = if is_claude {
-            af.target_path == "opencode.json" || af.target_path.starts_with(".opencode/")
-        } else {
-            af.target_path.starts_with(".claude/")
-        };
-        if other_runtime
+        if super::pull::is_other_runtime_path(&af.target_path, is_claude, &agentic_root)
             || super::pull::validate_agent_file_target_path(workspace, &af.target_path).is_err()
             || (super::pull::is_protected_path(&af.target_path)
                 && workspace.join(&af.target_path).exists())
@@ -594,16 +589,14 @@ pub async fn load(
     // Skills, OpenCode commands and directives.md rendered by pull.
     let mut generated: Vec<(String, String)> = Vec::new();
     if let Ok(skills) = client.export_skills(project_id).await {
-        for skill in &skills.skills {
-            generated.extend(super::pull::render_skill_files(skill, &agentic_root));
-            if !is_claude {
-                generated.extend(super::pull::render_command_file(skill, &agentic_root));
-            }
-        }
-        // Skill files an earlier pull wrote that are no longer exported:
-        // the same plan nexus pull applies.
-        let desired = super::pull::desired_skill_files(&skills.skills, &agentic_root, is_claude);
-        let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
+        // The skill files pull writes (canonical, OpenCode commands or the
+        // native Claude Code skills); the same set decides which recorded
+        // files are no longer exported.
+        let desired_files =
+            super::pull::desired_skill_files(&skills.skills, &agentic_root, is_claude);
+        let desired: Vec<String> = desired_files.iter().map(|(p, _)| p.clone()).collect();
+        let desired: Vec<&str> = desired.iter().map(String::as_str).collect();
+        generated.extend(desired_files.iter().cloned());
         for item in
             super::pull::plan_dropped_skill_files(workspace, &agentic_root, is_claude, &desired)
         {
@@ -744,6 +737,8 @@ async fn workspace_entries(
     let mut entries = Vec::new();
     let mut desired: Vec<(String, String)> = Vec::new();
     let mut executable = std::collections::BTreeSet::new();
+    // The export pull uses: the fork (v2); without a fork nothing; on any
+    // other error the legacy export (v1), unless provisioning is off.
     let exported = match client.export_workspace_mcp(project_id).await {
         Ok(ws) => {
             executable.extend(
@@ -756,7 +751,26 @@ async fn workspace_entries(
             desired.extend(ws.scripts.into_iter().map(|s| (s.path, s.body)));
             true
         }
-        Err(_) => false,
+        Err(e) if e.to_string().contains("No active workspace fork") => false,
+        Err(_) => match client.export_workspace(project_id).await {
+            // Same rule as pull: an export without files delivers (and
+            // removes) nothing.
+            Ok(v1)
+                if v1.workspace_provisioning_enabled != Some(false)
+                    && (v1.workspace.is_some() || !v1.scripts.is_empty()) =>
+            {
+                executable.extend(
+                    v1.scripts
+                        .iter()
+                        .filter(|s| s.executable)
+                        .map(|s| s.target_path.clone()),
+                );
+                desired.extend(v1.workspace.into_iter().map(|t| (t.target_path, t.body)));
+                desired.extend(v1.scripts.into_iter().map(|s| (s.target_path, s.body)));
+                true
+            }
+            _ => false,
+        },
     };
     let known: Vec<String> = desired.iter().map(|(p, _)| p.clone()).collect();
 

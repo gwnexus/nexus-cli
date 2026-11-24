@@ -227,9 +227,18 @@ pub async fn run(
                 .ok()
                 .map(|af| af.shadow.clone().unwrap_or_else(|| "off".into()));
 
-            let tool_flavor = project_detail
+            // The owner as `nexus pull` resolves it: the export first, then
+            // the project detail, then the owner cached by an earlier run.
+            let tool_flavor = af_export_result
                 .as_ref()
-                .and_then(|d| d.project.agent_owner.clone());
+                .ok()
+                .and_then(|af| af.agent_owner.clone())
+                .or_else(|| {
+                    project_detail
+                        .as_ref()
+                        .and_then(|d| d.project.agent_owner.clone())
+                })
+                .or_else(|| config::load_agent_owner(Some(&target)));
 
             // Cache the flavor in .nexus/config.toml so launch-time commands
             // (`nexus run`, `nexus preflight`) can pick the right artifacts and
@@ -448,8 +457,21 @@ pub async fn run(
                             "   {} No directives for this project.",
                             style("--").yellow()
                         );
+                    } else if super::pull::directives_user_managed(
+                        &target.join(&agentic_root).join("directives.md"),
+                        force,
+                    ) {
+                        println!(
+                            "   {} {}/directives.md is user-managed (no nexus-platform marker), skipping",
+                            style("--").yellow(),
+                            agentic_root
+                        );
                     } else {
-                        write_directives(&target, &dir_export.directives, &agentic_root)?;
+                        super::pull::write_directives(
+                            &target,
+                            &dir_export.directives,
+                            &agentic_root,
+                        )?;
                         println!(
                             "   {} {} directive(s) synced",
                             style("+").bold().green(),
@@ -777,6 +799,26 @@ pub async fn run(
 /// If `config.toml` already exists (e.g. preserved from deinit), it is NOT
 /// overwritten: user-configured `[mcp_extra]` and `[plugins]` sections
 /// would be lost. Only updates `[project]` section if needed.
+/// `v` as a one-line TOML basic string (quotes, backslashes and control
+/// characters escaped).
+fn toml_basic_string(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 2);
+    out.push('"');
+    for c in v.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn create_nexus_dir(
     target: &Path,
     project_name: &str,
@@ -825,22 +867,21 @@ fn create_nexus_dir(
         return Ok(());
     }
 
+    // Quoted and escaped as TOML strings: a name with a quote, backslash
+    // or line break must neither break the file nor add keys.
+    let quote = toml_basic_string;
     let project_section = match project_id {
         Some(id) => format!(
-            r#"[project]
-name = "{name}"
-id = "{id}"
-"#,
-            name = project_name,
-            id = id,
+            "[project]\nname = {name}\nid = {id}\n",
+            name = quote(project_name),
+            id = quote(id),
         ),
         None => format!(
-            r#"# Project not yet linked. Run `nexus link` or `nexus init --project-id <UUID>`.
-# [project]
-# name = "{name}"
-# id = "<project-uuid>"
-"#,
-            name = project_name,
+            "# Project not yet linked. Run `nexus link` or `nexus init --project-id <UUID>`.\n\
+             # [project]\n\
+             # name = {name}\n\
+             # id = \"<project-uuid>\"\n",
+            name = quote(project_name),
         ),
     };
 
@@ -1148,57 +1189,6 @@ fn migrate_gitignore_entries(target: &Path) {
 // Phase 2 helpers: Server-aware init
 // ---------------------------------------------------------------------------
 
-/// Write all directives to `.claude/directives.md` as a single Markdown file.
-///
-/// Directives are grouped by category, with priority indicated inline.
-fn write_directives(
-    target: &Path,
-    directives: &[nexus_core::api::ExportedDirective],
-    agentic_root: &str,
-) -> anyhow::Result<()> {
-    let dir = target.join(agentic_root);
-    fs::create_dir_all(&dir)?;
-
-    let mut content = String::from(
-        "---\ntype: project-directives\nsource: nexus-platform\n---\n\n# Project Directives\n\n",
-    );
-
-    // Group by category
-    let mut categories: std::collections::BTreeMap<
-        String,
-        Vec<&nexus_core::api::ExportedDirective>,
-    > = std::collections::BTreeMap::new();
-    for d in directives {
-        categories.entry(d.category.clone()).or_default().push(d);
-    }
-
-    for (category, items) in &categories {
-        content.push_str(&format!("## {}\n\n", capitalize(category)));
-
-        for d in items {
-            let priority_tag = match d.priority.as_str() {
-                "high" | "urgent" => format!(" [{}]", d.priority.to_uppercase()),
-                _ => String::new(),
-            };
-
-            content.push_str(&format!("### {}{}\n\n", d.title, priority_tag));
-
-            if let Some(ref body) = d.body {
-                if !body.is_empty() {
-                    content.push_str(body);
-                    content.push_str("\n\n");
-                }
-            }
-        }
-    }
-
-    let path = dir.join("directives.md");
-    fs::write(&path, format!("{}\n", content.trim_end()))?;
-    print_created(&format!("{}/directives.md", agentic_root));
-
-    Ok(())
-}
-
 /// Write a single agent file exported from the platform to its `target_path`.
 ///
 /// Creates any intermediate directories as needed.
@@ -1241,15 +1231,6 @@ fn write_agent_file(
     print_created(&af.target_path);
 
     Ok(true)
-}
-
-/// Capitalize the first letter of a string.
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        None => String::new(),
-        Some(f) => f.to_uppercase().to_string() + c.as_str(),
-    }
 }
 
 /// Write MCP server configuration to `opencode.json`.
@@ -1616,12 +1597,21 @@ fn merge_extra_mcp_servers(
                 if servers.contains_key(name) {
                     continue;
                 }
-                // Check for duplicate: same command under a different key.
+                // Check for duplicate: same command and arguments under a
+                // different key (`npx` alone runs many different servers).
                 let cmd_str = server.command.first().cloned().unwrap_or_default();
+                let args: Vec<&str> = server.command.iter().skip(1).map(String::as_str).collect();
                 let duplicate_key = servers.iter().find(|(_, v)| {
-                    v.get("command")
+                    let same_cmd = v
+                        .get("command")
                         .and_then(|c| c.as_str())
-                        .is_some_and(|c| c == cmd_str)
+                        .is_some_and(|c| c == cmd_str);
+                    let existing: Vec<&str> = v
+                        .get("args")
+                        .and_then(|a| a.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                        .unwrap_or_default();
+                    same_cmd && existing == args
                 });
                 if let Some((existing_key, _)) = duplicate_key {
                     println!(
@@ -1922,7 +1912,28 @@ async fn install_plugins(
                     let client = reqwest::Client::new();
                     match client.get(url).send().await {
                         Ok(resp) if resp.status().is_success() => {
-                            let body = resp.text().await.unwrap_or_default();
+                            // A failed or empty download keeps the installed
+                            // plugin; only a complete body replaces it.
+                            let body = match resp.text().await {
+                                Ok(body) if !body.trim().is_empty() => body,
+                                Ok(_) => {
+                                    println!(
+                                        "   {} Plugin '{}' download was empty; kept as it was",
+                                        style("!").bold().yellow(),
+                                        name,
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "   {} Plugin '{}' download failed: {}",
+                                        style("!").bold().yellow(),
+                                        name,
+                                        e,
+                                    );
+                                    continue;
+                                }
+                            };
                             fs::write(&dest, &body)?;
                             println!(
                                 "   {} .opencode/plugins/{} (downloaded)",
@@ -2329,22 +2340,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_preserves_existing_agents_md() {
+        // The destination init writes; `run` itself refuses an existing
+        // `.nexus` without --force, so the writer is called directly.
         let dir = temp_project_dir("preserves-agents");
-        fs::write(dir.join("AGENTS.md"), "custom content").unwrap();
+        fs::create_dir_all(dir.join(".nexus")).unwrap();
+        fs::write(dir.join(".nexus/AGENTS.md"), "custom content").unwrap();
 
-        run(
-            dir.to_str().unwrap(),
-            Some("test"),
-            None,
-            "https://nexus.gatewarden.eu",
-            false,
-            McpSource::Npm,
-            false,
-        )
-        .await
-        .unwrap();
+        create_agents_md(&dir, "test", false, ".nexus").unwrap();
 
-        let agents = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+        let agents = fs::read_to_string(dir.join(".nexus/AGENTS.md")).unwrap();
         assert_eq!(agents, "custom content");
 
         // Cleanup
@@ -2354,16 +2358,17 @@ mod tests {
     #[tokio::test]
     async fn test_init_preserves_existing_claude_md() {
         let dir = temp_project_dir("preserves-claude-md");
-        let claude_dir = dir.join(".claude");
+        let claude_dir = dir.join(".nexus");
         fs::create_dir_all(&claude_dir).unwrap();
         fs::write(claude_dir.join("CLAUDE.md"), "user-managed instructions").unwrap();
 
+        // Even a forced re-init keeps the user-managed CLAUDE.md.
         run(
             dir.to_str().unwrap(),
             Some("test"),
             None,
             "https://nexus.gatewarden.eu",
-            false,
+            true,
             McpSource::Npm,
             false,
         )
@@ -2381,7 +2386,8 @@ mod tests {
     #[tokio::test]
     async fn test_init_force_overwrites_agents_md() {
         let dir = temp_project_dir("force-agents");
-        fs::write(dir.join("AGENTS.md"), "old content").unwrap();
+        fs::create_dir_all(dir.join(".nexus")).unwrap();
+        fs::write(dir.join(".nexus/AGENTS.md"), "old content").unwrap();
 
         run(
             dir.to_str().unwrap(),
@@ -2961,6 +2967,31 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Two Claude Code servers run through the same launcher (`npx`) with
+    /// different arguments are different servers.
+    #[test]
+    fn test_merge_extra_claude_servers_compare_args() {
+        let dir = temp_project_dir("merge-extra-claude-args");
+        fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"a":{"command":"npx","args":["-y","pkg-a"]}}}"#,
+        )
+        .unwrap();
+        let server = |pkg: &str| ExtraMcpServer {
+            command: vec!["npx".into(), "-y".into(), pkg.into()],
+            environment: None,
+        };
+        let mut extras = HashMap::new();
+        extras.insert("b".to_string(), server("pkg-b"));
+        extras.insert("a-copy".to_string(), server("pkg-a"));
+        merge_extra_mcp_servers(&dir, &HashMap::new(), &extras, ".nexus").unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap();
+        assert!(doc["mcpServers"].get("b").is_some());
+        assert!(doc["mcpServers"].get("a-copy").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_merge_extra_mcp_servers_with_environment() {
         let dir = temp_project_dir("merge-extra-env");
@@ -3242,6 +3273,27 @@ mod tests {
         let ok = tempfile::tempdir().unwrap();
         create_nexus_dir(ok.path(), "test", None).unwrap();
         assert!(ok.path().join(".nexus/config.toml").is_file());
+    }
+
+    #[test]
+    fn test_create_nexus_dir_quotes_the_project_name() {
+        let ws = tempfile::tempdir().unwrap();
+        let name = "a \"b\" \\ c\nid = \"x\"\u{7}";
+        let id = "11111111-2222-4333-8444-555555555555";
+        create_nexus_dir(ws.path(), name, Some(id)).unwrap();
+        let pc = config::load_project_config(Some(ws.path()))
+            .unwrap()
+            .unwrap();
+        let project = pc.project.unwrap();
+        assert_eq!(project.name, name);
+        assert_eq!(project.id, id);
+        // Unlinked: the commented example stays one comment line.
+        let ws = tempfile::tempdir().unwrap();
+        create_nexus_dir(ws.path(), name, None).unwrap();
+        let pc = config::load_project_config(Some(ws.path()))
+            .unwrap()
+            .unwrap();
+        assert!(pc.project.is_none());
     }
 
     #[test]
