@@ -248,7 +248,15 @@ workspace has nothing to push. New local scripts are pushed when named
 pushed files, so it no longer carries the script. A named path pushes only
 the devbox files it selects (`nexus push scripts/devbox/a.sh`): every other
 file keeps its version from the current fork, so local edits elsewhere stay
-local; when the fork cannot be read, such a push stops. `nexus reset` of a
+local; when the fork cannot be read, such a push stops. A full `nexus push`
+stops too, with nothing published, when the current fork cannot be read
+(only "no workspace fork yet" goes on), or when a workspace file it would
+send (tracked, named or in the fork) cannot be read; generated scripts are
+never pushed, and files the fork dropped are skipped unless named. A file
+unchanged locally whose fork version is newer goes into the new fork with
+the fork version. If the local record of a pushed file changed while the
+push ran (another pull or push), push says so and suggests `nexus pull`.
+`nexus reset` of a
 deleted executable script writes it back executable, and a leftover Claude
 Code file that cannot be removed keeps its ownership record:
 
@@ -288,7 +296,11 @@ dashboard and can be activated again.
 
 `nexus push` requires a prior `nexus pull --scope workspace` (it tracks
 which files came from Nexus via `.nexus/sync-manifest.json`, and refuses to
-push untracked files). If the local workspace was never pulled, or you need
+push untracked files). The sync manifest and the pull manifest are updated
+under a lock (a `<file>.lock` file next to them), so concurrent `nexus`
+commands keep each other's records; a manifest locked for more than about
+five seconds stops the command with "locked by another nexus command; try
+again", and a manifest that cannot be parsed is reported, never reset. If the local workspace was never pulled, or you need
 to publish local edits without risking an older server-side fork
 overwriting them, use `nexus push --adopt-local` to bootstrap a new fork
 directly from the current local files, bypassing that check:

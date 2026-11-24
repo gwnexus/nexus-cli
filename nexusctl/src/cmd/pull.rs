@@ -4425,18 +4425,31 @@ fn update_pull_manifest<T>(
     agentic_root: &str,
     change: impl FnOnce(&mut std::collections::BTreeMap<String, String>) -> T,
 ) -> anyhow::Result<T> {
-    super::json_store::update_object(&pull_manifest_path(workspace, agentic_root), |m| {
-        let mut records: std::collections::BTreeMap<String, String> = m
-            .iter()
-            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-            .collect();
+    let path = pull_manifest_path(workspace, agentic_root);
+    super::json_store::update_object(&path, |m| {
+        // Every record is a hash string; any other value is corruption,
+        // reported with the manifest left unchanged.
+        let mut records = std::collections::BTreeMap::new();
+        for (k, v) in m.iter() {
+            match v.as_str() {
+                Some(h) => {
+                    records.insert(k.clone(), h.to_string());
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "{}: the record for {k} is not a hash; fix or remove the file",
+                        path.display()
+                    ))
+                }
+            }
+        }
         let result = change(&mut records);
         *m = records
             .into_iter()
             .map(|(k, v)| (k, serde_json::Value::String(v)))
             .collect();
-        result
-    })
+        Ok(result)
+    })?
 }
 
 fn print_zellij_config_outcome(path: &str, outcome: &ClaudeWorkspaceOutcome) {
@@ -4870,6 +4883,20 @@ pub fn write_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_update_pull_manifest_rejects_non_hash_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = pull_manifest_path(dir.path(), ".nexus");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let raw = "{\"valid\":\"abc\",\"broken\":17}";
+        fs::write(&path, raw).unwrap();
+        let r = update_pull_manifest(dir.path(), ".nexus", |m| {
+            m.insert("x".into(), "y".into());
+        });
+        assert!(r.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), raw);
+    }
 
     #[test]
     fn test_disabled_skills_reason() {
