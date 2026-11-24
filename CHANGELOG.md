@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **`nexus stash` keeps local edits recoverable.** Each save gets its own directory (two saves in one second no longer share one), the saved files live under `files/` apart from the metadata (an agent file named `stash.json` is no longer replaced by it), and executable workspace scripts are restored executable. `pop` checks every file first and keeps the stash, changing nothing, when one cannot be restored; a failed write keeps it too and names what was and was not restored. A final newline that pull added is no longer stashed as an edit. Stashes of older versions still restore.
 - **Remote marketplaces with a custom catalog path are usable.** A `github` or `git` marketplace declared with a catalog `path` is now matched against the stored registration of the agent CLI, which keeps that path; plugins from it are installed and updated again. A registration of another catalog, repository or checkout, a path leaving the checkout, or a missing record still fails closed.
+- **`nexus reload -y` keeps edited Claude Code files.** `-y` no longer counts as `--force` for edited locked Claude Code files and modified leftovers; only `--force` or `--force-unmanaged` replaces or removes them, as in `nexus pull`. Other files follow pull's `-y` handling.
+- **`nexus reload` compares what pull changed.** It snapshots the agentic root that pull selects from the export (not always `.nexus`) and uses it for the plugin step; files are compared by their bytes, so a change in a non-UTF-8 file is not missed.
+- **Plugin changes in `nexus reload` are reported only when known.** An unavailable plugin list is no longer read as empty (which reported every plugin as new) and no longer ends in "the running session is up to date", and installations of one plugin at user and project scope are compared separately.
 
 ## [0.51.0] - 2026-11-24
 

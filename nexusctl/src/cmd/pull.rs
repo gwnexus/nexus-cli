@@ -759,6 +759,38 @@ pub async fn run(
     trust: bool,
     untrack_shadowed: bool,
 ) -> anyhow::Result<()> {
+    run_with_root_hook(
+        api_url,
+        cli_project_id,
+        force,
+        mcp_source,
+        scope,
+        with_actor_assets,
+        ccx_force,
+        dry_run,
+        trust,
+        untrack_shadowed,
+        &mut |_| {},
+    )
+    .await
+}
+
+/// [`run`], calling `on_root` once with the agentic root this pull uses,
+/// before it writes anything (`nexus reload` snapshots that root).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_root_hook(
+    api_url: &str,
+    cli_project_id: Option<&str>,
+    force: bool,
+    mcp_source: McpSource,
+    scope: &[String],
+    with_actor_assets: bool,
+    ccx_force: super::ccx::ForceMode,
+    dry_run: bool,
+    trust: bool,
+    untrack_shadowed: bool,
+    on_root: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
     // A refused .nexus/config.toml is an error, not "no project linked".
@@ -833,6 +865,7 @@ pub async fn run(
             agentic_root = safe_agentic_root(&workspace, &af_export.agentic_root);
         }
     }
+    on_root(&agentic_root);
 
     // Resolve the runtime before writing anything, so only the selected
     // runtime's projection is rendered.
