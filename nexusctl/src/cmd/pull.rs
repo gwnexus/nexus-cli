@@ -918,28 +918,16 @@ pub async fn run_with_root_hook(
     // runtime's projection is rendered.
     // The owner cached by the previous pull, before it is overwritten below.
     let previous_owner = config::load_agent_owner(Some(&workspace));
-    // `flavor_known`: the backend reported the owner. An absent owner means
-    // OpenCode only when the previous pull did not record Claude Code: an
-    // unreachable backend, or one that omits the field, must never trigger
-    // the removal of the Claude Code projection below.
-    let (tool_flavor, flavor_known) = match af_export_result
-        .as_ref()
-        .ok()
-        .and_then(|r| r.agent_owner.clone())
-    {
-        Some(owner) => (Some(owner), true),
-        None => {
-            // Fallback: fetch from project details API
-            match client.get_project(&project_id).await {
-                Ok(d) => {
-                    let known = d.project.agent_owner.is_some()
-                        || !config::is_claude_owner(previous_owner.as_deref());
-                    (d.project.agent_owner, known)
-                }
-                Err(_) => (None, false),
-            }
-        }
-    };
+    let (tool_flavor, flavor_known) = resolve_agent_owner(
+        &client,
+        &project_id,
+        af_export_result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.agent_owner.clone()),
+        previous_owner.clone(),
+    )
+    .await;
     let is_claude = config::is_claude_owner(tool_flavor.as_deref());
 
     // Load sync manifest for local-modification detection
@@ -5421,6 +5409,50 @@ fn is_opencode_path(target_path: &str) -> bool {
     target_path == "opencode.json" || target_path.starts_with(".opencode/")
 }
 
+/// The runtime owner pull and `nexus status` use: the agent-file export's,
+/// else the project detail's, else (the backend cannot tell) the owner the
+/// previous pull cached. The flag is whether the backend reported it: an
+/// absent owner means OpenCode only when the cached owner is not Claude
+/// Code, so an unreachable backend, or one that omits the field, never
+/// triggers the removal of the Claude Code projection.
+pub(crate) async fn resolve_agent_owner(
+    client: &NexusClient,
+    project_id: &str,
+    export_owner: Option<String>,
+    previous: Option<String>,
+) -> (Option<String>, bool) {
+    let detail = match export_owner {
+        Some(_) => None,
+        None => Some(
+            client
+                .get_project(project_id)
+                .await
+                .ok()
+                .map(|d| d.project.agent_owner),
+        ),
+    };
+    pick_agent_owner(export_owner, detail, previous)
+}
+
+/// [`resolve_agent_owner`] without the network: `detail` is `None` when it
+/// was not needed, `Some(None)` when the detail request failed.
+fn pick_agent_owner(
+    export_owner: Option<String>,
+    detail: Option<Option<Option<String>>>,
+    previous: Option<String>,
+) -> (Option<String>, bool) {
+    if let Some(owner) = export_owner {
+        return (Some(owner), true);
+    }
+    match detail.flatten() {
+        Some(Some(owner)) => (Some(owner), true),
+        // The backend reports no owner: OpenCode, unless Claude Code was
+        // cached (then unknown, and the cached owner stays in effect).
+        Some(None) if !config::is_claude_owner(previous.as_deref()) => (None, true),
+        _ => (previous, false),
+    }
+}
+
 /// Whether an agent file belongs to the projection of the runtime the
 /// project does not use (`.opencode/`/`opencode.json` for Claude Code,
 /// `.claude/` for OpenCode). Same rule as `nexus status`. With the legacy
@@ -5776,6 +5808,37 @@ pub fn write_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pick_agent_owner() {
+        let s = |v: &str| Some(v.to_string());
+        // The export wins.
+        assert_eq!(
+            pick_agent_owner(s("opencode"), None, s("claude-cli")),
+            (s("opencode"), true)
+        );
+        // Then the project detail.
+        assert_eq!(
+            pick_agent_owner(None, Some(Some(s("claude-cli"))), None),
+            (s("claude-cli"), true)
+        );
+        // No owner reported: OpenCode, unless Claude Code was cached.
+        assert_eq!(
+            pick_agent_owner(None, Some(Some(None)), s("opencode")),
+            (None, true)
+        );
+        assert_eq!(pick_agent_owner(None, Some(Some(None)), None), (None, true));
+        assert_eq!(
+            pick_agent_owner(None, Some(Some(None)), s("claude-cli")),
+            (s("claude-cli"), false)
+        );
+        // Detail unavailable: the cached owner, not known.
+        assert_eq!(
+            pick_agent_owner(None, Some(None), s("claude-cli")),
+            (s("claude-cli"), false)
+        );
+        assert_eq!(pick_agent_owner(None, Some(None), None), (None, false));
+    }
 
     /// A broken manifest stops the personal and generated writers before
     /// they change any file.

@@ -205,20 +205,33 @@ fn tracked_count(workspace: &Path) -> usize {
         })
 }
 
-/// Append the ignore entry to `.gitignore` (created when missing).
+/// Append the ignore entry to `.gitignore` (created when missing). The
+/// existing bytes are kept as they are (any encoding): the entry is only
+/// appended. A file that cannot be read is left alone; the caller then
+/// reports the vault as still not ignored.
 fn append_gitignore(path: &Path) {
-    let existing = fs::read_to_string(path).unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == IGNORE_ENTRY) {
+    use std::io::Write;
+    let existing = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return,
+    };
+    if existing
+        .split(|b| *b == b'\n')
+        .any(|l| l.trim_ascii() == IGNORE_ENTRY.as_bytes())
+    {
         return;
     }
-    let mut content = existing;
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
+    let mut add = String::new();
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        add.push('\n');
     }
-    content.push_str("\n# Local vault (screenshots may show customer data)\n");
-    content.push_str(IGNORE_ENTRY);
-    content.push('\n');
-    let _ = fs::write(path, content);
+    add.push_str("\n# Local vault (screenshots may show customer data)\n");
+    add.push_str(IGNORE_ENTRY);
+    add.push('\n');
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(add.as_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +262,20 @@ mod tests {
 
     fn read(path: &Path) -> String {
         fs::read_to_string(path).unwrap_or_default()
+    }
+
+    #[test]
+    fn test_append_gitignore_keeps_non_utf8_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let original = b"# caf\xe9 rules\n.env\n".to_vec();
+        fs::write(&path, &original).unwrap();
+        append_gitignore(&path);
+        let after = fs::read(&path).unwrap();
+        assert!(after.starts_with(&original), "existing bytes changed");
+        assert!(String::from_utf8_lossy(&after).contains(IGNORE_ENTRY));
+        append_gitignore(&path);
+        assert_eq!(fs::read(&path).unwrap(), after, "entry added twice");
     }
 
     #[test]

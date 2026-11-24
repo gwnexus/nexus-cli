@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`nexus status` sees what `nexus pull` would do.** It resolves the runtime the same way (agent-file export, project detail, then the cached owner), uses the same agentic root and runtime path rule (agent files under a legacy `.claude` root are reported), includes the native Claude Code skill files, and falls back to the legacy workspace export when the fork export fails. A workspace file whose backend version could not be fetched shows "backend version unavailable" instead of a diff against an empty file.
+- **`nexus pull` keeps the cached Claude Code runtime when the backend cannot report the owner.** It no longer renders the OpenCode projection for a Claude Code workspace while the project detail is unreachable.
+- **The vault setup keeps `.gitignore` byte for byte.** The ignore entry is appended; a file that is not UTF-8 is no longer rewritten (and its rules lost), and a file that cannot be read is left alone.
 - **One `nexus pull` at a time per workspace.** The lock is taken before anything is fetched; a second pull started while one is running stops with a hint to try again, so two runs never apply an older export over a newer delivery or plan from each other's half-written records. A dry run takes no lock.
 - **A dropped file is removed only inside the workspace,** checked again right before the removal: a directory that became a link out of the workspace or into `.git` keeps the file and its record.
 - **`opencode.json` saved during a pull is kept.** If the file changed while pull merged its keys, it is left as saved and the next pull merges again; a file that cannot be parsed is always reported.
