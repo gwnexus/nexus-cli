@@ -604,15 +604,18 @@ fn hooks_dir(root: &Path) -> anyhow::Result<Option<PathBuf>> {
 /// prefix is replaced by its real path (symlinks followed) before a later
 /// `..` applies, so `link/../hooks` ends next to the link's target, as git
 /// sees it. Components that do not exist yet are applied lexically, but
-/// `None` when a `..` follows one: the operating system cannot go through
-/// a missing directory, so the path does not resolve at all.
+/// `None` when a `..` follows anything but a directory: the operating
+/// system cannot go through a missing path or a file, so the path does not
+/// resolve at all.
 fn resolve_path(path: &Path) -> Option<PathBuf> {
     let mut current = PathBuf::new();
     for component in path.components() {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                if fs::symlink_metadata(&current).is_err() {
+                // Only a directory can be left with `..`: not a missing
+                // path, a file or a dangling symlink.
+                if !fs::metadata(&current).is_ok_and(|m| m.is_dir()) {
                     return None;
                 }
                 current.pop();
@@ -784,10 +787,12 @@ pub fn install_hook(root: &Path, guard_rel: &str) -> anyhow::Result<HookAction> 
 }
 
 /// `path` relative to the work tree `root`, when it lies inside it and
-/// outside the git directory.
+/// outside the git directory. Only the parent directory is resolved: the
+/// entry itself (a symlinked hook) keeps its name, so tracking and
+/// exclusion apply to the hook, not to what it points to.
 fn work_tree_rel(root: &Path, path: &Path) -> Option<String> {
     let root = resolve_path(root)?;
-    let path = resolve_path(path)?;
+    let path = resolve_path(path.parent()?)?.join(path.file_name()?);
     let rel = path.strip_prefix(&root).ok()?;
     if rel.components().next()? == std::path::Component::Normal(".git".as_ref()) {
         return None;
@@ -1631,6 +1636,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_tracked_symlink_hook_is_left_alone() {
+        let dir = repo("hook-tracked-symlink");
+        fs::create_dir_all(dir.join(".githooks")).unwrap();
+        fs::write(dir.join("my-hook.sh"), "#!/bin/sh\n").unwrap();
+        std::os::unix::fs::symlink("../my-hook.sh", dir.join(".githooks/commit-msg")).unwrap();
+        git(&dir, &["add", "-f", ".githooks/commit-msg"]);
+        git(&dir, &["config", "core.hooksPath", ".githooks"]);
+        assert_eq!(
+            work_tree_rel(&dir, &dir.join(".githooks/commit-msg")).as_deref(),
+            Some(".githooks/commit-msg")
+        );
+        let a = install_hook(&dir, "g.json").unwrap();
+        assert!(matches!(a, HookAction::Skipped { .. }), "{a:?}");
+        assert!(fs::symlink_metadata(dir.join(".githooks/commit-msg"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_hooks_path_follows_symlinks_before_dotdot() {
         let dir = repo("hook-link-dotdot");
         fs::create_dir_all(dir.join("real/sub")).unwrap();
@@ -1646,6 +1673,10 @@ mod tests {
         // Git cannot go through a missing directory: not shortened to
         // `hooks`, the install refuses instead.
         assert_eq!(resolve_path(&dir.join("missing/../hooks")), None);
+        fs::write(dir.join("blocker"), "x").unwrap();
+        assert_eq!(resolve_path(&dir.join("blocker/../hooks")), None);
+        std::os::unix::fs::symlink(dir.join("gone"), dir.join("dangling")).unwrap();
+        assert_eq!(resolve_path(&dir.join("dangling/../hooks")), None);
         git(&dir, &["config", "core.hooksPath", "missing/../hooks"]);
         let err = install_hook(&dir, "g.json").unwrap_err().to_string();
         assert!(err.contains("core.hooksPath"), "{err}");
