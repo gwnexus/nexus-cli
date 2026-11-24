@@ -286,9 +286,9 @@ fn scan_commits(
         root,
         &["log", "-n", &limit.to_string(), "--format=%h%x00%B%x1e"],
     ) else {
-        // No commits yet is clean; a history that exists but cannot be
-        // read is not.
-        if git_bytes(root, &["rev-parse", "--verify", "-q", "HEAD"]).is_none() {
+        // Only a confirmed unborn branch is an empty history; a history
+        // that exists but cannot be read (a broken ref) is not clean.
+        if is_unborn(root) {
             return Ok((Vec::new(), 0));
         }
         anyhow::bail!("could not read the commit history; the check is incomplete");
@@ -306,6 +306,44 @@ fn scan_commits(
         }));
     }
     Ok((hits, scanned))
+}
+
+/// Whether HEAD names a branch that does not exist in any form yet (no
+/// loose ref, no packed entry, nothing git lists): a repository before its
+/// first commit. A ref that exists but cannot be resolved is not unborn.
+fn is_unborn(root: &Path) -> bool {
+    let Some(out) = git_bytes(root, &["symbolic-ref", "-q", "HEAD"]) else {
+        return false;
+    };
+    let name = String::from_utf8_lossy(&out).trim().to_string();
+    if name.is_empty() {
+        return false;
+    }
+    let git_path = |p: &str| {
+        git_bytes(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-path", p],
+        )
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o).trim()))
+    };
+    let (Some(loose), Some(packed)) = (git_path(&name), git_path("packed-refs")) else {
+        return false;
+    };
+    if fs::symlink_metadata(&loose).is_ok() {
+        return false;
+    }
+    let packed_has = match fs::read(&packed) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes)
+            .lines()
+            .any(|l| l.split_whitespace().nth(1) == Some(name.as_str())),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    };
+    if packed_has {
+        return false;
+    }
+    // Other ref storage (reftable): git lists the ref if it exists.
+    git_bytes(root, &["for-each-ref", "--format=%(refname)", &name])
+        .is_some_and(|o| o.iter().all(u8::is_ascii_whitespace))
 }
 
 /// Result of `nexus shadow check`.
@@ -467,10 +505,16 @@ pub enum Cleanup {
     Keep,
 }
 
-/// The cleanup git applies to this commit, read in the hook. Git runs the
-/// hook with `GIT_EDITOR=:` when no editor is used (`-m`, `-F`). Anything
-/// that cannot be determined keeps every line: a line is only skipped
-/// when git is sure to drop it.
+/// The cleanup git applies to this commit, as far as the hook can tell.
+///
+/// The hook sees neither `git commit --cleanup=<mode>` nor the comment
+/// string git picks for `auto`. Policy: comment lines are skipped only in
+/// the editor flow (git runs the hook with `GIT_EDITOR=:` for `-m` and
+/// `-F`), where git's own template comments would otherwise be scanned,
+/// and only when the configured mode strips them. Without an editor every
+/// line is checked, also when the configuration would strip comments: a
+/// `--cleanup=whitespace -m` commit keeps them. The remaining blind spot
+/// is `--cleanup=whitespace` together with an editor.
 fn message_cleanup() -> Cleanup {
     // Read as git sees it in the hook, so the hook's environment applies.
     let config = |key: &str| -> Result<Option<String>, ()> {
@@ -504,7 +548,7 @@ fn message_cleanup() -> Cleanup {
 
 fn cleanup_for(mode: Option<&str>, edited: bool, comment: Option<String>) -> Cleanup {
     match (mode.unwrap_or("default"), edited, comment) {
-        ("strip", _, Some(c)) | ("default", true, Some(c)) => Cleanup::Strip(c),
+        ("strip" | "default", true, Some(c)) => Cleanup::Strip(c),
         ("scissors", true, Some(c)) => Cleanup::Scissors(c),
         _ => Cleanup::Keep,
     }
@@ -517,10 +561,16 @@ pub fn check_message(guard: &ShadowGuard, raw: &str, cleanup: &Cleanup) -> Vec<H
         Cleanup::Scissors(c) => (Some(c.as_str()), false),
         Cleanup::Keep => (None, false),
     };
-    let scissors = comment.map(|c| format!("{c} ------------------------ >8"));
+    // Git cuts only at the complete delimiter line.
+    let scissors =
+        comment.map(|c| format!("{c} ------------------------ >8 ------------------------"));
     let message: String = raw
         .lines()
-        .take_while(|l| scissors.as_deref().is_none_or(|s| !l.starts_with(s)))
+        .take_while(|l| {
+            scissors
+                .as_deref()
+                .is_none_or(|s| l.trim_end_matches('\r') != s)
+        })
         .filter(|l| !(strip && comment.is_some_and(|c| l.starts_with(c))))
         .map(|l| format!("{l}\n"))
         .collect();
@@ -529,10 +579,45 @@ pub fn check_message(guard: &ShadowGuard, raw: &str, cleanup: &Cleanup) -> Vec<H
 }
 
 /// The directory git runs hooks from (honours `core.hooksPath`).
+/// Resolved like a real path (`..` and symlinks), so `.git/../.githooks`
+/// is classified as the work-tree directory it is.
 fn hooks_dir(root: &Path) -> Option<PathBuf> {
     let out = git_bytes(root, &["rev-parse", "--git-path", "hooks"])?;
     let p = PathBuf::from(String::from_utf8_lossy(&out).trim());
-    Some(if p.is_absolute() { p } else { root.join(p) })
+    Some(resolve_path(&if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }))
+}
+
+/// `path` with `.`/`..` removed and its longest existing ancestor
+/// canonicalized (the rest may not exist yet).
+fn resolve_path(path: &Path) -> PathBuf {
+    let mut lexical = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                lexical.pop();
+            }
+            other => lexical.push(other),
+        }
+    }
+    let mut existing = lexical.as_path();
+    let mut rest = Vec::new();
+    while fs::symlink_metadata(existing).is_err() {
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return lexical,
+        }
+    }
+    let mut out = fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    out.extend(rest.iter().rev());
+    out
 }
 
 /// A path as a single-quoted shell word.
@@ -634,18 +719,7 @@ pub fn install_hook(root: &Path, guard_rel: &str) -> anyhow::Result<HookAction> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => anyhow::bail!("cannot read {}: {e}", hook.display()),
     };
-    // A hooks directory inside the work tree (core.hooksPath): keep the
-    // generated hook and a chained local hook out of the repository, before
-    // either is written or moved.
-    if in_tree.is_some() {
-        let rels: Vec<String> = [&hook, &chained_path]
-            .iter()
-            .filter_map(|p| work_tree_rel(root, p))
-            .collect();
-        let rels: Vec<&str> = rels.iter().map(String::as_str).collect();
-        super::shadow::try_ensure_git_excluded_in(root, &rels, "shadow guard hook")
-            .map_err(|e| anyhow::anyhow!("cannot exclude the hook from git: {e}"))?;
-    }
+    let mut move_aside = false;
     if let Some(existing) = existing {
         if existing.contains(HOOK_MARKER) {
             if existing == script && is_executable(&hook) {
@@ -664,9 +738,24 @@ pub fn install_hook(root: &Path, guard_rel: &str) -> anyhow::Result<HookAction> 
                 dir.join(CHAINED_HOOK).display()
             );
         } else {
-            fs::rename(&hook, &chained_path)?;
-            chained = true;
+            move_aside = true;
         }
+    }
+    // A hooks directory inside the work tree (core.hooksPath): keep the
+    // generated hook and a chained local hook out of the repository, only
+    // for a hook Nexus writes and before it moves or writes anything.
+    if in_tree.is_some() {
+        let rels: Vec<String> = [&hook, &chained_path]
+            .iter()
+            .filter_map(|p| work_tree_rel(root, p))
+            .collect();
+        let rels: Vec<&str> = rels.iter().map(String::as_str).collect();
+        super::shadow::try_ensure_git_excluded_in(root, &rels, "shadow guard hook")
+            .map_err(|e| anyhow::anyhow!("cannot exclude the hook from git: {e}"))?;
+    }
+    if move_aside {
+        fs::rename(&hook, &chained_path)?;
+        chained = true;
     }
     fs::create_dir_all(&dir)?;
     fs::write(&hook, &script)?;
@@ -684,7 +773,9 @@ pub fn install_hook(root: &Path, guard_rel: &str) -> anyhow::Result<HookAction> 
 /// `path` relative to the work tree `root`, when it lies inside it and
 /// outside the git directory.
 fn work_tree_rel(root: &Path, path: &Path) -> Option<String> {
-    let rel = path.strip_prefix(root).ok()?;
+    let root = resolve_path(root);
+    let path = resolve_path(path);
+    let rel = path.strip_prefix(&root).ok()?;
     if rel.components().next()? == std::path::Component::Normal(".git".as_ref()) {
         return None;
     }
@@ -1147,13 +1238,48 @@ mod tests {
     }
 
     #[test]
+    fn test_scissors_only_at_the_complete_delimiter() {
+        let g = contract_guard();
+        let strip = Cleanup::Strip(";".into());
+        let raw = format!("fix: x\n; ------------------------ >8 not-a-cut\nsee {REF}\n");
+        assert_eq!(check_message(&g, &raw, &strip).len(), 1);
+        let raw =
+            format!("fix: x\n; ------------------------ >8 ------------------------\nsee {REF}\n");
+        assert!(check_message(&g, &raw, &strip).is_empty());
+    }
+
+    #[test]
+    fn test_broken_branch_ref_is_not_an_empty_history() {
+        let dir = repo("broken-ref");
+        fs::write(dir.join("a.txt"), "x").unwrap();
+        git(&dir, &["add", "a.txt"]);
+        git(&dir, &["commit", "-q", "-m", "one"]);
+        let head = git_bytes(&dir, &["symbolic-ref", "-q", "HEAD"]).unwrap();
+        let head = String::from_utf8_lossy(&head).trim().to_string();
+        git(&dir, &["pack-refs", "--all"]);
+        assert!(!is_unborn(&dir));
+        fs::create_dir_all(dir.join(".git").join(&head).parent().unwrap()).unwrap();
+        fs::write(dir.join(".git").join(&head), "not a sha\n").unwrap();
+        assert!(git_bytes(&dir, &["ls-files"]).is_some());
+        assert!(!is_unborn(&dir));
+        assert!(run_check(&dir, &contract_guard(), 5).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_cleanup_mode_follows_git() {
         let hash = || Some("#".to_string());
         assert_eq!(cleanup_for(None, true, hash()), Cleanup::Strip("#".into()));
         assert_eq!(cleanup_for(None, false, hash()), Cleanup::Keep);
         assert_eq!(cleanup_for(Some("default"), false, hash()), Cleanup::Keep);
+        // `-m`/`-F`: a `--cleanup` override is invisible, so every line counts.
+        assert_eq!(cleanup_for(Some("strip"), false, hash()), Cleanup::Keep);
         assert_eq!(
-            cleanup_for(Some("strip"), false, hash()),
+            cleanup_for(Some("strip"), false, Some(";".into())),
+            Cleanup::Keep
+        );
+        assert_eq!(
+            cleanup_for(Some("strip"), true, hash()),
             Cleanup::Strip("#".into())
         );
         assert_eq!(cleanup_for(Some("whitespace"), true, hash()), Cleanup::Keep);
@@ -1415,6 +1541,40 @@ mod tests {
             install_hook(&dir, "g.json").unwrap(),
             HookAction::Unchanged { path: hook }
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_hooks_path_through_the_git_dir_is_resolved() {
+        let dir = repo("hook-dotdot");
+        fs::create_dir_all(dir.join(".githooks")).unwrap();
+        fs::write(dir.join(".githooks/commit-msg"), "#!/bin/sh\nexit 0\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "hooks"]);
+        git(&dir, &["config", "core.hooksPath", ".git/../.githooks"]);
+        let a = install_hook(&dir, "g.json").unwrap();
+        assert!(matches!(&a, HookAction::Skipped { reason, .. } if reason.contains("tracked")));
+        assert_eq!(
+            fs::read_to_string(dir.join(".githooks/commit-msg")).unwrap(),
+            "#!/bin/sh\nexit 0\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_skipped_manager_hook_is_not_excluded() {
+        let dir = repo("hook-husky-excl");
+        git(&dir, &["config", "core.hooksPath", ".githooks"]);
+        fs::create_dir_all(dir.join(".githooks")).unwrap();
+        fs::write(
+            dir.join(".githooks/commit-msg"),
+            "#!/bin/sh\nnpx husky run\n",
+        )
+        .unwrap();
+        let a = install_hook(&dir, "g.json").unwrap();
+        assert!(matches!(&a, HookAction::Skipped { reason, .. } if reason.contains("husky")));
+        let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap_or_default();
+        assert!(!exclude.contains(".githooks/commit-msg"));
         let _ = fs::remove_dir_all(&dir);
     }
 
