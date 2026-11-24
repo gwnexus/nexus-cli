@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`nexus stash` keeps local edits recoverable.** Each save gets its own directory (two saves in one second no longer share one), the saved files live under `files/` apart from the metadata (an agent file named `stash.json` is no longer replaced by it), and executable workspace scripts are restored executable. `pop` checks every file first and keeps the stash, changing nothing, when one cannot be restored; a failed write keeps it too and names what was and was not restored. A final newline that pull added is no longer stashed as an edit. Stashes of older versions still restore.
+
 ## [0.51.0] - 2026-11-24
 
 ### Security
