@@ -627,7 +627,8 @@ fn message_cleanup() -> Cleanup {
 }
 
 /// The arguments of the process that runs this one (`git commit` for the
-/// hook): exact on Linux, split at whitespace from `ps` elsewhere.
+/// hook), with their boundaries: `/proc` on Linux, `KERN_PROCARGS2` on
+/// macOS. `None` elsewhere or when they cannot be read.
 fn parent_args() -> Option<Vec<String>> {
     #[cfg(unix)]
     {
@@ -640,42 +641,158 @@ fn parent_args() -> Option<Vec<String>> {
                     .collect(),
             );
         }
-        let out = Command::new("ps")
-            .args(["-o", "args=", "-p", &pid.to_string()])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        Some(
-            String::from_utf8_lossy(&out.stdout)
-                .split_whitespace()
-                .map(String::from)
-                .collect(),
-        )
+        #[cfg(target_os = "macos")]
+        return macos_args(pid);
     }
-    #[cfg(not(unix))]
+    #[allow(unreachable_code)]
     None
 }
 
-/// The `--cleanup` mode of a `git commit` command line; the last one wins,
-/// as in git. `None` for another command or without the option.
-fn cleanup_arg(args: &[String]) -> Option<String> {
-    if !args.iter().any(|a| a == "commit") {
+/// The argument vector of `pid` from `sysctl(KERN_PROCARGS2)`: the
+/// argument count, the executable path, padding, then the arguments, each
+/// ending in a NUL byte.
+#[cfg(target_os = "macos")]
+fn macos_args(pid: u32) -> Option<Vec<String>> {
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        libc::c_int::try_from(pid).ok()?,
+    ];
+    let mut size: libc::size_t = 0;
+    // SAFETY: `mib` holds three valid entries; a null buffer asks for the
+    // size only.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size < 4 {
         return None;
     }
+    let mut buf = vec![0u8; size];
+    // SAFETY: `buf` is `size` bytes long, as passed in `size`.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    buf.truncate(size);
+    procargs2_args(&buf)
+}
+
+/// Parse a `KERN_PROCARGS2` buffer (see [`macos_args`]).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn procargs2_args(buf: &[u8]) -> Option<Vec<String>> {
+    let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
+    let rest = &buf[4..];
+    let rest = &rest[rest.iter().position(|b| *b == 0)?..];
+    let rest = &rest[rest.iter().position(|b| *b != 0)?..];
+    let args: Vec<String> = rest
+        .split(|b| *b == 0)
+        .take(argc)
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect();
+    (args.len() == argc).then_some(args)
+}
+
+/// Global `git` options that take the next argument as their operand.
+const GIT_OPERAND_OPTIONS: &[&str] = &[
+    "-c",
+    "-C",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+];
+
+/// `git commit` long options that take an operand (`--name value` or
+/// `--name=value`).
+const COMMIT_OPERAND_LONG: &[&str] = &[
+    "--message",
+    "--file",
+    "--reuse-message",
+    "--reedit-message",
+    "--fixup",
+    "--squash",
+    "--author",
+    "--date",
+    "--template",
+    "--cleanup",
+    "--trailer",
+    "--pathspec-from-file",
+];
+
+/// `git commit` short options that take an operand (`-m msg`, `-mmsg`,
+/// also last in a group such as `-qm msg`).
+const COMMIT_OPERAND_SHORT: &[char] = &['m', 'F', 'C', 'c', 't'];
+
+/// The `--cleanup` mode of a `git commit` argument vector (`git` first);
+/// the last one wins, as in git. Operands of other options are skipped, so
+/// a message such as `-m --cleanup=strip` is not taken for the option.
+/// `None` for another command or without the option. Abbreviated long
+/// options are not recognized.
+fn cleanup_arg(args: &[String]) -> Option<String> {
+    let mut i = 1;
+    loop {
+        let a = args.get(i)?;
+        if a == "commit" {
+            break;
+        }
+        if !a.starts_with('-') {
+            return None;
+        }
+        i += if GIT_OPERAND_OPTIONS.contains(&a.as_str()) {
+            2
+        } else {
+            1
+        };
+    }
+    i += 1;
     let mut mode = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
+    while let Some(a) = args.get(i) {
+        i += 1;
         if a == "--" {
             break;
         }
-        if let Some(m) = a.strip_prefix("--cleanup=") {
-            mode = Some(m.to_string());
-        } else if a == "--cleanup" {
-            mode = it.next().cloned();
+        if let Some(long) = a.strip_prefix("--") {
+            let (name, value) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v.to_string())),
+                None => (long, None),
+            };
+            let name = format!("--{name}");
+            if COMMIT_OPERAND_LONG.contains(&name.as_str()) {
+                let value = match value {
+                    Some(v) => Some(v),
+                    None => {
+                        i += 1;
+                        args.get(i - 1).cloned()
+                    }
+                };
+                if name == "--cleanup" {
+                    mode = value;
+                }
+            }
+        } else if let Some(group) = a.strip_prefix('-') {
+            // The first operand option in a group takes the rest of the
+            // group, or the next argument when it ends the group.
+            if let Some(pos) = group.find(|c| COMMIT_OPERAND_SHORT.contains(&c)) {
+                if pos + 1 == group.len() {
+                    i += 1;
+                }
+            }
         }
     }
     mode
@@ -1466,25 +1583,75 @@ mod tests {
 
     #[test]
     fn test_cleanup_arg_reads_the_commit_command_line() {
-        let args = |s: &str| -> Vec<String> { s.split(' ').map(String::from).collect() };
+        let args = |v: &[&str]| -> Vec<String> { v.iter().map(|a| a.to_string()).collect() };
+        let mode = |v: &[&str]| cleanup_arg(&args(v));
         assert_eq!(
-            cleanup_arg(&args("git commit --cleanup=whitespace")).as_deref(),
+            mode(&["git", "commit", "--cleanup=whitespace"]).as_deref(),
             Some("whitespace")
         );
         assert_eq!(
-            cleanup_arg(&args("git -c a=b commit --cleanup verbatim -q")).as_deref(),
+            mode(&["git", "-c", "a=b", "commit", "--cleanup", "verbatim", "-q"]).as_deref(),
             Some("verbatim")
         );
         // The last one wins; nothing after `--`.
         assert_eq!(
-            cleanup_arg(&args(
-                "git commit --cleanup=strip --cleanup=scissors -- --cleanup=x"
-            ))
+            mode(&[
+                "git",
+                "commit",
+                "--cleanup=strip",
+                "--cleanup=scissors",
+                "--",
+                "--cleanup=x"
+            ])
             .as_deref(),
             Some("scissors")
         );
-        assert_eq!(cleanup_arg(&args("git commit -q")), None);
-        assert_eq!(cleanup_arg(&args("git merge --cleanup=strip")), None);
+        assert_eq!(mode(&["git", "commit", "-q"]), None);
+        assert_eq!(mode(&["git", "merge", "--cleanup=strip"]), None);
+        // A global option's operand that looks like the subcommand.
+        assert_eq!(
+            mode(&["git", "-C", "commit", "commit", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+        // Operands of other options are messages, not options.
+        assert_eq!(
+            mode(&["git", "commit", "--edit", "-m", "--cleanup=strip"]),
+            None
+        );
+        assert_eq!(
+            mode(&["git", "commit", "--edit", "-qm", "--cleanup=strip"]),
+            None
+        );
+        assert_eq!(
+            mode(&["git", "commit", "--message", "--cleanup=strip"]),
+            None
+        );
+        assert_eq!(
+            mode(&["git", "commit", "--edit", "--message=fix --cleanup=strip"]),
+            None
+        );
+        assert_eq!(
+            mode(&["git", "commit", "-mfix", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+        assert_eq!(
+            mode(&["git", "commit", "-F", "-", "--cleanup", "strip"]).as_deref(),
+            Some("strip")
+        );
+    }
+
+    /// A `KERN_PROCARGS2` buffer keeps each argument whole, spaces included.
+    #[test]
+    fn test_procargs2_args_keep_argument_boundaries() {
+        let mut buf = 3i32.to_ne_bytes().to_vec();
+        buf.extend_from_slice(
+            b"/usr/bin/git\0\0\0git\0commit\0--message=fix --cleanup=strip\0PATH=/bin\0",
+        );
+        assert_eq!(
+            procargs2_args(&buf).unwrap(),
+            vec!["git", "commit", "--message=fix --cleanup=strip"]
+        );
+        assert_eq!(procargs2_args(&buf[..3]), None);
     }
 
     #[test]
