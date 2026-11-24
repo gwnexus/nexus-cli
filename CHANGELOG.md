@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-11-24
+
 ### Security
 - **The API URL checked for trust is the one used.** The trust check reads the project config once and every command uses that URL, so a config changed after the check cannot send the token to an unchecked host.
 - **Typed tokens are always masked.** `nexus login` masks typed input also when stdout is redirected (the prompt moves to stderr) and refuses to read from a terminal it cannot mask on; piped input works as before.
