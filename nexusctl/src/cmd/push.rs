@@ -818,17 +818,21 @@ fn exported_paths(export: &nexus_core::api::WorkspaceForkExportResponse) -> Vec<
 
 /// Whether an unreadable `key` stops the push: it is named, or it would go
 /// into the new fork (tracked or in the current fork). Generated scripts are
-/// never pushed, and a tracked file the fork dropped is skipped anyway.
+/// never pushed (also when named), and a tracked file the fork dropped is
+/// skipped unless named.
 fn unreadable_blocks_push(
     key: &str,
     tracked: bool,
     exported: Option<&[String]>,
     include_named: &[String],
 ) -> bool {
+    if is_generated_script(key) {
+        return false;
+    }
     if include_named.iter().any(|p| p == key) {
         return true;
     }
-    if is_generated_script(key) || is_dropped(key, exported, include_named) {
+    if is_dropped(key, exported, include_named) {
         return false;
     }
     tracked || exported.is_some_and(|ex| ex.iter().any(|p| p == key))
@@ -1103,6 +1107,12 @@ mod tests {
             true,
             Some(&with_gen),
             &[]
+        ));
+        assert!(!unreadable_blocks_push(
+            &generated,
+            true,
+            Some(&with_gen),
+            std::slice::from_ref(&generated)
         ));
         // No fork: a tracked file stops the push.
         assert!(unreadable_blocks_push(&old, true, None, &[]));
