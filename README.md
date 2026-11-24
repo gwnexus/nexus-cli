@@ -153,7 +153,8 @@ nexus man --out-dir ~/.local/share/man/man1   # install all pages: man nexus-run
 | `nexus project link` | `--restrict-profiles` | Restrict the token to profile slugs (comma-separated) |
 | `nexus project rotate` | `--finalize` | Revoke the previously superseded token after overlap |
 | `nexus pull`    | `--project-id`   | Pull from a specific project (skip picker)     |
-| `nexus pull`    | `--dry-run`      | Show devbox workspace changes (create, update, keep, remove) without writing, and the executable items pull would ask about |
+| `nexus pull`    | `--dry-run`      | Preview the selected `--scope` without writing: devbox workspace changes (create, update, keep, remove, executable-bit repairs `MODE +x`), skill removals, the task snapshot, and the executable items pull would ask about |
+| `nexus pull`    | `--scope`        | Limit the pull to `skills`, `directives`, `agents`, `tasks` or `workspace` (repeatable, comma-separated); see [Pull scopes](#pull-scopes) |
 | `nexus pull`, `nexus init` | `--trust` | Accept new or changed executable content and activate the repository git hooks without asking (not implied by `--yes` / `--force`) |
 | `nexus push`    | `--name`         | Custom fork name (default: auto-generated)     |
 | `nexus push`    | `--dry-run`      | Show what would be pushed without sending      |
@@ -269,7 +270,11 @@ nexus push --dry-run                # show what would be pushed
 no longer contains, if they are unchanged locally (`REMOVE`); locally
 modified ones are kept and reported (`KEEP`), and files Nexus never wrote are
 not touched. `nexus status` lists them as `ORPHANED` or `DROPPED`, and
-`nexus pull --dry-run` previews all workspace changes. `nexus push` skips
+`nexus pull --dry-run` previews the workspace changes (with `--scope
+workspace` or no scope), also when the legacy workspace export is used.
+A file is removed only in the state the plan approved: one edited or
+re-recorded in the meantime is kept, and an unreadable one is named with
+its error and checked again on the next pull. `nexus push` skips
 files the current fork no longer contains, so a new fork does not bring them
 back by accident; `nexus push <path>` pushes one back on purpose.
 
@@ -300,7 +305,10 @@ push untracked files). The sync manifest and the pull manifest are updated
 under a lock (a `<file>.lock` file next to them), so concurrent `nexus`
 commands keep each other's records; a manifest locked for more than about
 five seconds stops the command with "locked by another nexus command; try
-again", and a manifest that cannot be parsed is reported, never reset. If the local workspace was never pulled, or you need
+again", and a manifest that cannot be parsed is reported, never reset.
+Only one `nexus pull` runs per workspace at a time (a lock on
+`.nexus/pull.lock`); a second one stops with "another nexus pull is running
+in this workspace". If the local workspace was never pulled, or you need
 to publish local edits without risking an older server-side fork
 overwriting them, use `nexus push --adopt-local` to bootstrap a new fork
 directly from the current local files, bypassing that check:
@@ -333,6 +341,22 @@ saved executable script executable again, and removes the stash only once
 every file is back. When a file cannot be restored (it is missing from the
 stash or its path is unsafe), `pop` changes nothing, keeps the stash and
 names the files.
+
+### Pull scopes
+
+`nexus pull --scope <scope>` (repeatable, comma-separated) limits a pull to
+some parts; without it, every part is pulled.
+
+| Scope | What it writes |
+|-------|----------------|
+| `skills` | Skill files under the agentic root, OpenCode slash commands, Claude Code's `.claude/skills/` copies, and the removal of skills no longer exported |
+| `directives` | `<agentic_root>/directives.md` |
+| `agents` | Agent files, actors, runtime configs (`opencode.json`, `.mcp.json`), the Claude Code projection, the shadow guard, plugins, the git identity and GitHub account, and the cleanup of the unused projection |
+| `tasks` | The `<agentic_root>/TASKS.md` snapshot (cleared when no task is open, only if Nexus wrote it) |
+| `workspace` | devbox workspace files and machine-local scripts |
+
+The server's git excludes are applied with `agents` and with `workspace`.
+`--dry-run` previews the same scopes.
 
 ### Generated `opencode.json`
 
@@ -367,6 +391,14 @@ names the files.
   `agentic_root` convention (default `.nexus/`). Pre-existing custom entries
   in `instructions[]` are preserved; re-running `pull` does not duplicate
   entries already present.
+
+Without `--force`, pull updates only the keys Nexus writes and keeps the
+rest of the file (theme and other settings). A changed default model or
+agent is reconciled on the next pull. An `opencode.json` that cannot be
+parsed is left alone with a warning (fix it or pull with `--force`); the
+Claude Code projection is then not cleaned up, so the workspace keeps a
+working configuration. `-y` does not rebuild the file; `--force` or
+`--force-unmanaged` does.
 
 #### Model-routing warnings
 
@@ -1292,7 +1324,8 @@ registers it without losing the conversation.
 `-y` answers questions as in `nexus pull`; edited Claude Code files
 (`.claude/` rules, skills, agents and other locked files) are replaced and
 modified leftovers removed only with `--force` or `--force-unmanaged`. Other files follow pull's
-`-y` handling (for example `.mcp.json` is rewritten from the backend). When
+`-y` handling (for example `.mcp.json` keeps locally added MCP servers; only
+`--force` or `--force-unmanaged` rebuilds it from the backend). When
 `claude plugin list` is unavailable before or after the pull, reload says
 that plugin changes could not be checked instead of reporting every plugin
 as new.

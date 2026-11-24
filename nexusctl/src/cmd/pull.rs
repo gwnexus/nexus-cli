@@ -324,15 +324,42 @@ pub(crate) fn prereq_argv(check_command: &str) -> Option<Vec<&str>> {
 /// the allowed shape, otherwise only looks the tool up on `PATH`.
 fn prerequisite_present(check_command: &str, tool: &str) -> bool {
     match prereq_argv(check_command) {
-        Some(argv) => std::process::Command::new(argv[0])
-            .args(&argv[1..])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false),
+        Some(argv) => {
+            let child = std::process::Command::new(argv[0])
+                .args(&argv[1..])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match child {
+                Ok(child) => wait_bounded(child, PREREQUISITE_TIMEOUT),
+                Err(_) => false,
+            }
+        }
         None => valid_path_segment(tool) && super::run::on_path(tool),
+    }
+}
+
+/// How long a prerequisite check may run before it counts as failed.
+const PREREQUISITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether `child` exits successfully within `limit`; a child still running
+/// then is killed and counts as failed, so a hanging check never stalls
+/// the pull.
+fn wait_bounded(mut child: std::process::Child, limit: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
     }
 }
 
@@ -826,6 +853,27 @@ pub async fn run_with_root_hook(
         }
     };
 
+    // One pull at a time per workspace, taken before anything is fetched:
+    // two runs would each apply exports and records the other is changing
+    // (an older export over a newer delivery, removals, adopted hashes).
+    // Held until the run ends. A fixed path next to the project binding,
+    // independent of the export (and its agentic root), checked before it
+    // is created. A dry run writes nothing and takes no lock.
+    const RUN_LOCK: &str = ".nexus/pull.lock";
+    let _run_lock = if dry_run {
+        None
+    } else {
+        if let Err(e) = validate_agent_file_target_path(&workspace, RUN_LOCK) {
+            anyhow::bail!("{RUN_LOCK} cannot be used: {e}");
+        }
+        match super::json_store::try_run_lock(&workspace.join(RUN_LOCK))? {
+            Some(lock) => Some(lock),
+            None => anyhow::bail!(
+                "another nexus pull is running in this workspace; wait for it to finish, then try again"
+            ),
+        }
+    };
+
     // Resolve authentication token
     let token = resolve_token().ok_or_else(|| {
         anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
@@ -844,8 +892,7 @@ pub async fn run_with_root_hook(
     println!();
 
     // Scope filter: if empty, pull everything. Otherwise only named scopes.
-    let pull_all = scope.is_empty();
-    let pull_scope = |name: &str| pull_all || scope.iter().any(|s| s.eq_ignore_ascii_case(name));
+    let pull_scope = |name: &str| scope_selects(scope, name);
 
     // Verify identity
     let identity = client.get_identity().await?;
@@ -908,8 +955,34 @@ pub async fn run_with_root_hook(
     let explicit_force = ccx_force != super::ccx::ForceMode::None;
     let mut ws_report = WorkspaceSyncReport::default();
 
-    // Export skills (always needed for project_name)
-    let mut export = client.export_skills(&project_id).await?;
+    // Export skills (also the project name). Only the skills and agents
+    // scopes need it: a tasks or workspace pull goes on without it.
+    let mut export = match client.export_skills(&project_id).await {
+        Ok(export) => export,
+        Err(e) if !pull_scope("skills") && !pull_scope("agents") => {
+            println!(
+                "   {} skills export unavailable ({e}); not needed for this scope",
+                style("!").yellow()
+            );
+            let name = client
+                .get_project(&project_id)
+                .await
+                .map(|d| d.project.name)
+                .unwrap_or_else(|_| project_id.clone());
+            nexus_core::api::SkillExportResponse {
+                action: "sk_export".into(),
+                project: nexus_core::api::SkillExportProject {
+                    id: project_id.clone(),
+                    slug: String::new(),
+                    name,
+                },
+                skills: Vec::new(),
+                count: 0,
+                executables: Vec::new(),
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
     let project_name = export.project.name.clone();
 
     println!(
@@ -921,19 +994,39 @@ pub async fn run_with_root_hook(
 
     // Nothing above writes to the workspace.
     if dry_run {
-        let ws_export = dry_run_workspace(&client, &project_id, &workspace).await?;
-        let desired = desired_skill_files(&export.skills, &agentic_root, is_claude);
-        let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
-        let skills = plan_dropped_skill_files(&workspace, &agentic_root, is_claude, &desired);
-        let disabled = DisabledSkills::for_plan(&client, &skills).await;
-        skills
-            .iter()
-            .filter(|i| !matches!(i, DroppedFile::Gone(_)))
-            .for_each(|i| print_dropped_skill_file(i, &disabled));
-        let mut items =
-            super::consent::collect_skills(&workspace, &export.skills, is_claude, &agentic_root);
-        let mut declared = export.executables.clone();
-        if let Ok(ref af_export) = af_export_result {
+        // The same scopes as a pull: only the selected parts are previewed.
+        let mut items = Vec::new();
+        let mut declared = Vec::new();
+        if pull_scope("workspace") {
+            let (ws_items, ws_declared) =
+                dry_run_workspace(&client, &project_id, &workspace).await?;
+            items.extend(ws_items);
+            declared.extend(ws_declared);
+        }
+        if pull_scope("skills") {
+            let desired = desired_skill_files(&export.skills, &agentic_root, is_claude);
+            let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
+            let skills = plan_dropped_skill_files(&workspace, &agentic_root, is_claude, &desired);
+            let disabled = DisabledSkills::for_plan(&client, &skills).await;
+            skills
+                .iter()
+                .filter(|i| !matches!(i, DroppedFile::Gone(_)))
+                .for_each(|i| print_dropped_skill_file(i, &disabled));
+            items.extend(super::consent::collect_skills(
+                &workspace,
+                &export.skills,
+                is_claude,
+                &agentic_root,
+            ));
+            declared.extend(export.executables.iter().cloned());
+        }
+        if pull_scope("directives") {
+            dry_run_directives(&client, &project_id, &workspace, &agentic_root, force).await;
+        }
+        if pull_scope("tasks") {
+            dry_run_tasks(&client, &project_id, &workspace, &agentic_root).await;
+        }
+        if let (true, Ok(ref af_export)) = (pull_scope("agents"), &af_export_result) {
             items.extend(super::consent::collect_agent_export(
                 &workspace,
                 af_export,
@@ -941,10 +1034,6 @@ pub async fn run_with_root_hook(
                 &agentic_root,
             ));
             declared.extend(af_export.executables.iter().cloned());
-        }
-        if let Some(ref ws_export) = ws_export {
-            items.extend(super::consent::collect_workspace_v2(&workspace, ws_export));
-            declared.extend(ws_export.executables.iter().cloned());
         }
         super::consent::preview(&workspace, &items, &declared);
         return Ok(());
@@ -954,80 +1043,108 @@ pub async fn run_with_root_hook(
     // layouts, scripts) needs consent before anything is written; a refused
     // item keeps its local version.
     let mut consent = super::consent::Gate::open(&workspace, trust);
+    // Only the selected scopes are offered: a `--scope tasks` pull never
+    // asks about (or records consent for) agent or skill executables.
     consent.exports(
         &workspace,
-        af_export_result.as_mut().ok(),
-        Some(&mut export),
+        af_export_result
+            .as_mut()
+            .ok()
+            .filter(|_| pull_scope("agents")),
+        pull_scope("skills").then_some(&mut export),
         is_claude,
         &agentic_root,
     );
 
-    if export.skills.is_empty() {
-        println!(
-            "   {} No skills assigned to this project.",
-            style("--").yellow()
-        );
-    } else {
-        // Skills (and, for OpenCode projects, their slash commands) are
-        // rendered here and compared with disk: unchanged files are left
-        // alone, files unmodified since the last pull are updated silently,
-        // and only locally edited files need confirmation.
-        let mut generated: Vec<(String, String)> = Vec::new();
-        for skill in &export.skills {
-            generated.extend(render_skill_files(skill, &agentic_root));
-            if !is_claude {
-                generated.extend(render_command_file(skill, &agentic_root));
+    if pull_scope("skills") {
+        if export.skills.is_empty() {
+            println!(
+                "   {} No skills assigned to this project.",
+                style("--").yellow()
+            );
+        } else {
+            // Skills (and, for OpenCode projects, their slash commands) are
+            // rendered here and compared with disk: unchanged files are left
+            // alone, files unmodified since the last pull are updated silently,
+            // and only locally edited files need confirmation.
+            let mut generated: Vec<(String, String)> = Vec::new();
+            for skill in &export.skills {
+                generated.extend(render_skill_files(skill, &agentic_root));
+                if is_claude {
+                    // Claude Code's native copies (`.claude/skills/`) follow
+                    // the skills scope and the same rules: a local edit is
+                    // kept without --force.
+                    generated.extend(
+                        claude_render::render_claude_skill_files(skill)
+                            .into_iter()
+                            .filter(|(p, _)| safe_target(&workspace, p)),
+                    );
+                } else {
+                    generated.extend(render_command_file(skill, &agentic_root));
+                }
             }
-        }
-        let (written, skipped) =
-            sync_generated_files(&workspace, &agentic_root, &generated, force)?;
-        skipped_modified.extend(skipped);
+            let (written, skipped) =
+                sync_generated_files(&workspace, &agentic_root, &generated, force)?;
+            skipped_modified.extend(skipped);
 
-        println!(
-            "   {} {} skill(s) synced ({})",
-            style("+").bold().green(),
-            export.skills.len(),
-            if written == 0 {
-                "up to date".to_string()
-            } else {
-                format!("{written} file(s) updated")
-            }
-        );
+            println!(
+                "   {} {} skill(s) synced ({})",
+                style("+").bold().green(),
+                export.skills.len(),
+                if written == 0 {
+                    "up to date".to_string()
+                } else {
+                    format!("{written} file(s) updated")
+                }
+            );
+        }
+        // Skills an earlier pull wrote that the export no longer contains
+        // (renamed or unassigned).
+        let desired_skills = desired_skill_files(&export.skills, &agentic_root, is_claude);
+        let desired_paths: Vec<&str> = desired_skills.iter().map(|(p, _)| p.as_str()).collect();
+        prune_dropped_skill_files(
+            &client,
+            &workspace,
+            &agentic_root,
+            is_claude,
+            &desired_paths,
+        )
+        .await;
     }
-    // Skills an earlier pull wrote that the export no longer contains
-    // (renamed or unassigned).
-    let desired_skills = desired_skill_files(&export.skills, &agentic_root, is_claude);
-    let desired_paths: Vec<&str> = desired_skills.iter().map(|(p, _)| p.as_str()).collect();
-    prune_dropped_skill_files(
-        &client,
-        &workspace,
-        &agentic_root,
-        is_claude,
-        &desired_paths,
-    )
-    .await;
 
     // Export directives
-    let has_directives = match client.export_directives(&project_id).await {
-        Ok(dir_export) => {
-            if dir_export.directives.is_empty() {
-                println!(
-                    "   {} No directives for this project.",
-                    style("--").yellow()
-                );
-                false
-            } else {
-                // Check for existing directives file
-                let directives_path = workspace.join(&agentic_root).join("directives.md");
-                if directives_path.exists() && !force {
-                    if !is_managed_file(&directives_path) {
-                        println!(
+    let has_directives = if !pull_scope("directives") {
+        // Out of scope: CLAUDE.md still mentions the directives on disk.
+        workspace.join(&agentic_root).join("directives.md").exists()
+    } else {
+        match client.export_directives(&project_id).await {
+            Ok(dir_export) => {
+                if dir_export.directives.is_empty() {
+                    println!(
+                        "   {} No directives for this project.",
+                        style("--").yellow()
+                    );
+                    false
+                } else {
+                    // Check for existing directives file
+                    let directives_path = workspace.join(&agentic_root).join("directives.md");
+                    if directives_path.exists() && !force {
+                        if directives_user_managed(&directives_path, force) {
+                            println!(
                             "   {} {}/directives.md is user-managed (no nexus-platform marker), skipping",
                             style("--").yellow(),
                             agentic_root
                         );
+                        } else {
+                            // Managed file, overwrite silently on pull
+                            write_directives(&workspace, &dir_export.directives, &agentic_root)?;
+                            println!(
+                                "   {} {} directive(s) synced",
+                                style("+").bold().green(),
+                                dir_export.directives.len()
+                            );
+                        }
                     } else {
-                        // Managed file, overwrite silently on pull
                         write_directives(&workspace, &dir_export.directives, &agentic_root)?;
                         println!(
                             "   {} {} directive(s) synced",
@@ -1035,504 +1152,36 @@ pub async fn run_with_root_hook(
                             dir_export.directives.len()
                         );
                     }
-                } else {
-                    write_directives(&workspace, &dir_export.directives, &agentic_root)?;
-                    println!(
-                        "   {} {} directive(s) synced",
-                        style("+").bold().green(),
-                        dir_export.directives.len()
-                    );
+                    true
                 }
-                true
             }
-        }
-        Err(e) => {
-            println!(
-                "   {} Could not fetch directives: {}",
-                style("!").bold().yellow(),
-                e
-            );
-            false
+            Err(e) => {
+                println!(
+                    "   {} Could not fetch directives: {}",
+                    style("!").bold().yellow(),
+                    e
+                );
+                false
+            }
         }
     };
-
-    // Export agent files (AGENTS.md, CLAUDE.md, etc.) from platform
-    // Reuse the af_export result fetched earlier (avoids duplicate API call)
-    // Track written agent file paths so the plugin download step doesn't
-    // overwrite them with stale content from the GitHub registry.
-    let mut af_written_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    match af_export_result {
-        Ok(ref af_export) => {
-            if af_export.agent_files.is_empty() {
-                println!(
-                    "   {} No agent files configured for this project.",
-                    style("--").yellow()
-                );
-            } else {
-                let mut af_written = 0;
-                let (agent_files, duplicates) = unique_agent_files(&af_export.agent_files);
-                for (path, dropped) in &duplicates {
-                    println!(
-                        "   {} backend sent several agent files for {}; using the first, ignoring {}",
-                        style("!").bold().yellow(),
-                        path,
-                        dropped.join(", ")
-                    );
-                }
-                for af in agent_files {
-                    // CCX files are reconciled against the CCX lock below.
-                    if af_export.ccx.is_some() && af.category == super::ccx::CCX_CATEGORY {
-                        continue;
-                    }
-                    let target_path = workspace.join(&af.target_path);
-
-                    // Only the selected runtime's projection is written.
-                    if is_other_runtime_path(&af.target_path, is_claude, &agentic_root) {
-                        continue;
-                    }
-
-                    // Protected files (secrets/env scaffolds) are write-if-missing:
-                    // an existing one is left alone without comment.
-                    if is_protected_target(&workspace, &af.target_path) && target_path.exists() {
-                        continue;
-                    }
-
-                    // Already identical (ignoring the export timestamp):
-                    // nothing to write or report.
-                    if agent_file_matches(&target_path, &af.body) {
-                        // Normalized hash: also true for the local file,
-                        // whose generated_at may differ from this export's.
-                        let _ = super::sync::update_manifest_after_pull(
-                            &workspace,
-                            &af.file_key,
-                            &af.target_path,
-                            &nexus_core::hash::sha256_hex_normalized(&af.body),
-                        );
-                        af_written_paths.insert(af.target_path.clone());
-                        continue;
-                    }
-
-                    // Check managed-file marker / sync manifest before overwriting
-                    if target_path.exists()
-                        && !force
-                        && !is_pull_managed(&workspace, &af.target_path, &manifest)
-                    {
-                        println!(
-                            "   {} {} is user-managed, skipping (use --force to overwrite)",
-                            style("--").yellow(),
-                            af.target_path
-                        );
-                        continue;
-                    }
-
-                    // Check for local modifications since last pull
-                    if target_path.exists()
-                        && is_locally_modified(&workspace, &af.target_path, &manifest)
-                    {
-                        if !force {
-                            println!(
-                                "   {} skipped: {} (locally modified, use --force to overwrite or nexus stash to save)",
-                                style("!").bold().yellow(),
-                                af.target_path
-                            );
-                            skipped_modified.push(af.target_path.clone());
-                            continue;
-                        } else {
-                            overwrote_modified.push(af.target_path.clone());
-                        }
-                    }
-
-                    write_agent_file(&workspace, af)?;
-                    af_written_paths.insert(af.target_path.clone());
-
-                    // Record the (generated_at-normalized) hash of what was
-                    // written, for local-modification detection.
-                    let _ = super::sync::update_manifest_after_pull(
-                        &workspace,
-                        &af.file_key,
-                        &af.target_path,
-                        &nexus_core::hash::sha256_hex_normalized(&af.body),
-                    );
-
-                    af_written += 1;
-                }
-                if af_written > 0 {
-                    println!(
-                        "   {} {} agent file(s) synced",
-                        style("+").bold().green(),
-                        af_written
-                    );
-                }
-            }
-        }
-        Err(ref e) => {
-            // Fallback to hardcoded templates when af_export is unavailable
-            println!(
-                "   {} Agent file export not available ({}), using local templates",
-                style("!").bold().yellow(),
-                e
-            );
-            sync_claude_md(
-                &workspace,
-                &project_name,
-                has_directives,
-                force,
-                &agentic_root,
-            )?;
-            sync_agents_md(&workspace, &project_name, force, &agentic_root)?;
-        }
-    }
-
-    // Export actor profiles from af_export response.
-    // Writes `.nexus/actors/<slug>.md` for each assigned actor and
-    // `.nexus/generated/actors.json` with the full actor metadata.
-    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
-        let actors_ok = !af_export.actors.is_empty()
-            && safe_target(&workspace, &format!("{agentic_root}/actors"))
-            && safe_target(&workspace, &format!("{agentic_root}/generated/actors.json"))
-            && (!with_actor_assets
-                || safe_target(&workspace, &format!("{agentic_root}/actors/assets")));
-        if actors_ok {
-            let actors_dir = workspace.join(&agentic_root).join("actors");
-            fs::create_dir_all(&actors_dir)?;
-
-            let generated_dir = workspace.join(&agentic_root).join("generated");
-            fs::create_dir_all(&generated_dir)?;
-
-            let mut actors_written = 0;
-            for actor in &af_export.actors {
-                if !valid_path_segment(&actor.slug) {
-                    println!(
-                        "   {} actor {:?} skipped: invalid slug",
-                        style("!").bold().yellow(),
-                        actor.slug
-                    );
-                    continue;
-                }
-                let rel = format!("{agentic_root}/actors/{}.md", actor.slug);
-                if !safe_target(&workspace, &rel) {
-                    continue;
-                }
-                fs::write(workspace.join(&rel), &actor.body)?;
-                actors_written += 1;
-            }
-
-            // Write actors.json with full metadata
-            let actors_json = serde_json::to_string_pretty(&af_export.actors)?;
-            fs::write(generated_dir.join("actors.json"), &actors_json)?;
-
-            if actors_written > 0 {
-                println!(
-                    "   {} {} actor profile(s) synced",
-                    style("+").bold().green(),
-                    actors_written
-                );
-            }
-
-            // Download avatar assets if --with-actor-assets was passed
-            if with_actor_assets {
-                let assets_dir = actors_dir.join("assets");
-                fs::create_dir_all(&assets_dir)?;
-
-                let mut assets_downloaded = 0;
-                for actor in af_export
-                    .actors
-                    .iter()
-                    .filter(|a| valid_path_segment(&a.slug))
-                {
-                    if let Some(ref avatar) = actor.avatar {
-                        if let Some(ref url) = avatar.url {
-                            // SEC-003: validate URL against trusted allowlist
-                            if let Err(e) = validate_download_url(url) {
-                                println!(
-                                    "   {} Avatar for '{}' skipped: {}",
-                                    style("!").bold().yellow(),
-                                    actor.slug,
-                                    e
-                                );
-                                continue;
-                            }
-                            match client.download_actor_avatar(url).await {
-                                Ok(svg_bytes) => {
-                                    let rel =
-                                        format!("{agentic_root}/actors/assets/{}.svg", actor.slug);
-                                    if !safe_target(&workspace, &rel) {
-                                        continue;
-                                    }
-                                    fs::write(workspace.join(&rel), &svg_bytes)?;
-                                    assets_downloaded += 1;
-                                }
-                                Err(e) => {
-                                    println!(
-                                        "   {} Avatar for '{}' download failed: {}",
-                                        style("!").bold().yellow(),
-                                        actor.slug,
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                if assets_downloaded > 0 {
-                    println!(
-                        "   {} {} actor avatar(s) downloaded",
-                        style("+").bold().green(),
-                        assets_downloaded
-                    );
-                }
-            }
-        }
-    }
-
-    // Check for deprecated model routes used by actors
-    // Note: model_routes is now Option<serde_json::Value> (map format)
-    if let Some(Ok(ref _af_export)) = Some(&af_export_result) {
-        // Deprecation checks via the new map format are handled when writing model-routes.json
-    }
-
-    // Cache the flavor (and the backend's run target) in .nexus/config.toml
-    // so launch-time commands (`nexus run`, `nexus preflight`) can pick the
-    // right artifacts and binary offline.
-    // Nonfatal, but a refused config (e.g. a symlink out of the
-    // workspace) is reported.
-    // Each value separately: a failed owner update must not leave the run
-    // target stale without saying so.
-    if let Err(e) = nexus_core::config::update_agent_owner(Some(&workspace), tool_flavor.as_deref())
-    {
-        eprintln!("  warning: the cached agent owner in .nexus/config.toml was not updated: {e}");
-    }
-    if let Ok(ref af_export) = af_export_result {
-        if let Err(e) =
-            nexus_core::config::update_run_target(Some(&workspace), af_export.run_target.as_ref())
-        {
-            eprintln!(
-                "  warning: the cached run target in .nexus/config.toml was not updated; nexus run may use an old one offline: {e}"
-            );
-        }
-    }
-
-    let plugin_mcp_servers = af_export_result
-        .as_ref()
-        .ok()
-        .map(|r| r.mcp_servers.clone())
-        .unwrap_or_default();
-
-    let providers = af_export_result
-        .as_ref()
-        .ok()
-        .map(|r| r.provider.clone())
-        .unwrap_or_default();
-
-    // Use auth_token from response if available: avoids a separate credentials.toml
-    // read and guarantees the token written to opencode.json is always fresh.
-    let effective_token = af_export_result
-        .as_ref()
-        .ok()
-        .and_then(|r| r.auth_token.as_ref().map(|t| t.expose().to_string()))
-        .unwrap_or_else(|| token.to_string());
-
-    // Resolve opencode_agents, default model, and model_routes from af_export response
-    let opencode_agents = af_export_result
-        .as_ref()
-        .ok()
-        .and_then(|r| r.opencode_agents.clone());
-
-    let opencode_default_model = af_export_result
-        .as_ref()
-        .ok()
-        .and_then(|r| r.opencode_default_model.clone());
-
-    let opencode_default_agent = af_export_result
-        .as_ref()
-        .ok()
-        .and_then(|r| r.opencode_default_agent.clone());
-
-    let model_routes_export = af_export_result
-        .as_ref()
-        .ok()
-        .and_then(|r| r.model_routes.clone());
-
-    // Instructions paths to merge into opencode.json's top-level
-    // "instructions" array (e.g. "<agentic_root>/AGENTS.md"), so OpenCode
-    // loads the project's agent policy deterministically instead of relying
-    // on its own upward AGENTS.md auto-discovery.
-    let opencode_instructions = af_export_result
-        .as_ref()
-        .ok()
-        .and_then(|r| r.opencode_instructions.clone());
-
-    // Model routing / provider divergence warnings from the backend (e.g. an
-    // agent's model uses a provider Nexus can't verify, or a route-alias
-    // migration hasn't been applied). Rendered verbatim and gated on operator
-    // confirmation before opencode.json is written.
-    let export_warnings = warnings_for_runtime(
-        af_export_result
-            .as_ref()
-            .ok()
-            .and_then(|r| r.export_warnings.clone())
-            .unwrap_or_default(),
-        is_claude,
-    );
-
-    // Write model-routes.json for traceability
-    if let Some(ref routes) = model_routes_export {
-        let generated_dir = workspace.join(&agentic_root).join("generated");
-        if let Err(e) = fs::create_dir_all(&generated_dir) {
-            println!(
-                "   {} Could not create generated/ dir: {}",
-                style("!").bold().yellow(),
-                e
-            );
-        } else {
-            let routes_path = generated_dir.join("model-routes.json");
-            let routes_json = serde_json::json!({ "routes": routes });
-            if let Some(content) = serde_json::to_string_pretty(&routes_json)
-                .ok()
-                .map(|c| c + "\n")
-                .filter(|c| !content_matches(&routes_path, c))
-            {
-                let _ = fs::write(&routes_path, content);
-                println!(
-                    "   {} {}/generated/model-routes.json",
-                    style("+").bold().green(),
-                    agentic_root
-                );
-            }
-        }
-    }
-
-    // Gate the opencode.json write on the operator confirming any
-    // model-routing warnings. Only relevant when opencode.json is actually
-    // going to be written (skipped entirely for the claude-cli-only flavor,
-    // since mcp.json carries no model/agent routing config).
-    let opencode_will_be_written = !is_claude;
-
-    for rel in drop_unused_nexus_env(&workspace)? {
-        println!(
-            "   {} {rel}: removed NEXUS_SEC_OPENAI_API_KEY (not used by the nexus MCP server)",
-            style("-").red()
-        );
-    }
 
     let mut claude_report: Option<claude_render::ClaudeProjectionReport> = None;
-    let proceed_with_opencode = if opencode_will_be_written {
-        confirm_export_warnings(&export_warnings, force)?
-    } else {
-        // Nothing to gate, but the operator still needs to see them (e.g.
-        // `actors_not_exported`).
-        print_export_warnings(&export_warnings);
-        true
-    };
-
-    if proceed_with_opencode {
-        // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
-        write_mcp_configs(
-            &workspace,
-            api_url,
-            &effective_token,
-            &project_id,
-            mcp_source,
-            tool_flavor.as_deref(),
-            &agentic_root,
-            &plugin_mcp_servers,
-            &providers,
-            &opencode_agents,
-            &opencode_default_model,
-            &opencode_default_agent,
-            &opencode_instructions,
-            force,
-        )?;
-
-        // Render the native Claude Code projection:
-        // CLAUDE.md, .claude/settings.json, .claude/skills/, .claude/agents/.
-        // Additive only; skipped entirely for the opencode-only flavor.
-        // .mcp.json itself was already written above by write_mcp_configs.
-        if is_claude {
-            let actors_for_claude = af_export_result
-                .as_ref()
-                .ok()
-                .map(|r| r.actors.clone())
-                .unwrap_or_default();
-            let agent_files_for_claude = af_export_result
-                .as_ref()
-                .ok()
-                .map(|r| r.agent_files.clone())
-                .unwrap_or_default();
-            let runtime_spec_for_claude = af_export_result
-                .as_ref()
-                .ok()
-                .and_then(|r| r.runtime_spec.as_ref());
-            let hook_adapters_for_claude = af_export_result
-                .as_ref()
-                .ok()
-                .and_then(|r| r.claude_hook_adapters.clone())
-                .unwrap_or_default();
-            // Same project-detail fetch pattern already used below for git
-            // identity application (line ~1363): af_export does not carry
-            // git_config, so this is a dedicated, cheap lookup.
-            let include_co_authored_by = client
-                .get_project(&project_id)
-                .await
-                .ok()
-                .and_then(|d| d.project.git_config)
-                .and_then(|g| g.include_co_authored_by);
-            claude_report = Some(claude_render::render_claude_projection(
-                &workspace,
-                &project_name,
-                &agentic_root,
-                &export.skills,
-                &actors_for_claude,
-                &agent_files_for_claude,
-                runtime_spec_for_claude,
-                &hook_adapters_for_claude,
-                include_co_authored_by,
-                af_export_result
-                    .as_ref()
-                    .ok()
-                    .and_then(|r| r.claude_settings.as_ref()),
-                af_export_result
-                    .as_ref()
-                    .ok()
-                    .and_then(|r| r.claude_md_managed_block.as_deref()),
-                &claude_render::ClaudeAgentInputs::from_export(af_export_result.as_ref().ok()),
-                ccx_force != super::ccx::ForceMode::None,
-            )?);
-            if let Ok(ref export) = af_export_result {
-                super::lane::print_sync(
-                    &agentic_root,
-                    super::lane::sync_cache(&workspace, &agentic_root, export)?,
-                );
-            }
-        }
-    } else {
-        println!(
-            "   {} Skipped opencode.json / {}/mcp.json (declined after model-routing warning(s) above).",
-            style("--").bold().yellow(),
-            agentic_root
-        );
-        println!("            Re-run 'nexus pull' to retry once the warning(s) are addressed.");
-    }
-
-    // CCX files: reconciled against
-    // the CCX lock; the lock is only rewritten once everything succeeded.
-    // Claude Code only: an OpenCode project gets no .claude/rules etc.
     let mut ccx_outcomes: Vec<super::ccx::FileOutcome> = Vec::new();
-    if let (true, Ok(ref af_export)) = (is_claude, &af_export_result) {
-        if let Some(ref info) = af_export.ccx {
-            let lock = super::ccx::load_lock(&workspace, &agentic_root);
-            let desired = super::ccx::ccx_files(&af_export.agent_files);
-            let plans = super::ccx::plan_files(&workspace, &desired, lock.as_ref(), &manifest)?;
-            let (outcomes, files) = super::ccx::apply_file_plans(&workspace, &plans, ccx_force)?;
-            super::ccx::record_ccx_in_lock(&workspace, &agentic_root, info, files)?;
-            ccx_outcomes = outcomes;
-        }
-    }
-
+    let server_workspace_shadow = af_export_result
+        .as_ref()
+        .ok()
+        .and_then(|e| e.shadow_workspace)
+        .is_some();
     // Server exclude list: personal files,
     // plus the agentic paths when policy.shadow is ai/nexus. Managed block
     // in .git/info/exclude; tracked files are never untracked, only hinted.
-    if let Ok(ref af_export) = af_export_result {
+    // Applied for the agents and the workspace scope: both write files the
+    // list keeps out of git.
+    if let (true, Ok(ref af_export)) = (
+        pull_scope("agents") || pull_scope("workspace"),
+        &af_export_result,
+    ) {
         if !af_export.git_exclude.is_empty() || af_export.shadow.is_some() {
             let mut report =
                 super::shadow::apply_server_excludes(&workspace, &af_export.git_exclude);
@@ -1554,240 +1203,778 @@ pub async fn run_with_root_hook(
             super::shadow::adopt_server_workspace(&workspace, effective);
         }
     }
-    let server_workspace_shadow = af_export_result
-        .as_ref()
-        .ok()
-        .and_then(|e| e.shadow_workspace)
-        .is_some();
-
-    // Shadow guard: cache the rules for the commit-msg hook and install or
-    // remove the hook (only when the export was read).
-    // The hook is executable content: it needs consent or --trust.
-    if let Ok(ref af_export) = af_export_result {
-        let wants_hook = af_export
-            .shadow_guard
-            .as_ref()
-            .is_some_and(|g| g.commit_msg_hook);
-        let allow_hook = !wants_hook
-            || super::shadow_guard::hook_consent_item(&workspace)
-                .is_none_or(|item| consent.local(&item));
-        super::shadow_guard::sync(
-            &workspace,
-            &agentic_root,
-            af_export.shadow_guard.as_ref(),
-            allow_hook,
-        );
-    }
-
-    // Personal, git-excluded workspace files: the layout and
-    // the Zellij config.
-    if let Ok(ref af_export) = af_export_result {
-        sync_personal_workspace_files(
-            &workspace,
-            &agentic_root,
-            af_export,
-            is_claude,
-            explicit_force,
-        );
-    }
-
-    // Write .nexus/env from af_export.plugin_env (platform-managed, full overwrite)
-    let plugin_env = af_export_result
-        .as_ref()
-        .ok()
-        .map(|r| r.plugin_env.clone())
-        .unwrap_or_default();
-    write_plugin_env_file(&workspace, &plugin_env, &project_name, &agentic_root)?;
-
-    // Install platform-selected plugins from af_export plugins list.
-    // Downloads known Nexus plugins (nexus-compaction-plus, nexus-cost-control)
-    // into .opencode/plugins/ using the built-in registry. Existing plugin files
-    // are not overwritten unless --force is set.
-    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
-        if !is_claude && !af_export.plugins.is_empty() {
-            let platform_plugins = resolve_platform_plugins(&af_export.plugins);
-            if !platform_plugins.is_empty() {
-                let plugins_dir = workspace.join(".opencode").join("plugins");
-                std::fs::create_dir_all(&plugins_dir)?;
-                for (name, def) in &platform_plugins {
-                    let filename = def
-                        .filename
-                        .clone()
-                        .unwrap_or_else(|| format!("{}.ts", name));
-                    let dest = plugins_dir.join(&filename);
-                    // Skip plugins already delivered via agent_files (DB is source of truth)
-                    let plugin_target = format!(".opencode/plugins/{}", filename);
-                    if af_written_paths.contains(&plugin_target) {
-                        continue;
-                    }
-                    // Skip if already present and not forcing
-                    if dest.exists() && !force {
+    // Agent files, actors, runtime configs, the Claude Code projection,
+    // the shadow guard, plugins and the cleanup of the unused
+    // projection: the "agents" scope.
+    if pull_scope("agents") {
+        // Export agent files (AGENTS.md, CLAUDE.md, etc.) from platform
+        // Reuse the af_export result fetched earlier (avoids duplicate API call)
+        // Track written agent file paths so the plugin download step doesn't
+        // overwrite them with stale content from the GitHub registry.
+        let mut af_written_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        match af_export_result {
+            Ok(ref af_export) => {
+                if af_export.agent_files.is_empty() {
+                    println!(
+                        "   {} No agent files configured for this project.",
+                        style("--").yellow()
+                    );
+                } else {
+                    let mut af_written = 0;
+                    let (agent_files, duplicates) = unique_agent_files(&af_export.agent_files);
+                    for (path, dropped) in &duplicates {
                         println!(
-                            "   {} .opencode/plugins/{} (already present, skipping)",
-                            style("·").dim(),
-                            filename
+                            "   {} backend sent several agent files for {}; using the first, ignoring {}",
+                            style("!").bold().yellow(),
+                            path,
+                            dropped.join(", ")
                         );
-                        continue;
                     }
-                    if let Some(ref url) = def.url {
-                        // SEC-003: validate URL against trusted allowlist
-                        if let Err(e) = validate_download_url(url) {
+                    for af in agent_files {
+                        // CCX files are reconciled against the CCX lock below.
+                        if af_export.ccx.is_some() && af.category == super::ccx::CCX_CATEGORY {
+                            continue;
+                        }
+                        let target_path = workspace.join(&af.target_path);
+
+                        // Only the selected runtime's projection is written.
+                        if is_other_runtime_path(&af.target_path, is_claude, &agentic_root) {
+                            continue;
+                        }
+
+                        // Protected files (secrets/env scaffolds) are write-if-missing:
+                        // an existing one is left alone without comment.
+                        if is_protected_target(&workspace, &af.target_path) && target_path.exists()
+                        {
+                            continue;
+                        }
+
+                        // Already identical (ignoring the export timestamp):
+                        // nothing to write or report.
+                        if agent_file_matches(&target_path, &af.body) {
+                            // Normalized hash: also true for the local file,
+                            // whose generated_at may differ from this export's.
+                            let _ = super::sync::update_manifest_after_pull(
+                                &workspace,
+                                &af.file_key,
+                                &af.target_path,
+                                &nexus_core::hash::sha256_hex_normalized(&af.body),
+                            );
+                            af_written_paths.insert(af.target_path.clone());
+                            continue;
+                        }
+
+                        // Check managed-file marker / sync manifest before overwriting
+                        if target_path.exists()
+                            && !force
+                            && !is_pull_managed(&workspace, &af.target_path, &manifest)
+                        {
                             println!(
-                                "   {} Plugin '{}' skipped: {}",
-                                style("!").bold().yellow(),
-                                name,
-                                e
+                                "   {} {} is user-managed, skipping (use --force to overwrite)",
+                                style("--").yellow(),
+                                af.target_path
                             );
                             continue;
                         }
-                        let client = reqwest::Client::new();
-                        match client.get(url).send().await {
-                            Ok(resp) if resp.status().is_success() => {
-                                let body = resp.text().await.unwrap_or_default();
-                                std::fs::write(&dest, &body)?;
-                                // Recorded, so a later switch to Claude Code
-                                // can tell an unedited plugin from an edited one.
-                                record_generated(&workspace, &agentic_root, &plugin_target, &body)?;
+
+                        // Check for local modifications since last pull
+                        if target_path.exists()
+                            && is_locally_modified(&workspace, &af.target_path, &manifest)
+                        {
+                            if !force {
                                 println!(
-                                    "   {} .opencode/plugins/{} ({})",
-                                    style("+").bold().green(),
-                                    filename,
-                                    if dest.exists() {
-                                        "updated"
-                                    } else {
-                                        "downloaded"
-                                    }
-                                );
-                            }
-                            Ok(resp) => {
-                                println!(
-                                    "   {} Plugin '{}' download failed: HTTP {}",
+                                    "   {} skipped: {} (locally modified, use --force to overwrite or nexus stash to save)",
                                     style("!").bold().yellow(),
-                                    name,
-                                    resp.status()
+                                    af.target_path
                                 );
+                                skipped_modified.push(af.target_path.clone());
+                                continue;
+                            } else {
+                                overwrote_modified.push(af.target_path.clone());
                             }
-                            Err(e) => {
+                        }
+
+                        write_agent_file(&workspace, af)?;
+                        af_written_paths.insert(af.target_path.clone());
+
+                        // Record the (generated_at-normalized) hash of what was
+                        // written, for local-modification detection.
+                        let _ = super::sync::update_manifest_after_pull(
+                            &workspace,
+                            &af.file_key,
+                            &af.target_path,
+                            &nexus_core::hash::sha256_hex_normalized(&af.body),
+                        );
+
+                        af_written += 1;
+                    }
+                    if af_written > 0 {
+                        println!(
+                            "   {} {} agent file(s) synced",
+                            style("+").bold().green(),
+                            af_written
+                        );
+                    }
+                }
+            }
+            Err(ref e) => {
+                // Fallback to hardcoded templates when af_export is unavailable
+                println!(
+                    "   {} Agent file export not available ({}), using local templates",
+                    style("!").bold().yellow(),
+                    e
+                );
+                sync_claude_md(
+                    &workspace,
+                    &project_name,
+                    has_directives,
+                    force,
+                    &agentic_root,
+                )?;
+                sync_agents_md(&workspace, &project_name, force, &agentic_root)?;
+            }
+        }
+
+        // Export actor profiles from af_export response.
+        // Writes `.nexus/actors/<slug>.md` for each assigned actor and
+        // `.nexus/generated/actors.json` with the full actor metadata.
+        if let Some(Ok(ref af_export)) = Some(&af_export_result) {
+            let actors_ok = !af_export.actors.is_empty()
+                && safe_target(&workspace, &format!("{agentic_root}/actors"))
+                && safe_target(&workspace, &format!("{agentic_root}/generated/actors.json"))
+                && (!with_actor_assets
+                    || safe_target(&workspace, &format!("{agentic_root}/actors/assets")));
+            if actors_ok {
+                let actors_dir = workspace.join(&agentic_root).join("actors");
+                fs::create_dir_all(&actors_dir)?;
+
+                let generated_dir = workspace.join(&agentic_root).join("generated");
+                fs::create_dir_all(&generated_dir)?;
+
+                let mut actors_written = 0;
+                for actor in &af_export.actors {
+                    if !valid_path_segment(&actor.slug) {
+                        println!(
+                            "   {} actor {:?} skipped: invalid slug",
+                            style("!").bold().yellow(),
+                            actor.slug
+                        );
+                        continue;
+                    }
+                    let rel = format!("{agentic_root}/actors/{}.md", actor.slug);
+                    if !safe_target(&workspace, &rel) {
+                        continue;
+                    }
+                    fs::write(workspace.join(&rel), &actor.body)?;
+                    actors_written += 1;
+                }
+
+                // Write actors.json with full metadata
+                let actors_json = serde_json::to_string_pretty(&af_export.actors)?;
+                fs::write(generated_dir.join("actors.json"), &actors_json)?;
+
+                if actors_written > 0 {
+                    println!(
+                        "   {} {} actor profile(s) synced",
+                        style("+").bold().green(),
+                        actors_written
+                    );
+                }
+
+                // Download avatar assets if --with-actor-assets was passed
+                if with_actor_assets {
+                    let assets_dir = actors_dir.join("assets");
+                    fs::create_dir_all(&assets_dir)?;
+
+                    let mut assets_downloaded = 0;
+                    for actor in af_export
+                        .actors
+                        .iter()
+                        .filter(|a| valid_path_segment(&a.slug))
+                    {
+                        if let Some(ref avatar) = actor.avatar {
+                            if let Some(ref url) = avatar.url {
+                                // SEC-003: validate URL against trusted allowlist
+                                if let Err(e) = validate_download_url(url) {
+                                    println!(
+                                        "   {} Avatar for '{}' skipped: {}",
+                                        style("!").bold().yellow(),
+                                        actor.slug,
+                                        e
+                                    );
+                                    continue;
+                                }
+                                match client.download_actor_avatar(url).await {
+                                    Ok(svg_bytes) => {
+                                        let rel = format!(
+                                            "{agentic_root}/actors/assets/{}.svg",
+                                            actor.slug
+                                        );
+                                        if !safe_target(&workspace, &rel) {
+                                            continue;
+                                        }
+                                        fs::write(workspace.join(&rel), &svg_bytes)?;
+                                        assets_downloaded += 1;
+                                    }
+                                    Err(e) => {
+                                        println!(
+                                            "   {} Avatar for '{}' download failed: {}",
+                                            style("!").bold().yellow(),
+                                            actor.slug,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if assets_downloaded > 0 {
+                        println!(
+                            "   {} {} actor avatar(s) downloaded",
+                            style("+").bold().green(),
+                            assets_downloaded
+                        );
+                    }
+                }
+            }
+        }
+
+        // Check for deprecated model routes used by actors
+        // Note: model_routes is now Option<serde_json::Value> (map format)
+        if let Some(Ok(ref _af_export)) = Some(&af_export_result) {
+            // Deprecation checks via the new map format are handled when writing model-routes.json
+        }
+
+        // Cache the flavor (and the backend's run target) in .nexus/config.toml
+        // so launch-time commands (`nexus run`, `nexus preflight`) can pick the
+        // right artifacts and binary offline.
+        // Nonfatal, but a refused config (e.g. a symlink out of the
+        // workspace) is reported.
+        // Each value separately: a failed owner update must not leave the run
+        // target stale without saying so.
+        if let Err(e) =
+            nexus_core::config::update_agent_owner(Some(&workspace), tool_flavor.as_deref())
+        {
+            eprintln!(
+                "  warning: the cached agent owner in .nexus/config.toml was not updated: {e}"
+            );
+        }
+        if let Ok(ref af_export) = af_export_result {
+            if let Err(e) = nexus_core::config::update_run_target(
+                Some(&workspace),
+                af_export.run_target.as_ref(),
+            ) {
+                eprintln!(
+                    "  warning: the cached run target in .nexus/config.toml was not updated; nexus run may use an old one offline: {e}"
+                );
+            }
+        }
+
+        let plugin_mcp_servers = af_export_result
+            .as_ref()
+            .ok()
+            .map(|r| r.mcp_servers.clone())
+            .unwrap_or_default();
+
+        let providers = af_export_result
+            .as_ref()
+            .ok()
+            .map(|r| r.provider.clone())
+            .unwrap_or_default();
+
+        // Use auth_token from response if available: avoids a separate credentials.toml
+        // read and guarantees the token written to opencode.json is always fresh.
+        let effective_token = af_export_result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.auth_token.as_ref().map(|t| t.expose().to_string()))
+            .unwrap_or_else(|| token.to_string());
+
+        // Resolve opencode_agents, default model, and model_routes from af_export response
+        let opencode_agents = af_export_result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.opencode_agents.clone());
+
+        let opencode_default_model = af_export_result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.opencode_default_model.clone());
+
+        let opencode_default_agent = af_export_result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.opencode_default_agent.clone());
+
+        let model_routes_export = af_export_result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.model_routes.clone());
+
+        // Instructions paths to merge into opencode.json's top-level
+        // "instructions" array (e.g. "<agentic_root>/AGENTS.md"), so OpenCode
+        // loads the project's agent policy deterministically instead of relying
+        // on its own upward AGENTS.md auto-discovery.
+        let opencode_instructions = af_export_result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.opencode_instructions.clone());
+
+        // Model routing / provider divergence warnings from the backend (e.g. an
+        // agent's model uses a provider Nexus can't verify, or a route-alias
+        // migration hasn't been applied). Rendered verbatim and gated on operator
+        // confirmation before opencode.json is written.
+        let export_warnings = warnings_for_runtime(
+            af_export_result
+                .as_ref()
+                .ok()
+                .and_then(|r| r.export_warnings.clone())
+                .unwrap_or_default(),
+            is_claude,
+        );
+
+        // Write model-routes.json for traceability
+        if let Some(ref routes) = model_routes_export {
+            let generated_dir = workspace.join(&agentic_root).join("generated");
+            if let Err(e) = fs::create_dir_all(&generated_dir) {
+                println!(
+                    "   {} Could not create generated/ dir: {}",
+                    style("!").bold().yellow(),
+                    e
+                );
+            } else {
+                let routes_path = generated_dir.join("model-routes.json");
+                let routes_json = serde_json::json!({ "routes": routes });
+                if let Some(content) = serde_json::to_string_pretty(&routes_json)
+                    .ok()
+                    .map(|c| c + "\n")
+                    .filter(|c| !content_matches(&routes_path, c))
+                {
+                    let _ = fs::write(&routes_path, content);
+                    println!(
+                        "   {} {}/generated/model-routes.json",
+                        style("+").bold().green(),
+                        agentic_root
+                    );
+                }
+            }
+        }
+
+        // Gate the opencode.json write on the operator confirming any
+        // model-routing warnings. Only relevant when opencode.json is actually
+        // going to be written (skipped entirely for the claude-cli-only flavor,
+        // since mcp.json carries no model/agent routing config).
+        let opencode_will_be_written = !is_claude;
+
+        let proceed_with_opencode = if opencode_will_be_written {
+            confirm_export_warnings(&export_warnings, force)?
+        } else {
+            // Nothing to gate, but the operator still needs to see them (e.g.
+            // `actors_not_exported`).
+            print_export_warnings(&export_warnings);
+            true
+        };
+
+        // Whether the selected projection's config is in place: the cleanup
+        // of the other projection below depends on it.
+        let mut selected_config_ready = false;
+        if proceed_with_opencode {
+            // Only after the confirmation: a declined config stays as it is.
+            for rel in drop_unused_nexus_env(&workspace)? {
+                println!(
+                    "   {} {rel}: removed NEXUS_SEC_OPENAI_API_KEY (not used by the nexus MCP server)",
+                    style("-").red()
+                );
+            }
+            // Write MCP server configs (creates if missing, merges plugin servers, force-overwrites)
+            selected_config_ready = write_mcp_configs(
+                &workspace,
+                api_url,
+                &effective_token,
+                &project_id,
+                mcp_source,
+                tool_flavor.as_deref(),
+                &agentic_root,
+                &plugin_mcp_servers,
+                &providers,
+                &opencode_agents,
+                &opencode_default_model,
+                &opencode_default_agent,
+                &opencode_instructions,
+                // Only --force / --force-unmanaged rebuild the files from
+                // scratch; -y keeps locally added servers and settings.
+                explicit_force,
+            )?;
+
+            // Render the native Claude Code projection:
+            // CLAUDE.md, .claude/settings.json, .claude/skills/, .claude/agents/.
+            // Additive only; skipped entirely for the opencode-only flavor.
+            // .mcp.json itself was already written above by write_mcp_configs.
+            if is_claude {
+                let actors_for_claude = af_export_result
+                    .as_ref()
+                    .ok()
+                    .map(|r| r.actors.clone())
+                    .unwrap_or_default();
+                let agent_files_for_claude = af_export_result
+                    .as_ref()
+                    .ok()
+                    .map(|r| r.agent_files.clone())
+                    .unwrap_or_default();
+                let runtime_spec_for_claude = af_export_result
+                    .as_ref()
+                    .ok()
+                    .and_then(|r| r.runtime_spec.as_ref());
+                let hook_adapters_for_claude = af_export_result
+                    .as_ref()
+                    .ok()
+                    .and_then(|r| r.claude_hook_adapters.clone())
+                    .unwrap_or_default();
+                // Same project-detail fetch pattern already used below for git
+                // identity application (line ~1363): af_export does not carry
+                // git_config, so this is a dedicated, cheap lookup.
+                let include_co_authored_by = client
+                    .get_project(&project_id)
+                    .await
+                    .ok()
+                    .and_then(|d| d.project.git_config)
+                    .and_then(|g| g.include_co_authored_by);
+                claude_report = Some(claude_render::render_claude_projection(
+                    &workspace,
+                    &project_name,
+                    &agentic_root,
+                    // The native skill copies are written by the skills scope.
+                    &[],
+                    &actors_for_claude,
+                    &agent_files_for_claude,
+                    runtime_spec_for_claude,
+                    &hook_adapters_for_claude,
+                    include_co_authored_by,
+                    af_export_result
+                        .as_ref()
+                        .ok()
+                        .and_then(|r| r.claude_settings.as_ref()),
+                    af_export_result
+                        .as_ref()
+                        .ok()
+                        .and_then(|r| r.claude_md_managed_block.as_deref()),
+                    &claude_render::ClaudeAgentInputs::from_export(af_export_result.as_ref().ok()),
+                    ccx_force != super::ccx::ForceMode::None,
+                )?);
+                if let Ok(ref export) = af_export_result {
+                    super::lane::print_sync(
+                        &agentic_root,
+                        super::lane::sync_cache(&workspace, &agentic_root, export)?,
+                    );
+                }
+            }
+        } else {
+            println!(
+                "   {} Skipped opencode.json / {}/mcp.json (declined after model-routing warning(s) above).",
+                style("--").bold().yellow(),
+                agentic_root
+            );
+            println!("            Re-run 'nexus pull' to retry once the warning(s) are addressed.");
+        }
+
+        // CCX files: reconciled against
+        // the CCX lock; the lock is only rewritten once everything succeeded.
+        // Claude Code only: an OpenCode project gets no .claude/rules etc.
+        if let (true, Ok(ref af_export)) = (is_claude, &af_export_result) {
+            if let Some(ref info) = af_export.ccx {
+                let lock = super::ccx::load_lock(&workspace, &agentic_root);
+                let desired = super::ccx::ccx_files(&af_export.agent_files);
+                let plans = super::ccx::plan_files(&workspace, &desired, lock.as_ref(), &manifest)?;
+                let (outcomes, files) =
+                    super::ccx::apply_file_plans(&workspace, &plans, ccx_force)?;
+                super::ccx::record_ccx_in_lock(&workspace, &agentic_root, info, files)?;
+                ccx_outcomes = outcomes;
+            }
+        }
+
+        // Shadow guard: cache the rules for the commit-msg hook and install or
+        // remove the hook (only when the export was read).
+        // The hook is executable content: it needs consent or --trust.
+        if let Ok(ref af_export) = af_export_result {
+            let wants_hook = af_export
+                .shadow_guard
+                .as_ref()
+                .is_some_and(|g| g.commit_msg_hook);
+            let allow_hook = !wants_hook
+                || super::shadow_guard::hook_consent_item(&workspace)
+                    .is_none_or(|item| consent.local(&item));
+            super::shadow_guard::sync(
+                &workspace,
+                &agentic_root,
+                af_export.shadow_guard.as_ref(),
+                allow_hook,
+            );
+        }
+
+        // Personal, git-excluded workspace files: the layout and
+        // the Zellij config.
+        if let Ok(ref af_export) = af_export_result {
+            sync_personal_workspace_files(
+                &workspace,
+                &agentic_root,
+                af_export,
+                is_claude,
+                explicit_force,
+            );
+        }
+
+        // Write .nexus/env from af_export.plugin_env (platform-managed, full overwrite)
+        let plugin_env = af_export_result
+            .as_ref()
+            .ok()
+            .map(|r| r.plugin_env.clone())
+            .unwrap_or_default();
+        write_plugin_env_file(&workspace, &plugin_env, &project_name, &agentic_root)?;
+
+        // Install platform-selected plugins from af_export plugins list.
+        // Downloads known Nexus plugins (nexus-compaction-plus, nexus-cost-control)
+        // into .opencode/plugins/ using the built-in registry. Existing plugin files
+        // are not overwritten unless --force is set.
+        if let Some(Ok(ref af_export)) = Some(&af_export_result) {
+            if !is_claude && !af_export.plugins.is_empty() {
+                let platform_plugins = resolve_platform_plugins(&af_export.plugins);
+                if !platform_plugins.is_empty() {
+                    let plugins_dir = workspace.join(".opencode").join("plugins");
+                    std::fs::create_dir_all(&plugins_dir)?;
+                    for (name, def) in &platform_plugins {
+                        let filename = def
+                            .filename
+                            .clone()
+                            .unwrap_or_else(|| format!("{}.ts", name));
+                        let dest = plugins_dir.join(&filename);
+                        // Skip plugins already delivered via agent_files (DB is source of truth)
+                        let plugin_target = format!(".opencode/plugins/{}", filename);
+                        if af_written_paths.contains(&plugin_target) {
+                            continue;
+                        }
+                        // Skip if already present and not forcing
+                        if dest.exists() && !force {
+                            println!(
+                                "   {} .opencode/plugins/{} (already present, skipping)",
+                                style("·").dim(),
+                                filename
+                            );
+                            continue;
+                        }
+                        if let Some(ref url) = def.url {
+                            // SEC-003: validate URL against trusted allowlist
+                            if let Err(e) = validate_download_url(url) {
                                 println!(
-                                    "   {} Plugin '{}' download failed: {}",
+                                    "   {} Plugin '{}' skipped: {}",
                                     style("!").bold().yellow(),
                                     name,
                                     e
                                 );
+                                continue;
+                            }
+                            let client = reqwest::Client::new();
+                            match client.get(url).send().await {
+                                Ok(resp) if resp.status().is_success() => {
+                                    // A body that fails to arrive or is empty never
+                                    // replaces the installed plugin.
+                                    let body = match resp.text().await {
+                                        Ok(b) if !b.trim().is_empty() => b,
+                                        Ok(_) => {
+                                            println!(
+                                                "   {} Plugin '{}' not updated: empty download",
+                                                style("!").bold().yellow(),
+                                                name
+                                            );
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            println!(
+                                                "   {} Plugin '{}' not updated: download failed: {}",
+                                                style("!").bold().yellow(),
+                                                name,
+                                                e
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    let existed = dest.exists();
+                                    std::fs::write(&dest, &body)?;
+                                    // Recorded, so a later switch to Claude Code
+                                    // can tell an unedited plugin from an edited one.
+                                    record_generated(
+                                        &workspace,
+                                        &agentic_root,
+                                        &plugin_target,
+                                        &body,
+                                    )?;
+                                    println!(
+                                        "   {} .opencode/plugins/{} ({})",
+                                        style("+").bold().green(),
+                                        filename,
+                                        if existed { "updated" } else { "downloaded" }
+                                    );
+                                }
+                                Ok(resp) => {
+                                    println!(
+                                        "   {} Plugin '{}' download failed: HTTP {}",
+                                        style("!").bold().yellow(),
+                                        name,
+                                        resp.status()
+                                    );
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "   {} Plugin '{}' download failed: {}",
+                                        style("!").bold().yellow(),
+                                        name,
+                                        e
+                                    );
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
 
-    // Remove the projection of the runtime this project no longer uses
-    // (v0.28.4), now that the selected one is on disk. Skipped when the
-    // owner is unknown or the OpenCode config write was declined, so a
-    // failed pull never leaves the workspace without a projection.
-    if let (true, true, Ok(ref af_export)) = (
-        flavor_known,
-        is_claude || proceed_with_opencode,
-        &af_export_result,
-    ) {
-        let projection = super::projection_cleanup::Projection::unselected(is_claude);
-        let ctx = cleanup_context(
-            af_export,
-            &export.skills,
-            &agentic_root,
-            &project_name,
-            is_claude,
-            explicit_force,
-        );
-        let plan = super::projection_cleanup::plan(&workspace, projection, &ctx);
-        // The selected projection is already complete: a cleanup error is
-        // reported, and the rest of the pull continues.
-        match super::projection_cleanup::apply(&workspace, &plan, &ctx) {
-            Ok(report) => {
-                let previous = previous_owner.as_deref().unwrap_or("opencode");
-                let current = tool_flavor.as_deref().unwrap_or("opencode");
-                let switched = (config::is_claude_owner(previous_owner.as_deref()) != is_claude)
-                    .then_some((previous, current));
-                super::projection_cleanup::print_report(&report, projection, switched);
-            }
-            Err(e) => println!(
-                "   {} Could not remove the unused {} projection: {} (re-run nexus pull)",
-                style("!").bold().yellow(),
-                projection.label(),
-                e
-            ),
+        // Remove the projection of the runtime this project no longer uses
+        // (v0.28.4), now that the selected one is on disk. Skipped when the
+        // owner is unknown or the OpenCode config was declined or could not
+        // be written, so a failed pull never leaves the workspace without a
+        // projection.
+        if !selected_config_ready && !is_claude && flavor_known {
+            println!(
+                "   {} The Claude Code projection is kept until opencode.json is usable.",
+                style("i").bold().blue()
+            );
         }
-    }
+        if let (true, true, Ok(ref af_export)) = (
+            flavor_known,
+            is_claude || selected_config_ready,
+            &af_export_result,
+        ) {
+            let projection = super::projection_cleanup::Projection::unselected(is_claude);
+            let ctx = cleanup_context(
+                af_export,
+                &export.skills,
+                &agentic_root,
+                &project_name,
+                is_claude,
+                explicit_force,
+            );
+            let plan = super::projection_cleanup::plan(&workspace, projection, &ctx);
+            // The selected projection is already complete: a cleanup error is
+            // reported, and the rest of the pull continues.
+            match super::projection_cleanup::apply(&workspace, &plan, &ctx) {
+                Ok(report) => {
+                    let previous = previous_owner.as_deref().unwrap_or("opencode");
+                    let current = tool_flavor.as_deref().unwrap_or("opencode");
+                    let switched = (config::is_claude_owner(previous_owner.as_deref())
+                        != is_claude)
+                        .then_some((previous, current));
+                    super::projection_cleanup::print_report(&report, projection, switched);
+                }
+                Err(e) => println!(
+                    "   {} Could not remove the unused {} projection: {} (re-run nexus pull)",
+                    style("!").bold().yellow(),
+                    projection.label(),
+                    e
+                ),
+            }
+        }
 
-    // Check prerequisites from af_export response.
-    // Warn for each required tool that is not found in PATH.
-    // This is non-blocking: pull succeeds regardless, but the user
-    // needs the tool for the plugin to actually work.
-    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
-        if !af_export.prerequisites.is_empty() {
-            let mut missing: Vec<String> = Vec::new();
-            for prereq in &af_export.prerequisites {
-                let found = prerequisite_present(&prereq.check_command, &prereq.tool);
-                if !found {
-                    missing.push(prereq.tool.clone());
+        // Check prerequisites from af_export response.
+        // Warn for each required tool that is not found in PATH.
+        // This is non-blocking: pull succeeds regardless, but the user
+        // needs the tool for the plugin to actually work.
+        if let Some(Ok(ref af_export)) = Some(&af_export_result) {
+            if !af_export.prerequisites.is_empty() {
+                let mut missing: Vec<String> = Vec::new();
+                for prereq in &af_export.prerequisites {
+                    // Off the async worker: the check runs a process.
+                    let (check, tool) = (prereq.check_command.clone(), prereq.tool.clone());
+                    let found =
+                        tokio::task::spawn_blocking(move || prerequisite_present(&check, &tool))
+                            .await
+                            .unwrap_or(false);
+                    if !found {
+                        missing.push(prereq.tool.clone());
+                        println!(
+                            "   {} {} not found in PATH",
+                            style("!").bold().yellow(),
+                            style(&prereq.tool).bold()
+                        );
+                        println!("     Required by: {}", prereq.required_by);
+                        println!("     Install: {}", style(&prereq.install_hint).dim());
+                    }
+                }
+                if !missing.is_empty() {
                     println!(
-                        "   {} {} not found in PATH",
+                        "   {} {} prerequisite{} missing: {} will not function until installed.",
                         style("!").bold().yellow(),
-                        style(&prereq.tool).bold()
+                        missing.len(),
+                        if missing.len() == 1 { "" } else { "s" },
+                        missing.join(", ")
                     );
-                    println!("     Required by: {}", prereq.required_by);
-                    println!("     Install: {}", style(&prereq.install_hint).dim());
                 }
             }
-            if !missing.is_empty() {
-                println!(
-                    "   {} {} prerequisite{} missing: {} will not function until installed.",
-                    style("!").bold().yellow(),
-                    missing.len(),
-                    if missing.len() == 1 { "" } else { "s" },
-                    missing.join(", ")
-                );
-            }
         }
-    }
 
-    // Programs the enabled agent plugins need (e.g. language servers).
-    // Warnings only, like the prerequisites above.
-    if let Some(Ok(ref af_export)) = Some(&af_export_result) {
-        for row in super::plugin_requirements::missing_rows(
-            &af_export.claude_plugin_requirements,
-            &workspace,
-        ) {
-            println!("   {} {}", style("!").bold().yellow(), row.message());
+        // Programs the enabled agent plugins need (e.g. language servers).
+        // Warnings only, like the prerequisites above.
+        if let Some(Ok(ref af_export)) = Some(&af_export_result) {
+            for row in super::plugin_requirements::missing_rows(
+                &af_export.claude_plugin_requirements,
+                &workspace,
+            ) {
+                println!("   {} {}", style("!").bold().yellow(), row.message());
+            }
         }
     }
 
     // Export open tasks as TASKS.md
-    match client
-        .list_tasks(&project_id, Some(&["open", "in_progress", "blocked"]))
-        .await
-    {
-        Ok(task_response) => {
-            if task_response.tasks.is_empty() {
-                println!("   {} No open tasks to export.", style("·").dim());
-            } else {
-                write_tasks(&workspace, &task_response.tasks, &agentic_root)?;
-                println!(
-                    "   {} Wrote {} task{} to {}/TASKS.md",
-                    style("✓").green(),
-                    task_response.tasks.len(),
-                    if task_response.tasks.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    },
-                    agentic_root,
-                );
+    if pull_scope("tasks") {
+        match client
+            .list_tasks(&project_id, Some(&["open", "in_progress", "blocked"]))
+            .await
+        {
+            Ok(task_response) => {
+                let count = task_response.tasks.len();
+                match tasks_snapshot_plan(&workspace, &agentic_root, count) {
+                    TasksPlan::Refused(why) => println!(
+                        "   {} {}/TASKS.md not written: {why}",
+                        style("!").bold().yellow(),
+                        agentic_root
+                    ),
+                    TasksPlan::Nothing => {
+                        println!("   {} No open tasks to export.", style("·").dim())
+                    }
+                    TasksPlan::Clear => {
+                        // The last open task closed: the snapshot says so
+                        // instead of listing it on.
+                        write_tasks(&workspace, &task_response.tasks, &agentic_root)?;
+                        println!(
+                            "   {} No open tasks; {}/TASKS.md updated.",
+                            style("✓").green(),
+                            agentic_root
+                        );
+                    }
+                    TasksPlan::Write => {
+                        write_tasks(&workspace, &task_response.tasks, &agentic_root)?;
+                        println!(
+                            "   {} Wrote {} task{} to {}/TASKS.md",
+                            style("✓").green(),
+                            count,
+                            if count == 1 { "" } else { "s" },
+                            agentic_root,
+                        );
+                    }
+                }
             }
-        }
-        Err(e) => {
-            println!("   {} Could not fetch tasks: {}", style("!").yellow(), e);
+            Err(e) => {
+                println!("   {} Could not fetch tasks: {}", style("!").yellow(), e);
+            }
         }
     }
 
@@ -2015,7 +2202,7 @@ pub async fn run_with_root_hook(
     }
 
     // Auto-apply git identity if configured
-    if pull_all || pull_scope("agents") {
+    if pull_scope("agents") {
         if let Ok(detail) = client.get_project(&project_id).await {
             if let Some(ref git_cfg) = detail.project.git_config {
                 if git_cfg.user_name.is_some() || git_cfg.user_email.is_some() {
@@ -2034,6 +2221,20 @@ pub async fn run_with_root_hook(
 
     skipped_modified.append(&mut ws_report.skipped_modified);
     overwrote_modified.append(&mut ws_report.overwrote_modified);
+
+    // Unreadable files are not edits: neither stash nor --force helps.
+    if !ws_report.unreadable.is_empty() {
+        println!();
+        println!(
+            "   {} {} file(s) kept because they cannot be read:",
+            style("!").bold().yellow(),
+            ws_report.unreadable.len(),
+        );
+        for path in &ws_report.unreadable {
+            println!("      {}", style(path).yellow());
+        }
+        println!("   Restore read access, then run nexus pull again.");
+    }
 
     // Summary: locally modified files
     if !skipped_modified.is_empty() {
@@ -2066,7 +2267,7 @@ pub async fn run_with_root_hook(
 
     print_committed_workspace_summary(&ws_report);
 
-    if let (true, Ok(ref af_export)) = (is_claude, &af_export_result) {
+    if let (true, true, Ok(ref af_export)) = (is_claude, pull_scope("agents"), &af_export_result) {
         if let Some(ref info) = af_export.ccx {
             print_ccx_summary(
                 info,
@@ -2081,7 +2282,9 @@ pub async fn run_with_root_hook(
     // what `enabledPlugins` names but Claude Code does not have yet. Only
     // on --force (a plain pull stays offline-cheap); `nexus run` does the
     // same before every launch. Never fails the pull.
-    if let (true, true, Ok(ref af_export)) = (is_claude, force, &af_export_result) {
+    if let (true, true, true, Ok(ref af_export)) =
+        (is_claude, force, pull_scope("agents"), &af_export_result)
+    {
         super::claude_plugins::sync_workspace(
             &workspace,
             &agentic_root,
@@ -2099,8 +2302,14 @@ pub async fn run_with_root_hook(
 
     // GitHub account of this project path: `.nexus/gh.env`, transport and
     // commit identity in the local git config. Pull never logs a profile
-    // in (`nexus git login` does). Applies to all tool flavors.
-    if let Ok(detail) = client.get_project(&project_id).await {
+    // in (`nexus git login` does). Applies to all tool flavors, with the
+    // "agents" scope like the git identity.
+    let detail = if pull_scope("agents") {
+        client.get_project(&project_id).await.ok()
+    } else {
+        None
+    };
+    if let Some(detail) = detail {
         let opts = super::gh_account::ApplyOptions {
             assume_yes: force,
             canonical_remotes: false,
@@ -2258,6 +2467,8 @@ fn is_pull_managed(workspace: &Path, target_path: &str, manifest: &serde_json::V
 #[derive(Debug, Default)]
 pub(crate) struct WorkspaceSyncReport {
     pub skipped_modified: Vec<String>,
+    /// Files kept because they cannot be read (not local edits).
+    pub unreadable: Vec<String>,
     pub overwrote_modified: Vec<String>,
     /// Committed files kept because the fork version differs (no --force).
     pub skipped_committed: Vec<String>,
@@ -2370,6 +2581,45 @@ pub(crate) fn git_head_content(workspace: &Path, rel: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Whether a script that must be executable has no execute bit at all
+/// (always `false` off Unix).
+fn needs_exec_repair(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).is_ok_and(|m| {
+            let mode = m.permissions().mode() & 0o7777;
+            exec_mode(mode) != mode
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Add an execute bit for the owner and for every class that can read the
+/// file; no read access is granted (`0600` becomes `0700`, `0644` `0755`).
+fn add_exec_bits(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode() & 0o7777;
+        fs::set_permissions(path, fs::Permissions::from_mode(exec_mode(mode)))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// `mode` with execute bits added where read bits are set (owner always).
+fn exec_mode(mode: u32) -> u32 {
+    mode | 0o100 | ((mode & 0o044) >> 2)
+}
+
 /// Sync one workspace file (`devbox.json` or a script) per
 /// [`decide_workspace_write`]. Written files always end with exactly one
 /// newline; the sync manifest records the hash of the backend's copy.
@@ -2416,9 +2666,25 @@ fn sync_file_as(
         return Ok(false);
     }
     let target = workspace.join(rel);
-    let local = fs::read(&target)
-        .ok()
-        .map(|b| String::from_utf8_lossy(&b).into_owned());
+    // Only a missing file is "not there": an unreadable one is left alone,
+    // with its record, instead of being replaced as if it were new.
+    let local_bytes = match read_existing(&target) {
+        Ok(local) => local,
+        Err(e) => {
+            // Not a local edit: --force would not help either.
+            println!(
+                "   {} skipped: {} (cannot be read: {}; restore read access, it is checked again on the next pull)",
+                style("!").bold().yellow(),
+                rel,
+                e
+            );
+            report.unreadable.push(rel.to_string());
+            return Ok(false);
+        }
+    };
+    let local = local_bytes
+        .as_ref()
+        .map(|b| String::from_utf8_lossy(b).into_owned());
     let recorded = super::ccx::sync_manifest_hash(manifest, rel);
     let action = decide_workspace_write(
         local.as_deref(),
@@ -2448,6 +2714,21 @@ fn sync_file_as(
     };
     match action {
         WorkspaceAction::Unchanged => {
+            // Same text, but a script that lost its exec bit is fixed. A
+            // file whose mode cannot be changed (owned by someone else) is
+            // reported and stays unrecorded; the pull goes on.
+            if executable && needs_exec_repair(&target) {
+                if let Err(e) = add_exec_bits(&target) {
+                    println!(
+                        "   {} {} is not executable and its mode cannot be changed: {}",
+                        style("!").bold().yellow(),
+                        rel,
+                        e
+                    );
+                    return Ok(false);
+                }
+                println!("   {} {} (made executable)", style("+").bold().green(), rel);
+            }
             record();
             Ok(false)
         }
@@ -2484,6 +2765,19 @@ fn sync_file_as(
             overwrote_modified,
             reverted_commit,
         } => {
+            // Re-read right before writing: a save during the git check
+            // or a prompt is kept. The check and the write are not atomic
+            // (no file lock is shared with editors), so a save landing in
+            // between those two calls is still replaced.
+            if !matches!(read_existing(&target), Ok(ref now) if *now == local_bytes) {
+                println!(
+                    "   {} skipped: {} (changed during the pull)",
+                    style("!").bold().yellow(),
+                    rel
+                );
+                report.skipped_modified.push(rel.to_string());
+                return Ok(false);
+            }
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -2491,14 +2785,21 @@ fn sync_file_as(
                 &target,
                 nexus_core::hash::with_single_trailing_newline(body),
             )?;
-            record();
-            #[cfg(unix)]
-            if executable {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+            if executable && needs_exec_repair(&target) {
+                // The body is written; the record waits for the mode, so
+                // the next pull repairs it. The other files still sync.
+                if let Err(e) = add_exec_bits(&target) {
+                    println!(
+                        "   {} {} was written but cannot be made executable: {}",
+                        style("!").bold().yellow(),
+                        rel,
+                        e
+                    );
+                    return Ok(true);
+                }
             }
-            #[cfg(not(unix))]
-            let _ = executable;
+            // Recorded only once the file is complete, mode included.
+            record();
             if overwrote_modified {
                 report.overwrote_modified.push(rel.to_string());
             }
@@ -2556,10 +2857,20 @@ fn print_committed_workspace_summary(report: &WorkspaceSyncReport) {
 /// workspace file the fork dropped, or a skill no longer exported).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DroppedFile {
-    /// Unchanged since pull wrote it: deleted.
-    Remove(String),
+    /// Unchanged since pull wrote it: deleted. Carries the recorded hash the
+    /// plan approved; the file goes only while both still match it.
+    Remove(String, String),
     /// Edited locally: kept, never deleted.
     KeepModified(String),
+    /// Cannot be read (the error): kept with its record, checked again on
+    /// the next pull.
+    Unreadable(String, String),
+    /// Planned for removal, but the file or its record changed before the
+    /// removal: kept (an outcome of applying a plan, never planned).
+    Changed(String),
+    /// The removal failed (the error): kept with its record, tried again on
+    /// the next pull (an outcome, never planned).
+    Failed(String, String),
     /// Already gone locally: only the manifest record is dropped.
     Gone(String),
 }
@@ -2576,11 +2887,13 @@ pub(crate) fn plan_dropped_workspace_files(
         .filter(|(path, _)| !exported.contains(&path.as_str()))
         .filter(|(path, _)| validate_agent_file_target_path(workspace, path).is_ok())
         .map(|(path, hash)| match fs::read(workspace.join(&path)) {
-            Err(_) => DroppedFile::Gone(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => DroppedFile::Gone(path),
+            // Unreadable: kept with its record, never treated as gone.
+            Err(e) => DroppedFile::Unreadable(path, e.to_string()),
             Ok(local) => {
                 let local = String::from_utf8_lossy(&local);
                 if nexus_core::hash::hash_matches_text(&hash, &local) {
-                    DroppedFile::Remove(path)
+                    DroppedFile::Remove(path, hash)
                 } else {
                     DroppedFile::KeepModified(path)
                 }
@@ -2594,7 +2907,12 @@ pub(crate) fn plan_dropped_workspace_files(
 impl DroppedFile {
     pub(crate) fn path(&self) -> &str {
         match self {
-            Self::Remove(p) | Self::KeepModified(p) | Self::Gone(p) => p,
+            Self::Remove(p, _)
+            | Self::KeepModified(p)
+            | Self::Unreadable(p, _)
+            | Self::Changed(p)
+            | Self::Failed(p, _)
+            | Self::Gone(p) => p,
         }
     }
 }
@@ -2605,24 +2923,154 @@ impl DroppedFile {
 pub(crate) fn apply_dropped_workspace_files(
     workspace: &Path,
     plan: &[DroppedFile],
-) -> anyhow::Result<()> {
-    let mut forget: Vec<&str> = Vec::new();
+) -> anyhow::Result<Vec<DroppedFile>> {
+    // Re-checked right before each removal: the plan may be older than the
+    // file (a prompt or a network call in between), and another pull may
+    // have recorded a newer version meanwhile.
+    let manifest = super::sync::load_manifest_pub(workspace);
+    let recorded: std::collections::HashMap<String, String> =
+        super::sync::workspace_manifest_entries(&manifest)
+            .into_iter()
+            .chain(super::sync::local_script_manifest_entries(&manifest))
+            .collect();
+    let outcomes = apply_dropped(
+        workspace,
+        plan,
+        |path, approved, local| {
+            recorded.get(path).map(String::as_str) == Some(approved)
+                && nexus_core::hash::hash_matches_text(approved, &String::from_utf8_lossy(local))
+        },
+        |_| workspace.to_path_buf(),
+    )?;
+    let forget = forget_set(&outcomes);
+    if !forget.is_empty() {
+        super::sync::remove_manifest_entries_with(workspace, |p, h| forget.matches(p, h))?;
+    }
+    Ok(outcomes)
+}
+
+/// Apply a removal plan: a `Remove` goes only while `still_approved` holds
+/// for its current bytes (otherwise the outcome is `Changed`), a file
+/// already gone becomes `Gone`, an unreadable one `Unreadable`. Empty
+/// parent directories are pruned up to `stop_at(path)`. Returns what was
+/// done per file; the caller drops the records of `Remove` and `Gone`.
+fn apply_dropped(
+    workspace: &Path,
+    plan: &[DroppedFile],
+    still_approved: impl Fn(&str, &str, &[u8]) -> bool,
+    stop_at: impl Fn(&str) -> std::path::PathBuf,
+) -> anyhow::Result<Vec<DroppedFile>> {
+    let mut outcomes = Vec::with_capacity(plan.len());
     for item in plan {
-        match item {
-            DroppedFile::Remove(path) => {
-                let target = workspace.join(path);
-                fs::remove_file(&target)?;
-                remove_empty_parents(workspace, &target);
-                forget.push(path);
+        let (path, approved) = match item {
+            DroppedFile::Remove(path, approved) => (path, approved),
+            // Back on disk since the plan: kept with its record. Only a
+            // confirmed absence stays `Gone`.
+            DroppedFile::Gone(path) => {
+                outcomes.push(match fs::symlink_metadata(workspace.join(path)) {
+                    Ok(_) => DroppedFile::Changed(path.clone()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => item.clone(),
+                    Err(e) => DroppedFile::Unreadable(path.clone(), e.to_string()),
+                });
+                continue;
             }
-            DroppedFile::Gone(path) => forget.push(path),
-            DroppedFile::KeepModified(_) => {}
+            _ => {
+                outcomes.push(item.clone());
+                continue;
+            }
+        };
+        // Confinement checked again (the plan was made before network
+        // calls): a parent that became a link out of the workspace or into
+        // `.git` is never followed; the record stays.
+        if let Err(e) = validate_agent_file_target_path(workspace, path) {
+            outcomes.push(DroppedFile::Failed(
+                path.clone(),
+                format!("not removed: {e}"),
+            ));
+            continue;
+        }
+        let target = workspace.join(path);
+        // Checked right before the removal; as for writes, the check and
+        // the unlink are not atomic, so a save landing in between is lost.
+        match read_existing(&target) {
+            Ok(Some(local)) if still_approved(path, approved, &local) => {
+                // One failed removal does not hide the ones done before.
+                match fs::remove_file(&target) {
+                    Ok(()) => {
+                        remove_empty_parents(&stop_at(path), &target);
+                        outcomes.push(item.clone());
+                    }
+                    Err(e) => outcomes.push(DroppedFile::Failed(path.clone(), e.to_string())),
+                }
+            }
+            Ok(Some(_)) => outcomes.push(DroppedFile::Changed(path.clone())),
+            Ok(None) => outcomes.push(DroppedFile::Gone(path.clone())),
+            Err(e) => outcomes.push(DroppedFile::Unreadable(path.clone(), e.to_string())),
         }
     }
-    if !forget.is_empty() {
-        super::sync::remove_manifest_entries(workspace, |p| forget.contains(&p))?;
+    Ok(outcomes)
+}
+
+/// The records to drop after applying a removal plan: a removed file only
+/// while its record still holds the approved hash (a newer pull may have
+/// recorded the path again meanwhile), a file already gone always.
+struct ForgetSet<'a> {
+    removed: Vec<(&'a str, &'a str)>,
+    gone: Vec<&'a str>,
+}
+
+impl ForgetSet<'_> {
+    fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.gone.is_empty()
     }
-    Ok(())
+
+    fn matches(&self, path: &str, hash: Option<&str>) -> bool {
+        self.gone.contains(&path)
+            || self
+                .removed
+                .iter()
+                .any(|(p, h)| *p == path && Some(*h) == hash)
+    }
+}
+
+fn forget_set(outcomes: &[DroppedFile]) -> ForgetSet<'_> {
+    let mut set = ForgetSet {
+        removed: Vec::new(),
+        gone: Vec::new(),
+    };
+    for o in outcomes {
+        match o {
+            DroppedFile::Remove(p, h) => set.removed.push((p, h)),
+            DroppedFile::Gone(p) => set.gone.push(p),
+            _ => {}
+        }
+    }
+    set
+}
+
+/// The notice for a dropped file kept because it cannot be read or changed
+/// during the pull; `None` for the other outcomes.
+fn kept_dropped_notice(item: &DroppedFile) -> Option<String> {
+    match item {
+        DroppedFile::Unreadable(path, e) => Some(format!(
+            "   {} {} (cannot be read: {}; restore read access, it is checked again on the next pull)",
+            style("KEEP").bold().yellow(),
+            path,
+            e
+        )),
+        DroppedFile::Changed(path) => Some(format!(
+            "   {} {} (changed during the pull, not removed)",
+            style("KEEP").bold().yellow(),
+            path
+        )),
+        DroppedFile::Failed(path, e) => Some(format!(
+            "   {} {} (could not be removed: {}; tried again on the next pull)",
+            style("KEEP").bold().yellow(),
+            path,
+            e
+        )),
+        _ => None,
+    }
 }
 
 /// Remove the now-empty directories above `file`, up to (not including)
@@ -2638,8 +3086,12 @@ fn remove_empty_parents(stop: &Path, file: &Path) {
 }
 
 fn print_dropped_workspace_file(item: &DroppedFile) {
+    if let Some(notice) = kept_dropped_notice(item) {
+        println!("{notice}");
+        return;
+    }
     match item {
-        DroppedFile::Remove(path) => println!(
+        DroppedFile::Remove(path, _) => println!(
             "   {} {} (no longer in the workspace)",
             style("REMOVE").bold().red(),
             path
@@ -2650,7 +3102,7 @@ fn print_dropped_workspace_file(item: &DroppedFile) {
             path,
             path
         ),
-        DroppedFile::Gone(_) => {}
+        _ => {}
     }
 }
 
@@ -2663,7 +3115,7 @@ fn prune_dropped_workspace_files(workspace: &Path, exported: &[&str]) {
         return;
     }
     match apply_dropped_workspace_files(workspace, &plan) {
-        Ok(()) => plan.iter().for_each(print_dropped_workspace_file),
+        Ok(outcomes) => outcomes.iter().for_each(print_dropped_workspace_file),
         Err(e) => println!(
             "   {} Could not remove workspace files the fork no longer has: {}",
             style("!").yellow(),
@@ -2716,10 +3168,12 @@ fn plan_dropped_local_scripts(
         .into_iter()
         .filter(|(path, _)| !delivered.contains(&path.as_str()) && safe_target(workspace, path))
         .map(|(path, hash)| match fs::read(workspace.join(&path)) {
-            Err(_) => DroppedFile::Gone(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => DroppedFile::Gone(path),
+            // Unreadable: kept with its record, never treated as gone.
+            Err(e) => DroppedFile::Unreadable(path, e.to_string()),
             Ok(local) => {
                 if nexus_core::hash::hash_matches_text(&hash, &String::from_utf8_lossy(&local)) {
-                    DroppedFile::Remove(path)
+                    DroppedFile::Remove(path, hash)
                 } else {
                     DroppedFile::KeepModified(path)
                 }
@@ -2729,8 +3183,12 @@ fn plan_dropped_local_scripts(
 }
 
 fn print_dropped_local_script(item: &DroppedFile) {
+    if let Some(notice) = kept_dropped_notice(item) {
+        println!("{notice}");
+        return;
+    }
     match item {
-        DroppedFile::Remove(path) => println!(
+        DroppedFile::Remove(path, _) => println!(
             "   {} {} (local script no longer delivered)",
             style("REMOVE").bold().red(),
             path
@@ -2740,7 +3198,7 @@ fn print_dropped_local_script(item: &DroppedFile) {
             style("KEEP").bold().yellow(),
             path
         ),
-        DroppedFile::Gone(_) => {}
+        _ => {}
     }
 }
 
@@ -2763,15 +3221,25 @@ fn sync_local_scripts(
     let delivered: Vec<&str> = accepted.iter().map(|(p, _)| *p).collect();
     let dropped = plan_dropped_local_scripts(workspace, &manifest, &delivered);
 
-    let mut excluded: Vec<String> = delivered.iter().map(|p| p.to_string()).collect();
-    excluded.extend(
-        dropped
+    // Every script that may stay on disk is excluded before anything is
+    // written; the planned removals are dropped from the block only after
+    // they actually went.
+    let excluded_with = |extra: &[DroppedFile]| -> Vec<String> {
+        delivered
             .iter()
-            .filter(|d| matches!(d, DroppedFile::KeepModified(_)))
-            .map(|d| d.path().to_string()),
-    );
+            .map(|p| p.to_string())
+            .chain(
+                extra
+                    .iter()
+                    .filter(|d| !matches!(d, DroppedFile::Gone(_)))
+                    .map(|d| d.path().to_string()),
+            )
+            .collect()
+    };
     // Without the exclude rule a new script could be committed by accident.
-    if let Some(e) = super::shadow::apply_local_script_excludes(workspace, &excluded).error {
+    if let Some(e) =
+        super::shadow::apply_local_script_excludes(workspace, &excluded_with(&dropped)).error
+    {
         println!(
             "   {} local scripts not synced: .git/info/exclude could not be updated ({e})",
             style("!").bold().yellow()
@@ -2802,8 +3270,13 @@ fn sync_local_scripts(
     }
 
     if !dropped.is_empty() {
-        apply_dropped_workspace_files(workspace, &dropped)?;
-        dropped.iter().for_each(print_dropped_local_script);
+        let outcomes = apply_dropped_workspace_files(workspace, &dropped)?;
+        outcomes.iter().for_each(print_dropped_local_script);
+        let still_there: Vec<DroppedFile> = outcomes
+            .into_iter()
+            .filter(|o| !matches!(o, DroppedFile::Remove(..)))
+            .collect();
+        super::shadow::apply_local_script_excludes(workspace, &excluded_with(&still_there));
     }
     Ok(written)
 }
@@ -2857,9 +3330,11 @@ pub(crate) fn plan_dropped_skill_files(
         .filter(|(path, _)| !desired.contains(&path.as_str()))
         .filter(|(path, _)| validate_agent_file_target_path(workspace, path).is_ok())
         .map(|(path, hash)| match fs::read(workspace.join(&path)) {
-            Err(_) => DroppedFile::Gone(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => DroppedFile::Gone(path),
+            // Unreadable: kept with its record, never treated as gone.
+            Err(e) => DroppedFile::Unreadable(path, e.to_string()),
             Ok(local) if nexus_core::hash::sha256_hex_bytes(&local) == hash => {
-                DroppedFile::Remove(path)
+                DroppedFile::Remove(path, hash)
             }
             Ok(_) => DroppedFile::KeepModified(path),
         })
@@ -2875,32 +3350,41 @@ pub(crate) fn apply_dropped_skill_files(
     agentic_root: &str,
     is_claude: bool,
     plan: &[DroppedFile],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<DroppedFile>> {
     let roots = skill_roots(agentic_root, is_claude);
-    let mut forget: Vec<&str> = Vec::new();
-    for item in plan {
-        match item {
-            DroppedFile::Remove(path) => {
-                let target = workspace.join(path);
-                fs::remove_file(&target)?;
-                if let Some(root) = roots.iter().find(|r| path.starts_with(&format!("{r}/"))) {
-                    remove_empty_parents(&workspace.join(root), &target);
-                }
-                forget.push(path);
-            }
-            DroppedFile::Gone(path) => forget.push(path),
-            DroppedFile::KeepModified(_) => {}
-        }
-    }
+    // Re-checked right before each removal (the plan is made before the
+    // disabled-skill lookup goes over the network).
+    let recorded = load_pull_manifest(workspace, agentic_root);
+    let outcomes = apply_dropped(
+        workspace,
+        plan,
+        |path, approved, local| {
+            recorded.get(path).map(String::as_str) == Some(approved)
+                && nexus_core::hash::sha256_hex_bytes(local) == approved
+        },
+        |path| {
+            roots
+                .iter()
+                .find(|r| path.starts_with(&format!("{r}/")))
+                .map(|r| workspace.join(r))
+                // Not below a skill root: nothing above the file is pruned.
+                .unwrap_or_else(|| workspace.join(path))
+        },
+    )?;
+    let forget = forget_set(&outcomes);
     if !forget.is_empty() {
-        remove_generated_records(workspace, agentic_root, |p| forget.contains(&p))?;
+        remove_generated_records_with(workspace, agentic_root, |p, h| forget.matches(p, h))?;
     }
-    Ok(())
+    Ok(outcomes)
 }
 
 fn print_dropped_skill_file(item: &DroppedFile, disabled: &DisabledSkills) {
+    if let Some(notice) = kept_dropped_notice(item) {
+        println!("{notice}");
+        return;
+    }
     match item {
-        DroppedFile::Remove(path) => println!(
+        DroppedFile::Remove(path, _) => println!(
             "   {} {} (skill {})",
             style("REMOVE").bold().red(),
             path,
@@ -2912,7 +3396,7 @@ fn print_dropped_skill_file(item: &DroppedFile, disabled: &DisabledSkills) {
             path,
             disabled.reason(path)
         ),
-        DroppedFile::Gone(_) => {}
+        _ => {}
     }
 }
 
@@ -2985,7 +3469,7 @@ async fn prune_dropped_skill_files(
     }
     let disabled = DisabledSkills::for_plan(client, &plan).await;
     match apply_dropped_skill_files(workspace, agentic_root, is_claude, &plan) {
-        Ok(()) => plan
+        Ok(outcomes) => outcomes
             .iter()
             .for_each(|i| print_dropped_skill_file(i, &disabled)),
         Err(e) => println!(
@@ -2996,52 +3480,137 @@ async fn prune_dropped_skill_files(
     }
 }
 
-/// `nexus pull --dry-run`: what a pull would do with the devbox workspace
-/// files (as without --force). Nothing is written.
-async fn dry_run_workspace(
+/// Dry run: what the task snapshot would become.
+/// An existing `directives.md` without the Nexus marker is the operator's:
+/// a pull without `--force` leaves it alone.
+fn directives_user_managed(path: &Path, force: bool) -> bool {
+    !force && path.exists() && !is_managed_file(path)
+}
+
+/// Dry run: what a pull would do with `directives.md`.
+async fn dry_run_directives(
     client: &NexusClient,
     project_id: &str,
     workspace: &Path,
-) -> anyhow::Result<Option<nexus_core::api::WorkspaceForkExportResponse>> {
-    println!(
-        "   {} Dry run: devbox workspace files and skill removals; nothing is written.",
-        style("·").dim()
-    );
-    let export = match client.export_workspace_mcp(project_id).await {
-        Ok(export) => export,
-        Err(e) if e.to_string().contains("No active workspace fork") => {
-            println!(
-                "   {} No workspace fork assigned to this project.",
-                style("·").dim()
-            );
-            return Ok(None);
+    agentic_root: &str,
+    force: bool,
+) {
+    let rel = format!("{agentic_root}/directives.md");
+    let path = workspace.join(&rel);
+    match client.export_directives(project_id).await {
+        Ok(d) if d.directives.is_empty() => {
+            println!("   {} No directives for this project.", style("·").dim())
         }
-        Err(e) => anyhow::bail!("could not fetch workspace files: {e}"),
-    };
-    let manifest = super::sync::load_manifest_pub(workspace);
-    let mut files: Vec<(&str, &str)> = vec![("devbox.json", export.devbox_json.as_str())];
-    files.extend(
-        export
-            .scripts
-            .iter()
-            .map(|s| (s.path.as_str(), s.body.as_str())),
-    );
+        Ok(_) if directives_user_managed(&path, force) => println!(
+            "   {} {rel} (user-managed, no nexus-platform marker)",
+            style("SKIP").bold().yellow()
+        ),
+        Ok(d) => {
+            let label = if !path.exists() {
+                "CREATE"
+            } else if content_matches(&path, &render_directives_markdown(&d.directives)) {
+                "SAME"
+            } else {
+                "UPDATE"
+            };
+            println!(
+                "   {} {rel} ({} directive(s))",
+                style(label).bold().green(),
+                d.directives.len()
+            );
+        }
+        Err(e) => println!(
+            "   {} Could not fetch directives: {}",
+            style("!").yellow(),
+            e
+        ),
+    }
+}
 
+async fn dry_run_tasks(
+    client: &NexusClient,
+    project_id: &str,
+    workspace: &Path,
+    agentic_root: &str,
+) {
+    let snapshot = workspace.join(agentic_root).join("TASKS.md");
+    // The same decision as the pull itself.
+    match client
+        .list_tasks(project_id, Some(&["open", "in_progress", "blocked"]))
+        .await
+        .map(|r| {
+            (
+                tasks_snapshot_plan(workspace, agentic_root, r.tasks.len()),
+                r,
+            )
+        }) {
+        Ok((TasksPlan::Refused(why), _)) => println!(
+            "   {} {agentic_root}/TASKS.md ({why})",
+            style("SKIP").bold().yellow()
+        ),
+        Ok((TasksPlan::Clear, _)) => println!(
+            "   {} {agentic_root}/TASKS.md (no open tasks)",
+            style("UPDATE").bold().green()
+        ),
+        Ok((TasksPlan::Nothing, _)) => {
+            println!("   {} No open tasks to export.", style("·").dim())
+        }
+        Ok((TasksPlan::Write, r)) => println!(
+            "   {} {agentic_root}/TASKS.md ({} open task(s))",
+            style(if snapshot.exists() {
+                "UPDATE"
+            } else {
+                "CREATE"
+            })
+            .bold()
+            .green(),
+            r.tasks.len()
+        ),
+        Err(e) => println!("   {} Could not fetch tasks: {}", style("!").yellow(), e),
+    }
+}
+
+/// Dry run: print what a pull would do with each workspace file (path,
+/// body, executable); returns the number of files that would change.
+fn preview_workspace_files(
+    workspace: &Path,
+    manifest: &serde_json::Value,
+    files: &[(&str, &str, bool)],
+) -> usize {
     let mut changes = 0;
-    for (rel, body) in &files {
-        let local = fs::read(workspace.join(rel))
-            .ok()
-            .map(|b| String::from_utf8_lossy(&b).into_owned());
+    for (rel, body, executable) in files {
+        // The same target check as the pull: a path through a link out of
+        // the workspace is skipped, never previewed as a write.
+        if let Err(e) = validate_agent_file_target_path(workspace, rel) {
+            println!("   {} {rel} ({e})", style("SKIP").bold().yellow());
+            continue;
+        }
+        let local = match read_existing(&workspace.join(rel)) {
+            Ok(local) => local.map(|b| String::from_utf8_lossy(&b).into_owned()),
+            Err(e) => {
+                println!(
+                    "   {} {rel} (cannot be read: {e})",
+                    style("KEEP unreadable").bold().yellow()
+                );
+                changes += 1;
+                continue;
+            }
+        };
         let action = decide_workspace_write(
             local.as_deref(),
             body,
-            local.is_some() && is_pull_managed(workspace, rel, &manifest),
-            super::ccx::sync_manifest_hash(&manifest, rel).as_deref(),
+            local.is_some() && is_pull_managed(workspace, rel, manifest),
+            super::ccx::sync_manifest_hash(manifest, rel).as_deref(),
             || git_head_content(workspace, rel),
             false,
             false,
         );
         let label = match action {
+            WorkspaceAction::Unchanged
+                if *executable && needs_exec_repair(&workspace.join(rel)) =>
+            {
+                style("MODE +x").bold().green()
+            }
             WorkspaceAction::Unchanged => continue,
             WorkspaceAction::Write { .. } if local.is_none() => style("CREATE").bold().green(),
             WorkspaceAction::Write { .. } => style("UPDATE").bold().green(),
@@ -3061,7 +3630,95 @@ async fn dry_run_workspace(
         changes += 1;
     }
 
-    let exported: Vec<&str> = files.iter().map(|(p, _)| *p).collect();
+    changes
+}
+
+/// `nexus pull --dry-run`: what a pull would do with the devbox workspace
+/// files (as without --force). Nothing is written.
+async fn dry_run_workspace(
+    client: &NexusClient,
+    project_id: &str,
+    workspace: &Path,
+) -> anyhow::Result<(
+    Vec<super::consent::Item>,
+    Vec<nexus_core::api::ExportedExecutable>,
+)> {
+    println!(
+        "   {} Dry run: devbox workspace files and skill removals; nothing is written.",
+        style("·").dim()
+    );
+    let export = match client.export_workspace_mcp(project_id).await {
+        Ok(export) => export,
+        Err(e) if e.to_string().contains("No active workspace fork") => {
+            println!(
+                "   {} No workspace fork assigned to this project.",
+                style("·").dim()
+            );
+            return Ok(Default::default());
+        }
+        Err(e) => {
+            // The same fallback a pull uses: the legacy workspace export.
+            println!(
+                "   {} ws_export failed: {}, trying v1...",
+                style("!").yellow(),
+                e
+            );
+            match client.export_workspace(project_id).await {
+                Ok(v1) if v1.workspace_provisioning_enabled == Some(false) => println!(
+                    "   {} Workspace provisioning disabled for this project.",
+                    style("·").dim()
+                ),
+                Ok(v1) => {
+                    let manifest = super::sync::load_manifest_pub(workspace);
+                    let mut files: Vec<(&str, &str, bool)> = v1
+                        .workspace
+                        .iter()
+                        .map(|t| (t.target_path.as_str(), t.body.as_str(), false))
+                        .collect();
+                    files.extend(
+                        v1.scripts
+                            .iter()
+                            .map(|s| (s.target_path.as_str(), s.body.as_str(), s.executable)),
+                    );
+                    let mut changes = preview_workspace_files(workspace, &manifest, &files);
+                    // The removals a v1 pull applies, as for v2 below.
+                    let exported: Vec<&str> = files.iter().map(|(p, _, _)| *p).collect();
+                    for item in plan_dropped_workspace_files(workspace, &manifest, &exported) {
+                        if !matches!(item, DroppedFile::Gone(_)) {
+                            print_dropped_workspace_file(&item);
+                            changes += 1;
+                        }
+                    }
+                    if changes == 0 {
+                        println!("   {} Workspace files are up to date.", style("=").dim());
+                    }
+                    return Ok((
+                        super::consent::collect_workspace_v1(workspace, &v1),
+                        Vec::new(),
+                    ));
+                }
+                Err(e) => println!(
+                    "   {} Could not fetch workspace files: {}",
+                    style("!").yellow(),
+                    e
+                ),
+            }
+            return Ok(Default::default());
+        }
+    };
+    let manifest = super::sync::load_manifest_pub(workspace);
+    let mut files: Vec<(&str, &str, bool)> =
+        vec![("devbox.json", export.devbox_json.as_str(), false)];
+    files.extend(
+        export
+            .scripts
+            .iter()
+            .map(|s| (s.path.as_str(), s.body.as_str(), s.executable)),
+    );
+
+    let mut changes = preview_workspace_files(workspace, &manifest, &files);
+
+    let exported: Vec<&str> = files.iter().map(|(p, _, _)| *p).collect();
     for item in plan_dropped_workspace_files(workspace, &manifest, &exported) {
         if !matches!(item, DroppedFile::Gone(_)) {
             print_dropped_workspace_file(&item);
@@ -3071,9 +3728,17 @@ async fn dry_run_workspace(
     if let Some(ref local) = export.local_scripts {
         let accepted = accepted_local_scripts(workspace, local, &export.meta.scripts_path);
         for (rel, body) in &accepted {
-            let current = fs::read(workspace.join(rel))
-                .ok()
-                .map(|b| String::from_utf8_lossy(&b).into_owned());
+            let current = match read_existing(&workspace.join(rel)) {
+                Ok(c) => c.map(|b| String::from_utf8_lossy(&b).into_owned()),
+                Err(e) => {
+                    println!(
+                        "   {} {rel} (cannot be read: {e})",
+                        style("KEEP unreadable").bold().yellow()
+                    );
+                    changes += 1;
+                    continue;
+                }
+            };
             let action = decide_workspace_write(
                 current.as_deref(),
                 body,
@@ -3111,7 +3776,15 @@ async fn dry_run_workspace(
     if let Some(notice) = export.meta.shadow_notice() {
         println!("   {} {}", style("i").bold().blue(), notice);
     }
-    Ok(Some(export))
+    Ok((
+        super::consent::collect_workspace_v2(workspace, &export),
+        export.executables.clone(),
+    ))
+}
+
+/// Whether `path` itself is a symbolic link.
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// Check whether a file contains the `source: nexus-platform` marker,
@@ -3593,7 +4266,10 @@ fn write_mcp_configs(
     opencode_default_agent: &Option<String>,
     opencode_instructions: &Option<Vec<String>>,
     force: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
+    // False when an existing opencode.json was left alone (unparsable):
+    // the OpenCode projection is then not usable.
+    let mut opencode_usable = true;
     let opencode_path = workspace.join("opencode.json");
     let claude_mcp_path = workspace.join(".mcp.json");
 
@@ -3614,18 +4290,46 @@ fn write_mcp_configs(
             || !plugin_mcp_servers.is_empty()
             || !providers.is_empty()
             || opencode_agents.is_some()
-            || opencode_instructions.is_some();
+            || opencode_instructions.is_some()
+            || opencode_default_model.is_some()
+            || opencode_default_agent.is_some();
 
-        if needs_write {
-            // Parse the existing file once (if applicable) and reuse it for
-            // both the "mcp" merge and the "instructions" merge below.
-            let existing_parsed: Option<serde_json::Value> = if exists && !force {
-                fs::read_to_string(&opencode_path)
-                    .ok()
-                    .and_then(|content| serde_json::from_str(&content).ok())
-            } else {
-                None
-            };
+        // Parse the existing file once (if applicable) and reuse it for the
+        // merges below. Without --force a file that cannot be read or parsed
+        // is left alone instead of being replaced.
+        // The bytes the merge starts from; checked again before writing.
+        let merge_input = (exists && !force).then(|| fs::read(&opencode_path).ok());
+        let existing_parsed: Result<Option<serde_json::Value>, String> = if exists && !force {
+            fs::read_to_string(&opencode_path)
+                .map_err(|e| e.to_string())
+                .and_then(|content| {
+                    serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())
+                })
+                .and_then(|v| {
+                    if v.is_object() {
+                        Ok(Some(v))
+                    } else {
+                        Err("not a JSON object".to_string())
+                    }
+                })
+        } else {
+            Ok(None)
+        };
+
+        // A file that cannot be parsed is not a usable OpenCode config,
+        // also when nothing would be written to it.
+        if existing_parsed.is_err() {
+            opencode_usable = false;
+        }
+        // Reported whether or not a write was planned: the cleanup that
+        // depends on it is blocked either way.
+        if let Err(e) = &existing_parsed {
+            println!(
+                "   {} opencode.json not updated: it cannot be read ({e}); fix it or use --force",
+                style("!").bold().yellow()
+            );
+        } else if needs_write {
+            let existing_parsed = existing_parsed.ok().flatten();
 
             let mut mcp_block: serde_json::Map<String, serde_json::Value> = existing_parsed
                 .as_ref()
@@ -3722,7 +4426,13 @@ fn write_mcp_configs(
                 provider_block.insert(name.to_string(), cfg.clone());
             }
 
-            let mut opencode_obj = serde_json::Map::new();
+            // Without --force the operator's other settings (theme, keybinds,
+            // ...) stay; Nexus replaces only the keys it writes.
+            let mut opencode_obj = existing_parsed
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
             opencode_obj.insert(
                 "$schema".to_string(),
                 serde_json::Value::String("https://opencode.ai/config.json".to_string()),
@@ -3785,6 +4495,17 @@ fn write_mcp_configs(
             let opencode_json = serde_json::Value::Object(opencode_obj);
             let opencode_content = serde_json::to_string_pretty(&opencode_json)? + "\n";
             let unchanged = content_matches(&opencode_path, &opencode_content);
+            // Saved by the operator while pull merged: their settings stay;
+            // the next pull merges again from the new file.
+            if let Some(input) = &merge_input {
+                if !unchanged && fs::read(&opencode_path).ok() != *input {
+                    println!(
+                        "   {} opencode.json not updated: it changed during the pull; run nexus pull again",
+                        style("!").bold().yellow()
+                    );
+                    return Ok(false);
+                }
+            }
             // Token-bearing: git-excluded first, then written owner-only.
             if unchanged {
                 shadow::protect_token_file(
@@ -3947,7 +4668,7 @@ fn write_mcp_configs(
         }
     }
 
-    Ok(())
+    Ok(opencode_usable)
 }
 
 /// Whether the JSON config at `path` parses but has no `nexus` entry under
@@ -4137,6 +4858,21 @@ pub(crate) fn classify_generated(
     }
 }
 
+/// Whether `--scope` selects `name`: no scope selects everything.
+fn scope_selects(scope: &[String], name: &str) -> bool {
+    scope.is_empty() || scope.iter().any(|s| s.eq_ignore_ascii_case(name))
+}
+
+/// A file's bytes, `None` when it does not exist; any other read error is
+/// returned, so an unreadable file is never mistaken for a missing one.
+pub(crate) fn read_existing(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Write the rendered `files` per [`classify_generated`]. Locally modified
 /// files are listed and confirmed with a single prompt (skipped without
 /// `force` if declined); the rest of the pull always continues. Returns the
@@ -4160,23 +4896,33 @@ fn sync_generated_files_with(
 ) -> anyhow::Result<(usize, Vec<String>)> {
     let recorded = read_pull_manifest(workspace, agentic_root)?;
     let mut updates: Vec<(String, String)> = Vec::new();
+    // Each file's bytes as classified; `Err` when it cannot be read (then
+    // it is left alone, never treated as missing).
+    let locals: Vec<std::io::Result<Option<Vec<u8>>>> = files
+        .iter()
+        .map(|(path, _)| read_existing(&workspace.join(path)))
+        .collect();
     let states: Vec<GeneratedState> = files
         .iter()
-        .map(|(path, content)| {
-            let local = fs::read(workspace.join(path)).ok();
-            classify_generated(
+        .zip(&locals)
+        .map(|((path, content), local)| match local {
+            Ok(local) => classify_generated(
                 local.as_deref(),
                 content,
                 recorded.get(path).map(String::as_str),
-            )
+            ),
+            Err(_) => GeneratedState::LocallyModified,
         })
         .collect();
 
+    // Unreadable files are reported on their own and never offered for
+    // overwriting; the prompt covers readable local edits only.
     let modified: Vec<&str> = files
         .iter()
         .zip(&states)
-        .filter(|(_, s)| **s == GeneratedState::LocallyModified)
-        .map(|((p, _), _)| p.as_str())
+        .zip(&locals)
+        .filter(|((_, s), l)| **s == GeneratedState::LocallyModified && l.is_ok())
+        .map(|(((p, _), _), _)| p.as_str())
         .collect();
     let overwrite_modified = if modified.is_empty() || force {
         true
@@ -4189,12 +4935,33 @@ fn sync_generated_files_with(
         for path in &modified {
             println!("      {}", style(path).dim());
         }
-        confirm()?
+        // No answer (no terminal, read error): the edits stay, the other
+        // files still sync.
+        confirm().unwrap_or_else(|e| {
+            println!(
+                "   {} No answer ({e}); the modified files are kept.",
+                style("!").bold().yellow()
+            );
+            false
+        })
     };
 
     let mut written = 0;
     let mut skipped = Vec::new();
-    for ((path, content), state) in files.iter().zip(&states) {
+    for (((path, content), state), local) in files.iter().zip(&states).zip(&locals) {
+        let local = match local {
+            Ok(local) => local,
+            Err(e) => {
+                println!(
+                    "   {} skipped: {} (cannot be read: {e}; restore read access, it is checked again on the next pull)",
+                    style("!").bold().yellow(),
+                    path
+                );
+                // Reported here, not with the local edits (stash or
+                // --force would not help).
+                continue;
+            }
+        };
         match state {
             GeneratedState::Unchanged => {}
             GeneratedState::LocallyModified if !overwrite_modified => {
@@ -4206,6 +4973,17 @@ fn sync_generated_files_with(
                     continue;
                 }
                 let target = workspace.join(path);
+                // Changed since it was classified (edited while the prompt
+                // was open): the new edit stays.
+                if read_existing(&target).ok().as_ref() != Some(local) {
+                    println!(
+                        "   {} skipped: {} (changed during the pull)",
+                        style("!").bold().yellow(),
+                        path
+                    );
+                    skipped.push(path.clone());
+                    continue;
+                }
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -4283,6 +5061,11 @@ pub(crate) fn sync_personal_workspace_files(
                 style("!").bold().yellow(),
                 path
             ),
+            Ok(ZellijConfigRemoval::Unreadable(path, e)) => println!(
+                "   {} Zellij config {} is no longer sent by the project but cannot be read ({e}); kept, restore read access and pull again",
+                style("!").bold().yellow(),
+                path
+            ),
             Ok(ZellijConfigRemoval::None) => {}
             Err(e) => println!(
                 "   {} Zellij config not removed: {}",
@@ -4300,6 +5083,8 @@ pub(crate) enum ClaudeWorkspaceOutcome {
     Unchanged,
     /// Edited locally since the last pull; kept (no --force).
     KeptLocalEdit,
+    /// Cannot be read (the error); kept, also with --force.
+    Unreadable(String),
 }
 
 /// Git-exclude entries for the per-user layout and the local observer
@@ -4374,6 +5159,8 @@ pub(crate) enum ZellijConfigRemoval {
     Removed(String),
     /// Edited locally since the last pull; left on disk, no longer managed.
     KeptLocalEdit(String),
+    /// Cannot be read (path, error): left on disk with its record.
+    Unreadable(String, String),
 }
 
 /// The backend no longer sends `zellij_config`: remove the file a previous
@@ -4404,8 +5191,8 @@ pub(crate) fn remove_zellij_config(
             ZellijConfigRemoval::Removed(path.clone())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => ZellijConfigRemoval::None,
-        // Unreadable: kept, and so is its record.
-        Err(_) => return Ok(ZellijConfigRemoval::KeptLocalEdit(path)),
+        // Kept with its record, so a later pull still knows it owns it.
+        Err(e) => return Ok(ZellijConfigRemoval::Unreadable(path, e.to_string())),
     };
     update_pull_manifest(workspace, agentic_root, |m| {
         m.remove(&path);
@@ -4438,7 +5225,11 @@ fn sync_personal_file(
 
     let recorded = read_pull_manifest(workspace, agentic_root)?;
     let target = workspace.join(path);
-    let local = fs::read(&target).ok();
+    // An unreadable file is kept like a local edit, never replaced as new.
+    let local = match read_existing(&target) {
+        Ok(local) => local,
+        Err(e) => return Ok(ClaudeWorkspaceOutcome::Unreadable(e.to_string())),
+    };
     let outcome = match classify_generated(
         local.as_deref(),
         body,
@@ -4498,6 +5289,11 @@ fn print_zellij_config_outcome(path: &str, outcome: &ClaudeWorkspaceOutcome) {
             path,
             path
         ),
+        ClaudeWorkspaceOutcome::Unreadable(e) => println!(
+            "   {} Zellij config {} cannot be read ({e}), kept; restore read access and pull again",
+            style("!").bold().yellow(),
+            path
+        ),
     }
 }
 
@@ -4538,6 +5334,11 @@ fn print_claude_workspace_outcome(
             "   {} Workspace layout {} edited locally, kept (nexus diff {} to compare, nexus pull --force to replace)",
             style("!").bold().yellow(),
             layout.path,
+            layout.path
+        ),
+        ClaudeWorkspaceOutcome::Unreadable(e) => println!(
+            "   {} Workspace layout {} cannot be read ({e}), kept; restore read access and pull again",
+            style("!").bold().yellow(),
             layout.path
         ),
     }
@@ -4587,9 +5388,18 @@ pub(crate) fn remove_generated_records(
     agentic_root: &str,
     remove: impl Fn(&str) -> bool,
 ) -> anyhow::Result<usize> {
+    remove_generated_records_with(workspace, agentic_root, |p, _| remove(p))
+}
+
+/// [`remove_generated_records`] with the recorded hash passed along.
+pub(crate) fn remove_generated_records_with(
+    workspace: &Path,
+    agentic_root: &str,
+    remove: impl Fn(&str, Option<&str>) -> bool,
+) -> anyhow::Result<usize> {
     update_pull_manifest(workspace, agentic_root, |m| {
         let before = m.len();
-        m.retain(|path, _| !remove(path));
+        m.retain(|path, hash| !remove(path, Some(hash.as_str())));
         before - m.len()
     })
 }
@@ -4820,11 +5630,64 @@ fn capitalize(s: &str) -> String {
 ///
 /// The file is always overwritten (it is a snapshot of the current backlog,
 /// not a user-editable document).
+/// What a pull does with `TASKS.md` for `count` open tasks.
+#[derive(Debug, PartialEq)]
+enum TasksPlan {
+    /// Write the open tasks.
+    Write,
+    /// No open tasks and a snapshot Nexus wrote: rewrite it empty.
+    Clear,
+    /// No open tasks and no Nexus snapshot: nothing to do.
+    Nothing,
+    /// The destination cannot be written safely.
+    Refused(String),
+}
+
+fn tasks_snapshot_plan(workspace: &Path, agentic_root: &str, count: usize) -> TasksPlan {
+    if let Some(why) = tasks_snapshot_refusal(workspace, agentic_root) {
+        return TasksPlan::Refused(why);
+    }
+    let snapshot = workspace.join(agentic_root).join("TASKS.md");
+    match (count, is_managed_file(&snapshot)) {
+        (0, true) => TasksPlan::Clear,
+        (0, false) => TasksPlan::Nothing,
+        _ => TasksPlan::Write,
+    }
+}
+
+/// Why `<agentic_root>/TASKS.md` must not be written: outside the
+/// workspace or into `.git`, or a symlink as the file or any directory on
+/// the way (also one pointing inside the workspace).
+fn tasks_snapshot_refusal(workspace: &Path, agentic_root: &str) -> Option<String> {
+    let rel = format!("{agentic_root}/TASKS.md");
+    if let Err(e) = validate_agent_file_target_path(workspace, &rel) {
+        return Some(e.to_string());
+    }
+    let mut at = workspace.to_path_buf();
+    for part in Path::new(&rel).components() {
+        at.push(part);
+        if is_symlink(&at) {
+            let shown = at
+                .strip_prefix(workspace)
+                .unwrap_or(&at)
+                .display()
+                .to_string();
+            return Some(format!("{shown} is a symlink"));
+        }
+    }
+    None
+}
+
 pub fn write_tasks(
     workspace: &Path,
     tasks: &[nexus_core::api::TaskSummary],
     agentic_root: &str,
 ) -> anyhow::Result<()> {
+    // Inside the workspace, never through a symlink (file or directory)
+    // or into `.git`.
+    if let Some(why) = tasks_snapshot_refusal(workspace, agentic_root) {
+        anyhow::bail!("{agentic_root}/TASKS.md not written: {why}");
+    }
     let dir = workspace.join(agentic_root);
     fs::create_dir_all(&dir)?;
 
@@ -5631,6 +6494,160 @@ mod tests {
             classify_generated(Some(b"edited"), d, None),
             GeneratedState::LocallyModified
         );
+    }
+
+    /// A file edited while the overwrite prompt was open is not replaced.
+    #[test]
+    fn test_generated_file_changed_during_prompt_is_kept() {
+        let dir = temp_dir("gen-changed-during-prompt");
+        let files = gen_files();
+        sync_generated_files_with(&dir, ".nexus", &files, false, never_prompt).unwrap();
+        let skill = dir.join(".nexus/skills/nx-a/SKILL.md");
+        fs::write(&skill, "edited\n").unwrap();
+        let mut newer = gen_files();
+        newer[0].1 = "a v2\n".into();
+        let (written, skipped) = sync_generated_files_with(&dir, ".nexus", &newer, false, || {
+            fs::write(&skill, "edited again\n").unwrap();
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(written, 0);
+        assert_eq!(skipped, vec![".nexus/skills/nx-a/SKILL.md".to_string()]);
+        assert_eq!(fs::read_to_string(&skill).unwrap(), "edited again\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unreadable_files_are_not_treated_as_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("unreadable");
+        fs::write(dir.join("devbox.json"), "{\"mine\":1}\n").unwrap();
+        fs::set_permissions(dir.join("devbox.json"), fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(dir.join("devbox.json")).is_ok() {
+            // Running as root: permissions do not apply.
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(read_existing(&dir.join("devbox.json")).is_err());
+        assert!(read_existing(&dir.join("absent")).unwrap().is_none());
+        let mut report = WorkspaceSyncReport::default();
+        let written = sync_workspace_file(
+            &dir,
+            "devbox.json",
+            "{}",
+            false,
+            true,
+            true,
+            &serde_json::json!({}),
+            &mut report,
+        )
+        .unwrap();
+        assert!(!written);
+        // Reported as unreadable, not as a local edit (no --force advice).
+        assert_eq!(report.unreadable, vec!["devbox.json".to_string()]);
+        assert!(report.skipped_modified.is_empty());
+        fs::set_permissions(dir.join("devbox.json"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("devbox.json")).unwrap(),
+            "{\"mine\":1}\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unchanged_script_gets_its_exec_bit_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("exec-bit");
+        let rel = "scripts/run.sh";
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        fs::write(dir.join(rel), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(dir.join(rel), fs::Permissions::from_mode(0o644)).unwrap();
+        let mut report = WorkspaceSyncReport::default();
+        sync_workspace_file(
+            &dir,
+            rel,
+            "#!/bin/sh\n",
+            true,
+            false,
+            false,
+            &ws_manifest(rel, "#!/bin/sh\n"),
+            &mut report,
+        )
+        .unwrap();
+        let mode = fs::metadata(dir.join(rel)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The removal plan is re-checked right before the file goes: an edit
+    /// made after planning keeps the file and its record.
+    #[test]
+    fn test_dropped_skill_edited_after_planning_is_kept() {
+        let dir = temp_dir("skill-recheck");
+        let rel = ".nexus/skills/nx-old/SKILL.md";
+        sync_generated_files_with(
+            &dir,
+            ".nexus",
+            &[(rel.to_string(), "old\n".to_string())],
+            false,
+            never_prompt,
+        )
+        .unwrap();
+        let plan = plan_dropped_skill_files(&dir, ".nexus", false, &[]);
+        assert!(matches!(&plan[..], [DroppedFile::Remove(p, _)] if p == rel));
+        fs::write(dir.join(rel), "edited\n").unwrap();
+        apply_dropped_skill_files(&dir, ".nexus", false, &plan).unwrap();
+        assert_eq!(fs::read_to_string(dir.join(rel)).unwrap(), "edited\n");
+        assert!(load_pull_manifest(&dir, ".nexus").contains_key(rel));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_opencode_json_merge_keeps_operator_settings() {
+        let dir = temp_dir("oc-json-merge");
+        let write = |dir: &Path, model: Option<&str>, force: bool| {
+            write_mcp_configs(
+                dir,
+                "https://nexus.example",
+                "nxs_pat_x",
+                "pid",
+                McpSource::Npm,
+                Some("opencode"),
+                ".nexus",
+                &HashMap::new(),
+                &HashMap::new(),
+                &None,
+                &model.map(str::to_string),
+                &None,
+                &None,
+                force,
+            )
+        };
+        fs::write(
+            dir.join("opencode.json"),
+            "{\"theme\":\"dark\",\"model\":\"old/m\",\"mcp\":{\"nexus\":{}}}",
+        )
+        .unwrap();
+        // A changed default model is reconciled; the theme stays.
+        write(&dir, Some("new/m"), false).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("opencode.json")).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["model"], "new/m");
+        // An unparsable file is not replaced without --force.
+        fs::write(dir.join("opencode.json"), "{ broken").unwrap();
+        write(&dir, Some("new/m"), false).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("opencode.json")).unwrap(),
+            "{ broken"
+        );
+        write(&dir, Some("new/m"), true).unwrap();
+        assert!(fs::read_to_string(dir.join("opencode.json"))
+            .unwrap()
+            .contains("new/m"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -7565,25 +8582,17 @@ mod tests {
 
     #[test]
     fn test_workspace_scope_filter() {
-        // Scope filter helper logic
-        let scope_empty: Vec<String> = vec![];
-        let scope_ws: Vec<String> = vec!["workspace".into()];
-        let scope_skills: Vec<String> = vec!["skills".into()];
-
-        let _pull_all_empty = scope_empty.is_empty();
-        let check = |scope: &[String], name: &str| {
-            scope.is_empty() || scope.iter().any(|s| s.eq_ignore_ascii_case(name))
-        };
-
+        let scope = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         // Empty scope = pull everything
-        assert!(check(&scope_empty, "workspace"));
-        assert!(check(&scope_empty, "skills"));
-
+        for name in ["skills", "directives", "agents", "workspace", "tasks"] {
+            assert!(scope_selects(&[], name));
+        }
         // Explicit scope = only that scope
-        assert!(check(&scope_ws, "workspace"));
-        assert!(!check(&scope_ws, "skills"));
-        assert!(!check(&scope_skills, "workspace"));
-        assert!(check(&scope_skills, "skills"));
+        assert!(scope_selects(&scope(&["workspace"]), "workspace"));
+        assert!(!scope_selects(&scope(&["workspace"]), "skills"));
+        assert!(!scope_selects(&scope(&["workspace"]), "agents"));
+        assert!(scope_selects(&scope(&["Skills", "tasks"]), "skills"));
+        assert!(!scope_selects(&scope(&["skills"]), "workspace"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -8412,6 +9421,235 @@ mod tests {
 
     /// Write a workspace file as pull would and record it in the sync
     /// manifest.
+    #[test]
+    fn test_exec_mode_adds_execute_only_where_readable() {
+        assert_eq!(exec_mode(0o600), 0o700);
+        assert_eq!(exec_mode(0o644), 0o755);
+        assert_eq!(exec_mode(0o640), 0o750);
+        assert_eq!(exec_mode(0o400), 0o500);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_add_exec_bits_keeps_private_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sh");
+        fs::write(&path, "x").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(needs_exec_repair(&path));
+        add_exec_bits(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(!needs_exec_repair(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wait_bounded_kills_a_hanging_check() {
+        let child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        assert!(!wait_bounded(child, std::time::Duration::from_millis(100)));
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        let ok = std::process::Command::new("true").spawn().unwrap();
+        assert!(wait_bounded(ok, std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn test_apply_dropped_keeps_a_file_changed_after_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        pulled_workspace_file(dir, "scripts/devbox/a.sh", "a");
+        pulled_workspace_file(dir, "scripts/devbox/b.sh", "b");
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        let plan = plan_dropped_workspace_files(dir, &manifest, &["devbox.json"]);
+        assert_eq!(plan.len(), 2);
+        // Edited after the plan: kept, record stays.
+        fs::write(dir.join("scripts/devbox/a.sh"), "edited\n").unwrap();
+        let outcomes = apply_dropped_workspace_files(dir, &plan).unwrap();
+        assert!(outcomes.contains(&DroppedFile::Changed("scripts/devbox/a.sh".into())));
+        assert!(outcomes
+            .iter()
+            .any(|o| matches!(o, DroppedFile::Remove(p, _) if p == "scripts/devbox/b.sh")));
+        assert!(dir.join("scripts/devbox/a.sh").exists());
+        assert!(!dir.join("scripts/devbox/b.sh").exists());
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        let recorded: Vec<String> = super::super::sync::workspace_manifest_entries(&manifest)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert!(recorded.contains(&"scripts/devbox/a.sh".to_string()));
+        assert!(!recorded.contains(&"scripts/devbox/b.sh".to_string()));
+    }
+
+    /// The workspace preview skips a target the pull would refuse and
+    /// still counts a new file under a confined directory.
+    #[cfg(unix)]
+    #[test]
+    fn test_preview_workspace_files_skips_linked_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        fs::create_dir_all(ws.join("scripts")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.join("scripts/devbox")).unwrap();
+        let manifest = serde_json::json!({});
+        let linked = [("scripts/devbox/new.sh", "x\n", true)];
+        assert_eq!(preview_workspace_files(ws, &manifest, &linked), 0);
+        let plain = [("scripts/new.sh", "x\n", true)];
+        assert_eq!(preview_workspace_files(ws, &manifest, &plain), 1);
+    }
+
+    /// Pull and dry run share one TASKS.md decision: a managed snapshot is
+    /// cleared, the operator's own file stays, and a link (file or any
+    /// directory on the way, even inside the workspace) is refused.
+    #[test]
+    fn test_tasks_snapshot_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        assert_eq!(tasks_snapshot_plan(ws, ".nexus", 0), TasksPlan::Nothing);
+        assert_eq!(tasks_snapshot_plan(ws, ".nexus", 2), TasksPlan::Write);
+        write_tasks(ws, &[], ".nexus").unwrap();
+        assert_eq!(tasks_snapshot_plan(ws, ".nexus", 0), TasksPlan::Clear);
+        fs::write(ws.join(".nexus/TASKS.md"), "my own notes\n").unwrap();
+        assert_eq!(tasks_snapshot_plan(ws, ".nexus", 0), TasksPlan::Nothing);
+        #[cfg(unix)]
+        {
+            // A managed snapshot reached through a linked agentic root.
+            write_tasks(ws, &[], ".nexus").unwrap();
+            std::os::unix::fs::symlink(ws.join(".nexus"), ws.join(".agent")).unwrap();
+            assert!(matches!(
+                tasks_snapshot_plan(ws, ".agent", 0),
+                TasksPlan::Refused(_)
+            ));
+            assert!(write_tasks(ws, &[], ".agent").is_err());
+            // The snapshot itself as a link.
+            fs::create_dir_all(ws.join(".other")).unwrap();
+            std::os::unix::fs::symlink(ws.join(".nexus/TASKS.md"), ws.join(".other/TASKS.md"))
+                .unwrap();
+            assert!(matches!(
+                tasks_snapshot_plan(ws, ".other", 3),
+                TasksPlan::Refused(_)
+            ));
+        }
+    }
+
+    /// A parent that became a link out of the workspace after the plan:
+    /// nothing outside is removed and the record stays.
+    #[cfg(unix)]
+    #[test]
+    fn test_apply_dropped_refuses_a_parent_linked_after_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        pulled_workspace_file(dir, "scripts/devbox/sub/a.sh", "a");
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        let plan = plan_dropped_workspace_files(dir, &manifest, &["devbox.json"]);
+        assert_eq!(plan.len(), 1);
+        // The directory moves out and a link takes its place; same bytes.
+        fs::rename(dir.join("scripts/devbox/sub"), outside.path().join("sub")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("sub"), dir.join("scripts/devbox/sub"))
+            .unwrap();
+        let outcomes = apply_dropped_workspace_files(dir, &plan).unwrap();
+        assert!(
+            matches!(&outcomes[0], DroppedFile::Failed(p, _) if p == "scripts/devbox/sub/a.sh")
+        );
+        assert!(outside.path().join("sub/a.sh").exists());
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        assert!(super::super::sync::workspace_manifest_entries(&manifest)
+            .iter()
+            .any(|(p, _)| p == "scripts/devbox/sub/a.sh"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_repair_detects_a_missing_owner_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sh");
+        fs::write(&path, "x").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o645)).unwrap();
+        assert!(needs_exec_repair(&path));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!needs_exec_repair(&path));
+    }
+
+    /// A file missing when planned but back before the removal keeps its
+    /// record.
+    #[test]
+    fn test_apply_dropped_rechecks_gone_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        pulled_workspace_file(dir, "scripts/devbox/a.sh", "a");
+        fs::remove_file(dir.join("scripts/devbox/a.sh")).unwrap();
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        let plan = plan_dropped_workspace_files(dir, &manifest, &["devbox.json"]);
+        assert_eq!(plan, vec![DroppedFile::Gone("scripts/devbox/a.sh".into())]);
+        fs::write(dir.join("scripts/devbox/a.sh"), "back\n").unwrap();
+        let outcomes = apply_dropped_workspace_files(dir, &plan).unwrap();
+        assert_eq!(
+            outcomes,
+            vec![DroppedFile::Changed("scripts/devbox/a.sh".into())]
+        );
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        assert_eq!(
+            super::super::sync::workspace_manifest_entries(&manifest).len(),
+            1
+        );
+    }
+
+    /// The forget step drops a record only while it holds the approved hash.
+    #[test]
+    fn test_forget_set_checks_the_recorded_hash() {
+        let outcomes = vec![
+            DroppedFile::Remove("a".into(), "h1".into()),
+            DroppedFile::Gone("b".into()),
+            DroppedFile::Changed("c".into()),
+        ];
+        let set = forget_set(&outcomes);
+        assert!(set.matches("a", Some("h1")));
+        assert!(!set.matches("a", Some("h2")));
+        assert!(set.matches("b", None));
+        assert!(!set.matches("c", Some("x")));
+    }
+
+    #[test]
+    fn test_remove_zellij_config_keeps_the_record_when_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let path = zellij_config_default_path(".nexus");
+        // A directory in place of the file: reading it fails, not NotFound.
+        fs::create_dir_all(ws.join(&path)).unwrap();
+        record_generated_many(ws, ".nexus", &[(path.clone(), "x".into())]).unwrap();
+        let outcome = remove_zellij_config(ws, ".nexus", false).unwrap();
+        assert!(
+            matches!(outcome, ZellijConfigRemoval::Unreadable(..)),
+            "{outcome:?}"
+        );
+        assert!(load_pull_manifest(ws, ".nexus").contains_key(&path));
+    }
+
+    #[test]
+    fn test_apply_dropped_keeps_a_file_whose_record_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        pulled_workspace_file(dir, "scripts/devbox/a.sh", "a");
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        let plan = plan_dropped_workspace_files(dir, &manifest, &["devbox.json"]);
+        // Another pull recorded a newer version and wrote it meanwhile.
+        pulled_workspace_file(dir, "scripts/devbox/a.sh", "newer");
+        let outcomes = apply_dropped_workspace_files(dir, &plan).unwrap();
+        assert_eq!(
+            outcomes,
+            vec![DroppedFile::Changed("scripts/devbox/a.sh".into())]
+        );
+        assert!(dir.join("scripts/devbox/a.sh").exists());
+    }
+
     fn pulled_workspace_file(dir: &Path, rel: &str, body: &str) {
         let target = dir.join(rel);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -8437,7 +9675,8 @@ mod tests {
         assert_eq!(
             plan,
             vec![DroppedFile::Remove(
-                "scripts/devbox/init/os_darwin/override.sh".into()
+                "scripts/devbox/init/os_darwin/override.sh".into(),
+                sha256_hex("")
             )]
         );
         apply_dropped_workspace_files(&dir, &plan).unwrap();
@@ -8511,7 +9750,7 @@ mod tests {
         let manifest = super::super::sync::load_manifest_pub(&dir);
         assert_eq!(
             plan_dropped_workspace_files(&dir, &manifest, &["devbox.json"]),
-            vec![DroppedFile::Remove(rel.into())]
+            vec![DroppedFile::Remove(rel.into(), sha256_hex("tmux"))]
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -8742,7 +9981,7 @@ mod tests {
                 ".nexus/skills/nx-cr-review/SKILL.md"
             ]
         );
-        assert!(plan.iter().all(|i| matches!(i, DroppedFile::Remove(_))));
+        assert!(plan.iter().all(|i| matches!(i, DroppedFile::Remove(..))));
         apply_dropped_skill_files(&dir, ".nexus", true, &plan).unwrap();
         assert!(!dir.join(".claude/skills/nexus-cr-review").exists());
         assert!(!dir.join(".nexus/skills/nx-cr-review").exists());
@@ -8805,7 +10044,10 @@ mod tests {
         // In an OpenCode project the stale command is pruned.
         assert_eq!(
             plan_dropped_skill_files(&dir, ".nexus", false, &[]),
-            vec![DroppedFile::Remove(cmd.0.clone())]
+            vec![DroppedFile::Remove(
+                cmd.0.clone(),
+                nexus_core::hash::sha256_hex_bytes(cmd.1.as_bytes())
+            )]
         );
         assert!(dir.join(".claude/skills/mine/SKILL.md").exists());
         let _ = fs::remove_dir_all(&dir);

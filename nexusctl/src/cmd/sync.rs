@@ -284,6 +284,14 @@ pub fn remove_manifest_entries(
     workspace: &Path,
     remove: impl Fn(&str) -> bool,
 ) -> anyhow::Result<usize> {
+    remove_manifest_entries_with(workspace, |p, _| remove(p))
+}
+
+/// [`remove_manifest_entries`] with the recorded hash passed along.
+pub fn remove_manifest_entries_with(
+    workspace: &Path,
+    remove: impl Fn(&str, Option<&str>) -> bool,
+) -> anyhow::Result<usize> {
     update_manifest(workspace, |m| {
         let before = m.len();
         m.retain(|key, entry| {
@@ -291,7 +299,7 @@ pub fn remove_manifest_entries(
                 .get("target_path")
                 .and_then(|t| t.as_str())
                 .unwrap_or(key);
-            !remove(target)
+            !remove(target, entry.get("hash").and_then(|h| h.as_str()))
         });
         before - m.len()
     })
