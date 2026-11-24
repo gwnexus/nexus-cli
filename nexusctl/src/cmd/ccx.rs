@@ -473,8 +473,6 @@ pub fn ccx_files(agent_files: &[ExportedAgentFile]) -> Vec<&ExportedAgentFile> {
     agent_files
         .iter()
         .filter(|af| af.category == CCX_CATEGORY)
-        // settings.json is merged by the projection, never written whole.
-        .filter(|af| !super::claude_render::is_merged_settings_target(&af.target_path))
         .filter(|af| seen.insert(af.target_path.as_str()))
         .collect()
 }
@@ -529,8 +527,14 @@ pub fn plan_each(
     let migrating = lock.is_none_or(|l| l.revision.is_none());
     let mut plans = Vec::new();
 
+    // settings.json is merged by the projection: never written whole by a
+    // CCX file, nor deleted as an orphan (its lock entry then drops out).
+    let merged = |rel: &str| super::claude_render::is_merged_settings_target(workspace, rel);
     for af in desired {
         super::pull::validate_agent_file_target_path(workspace, &af.target_path)?;
+        if merged(&af.target_path) {
+            continue;
+        }
         let local = match read_local(workspace, &af.target_path) {
             Ok(local) => local,
             Err(e) => {
@@ -565,7 +569,7 @@ pub fn plan_each(
 
     if let Some(lock) = lock {
         for (path, entry) in &lock.files {
-            if desired.iter().any(|af| &af.target_path == path) {
+            if desired.iter().any(|af| &af.target_path == path) || merged(path) {
                 continue;
             }
             // The lock is an editable file on disk: never follow a path
@@ -1816,6 +1820,37 @@ mod tests {
         assert_eq!(applied.outcomes[0].action, FileAction::Written);
         assert_eq!(applied.outcomes[1].action, FileAction::Changed);
         assert_eq!(applied.files[RULE].sha256, sha256_hex("v2\n"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_settings_json_is_never_a_ccx_file_or_orphan() {
+        let dir = tmp_dir("ccx-settings");
+        let settings = ".claude/settings.json";
+        fs_write(&dir, settings, "{\"mine\": true}\n");
+        // An earlier CCX run recorded it, with matching bytes.
+        let mut files = BTreeMap::new();
+        files.insert(
+            settings.to_string(),
+            CcxLockFileEntry {
+                file_key: "k".into(),
+                sha256: sha256_hex("{\"mine\": true}\n"),
+            },
+        );
+        record_ccx_in_lock(&dir, ".nexus", &bundle("rev-1"), files).unwrap();
+        // Neither delivered nor deleted, also with --force.
+        for force in [ForceMode::None, ForceMode::Force] {
+            let out = pull(&dir, &[ccx_file(settings, "{}\n")], force);
+            assert!(out.iter().all(|o| o.target_path != settings), "{out:?}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(settings)).unwrap(),
+            "{\"mine\": true}\n"
+        );
+        assert!(!load_lock(&dir, ".nexus")
+            .unwrap()
+            .files
+            .contains_key(settings));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

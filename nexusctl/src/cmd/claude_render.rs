@@ -602,11 +602,34 @@ pub fn write_claude_hook_adapters(
     Ok(written)
 }
 
-/// Whether `rel` is `.claude/settings.json`, which only the projection
+/// Whether `rel` names `.claude/settings.json`, which only the projection
 /// merge writes: an agent file or CCX file for it is never written over it.
-pub(crate) fn is_merged_settings_target(rel: &str) -> bool {
-    let rel = rel.trim_start_matches("./");
-    rel.eq_ignore_ascii_case(".claude/settings.json")
+/// Also through a workspace-local alias: a symlinked parent directory or a
+/// symlink to the file itself resolves to the same destination.
+pub(crate) fn is_merged_settings_target(workspace: &Path, rel: &str) -> bool {
+    if rel
+        .trim_start_matches("./")
+        .eq_ignore_ascii_case(".claude/settings.json")
+    {
+        return true;
+    }
+    let settings = workspace.join(".claude").join("settings.json");
+    let path = workspace.join(rel);
+    // The file (if it or its target exists) resolves to settings.json.
+    if let (Ok(a), Ok(b)) = (fs::canonicalize(&path), fs::canonicalize(&settings)) {
+        if a == b {
+            return true;
+        }
+    }
+    // A file not written yet: its directory resolves to `.claude`.
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    name.to_string_lossy().eq_ignore_ascii_case("settings.json")
+        && matches!(
+            (fs::canonicalize(parent), fs::canonicalize(workspace.join(".claude"))),
+            (Ok(a), Ok(b)) if a == b
+        )
 }
 
 /// `.claude/settings.json` for a merge: `{}` when the file does not exist,
@@ -2797,6 +2820,42 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.join(".claude")).unwrap();
         let (written, files) = write_claude_skill(&dir, &sample_skill("nexus-x")).unwrap();
         assert!(!written && files.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_settings_target_is_recognized_through_aliases() {
+        let dir = temp_dir("settings-alias");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(dir.join(".claude"), dir.join("config")).unwrap();
+        // Before and after the file exists.
+        assert!(is_merged_settings_target(&dir, "config/settings.json"));
+        fs::write(dir.join(".claude/settings.json"), "{ invalid,").unwrap();
+        std::os::unix::fs::symlink(dir.join(".claude/settings.json"), dir.join("link.json"))
+            .unwrap();
+        assert!(is_merged_settings_target(&dir, "config/settings.json"));
+        assert!(is_merged_settings_target(&dir, "link.json"));
+        assert!(is_merged_settings_target(&dir, "./.claude/settings.json"));
+        // Other files stay writable.
+        assert!(!is_merged_settings_target(&dir, "config/other.json"));
+        assert!(!is_merged_settings_target(&dir, "settings.json"));
+        let af = ExportedAgentFile {
+            file_key: "x".into(),
+            target_path: "config/settings.json".into(),
+            name: "x".into(),
+            description: None,
+            category: "config".into(),
+            version: 1,
+            body: "{}".into(),
+            content_hash: None,
+            agent_file_id: None,
+        };
+        crate::cmd::pull::write_agent_file(&dir, &af).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
+            "{ invalid,"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

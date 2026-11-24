@@ -1207,7 +1207,7 @@ fn write_agent_file(
     super::pull::validate_agent_file_target_path(target, &af.target_path)?;
 
     // Only the projection merges into settings.json; never replaced whole.
-    if super::claude_render::is_merged_settings_target(&af.target_path) {
+    if super::claude_render::is_merged_settings_target(target, &af.target_path) {
         println!(
             "   {} {} is merged by the Claude Code projection; agent file not written",
             style("!").bold().yellow(),
