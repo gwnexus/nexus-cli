@@ -106,6 +106,30 @@ struct FileLock {
     _file: fs::File,
 }
 
+/// Release a `flock` explicitly: closing the descriptor alone keeps the
+/// lock while a child process forked in the meantime still holds a copy
+/// of it (until its exec).
+#[cfg(unix)]
+fn unlock(file: &fs::File) {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: the descriptor belongs to `file`, which is still open.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+}
+
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unlock(&self._file);
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unlock(&self._file);
+    }
+}
+
 impl FileLock {
     fn acquire(path: &Path) -> anyhow::Result<Self> {
         #[cfg(unix)]
