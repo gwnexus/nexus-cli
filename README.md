@@ -214,6 +214,18 @@ One command per activity; each classifies every file itself:
   `ops/*.sh`; put local changes into `scripts/devbox/init/os_<os>/override.sh`
   or an own script). States: DRIFTED, CONFLICT, UPDATE, CREATE, ORPHANED,
   UNMANAGED.
+- Claude Code Experience files are tracked in `.nexus/claude/manifest.lock.json`.
+  Without `--force` or `--force-unmanaged`, `nexus pull` reads each file
+  again right before it writes, takes over or deletes it: one saved in the
+  meantime is kept (`KEPT changed during the pull`). A forced pull does not
+  check again.
+  Content refused at the consent prompt stays local and is not taken over
+  as managed (`REFUSED`), and protected files such as `.env` are never
+  taken over or deleted. A lock or file that exists but cannot be read
+  stops the pull with its path instead of counting as missing (`nexus
+  status` lists it as unreadable and compares the rest); when a pull
+  stops on a write error, the files it already wrote are recorded, so the
+  next pull updates them normally.
 - Leftovers of the runtime the project does not use are reported as STALE
   with "run nexus pull to remove it" (see below); unmanaged files are never
   touched.
