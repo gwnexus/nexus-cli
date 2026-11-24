@@ -671,7 +671,12 @@ which is added to `.git/info/exclude` and never committed. `run_target.layout`
 points to it. It is regenerated on every pull; a local edit is reported and
 kept unless `nexus pull --force` (`nexus status` / `diff` / `reset` list it as
 a projection). Until it has been pulled, `nexus run` falls back to the
-committed team layout `.nexus/claude/nexus-claude.kdl` with a WARN.
+committed team layout `.nexus/claude/nexus-claude.kdl` with a WARN. The
+per-user Zellij config works the same way; when the backend stops sending
+it, pull removes the file only while it is unchanged. A file that cannot be
+read is kept together with its pull-manifest record and reported; only a
+missing file is dropped from the record silently, and a path that now leads
+through a link out of the workspace is never removed.
 
 ### Agent Observability (`nexus status --agents`)
 

@@ -4389,6 +4389,11 @@ pub(crate) fn remove_zellij_config(
     let Some(hash) = recorded.get(&path).cloned() else {
         return Ok(ZellijConfigRemoval::None);
     };
+    // Checked again right before the removal: a parent that became a
+    // link out of the workspace (or into `.git`) is never followed.
+    if let Err(e) = validate_agent_file_target_path(workspace, &path) {
+        anyhow::bail!("{path} not removed: {e}");
+    }
     let target = workspace.join(&path);
     let outcome = match fs::read(&target) {
         Ok(local) if !force && nexus_core::hash::sha256_hex_bytes(&local) != hash => {
@@ -4924,6 +4929,28 @@ mod tests {
         let generated = vec![(".nexus/skills/a/SKILL.md".to_string(), "a".to_string())];
         assert!(sync_generated_files_with(ws, ".nexus", &generated, true, || Ok(true)).is_err());
         assert!(!ws.join(".nexus/skills/a/SKILL.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remove_zellij_config_refuses_a_linked_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let path = zellij_config_default_path(".nexus");
+        let body = "layout {}\n";
+        update_pull_manifest(ws, ".nexus", |m| {
+            m.insert(path.clone(), sha256_hex(body));
+        })
+        .unwrap();
+        // The parent now links out of the workspace to a matching file.
+        let rel_parent = Path::new(&path).parent().unwrap();
+        let name = Path::new(&path).file_name().unwrap();
+        fs::write(outside.path().join(name), body).unwrap();
+        fs::create_dir_all(ws.join(rel_parent).parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.join(rel_parent)).unwrap();
+        assert!(remove_zellij_config(ws, ".nexus", true).is_err());
+        assert!(outside.path().join(name).exists());
     }
 
     #[test]
