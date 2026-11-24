@@ -1395,7 +1395,12 @@ fn host_warning(item: &Item) -> Option<String> {
     untrusted_token_host(item).map(|h| format!("sends your Sentry token to {h}"))
 }
 
-fn print_item(item: &Item, state: State) {
+/// Diff lines shown in the short preview of an item.
+const PREVIEW_LINES: usize = 80;
+
+/// Print an item with its diff (`max` lines of it, all when `None`).
+/// Returns `true` when lines were left out.
+fn print_item(item: &Item, state: State, max: Option<usize>) -> bool {
     println!();
     println!(
         "   {} {} {}  ({})",
@@ -1410,11 +1415,17 @@ fn print_item(item: &Item, state: State) {
     if let Some(w) = host_warning(item) {
         println!("     {} {}", style("!").bold().red(), style(w).bold().red());
     }
+    print_diff(item, max)
+}
+
+/// Print the item's diff, at most `max` lines; `true` when lines were left
+/// out.
+fn print_diff(item: &Item, max: Option<usize>) -> bool {
     let old = item.local.as_deref().unwrap_or_default();
     let diff = super::state_cmd::unified_diff(old, &item.content, "local", "nexus");
-    const MAX_LINES: usize = 80;
     let lines: Vec<&str> = diff.lines().collect();
-    for line in lines.iter().take(MAX_LINES) {
+    let shown = max.unwrap_or(lines.len()).min(lines.len());
+    for line in &lines[..shown] {
         let styled = if line.starts_with('+') && !line.starts_with("+++") {
             style(*line).green()
         } else if line.starts_with('-') && !line.starts_with("---") {
@@ -1424,9 +1435,10 @@ fn print_item(item: &Item, state: State) {
         };
         println!("     {styled}");
     }
-    if lines.len() > MAX_LINES {
-        println!("     ... {} more line(s)", lines.len() - MAX_LINES);
+    if lines.len() > shown {
+        println!("     ... {} more line(s)", lines.len() - shown);
     }
+    lines.len() > shown
 }
 
 /// Ask for the pending items: all at once or one by one.
@@ -1461,7 +1473,25 @@ fn prompt(pending: &[(&Item, State)]) -> Vec<bool> {
         Some(0) => pending
             .iter()
             .map(|(item, state)| {
-                print_item(item, *state);
+                // A long diff is shortened, with the full one on request
+                // before the decision.
+                if print_item(item, *state, Some(PREVIEW_LINES)) {
+                    let pick = dialoguer::Select::with_theme(&theme)
+                        .with_prompt(format!("Install {}?", item.label()))
+                        .items(&["Skip", "Install", "Show the full diff"])
+                        .default(0)
+                        .interact_opt()
+                        .ok()
+                        .flatten();
+                    match pick {
+                        Some(1) => return true,
+                        Some(2) => {
+                            println!();
+                            print_diff(item, None);
+                        }
+                        _ => return false,
+                    }
+                }
                 dialoguer::Confirm::with_theme(&theme)
                     .with_prompt(format!("Install {}?", item.label()))
                     .default(false)
@@ -1866,6 +1896,16 @@ mod tests {
             server_hash: Some("ours".into()),
             slot: Slot::Workspace,
         }
+    }
+
+    /// A long diff is shortened in the preview and complete on request.
+    #[test]
+    fn test_print_diff_reports_left_out_lines() {
+        let mut long = item("f", None, false);
+        long.content = (0..200).map(|i| format!("line {i}\n")).collect();
+        assert!(print_diff(&long, Some(PREVIEW_LINES)));
+        assert!(!print_diff(&long, None));
+        assert!(!print_diff(&item("f", None, false), Some(PREVIEW_LINES)));
     }
 
     #[test]

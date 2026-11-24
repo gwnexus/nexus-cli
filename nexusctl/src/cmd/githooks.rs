@@ -267,12 +267,14 @@ mod tests {
         assert_eq!(local_hooks_path(&dir).as_deref(), Some(".husky"));
         git(&dir, &["config", "--local", "--unset", "core.hooksPath"]).unwrap();
 
-        let report = self_heal(&dir, || true, |_| true);
+        // Checked before self_heal, which would set the local value and
+        // so hide whether the setting was inherited.
         if git(&dir, &["config", "--get", "core.hooksPath"]).is_some() {
             // A global hooksPath on this machine: left alone as well.
             let _ = fs::remove_dir_all(&dir);
             return;
         }
+        let report = self_heal(&dir, || true, |_| true);
         assert_eq!(report.outcome, HookOutcome::Set);
         assert!(!report.gitleaks_missing);
         assert_eq!(local_hooks_path(&dir).as_deref(), Some(".githooks"));

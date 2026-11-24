@@ -1110,7 +1110,8 @@ env values) and ask before a new or changed item lands on disk:
 ```
 
 "Review each" shows the command and a diff against the local file (env values
-only as a short hash). A refused item keeps its local version, or is left out
+only as a short hash). A diff longer than 80 lines is shortened; the prompt
+then offers Skip, Install or "Show the full diff" before you decide. A refused item keeps its local version, or is left out
 when there is none; the rest of the pull continues. Without a terminal, new
 or changed items are skipped and listed; `--trust` accepts them (for CI).
 Items that are already on disk exactly as they would be written are accepted
