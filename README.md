@@ -1239,6 +1239,19 @@ project is no longer shadowed, or its devbox files are excluded instead),
 the next pull deletes it with its exclude line; an edited copy stays and is
 reported. Backends without the field leave them alone.
 
+**Tracked devbox files stay as committed.** A git exclude does not cover
+files git already tracks, so in a shadowed project (level `ai` or `nexus`,
+or the devbox files shadowed) `nexus pull` does not write the Nexus version
+of a workspace file over a tracked one whose committed content differs:
+it keeps the file, prints `kept: <path>` and lists the kept files at the
+end. `-y` does not change that; `nexus pull --force` writes the Nexus
+version anyway. When the working copy already carries an earlier Nexus
+version, the message points to `git diff` and `git restore`. To let Nexus
+manage such a file outside git, remove it from the index
+(`git rm --cached -- <file>`) and commit that. A devbox file that is a
+symlink is checked against the file it points to. `nexus pull --dry-run` shows these files
+as `KEEP tracked, shadowed project`.
+
 When the server sets a level, `nexus shadow status` labels the old local
 agentic block as `Local shadow block (legacy)` and the devbox block as
 `Workspace shadow (devbox files)`, so neither reads as a contradiction to the
@@ -1610,6 +1623,7 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 - Each project uses exactly one runtime (`agent_owner`: OpenCode or Claude Code); `nexus pull` only writes that runtime's files. Run `nexus link` to see which runtime is configured. When the backend cannot report the owner (project detail unreachable, or no owner while Claude Code is cached), pull keeps the owner cached in `.nexus/config.toml` and removes nothing of the other runtime.
 - Switching `agent_owner` is safe at any time: the next `nexus pull` writes the new runtime's projection and then removes what Nexus had put on disk for the old one (OpenCode: `.opencode/` commands, plugins, install artifacts, the Nexus parts of `opencode.json`; Claude Code: CCX files and hooks, rendered skills and agents, the Nexus keys in `.claude/settings.json`, the Nexus servers in `.mcp.json`, the `CLAUDE.md` managed block). Locally modified Nexus files are kept and listed; `nexus pull --force` removes them too (for OpenCode the whole `.opencode/`). Files Nexus never wrote under `.claude/` and `.claude/settings.local.json` are never touched. Switching back recreates everything.
 - Committed workspace files are protected: when `devbox.json` or a script equals `HEAD`, differs from what Nexus last delivered and the workspace fork has a different version, `nexus pull` keeps it and suggests `nexus diff`, then `nexus push` (publish the committed version) or `nexus pull --force` (take the fork version, with a warning to review `git diff`).
+- In a shadowed project a tracked workspace file whose committed content differs from the Nexus version is never overwritten without an explicit `--force` (see Shadow Mode), so the Nexus version cannot end up in the repository.
 - If the repo ships `.githooks/pre-commit`, `nexus pull` offers to set `git config core.hooksPath .githooks` when it is unset (a value set on purpose is never overridden, only hinted) and warns when the hook needs `gitleaks` but it is not installed. Hooks run code on every commit, so they are activated only after a confirmation on a terminal (default no) or with `--trust`; a non-interactive pull leaves them inactive and prints how to enable them.
 
 ## Cost Control Tools

@@ -288,3 +288,87 @@ extern "C" {
     #[link_name = "geteuid"]
     fn libc_geteuid() -> u32;
 }
+
+/// In a shadowed project a devbox file git tracks keeps its committed
+/// content: `-y` does not replace it, a dry run says so, a working copy
+/// that already carries an earlier Nexus version is kept with a hint, and
+/// only `--force` writes the Nexus version.
+#[test]
+fn shadowed_project_keeps_tracked_devbox_files() {
+    let mut backend = full_backend();
+    backend.shadow = Some("nexus");
+    let (api, ws) = setup(&backend);
+    let committed = "#!/bin/sh\necho own setup\n";
+    ws.write(SETUP, committed);
+    ws.git(&["add", SETUP]);
+    ws.git(&["commit", "-qm", "own devbox"]);
+
+    ws.nexus(&api, &["pull", "--dry-run", "--trust"])
+        .assert_ok()
+        .assert_contains("KEEP tracked, shadowed project scripts/devbox/setup.sh");
+    ws.nexus(&api, &["pull", "--trust", "-y"])
+        .assert_ok()
+        .assert_contains("kept: scripts/devbox/setup.sh (tracked by git in a shadowed project")
+        .assert_contains("1 tracked file(s) of this shadowed project were kept")
+        .assert_contains("git rm --cached -- <file>");
+    assert_eq!(ws.read(SETUP), committed);
+    // Untracked workspace files are delivered as before.
+    assert!(ws.read(CHECK).contains("echo check"));
+    assert_eq!(ws.git(&["status", "--porcelain", "--", SETUP]).trim(), "");
+
+    // --force writes the Nexus version; the next update is kept again and
+    // points at the uncommitted Nexus content.
+    ws.nexus(&api, &["pull", "--trust", "--force"]).assert_ok();
+    assert!(ws.read(SETUP).contains("echo setup"));
+    let mut next = backend.clone();
+    next.scripts[0].1 = "#!/bin/sh\necho setup v2\n".into();
+    next.install(&api);
+    let run = ws.nexus(&api, &["pull", "--trust", "-y"]);
+    run.assert_ok()
+        .assert_contains("kept: scripts/devbox/setup.sh")
+        .assert_contains("git restore -- scripts/devbox/setup.sh");
+    assert!(!ws.read(SETUP).contains("v2"));
+
+    // A devbox file that is a link to a tracked file is checked against
+    // the file it points to.
+    #[cfg(unix)]
+    {
+        let link = "scripts/devbox/alias.sh";
+        std::os::unix::fs::symlink("setup.sh", ws.path(link)).unwrap();
+        ws.git(&["restore", "--", SETUP]);
+        let mut linked = next.clone();
+        linked
+            .scripts
+            .push((link.into(), "#!/bin/sh\necho via link\n".into(), true));
+        linked.install(&api);
+        ws.nexus(&api, &["pull", "--trust", "-y"])
+            .assert_ok()
+            .assert_contains("kept: scripts/devbox/alias.sh");
+        assert_eq!(ws.read(SETUP), committed);
+        std::fs::remove_file(ws.path(link)).unwrap();
+    }
+
+    // The committed content equals the Nexus version: a plain update.
+    next.scripts[0].1 = committed.into();
+    next.install(&api);
+    ws.nexus(&api, &["pull", "--trust", "-y"]).assert_ok();
+    assert_eq!(ws.read(SETUP), committed);
+}
+
+/// Without shadow a tracked file the backend delivered before follows the
+/// fork as before.
+#[test]
+fn unshadowed_project_updates_delivered_tracked_files() {
+    let backend = full_backend();
+    let (api, ws) = setup(&backend);
+    ws.nexus(&api, &["pull", "--trust"]).assert_ok();
+    ws.git(&["add", SETUP]);
+    ws.git(&["commit", "-qm", "devbox"]);
+    let mut next = backend.clone();
+    next.scripts[0].1 = "#!/bin/sh\necho setup v2\n".into();
+    next.install(&api);
+    let run = ws.nexus(&api, &["pull", "--trust"]);
+    run.assert_ok();
+    assert!(!run.all().contains("shadowed project"));
+    assert!(ws.read(SETUP).contains("v2"));
+}

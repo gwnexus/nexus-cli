@@ -1000,8 +1000,13 @@ pub async fn run_with_root_hook(
         let mut items = Vec::new();
         let mut declared = Vec::new();
         if pull_scope("workspace") {
-            let (ws_items, ws_declared) =
-                dry_run_workspace(&client, &project_id, &workspace).await?;
+            let (ws_items, ws_declared) = dry_run_workspace(
+                &client,
+                &project_id,
+                &workspace,
+                af_export_result.as_ref().ok(),
+            )
+            .await?;
             items.extend(ws_items);
             declared.extend(ws_declared);
         }
@@ -1989,6 +1994,10 @@ pub async fn run_with_root_hook(
                 v2_ok = true;
                 let mut ws_written = 0;
                 let held = consent.workspace_v2(&workspace, &export);
+                ws_report.keep_tracked = keeps_tracked_workspace(
+                    af_export_result.as_ref().ok(),
+                    export.meta.shadow_mode,
+                );
 
                 // devbox.json and scripts: same rules for every workspace
                 // file (see sync_workspace_file).
@@ -2112,6 +2121,10 @@ pub async fn run_with_root_hook(
                     } else {
                         let mut ws_written = 0;
                         let held = consent.workspace_v1(&workspace, &ws_export);
+                        ws_report.keep_tracked = keeps_tracked_workspace(
+                            af_export_result.as_ref().ok(),
+                            ws_export.shadow_mode,
+                        );
 
                         // Composed workspace template (devbox.json) and
                         // scripts, with the same rules as the v2 path.
@@ -2476,6 +2489,61 @@ pub(crate) struct WorkspaceSyncReport {
     pub skipped_committed: Vec<String>,
     /// Committed files replaced by the fork version (--force).
     pub overwrote_committed: Vec<String>,
+    /// Set before syncing: the project is shadowed, so a file git tracks
+    /// keeps its committed content (see [`shadow_keeps_tracked`]).
+    pub keep_tracked: bool,
+    /// Tracked files kept because the Nexus version would land in git.
+    pub kept_tracked: Vec<String>,
+}
+
+/// Whether a pull keeps git-tracked workspace files at their committed
+/// content: the shadow level hides AI and Nexus tooling (`ai`, `nexus`),
+/// or the workspace files are kept out of git (the server's effective
+/// `shadow_workspace`, else the fork's shadow mode unless switched off
+/// locally). A git exclude does not cover tracked files, so writing the
+/// Nexus version there would put it into the repository.
+pub(crate) fn keeps_tracked_workspace(
+    af_export: Option<&nexus_core::api::AgentFileExportResponse>,
+    fork_shadow_mode: bool,
+) -> bool {
+    let level = af_export
+        .and_then(|e| e.shadow.as_deref())
+        .is_some_and(|l| matches!(l, "ai" | "nexus"));
+    let workspace = match af_export.and_then(|e| e.shadow_workspace) {
+        Some(on) => on,
+        None => fork_shadow_mode && !super::shadow::workspace_opted_out(),
+    };
+    level || workspace
+}
+
+/// The workspace path git tracks for `rel`: the file a symlink at `rel`
+/// points to (a write goes through the link), else `rel` itself.
+fn tracked_rel(workspace: &Path, rel: &str) -> String {
+    let target = workspace.join(rel);
+    if is_symlink(&target) {
+        if let (Ok(file), Ok(root)) = (fs::canonicalize(&target), fs::canonicalize(workspace)) {
+            if let Ok(inner) = file.strip_prefix(&root) {
+                return inner.to_string_lossy().into_owned();
+            }
+        }
+    }
+    rel.to_string()
+}
+
+/// In a shadowed project: whether a workspace file is kept because git
+/// tracks it (`head` is its committed content) and the Nexus version
+/// differs from both the committed and the local copy. Only an explicit
+/// `--force` writes it; `-y` does not.
+pub(crate) fn shadow_keeps_tracked(
+    local: Option<&str>,
+    incoming: &str,
+    head: impl FnOnce() -> Option<String>,
+    explicit_force: bool,
+) -> bool {
+    if explicit_force || local.is_some_and(|l| nexus_core::hash::text_equivalent(l, incoming)) {
+        return false;
+    }
+    head().is_some_and(|h| !nexus_core::hash::text_equivalent(&h, incoming))
 }
 
 /// Why a workspace file is not written.
@@ -2687,6 +2755,38 @@ fn sync_file_as(
     let local = local_bytes
         .as_ref()
         .map(|b| String::from_utf8_lossy(b).into_owned());
+    if report.keep_tracked && !local_only {
+        let mut head = None;
+        if shadow_keeps_tracked(
+            local.as_deref(),
+            body,
+            || {
+                head = git_head_content(workspace, &tracked_rel(workspace, rel));
+                head.clone()
+            },
+            explicit_force,
+        ) {
+            println!(
+                "   {} kept: {} (tracked by git in a shadowed project; the Nexus version differs \
+                 from the committed one and would end up in the repository. Keep Nexus tooling \
+                 in the git-excluded overlay, or run `nexus pull --force` to write it anyway)",
+                style("!").bold().yellow(),
+                rel
+            );
+            let differs = match (&local, &head) {
+                (Some(l), Some(h)) => !nexus_core::hash::text_equivalent(l, h),
+                _ => true,
+            };
+            if differs {
+                println!(
+                    "      the working copy differs from HEAD: review it with `git diff -- {rel}`; \
+                     `git restore -- {rel}` brings back the committed version"
+                );
+            }
+            report.kept_tracked.push(rel.to_string());
+            return Ok(false);
+        }
+    }
     let recorded = super::ccx::sync_manifest_hash(manifest, rel);
     let action = decide_workspace_write(
         local.as_deref(),
@@ -2816,6 +2916,25 @@ fn sync_file_as(
 /// Summary lines for committed workspace files the fork version would
 /// revert (C3 overwrite guard).
 fn print_committed_workspace_summary(report: &WorkspaceSyncReport) {
+    if !report.kept_tracked.is_empty() {
+        println!();
+        println!(
+            "   {} {} tracked file(s) of this shadowed project were kept at their committed content:",
+            style("!").bold().yellow(),
+            report.kept_tracked.len()
+        );
+        for path in &report.kept_tracked {
+            println!("      {}", style(path).yellow());
+        }
+        println!(
+            "   To let Nexus manage them outside git, remove each from the index ({}) and commit that;",
+            style("git rm --cached -- <file>").bold()
+        );
+        println!(
+            "   to write the Nexus version anyway, run {}.",
+            style("nexus pull --force").bold()
+        );
+    }
     if !report.overwrote_committed.is_empty() {
         println!();
         println!(
@@ -3579,6 +3698,7 @@ fn preview_workspace_files(
     workspace: &Path,
     manifest: &serde_json::Value,
     files: &[(&str, &str, bool)],
+    keep_tracked: bool,
 ) -> usize {
     let mut changes = 0;
     for (rel, body, executable) in files {
@@ -3599,6 +3719,21 @@ fn preview_workspace_files(
                 continue;
             }
         };
+        if keep_tracked
+            && shadow_keeps_tracked(
+                local.as_deref(),
+                body,
+                || git_head_content(workspace, &tracked_rel(workspace, rel)),
+                false,
+            )
+        {
+            println!(
+                "   {} {rel}",
+                style("KEEP tracked, shadowed project").bold().yellow()
+            );
+            changes += 1;
+            continue;
+        }
         let action = decide_workspace_write(
             local.as_deref(),
             body,
@@ -3642,6 +3777,7 @@ async fn dry_run_workspace(
     client: &NexusClient,
     project_id: &str,
     workspace: &Path,
+    af_export: Option<&nexus_core::api::AgentFileExportResponse>,
 ) -> anyhow::Result<(
     Vec<super::consent::Item>,
     Vec<nexus_core::api::ExportedExecutable>,
@@ -3683,7 +3819,8 @@ async fn dry_run_workspace(
                             .iter()
                             .map(|s| (s.target_path.as_str(), s.body.as_str(), s.executable)),
                     );
-                    let mut changes = preview_workspace_files(workspace, &manifest, &files);
+                    let keep = keeps_tracked_workspace(af_export, v1.shadow_mode);
+                    let mut changes = preview_workspace_files(workspace, &manifest, &files, keep);
                     // The removals a v1 pull applies, as for v2 below.
                     let exported: Vec<&str> = files.iter().map(|(p, _, _)| *p).collect();
                     for item in plan_dropped_workspace_files(workspace, &manifest, &exported) {
@@ -3719,7 +3856,8 @@ async fn dry_run_workspace(
             .map(|s| (s.path.as_str(), s.body.as_str(), s.executable)),
     );
 
-    let mut changes = preview_workspace_files(workspace, &manifest, &files);
+    let keep = keeps_tracked_workspace(af_export, export.meta.shadow_mode);
+    let mut changes = preview_workspace_files(workspace, &manifest, &files, keep);
 
     let exported: Vec<&str> = files.iter().map(|(p, _, _)| *p).collect();
     for item in plan_dropped_workspace_files(workspace, &manifest, &exported) {
@@ -9615,6 +9753,74 @@ mod tests {
     /// still counts a new file under a confined directory.
     #[cfg(unix)]
     #[test]
+    fn test_shadow_keeps_tracked_only_differing_committed_files() {
+        let committed = || Some("echo own\n".to_string());
+        // Tracked, committed content differs from the Nexus version: kept.
+        assert!(shadow_keeps_tracked(
+            Some("echo own\n"),
+            "echo nexus",
+            committed,
+            false
+        ));
+        // Also when the working copy already carries another version or is gone.
+        assert!(shadow_keeps_tracked(
+            Some("echo old nexus"),
+            "echo nexus",
+            committed,
+            false
+        ));
+        assert!(shadow_keeps_tracked(None, "echo nexus", committed, false));
+        // An explicit --force writes it.
+        assert!(!shadow_keeps_tracked(
+            Some("echo own\n"),
+            "echo nexus",
+            committed,
+            true
+        ));
+        // Untracked, or the committed content is the Nexus version: written.
+        assert!(!shadow_keeps_tracked(
+            Some("echo old"),
+            "echo nexus",
+            || None,
+            false
+        ));
+        assert!(!shadow_keeps_tracked(
+            Some("echo old"),
+            "echo own",
+            committed,
+            false
+        ));
+        // Already equal: nothing to keep, and git is not asked.
+        assert!(!shadow_keeps_tracked(
+            Some("echo nexus\n"),
+            "echo nexus",
+            || panic!("git asked for an unchanged file"),
+            false
+        ));
+    }
+
+    #[test]
+    fn test_keeps_tracked_workspace_follows_the_shadow_level_and_target() {
+        let export = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "project_id": "p", "project_name": "n", "agent_files": [], "count": 0
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<nexus_core::api::AgentFileExportResponse>(v).unwrap()
+        };
+        for level in ["ai", "nexus"] {
+            let e = export(serde_json::json!({"shadow": level, "shadow_workspace": false}));
+            assert!(keeps_tracked_workspace(Some(&e), false), "{level}");
+        }
+        let off = export(serde_json::json!({"shadow": "off", "shadow_workspace": false}));
+        assert!(!keeps_tracked_workspace(Some(&off), true));
+        let ws = export(serde_json::json!({"shadow": "off", "shadow_workspace": true}));
+        assert!(keeps_tracked_workspace(Some(&ws), false));
+    }
+
+    #[test]
     fn test_preview_workspace_files_skips_linked_targets() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -9623,9 +9829,9 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), ws.join("scripts/devbox")).unwrap();
         let manifest = serde_json::json!({});
         let linked = [("scripts/devbox/new.sh", "x\n", true)];
-        assert_eq!(preview_workspace_files(ws, &manifest, &linked), 0);
+        assert_eq!(preview_workspace_files(ws, &manifest, &linked, false), 0);
         let plain = [("scripts/new.sh", "x\n", true)];
-        assert_eq!(preview_workspace_files(ws, &manifest, &plain), 1);
+        assert_eq!(preview_workspace_files(ws, &manifest, &plain, false), 1);
     }
 
     /// Pull and dry run share one TASKS.md decision: a managed snapshot is
