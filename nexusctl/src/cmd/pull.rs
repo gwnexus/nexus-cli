@@ -2429,13 +2429,22 @@ fn sync_file_as(
         force,
         explicit_force,
     );
+    // A record that cannot be saved (manifest locked or broken) is
+    // reported: the next pull would otherwise take the file for an edit.
     let record = || {
         let hash = sha256_hex(body);
-        let _ = if local_only {
+        let saved = if local_only {
             super::sync::update_local_script_manifest_after_pull(workspace, rel, &hash)
         } else {
             super::sync::update_workspace_manifest_after_pull(workspace, rel, &hash)
         };
+        if let Err(e) = saved {
+            println!(
+                "   {} {} is up to date, but its record was not saved: {e}; run nexus pull again",
+                style("!").bold().yellow(),
+                rel
+            );
+        }
     };
     match action {
         WorkspaceAction::Unchanged => {
