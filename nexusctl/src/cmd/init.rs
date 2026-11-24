@@ -457,6 +457,15 @@ pub async fn run(
                             "   {} No directives for this project.",
                             style("--").yellow()
                         );
+                    } else if super::pull::directives_user_managed(
+                        &target.join(&agentic_root).join("directives.md"),
+                        force,
+                    ) {
+                        println!(
+                            "   {} {}/directives.md is user-managed (no nexus-platform marker), skipping",
+                            style("--").yellow(),
+                            agentic_root
+                        );
                     } else {
                         super::pull::write_directives(
                             &target,

@@ -1051,7 +1051,8 @@ catalog plus project rules. `nexus pull` renders them into
 `.nexus/directives.md` as a compact list, grouped by category in the order
 the server sends them (`nexus init` uses the same writer and records the
 file the same way, so `nexus status` tracks it; a target linked out of the
-workspace or into `.git` is not written):
+workspace or into `.git` is not written, and an existing `directives.md`
+without the Nexus marker is kept unless `--force` is given):
 
 ```markdown
 ## Security

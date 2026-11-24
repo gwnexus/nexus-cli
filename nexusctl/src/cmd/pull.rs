@@ -3468,10 +3468,9 @@ async fn prune_dropped_skill_files(
     }
 }
 
-/// Dry run: what the task snapshot would become.
 /// An existing `directives.md` without the Nexus marker is the operator's:
-/// a pull without `--force` leaves it alone.
-fn directives_user_managed(path: &Path, force: bool) -> bool {
+/// pull and init leave it alone without `--force`.
+pub(crate) fn directives_user_managed(path: &Path, force: bool) -> bool {
     !force && path.exists() && !is_managed_file(path)
 }
 
@@ -5836,6 +5835,21 @@ mod tests {
             std::fs::read_to_string(outside.path().join("victim")).unwrap(),
             "keep\n"
         );
+    }
+
+    #[test]
+    fn test_directives_user_managed() {
+        let ws = tempfile::tempdir().unwrap();
+        let path = ws.path().join("directives.md");
+        // Missing: written.
+        assert!(!directives_user_managed(&path, false));
+        // The operator's own file: kept unless forced.
+        std::fs::write(&path, "# my rules\n").unwrap();
+        assert!(directives_user_managed(&path, false));
+        assert!(!directives_user_managed(&path, true));
+        // A Nexus file: managed.
+        std::fs::write(&path, "---\nsource: nexus-platform\n---\n").unwrap();
+        assert!(!directives_user_managed(&path, false));
     }
 
     #[test]
