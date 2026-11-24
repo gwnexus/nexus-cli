@@ -2708,9 +2708,14 @@ fn sync_file_as(
             overwrote_modified,
             reverted_commit,
         } => {
-            // Re-read right before writing: a save during the git check
-            // or a prompt is kept.
-            if !matches!(read_existing(&target), Ok(ref now) if *now == local_bytes) {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            // Replaced only while it still holds the bytes read above: a
+            // save during the git check, a prompt or the write itself is
+            // kept.
+            let new = nexus_core::hash::with_single_trailing_newline(body);
+            if !replace_if_unchanged(&target, local_bytes.as_deref(), new.as_bytes())? {
                 println!(
                     "   {} skipped: {} (changed during the pull)",
                     style("!").bold().yellow(),
@@ -2719,13 +2724,6 @@ fn sync_file_as(
                 report.skipped_modified.push(rel.to_string());
                 return Ok(false);
             }
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(
-                &target,
-                nexus_core::hash::with_single_trailing_newline(body),
-            )?;
             if executable && needs_exec_repair(&target) {
                 // The body is written; the record waits for the mode, so
                 // the next pull repairs it. The other files still sync.
@@ -2905,9 +2903,14 @@ fn apply_dropped(
     for item in plan {
         let (path, approved) = match item {
             DroppedFile::Remove(path, approved) => (path, approved),
-            // Back on disk since the plan: kept with its record.
-            DroppedFile::Gone(path) if fs::symlink_metadata(workspace.join(path)).is_ok() => {
-                outcomes.push(DroppedFile::Changed(path.clone()));
+            // Back on disk since the plan: kept with its record. Only a
+            // confirmed absence stays `Gone`.
+            DroppedFile::Gone(path) => {
+                outcomes.push(match fs::symlink_metadata(workspace.join(path)) {
+                    Ok(_) => DroppedFile::Changed(path.clone()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => item.clone(),
+                    Err(e) => DroppedFile::Unreadable(path.clone(), e.to_string()),
+                });
                 continue;
             }
             _ => {
@@ -2916,23 +2919,143 @@ fn apply_dropped(
             }
         };
         let target = workspace.join(path);
-        match read_existing(&target) {
-            Ok(Some(local)) if still_approved(path, approved, &local) => {
-                // One failed removal does not hide the ones done before.
-                match fs::remove_file(&target) {
-                    Ok(()) => {
-                        remove_empty_parents(&stop_at(path), &target);
-                        outcomes.push(item.clone());
-                    }
-                    Err(e) => outcomes.push(DroppedFile::Failed(path.clone(), e.to_string())),
+        // One failed removal does not hide the ones done before.
+        outcomes.push(
+            match remove_if_unchanged(&target, |local| still_approved(path, approved, local)) {
+                Ok(Removal::Removed) => {
+                    remove_empty_parents(&stop_at(path), &target);
+                    item.clone()
                 }
-            }
-            Ok(Some(_)) => outcomes.push(DroppedFile::Changed(path.clone())),
-            Ok(None) => outcomes.push(DroppedFile::Gone(path.clone())),
-            Err(e) => outcomes.push(DroppedFile::Unreadable(path.clone(), e.to_string())),
-        }
+                Ok(Removal::Changed) => DroppedFile::Changed(path.clone()),
+                Ok(Removal::Gone) => DroppedFile::Gone(path.clone()),
+                Err(RemovalError::Read(e)) => DroppedFile::Unreadable(path.clone(), e.to_string()),
+                Err(RemovalError::Remove(e)) => DroppedFile::Failed(path.clone(), e.to_string()),
+            },
+        );
     }
     Ok(outcomes)
+}
+
+/// What [`remove_if_unchanged`] did.
+enum Removal {
+    Removed,
+    /// Kept: the bytes did not pass the check (or a new file took the path).
+    Changed,
+    Gone,
+}
+
+enum RemovalError {
+    Read(std::io::Error),
+    Remove(std::io::Error),
+}
+
+/// A sibling path for moving `target` aside while it is checked.
+fn aside_path(target: &Path) -> std::path::PathBuf {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    target.with_file_name(format!(".{name}.nexus-pull-{}", std::process::id()))
+}
+
+/// Put the moved-aside file back without replacing a file saved at
+/// `target` meanwhile; when that one exists, the moved copy stays next to
+/// it and is reported.
+fn restore_aside(aside: &Path, target: &Path) {
+    if fs::hard_link(aside, target).is_ok() {
+        let _ = fs::remove_file(aside);
+    } else if fs::symlink_metadata(target).is_ok() {
+        println!(
+            "   {} {} was saved again during the pull; the earlier copy is kept as {}",
+            style("!").bold().yellow(),
+            target.display(),
+            aside.display()
+        );
+    } else {
+        let _ = fs::rename(aside, target);
+    }
+}
+
+/// Remove `target` only in the state `approve` accepts. The file is first
+/// moved aside (atomic), so a save made while it is checked lands in a new
+/// file that is never touched; the moved bytes are what gets checked.
+fn remove_if_unchanged(
+    target: &Path,
+    approve: impl Fn(&[u8]) -> bool,
+) -> Result<Removal, RemovalError> {
+    let aside = aside_path(target);
+    match fs::rename(target, &aside) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Removal::Gone),
+        Err(e) => return Err(RemovalError::Remove(e)),
+    }
+    let bytes = match fs::read(&aside) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            restore_aside(&aside, target);
+            return Err(RemovalError::Read(e));
+        }
+    };
+    if !approve(&bytes) {
+        restore_aside(&aside, target);
+        return Ok(Removal::Changed);
+    }
+    fs::remove_file(&aside).map_err(RemovalError::Remove)?;
+    Ok(Removal::Removed)
+}
+
+/// Replace `target` with `new` only while it holds `expected` (`None`:
+/// missing). The new content is prepared in a temporary file with the old
+/// mode, the old file is moved aside and checked, and the new one is linked
+/// in without replacing anything: a save made meanwhile is kept. Returns
+/// whether `new` is in place.
+fn replace_if_unchanged(
+    target: &Path,
+    expected: Option<&[u8]>,
+    new: &[u8],
+) -> anyhow::Result<bool> {
+    let tmp = target.with_file_name(format!(
+        ".{}.nexus-new-{}",
+        target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        std::process::id()
+    ));
+    fs::write(&tmp, new)?;
+    let cleanup = |r: anyhow::Result<bool>| {
+        let _ = fs::remove_file(&tmp);
+        r
+    };
+    let aside = aside_path(target);
+    match expected {
+        None => {}
+        Some(expected) => {
+            if let Ok(meta) = fs::metadata(target) {
+                let _ = fs::set_permissions(&tmp, meta.permissions());
+            }
+            match fs::rename(target, &aside) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return cleanup(Ok(false)),
+                Err(e) => return cleanup(Err(e.into())),
+            }
+            if !matches!(fs::read(&aside), Ok(ref now) if now.as_slice() == expected) {
+                restore_aside(&aside, target);
+                return cleanup(Ok(false));
+            }
+        }
+    }
+    // No-clobber: fails when a file was saved at `target` meanwhile.
+    if fs::hard_link(&tmp, target).is_err() {
+        if expected.is_some() {
+            restore_aside(&aside, target);
+        }
+        return cleanup(Ok(false));
+    }
+    if expected.is_some() {
+        let _ = fs::remove_file(&aside);
+    }
+    cleanup(Ok(true))
 }
 
 /// The records to drop after applying a removal plan: a removed file only
@@ -9250,6 +9373,67 @@ mod tests {
             "{outcome:?}"
         );
         assert!(load_pull_manifest(ws, ".nexus").contains_key(&path));
+    }
+
+    #[test]
+    fn test_replace_if_unchanged_keeps_a_newer_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devbox.json");
+        fs::write(&path, "old").unwrap();
+        // Saved after the read: not replaced.
+        fs::write(&path, "saved").unwrap();
+        assert!(!replace_if_unchanged(&path, Some(b"old"), b"new").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "saved");
+        assert!(replace_if_unchanged(&path, Some(b"saved"), b"new").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        // Expected missing, but a file appeared: kept.
+        let fresh = dir.path().join("fresh.sh");
+        fs::write(&fresh, "mine").unwrap();
+        assert!(!replace_if_unchanged(&fresh, None, b"theirs").unwrap());
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "mine");
+        // No helper files are left behind.
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_replace_if_unchanged_keeps_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sh");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(replace_if_unchanged(&path, Some(b"old"), b"new").unwrap());
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn test_remove_if_unchanged_checks_the_moved_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.sh");
+        fs::write(&path, "edited").unwrap();
+        assert!(matches!(
+            remove_if_unchanged(&path, |b| b == b"a"),
+            Ok(Removal::Changed)
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "edited");
+        assert!(matches!(
+            remove_if_unchanged(&path, |b| b == b"edited"),
+            Ok(Removal::Removed)
+        ));
+        assert!(!path.exists());
+        assert!(matches!(
+            remove_if_unchanged(&path, |_| true),
+            Ok(Removal::Gone)
+        ));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

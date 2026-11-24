@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`TASKS.md` is cleared only when Nexus wrote it**, and is never written through a symlink or outside the workspace.
 - **Prerequisite checks time out after 5 seconds** instead of stalling the pull.
 - **An unreadable generated file is not offered for overwriting,** and a failed confirmation keeps the modified files.
-- **`nexus pull` keeps what changed while it ran.** A workspace file saved after pull read it is not overwritten, a dropped file back on disk keeps its record, a record re-written by another pull is not dropped, and a failed removal no longer hides the ones done before it. A dropped Zellij config that cannot be read keeps its record.
+- **`nexus pull` keeps what changed while it ran.** Workspace files are replaced and dropped files removed only after the old file was moved aside and checked, and the new file is put in place without replacing a save made meanwhile (an earlier copy that cannot go back is kept next to it and named), a dropped file back on disk keeps its record, a record re-written by another pull is not dropped, and a failed removal no longer hides the ones done before it. A dropped Zellij config that cannot be read keeps its record.
 - **Claude Code's `.claude/skills/` copies keep local edits without `--force`,** like the other generated skill files.
 - **`nexus pull --scope tasks` and `--scope workspace` no longer need the skills export,** and the GitHub account step runs only with the `agents` scope.
 - **`nexus status` reports an unreadable dropped skill as unreadable** instead of as edited.
