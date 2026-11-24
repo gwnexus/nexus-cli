@@ -1302,7 +1302,11 @@ pub async fn run_with_root_hook(
                             }
                         }
 
-                        write_agent_file(&workspace, af)?;
+                        // Skipped (settings.json is merged, not written):
+                        // neither counted nor recorded.
+                        if !write_agent_file(&workspace, af)? {
+                            continue;
+                        }
                         af_written_paths.insert(af.target_path.clone());
 
                         // Record the (generated_at-normalized) hash of what was
@@ -4134,10 +4138,12 @@ fn sync_agents_md(
 ///
 /// Creates any intermediate directories as needed.
 /// The file body is already template-substituted by the server.
+/// Returns `false` when the target is skipped (`.claude/settings.json`,
+/// merged by the Claude Code projection), so the caller records nothing.
 pub fn write_agent_file(
     workspace: &Path,
     af: &nexus_core::api::ExportedAgentFile,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     // Path traversal / absolute-path escape protection, checked first so
     // a malformed target_path is rejected before any exists()/join() call
     // touches it.
@@ -4150,7 +4156,7 @@ pub fn write_agent_file(
             style("!").bold().yellow(),
             af.target_path
         );
-        return Ok(());
+        return Ok(false);
     }
 
     // Protected file guard: never overwrite secrets/env files
@@ -4173,7 +4179,7 @@ pub fn write_agent_file(
     fs::write(&target, &af.body)?;
     print_synced(&af.target_path);
 
-    Ok(())
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -7869,7 +7875,9 @@ mod tests {
             content_hash: None,
             agent_file_id: None,
         };
-        write_agent_file(ws.path(), &af).unwrap();
+        // Reported as not written, so the caller neither counts nor
+        // records it in the sync manifest.
+        assert!(!write_agent_file(ws.path(), &af).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ invalid,");
     }
 

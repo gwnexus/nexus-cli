@@ -1825,33 +1825,38 @@ mod tests {
 
     #[test]
     fn test_settings_json_is_never_a_ccx_file_or_orphan() {
-        let dir = tmp_dir("ccx-settings");
         let settings = ".claude/settings.json";
-        fs_write(&dir, settings, "{\"mine\": true}\n");
-        // An earlier CCX run recorded it, with matching bytes.
-        let mut files = BTreeMap::new();
-        files.insert(
-            settings.to_string(),
-            CcxLockFileEntry {
-                file_key: "k".into(),
-                sha256: sha256_hex("{\"mine\": true}\n"),
-            },
-        );
-        record_ccx_in_lock(&dir, ".nexus", &bundle("rev-1"), files).unwrap();
-        // Neither delivered nor deleted, also with --force.
-        for force in [ForceMode::None, ForceMode::Force] {
-            let out = pull(&dir, &[ccx_file(settings, "{}\n")], force);
-            assert!(out.iter().all(|o| o.target_path != settings), "{out:?}");
+        let body = "{\"mine\": true}\n";
+        // Delivered, or only left in the lock (orphan), with and without
+        // --force: never written or deleted, and the lock entry drops out.
+        for delivered in [true, false] {
+            for force in [ForceMode::None, ForceMode::Force] {
+                let dir = tmp_dir(&format!("ccx-settings-{delivered}-{force:?}"));
+                fs_write(&dir, settings, body);
+                let mut files = BTreeMap::new();
+                files.insert(
+                    settings.to_string(),
+                    CcxLockFileEntry {
+                        file_key: "k".into(),
+                        sha256: sha256_hex(body),
+                    },
+                );
+                record_ccx_in_lock(&dir, ".nexus", &bundle("rev-1"), files).unwrap();
+                let desired = if delivered {
+                    vec![ccx_file(settings, "{}\n")]
+                } else {
+                    Vec::new()
+                };
+                let out = pull(&dir, &desired, force);
+                assert!(out.iter().all(|o| o.target_path != settings), "{out:?}");
+                assert_eq!(std::fs::read_to_string(dir.join(settings)).unwrap(), body);
+                assert!(!load_lock(&dir, ".nexus")
+                    .unwrap()
+                    .files
+                    .contains_key(settings));
+                let _ = std::fs::remove_dir_all(&dir);
+            }
         }
-        assert_eq!(
-            std::fs::read_to_string(dir.join(settings)).unwrap(),
-            "{\"mine\": true}\n"
-        );
-        assert!(!load_lock(&dir, ".nexus")
-            .unwrap()
-            .files
-            .contains_key(settings));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
