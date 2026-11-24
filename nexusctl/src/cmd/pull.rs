@@ -1544,7 +1544,9 @@ pub async fn run_with_root_hook(
             }
             super::shadow::print_server_exclude_report(&report, af_export.shadow.as_deref());
             if untrack {
-                super::shadow::untrack_server_entries();
+                if let Err(e) = super::shadow::untrack_server_paths(&workspace, &report.entries) {
+                    println!("   {} {e}", style("!").bold().yellow());
+                }
             }
         }
         // The server decides the workspace target too once it reports it.
@@ -1567,7 +1569,7 @@ pub async fn run_with_root_hook(
             .as_ref()
             .is_some_and(|g| g.commit_msg_hook);
         let allow_hook = !wants_hook
-            || super::shadow_guard::hook_consent_item(&workspace, &agentic_root)
+            || super::shadow_guard::hook_consent_item(&workspace)
                 .is_none_or(|item| consent.local(&item));
         super::shadow_guard::sync(
             &workspace,
@@ -8140,7 +8142,11 @@ mod tests {
     #[test]
     fn test_sync_claude_workspace_writes_excludes_and_keeps_local_edit() {
         let dir = temp_pull_dir("claude-workspace");
-        fs::create_dir_all(dir.join(".git/info")).unwrap();
+        assert!(crate::cmd::shadow_guard::git_in(&dir)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
         let v1 = claude_layout("layout { pane }\n");
         let path = dir.join(&v1.path);
 
@@ -8217,7 +8223,11 @@ mod tests {
     #[test]
     fn test_sync_and_remove_zellij_config() {
         let dir = temp_pull_dir("zellij-config");
-        fs::create_dir_all(dir.join(".git/info")).unwrap();
+        assert!(crate::cmd::shadow_guard::git_in(&dir)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
         let v1 = zellij_config("copy_command \"pbcopy\"\n");
         let path = dir.join(&v1.path);
         assert_eq!(

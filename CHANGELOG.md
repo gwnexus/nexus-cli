@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`nexus shadow on` only takes files out of the git index with `--untrack`.** Files that were only staged stay staged and are listed in the hint, like committed ones.
+- **`--untrack` selects files as git applies the exclude rules and only for the switched targets.** `.claude/` also covers a nested `sub/.claude/`; names with non-ASCII characters are passed back to git unchanged; `--target workspace` no longer untracks agentic files; a file git refuses to untrack is reported with a non-zero exit instead of being skipped silently.
+- **`nexus shadow` never replaces an exclude file it cannot read, and does not untrack after a failed write.** Only a missing `.git/info/exclude` counts as empty; one that cannot be read or is not UTF-8 is left unchanged and reported.
+- **`nexus shadow` resolves the repository through git.** Linked worktrees and submodules (where `.git` is a file) get their own exclude file instead of the enclosing repository's.
+- **`nexus shadow check` finds the cached rules for any agentic root.** The guard is cached under `.nexus/generated/` whatever the agentic root, so the offline check runs the rules `nexus pull` cached.
+
 - **`nexus shadow check` no longer reports clean when git cannot read the index or history.** An unreadable index or commit history makes the check fail with a non-zero exit instead of passing with nothing scanned.
 - **The shadow guard commit-msg hook checks the message git will store.** Comment lines are skipped only in the editor flow and when the configured cleanup strips them (`commit.cleanup`, `core.commentChar`); with `-m` or `-F` every line is checked, and only the complete scissors line cuts the message. An unreadable branch reference is no longer taken for an empty history.
 - **The shadow guard hook leaves tracked hooks alone, also when deleted locally.** Tracking is checked before the file is read; an existing hook moved aside for chaining is excluded from git before it is moved (a hook left to a hook manager is not excluded), a hooks path through the git directory (`.git/../.githooks`) is resolved first, and a hook without its executable bit is repaired and no longer reported as installed.

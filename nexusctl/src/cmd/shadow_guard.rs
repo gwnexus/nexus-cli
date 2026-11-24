@@ -451,8 +451,15 @@ pub fn print_report(report: &CheckReport) {
 // Local cache (read by the commit-msg hook, no network)
 // ---------------------------------------------------------------------------
 
-/// Workspace-relative path of the cached guard.
-pub fn cache_rel_path(agentic_root: &str) -> String {
+/// Workspace-relative path of the cached guard: always under `.nexus`
+/// (the directory of the project link), whatever the agentic root, so
+/// `nexus shadow check` finds it without the hub.
+pub fn cache_rel_path() -> String {
+    ".nexus/generated/shadow-guard.json".to_string()
+}
+
+/// Where earlier versions cached the guard: under the agentic root.
+fn legacy_cache_rel_path(agentic_root: &str) -> String {
     format!(
         "{}/generated/shadow-guard.json",
         agentic_root.trim_end_matches('/')
@@ -461,6 +468,13 @@ pub fn cache_rel_path(agentic_root: &str) -> String {
 
 pub fn load_cache(path: &Path) -> Option<ShadowGuard> {
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+/// The guard cached in `workspace` by the last pull, read from the same
+/// validated location [`sync`] writes to.
+pub fn cached_guard(workspace: &Path) -> Option<ShadowGuard> {
+    super::pull::validate_agent_file_target_path(workspace, &cache_rel_path()).ok()?;
+    load_cache(&workspace.join(cache_rel_path()))
 }
 
 // ---------------------------------------------------------------------------
@@ -919,10 +933,10 @@ fn print_hook_action(root: &Path, action: &HookAction) {
 /// for the hook and install or remove the hook. Never fails the caller.
 /// The consent item for the `commit-msg` hook `sync` would install, or
 /// `None` outside a repository.
-pub fn hook_consent_item(workspace: &Path, agentic_root: &str) -> Option<super::consent::Item> {
+pub fn hook_consent_item(workspace: &Path) -> Option<super::consent::Item> {
     let root = repo_root(workspace)?;
     let hook = hooks_dir(&root).ok().flatten()?.join("commit-msg");
-    let script = hook_script(&guard_rel_for(workspace, &root, agentic_root));
+    let script = hook_script(&guard_rel_for(workspace, &root));
     let shown = hook
         .strip_prefix(&root)
         .unwrap_or(&hook)
@@ -936,8 +950,8 @@ pub fn hook_consent_item(workspace: &Path, agentic_root: &str) -> Option<super::
     Some(super::consent::git_hook_item(&shown, &script, local))
 }
 
-fn guard_rel_for(workspace: &Path, root: &Path, agentic_root: &str) -> String {
-    let rel = cache_rel_path(agentic_root);
+fn guard_rel_for(workspace: &Path, root: &Path) -> String {
+    let rel = cache_rel_path();
     workspace
         .strip_prefix(root)
         .map(|p| p.join(&rel).to_string_lossy().into_owned())
@@ -953,17 +967,22 @@ pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>, a
     };
     // The agentic root comes from the server: the cache path must stay
     // inside the workspace (relative, outside .git, no symlink out).
-    if let Err(e) =
-        super::pull::validate_agent_file_target_path(workspace, &cache_rel_path(agentic_root))
-    {
+    if let Err(e) = super::pull::validate_agent_file_target_path(workspace, &cache_rel_path()) {
         println!(
             "   {} shadow guard not cached: {e}",
             style("!").bold().yellow()
         );
         return;
     }
-    let cache = workspace.join(cache_rel_path(agentic_root));
-    let guard_rel = guard_rel_for(workspace, &root, agentic_root);
+    let cache = workspace.join(cache_rel_path());
+    let guard_rel = guard_rel_for(workspace, &root);
+    // A copy an earlier version cached under another agentic root.
+    let legacy = legacy_cache_rel_path(agentic_root);
+    if legacy != cache_rel_path()
+        && super::pull::validate_agent_file_target_path(workspace, &legacy).is_ok()
+    {
+        let _ = fs::remove_file(workspace.join(&legacy));
+    }
     let result = match guard {
         Some(g) => {
             let json = serde_json::to_string_pretty(g).unwrap_or_default() + "\n";
@@ -1386,18 +1405,34 @@ mod tests {
         g.commit_msg_hook = true;
         sync(&dir, ".nexus", Some(&g), false);
         assert!(!hook.exists(), "installed without consent");
-        let item = hook_consent_item(&dir, ".nexus").unwrap();
+        let item = hook_consent_item(&dir).unwrap();
         assert!(!item.installed);
         sync(&dir, ".nexus", Some(&g), true);
         assert_eq!(fs::read_to_string(&hook).unwrap(), item.content);
         // Installed as approved: the item now reads as installed.
-        assert!(hook_consent_item(&dir, ".nexus").unwrap().installed);
+        assert!(hook_consent_item(&dir).unwrap().installed);
         // A symlinked hook is never read into the prompt.
         let outside = dir.join("outside-hook");
         fs::write(&outside, "private\n").unwrap();
         fs::remove_file(&hook).unwrap();
         std::os::unix::fs::symlink(&outside, &hook).unwrap();
-        assert_eq!(hook_consent_item(&dir, ".nexus").unwrap().local, None);
+        assert_eq!(hook_consent_item(&dir).unwrap().local, None);
+    }
+
+    /// Another agentic root still caches the guard where `nexus shadow
+    /// check` reads it without the hub; an older copy under that root goes.
+    #[test]
+    fn test_guard_cache_is_found_for_any_agentic_root() {
+        let dir = repo("cache-root");
+        let legacy = dir.join(".agent/generated/shadow-guard.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "{}").unwrap();
+        let g = guard(vec![]);
+        sync(&dir, ".agent", Some(&g), false);
+        assert!(!legacy.exists());
+        assert!(dir.join(".nexus/generated/shadow-guard.json").exists());
+        assert_eq!(cached_guard(&dir).unwrap().level, g.level);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
@@ -1915,7 +1950,7 @@ mod tests {
             .to_path_buf();
         assert!(bin_dir.join("nexus").exists(), "run cargo build first");
         let dir = repo("e2e");
-        let rel = cache_rel_path(".nexus");
+        let rel = cache_rel_path();
         fs::create_dir_all(dir.join(".nexus/generated")).unwrap();
         fs::write(
             dir.join(&rel),
