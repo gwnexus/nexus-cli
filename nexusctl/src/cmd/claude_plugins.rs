@@ -448,9 +448,10 @@ fn location_key(source: &serde_json::Value) -> Option<String> {
     )
 }
 
-/// A catalog path as compared: trimmed, without leading `./`.
+/// A catalog path as compared: without leading `./`. Whitespace is kept:
+/// `a.json ` and `a.json` are different files.
 fn normalize_catalog_path(path: &str) -> &str {
-    let mut p = path.trim();
+    let mut p = path;
     while let Some(rest) = p.strip_prefix("./") {
         p = rest.trim_start_matches('/');
     }
@@ -565,6 +566,14 @@ fn with_stored_catalog_paths(
         // The stored record must describe this registration: same source
         // without the path, and the same checkout whenever the listing
         // names one.
+        // The ref is part of the source: both name the same one, or none.
+        let stored_ref = source
+            .get("ref")
+            .and_then(|r| r.as_str())
+            .filter(|r| !r.is_empty());
+        if stored_ref != entry.git_ref.as_deref() {
+            continue;
+        }
         let mut bare = source.clone();
         bare.remove("path");
         if location_key(&serde_json::Value::Object(bare)).as_deref() != Some(listed.as_str()) {
@@ -1895,6 +1904,14 @@ mod tests {
             )),
             // A path leaving the checkout.
             Some(stored(repo, Some("../approved/marketplace.json"), &dir)),
+            // A record of another ref.
+            Some({
+                let mut record = stored(repo, Some("approved/marketplace.json"), &dir);
+                record["gatewarden-nexus"]["source"]["ref"] = serde_json::json!("nexus-core--v9");
+                record
+            }),
+            // A path that differs only by whitespace names another file.
+            Some(stored(repo, Some("approved/marketplace.json "), &dir)),
             // A record without a checkout while the listing names one.
             Some({
                 let mut record = stored(repo, Some("approved/marketplace.json"), &dir);
