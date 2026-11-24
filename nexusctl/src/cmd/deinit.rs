@@ -232,6 +232,14 @@ fn push_unless_kept(
 /// Run the `nexus deinit` command.
 pub fn run(force: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
+    // Only with a real `.nexus/` directory: deinit never creates one, and a
+    // linked one is removed as a link.
+    let nexus_dir = cwd.join(".nexus");
+    let _workspace_lock = if nexus_dir.is_dir() && !is_symlink(&nexus_dir) {
+        Some(super::pull::lock_workspace(&cwd)?)
+    } else {
+        None
+    };
     let agentic_root = detect_agentic_root(&cwd);
     let ctx = CleanupContext {
         agentic_root: agentic_root.clone(),

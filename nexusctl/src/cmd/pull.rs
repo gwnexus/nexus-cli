@@ -39,6 +39,26 @@ pub(crate) const MANAGED_MARKER: &str = "source: nexus-platform";
 pub(crate) const TASKS_SNAPSHOT_HEAD: &str =
     "---\nsource: nexus-platform\n---\n\n# Active Tasks\n\n";
 
+/// The lock every command that changes workspace files or their records
+/// holds for its whole run. A fixed path next to the project binding,
+/// independent of the export and its agentic root.
+pub(crate) const WORKSPACE_LOCK: &str = ".nexus/pull.lock";
+
+/// Take the workspace lock without waiting: one pull, push, reset, stash
+/// or deinit at a time per workspace, so none of them checks a record or a
+/// file that another one is changing meanwhile. Held until it is dropped.
+pub(crate) fn lock_workspace(workspace: &Path) -> anyhow::Result<super::json_store::RunLock> {
+    if let Err(e) = validate_agent_file_target_path(workspace, WORKSPACE_LOCK) {
+        anyhow::bail!("{WORKSPACE_LOCK} cannot be used: {e}");
+    }
+    match super::json_store::try_run_lock(&workspace.join(WORKSPACE_LOCK))? {
+        Some(lock) => Ok(lock),
+        None => anyhow::bail!(
+            "another nexus command (pull, push, reset, stash or deinit) is changing this workspace; wait for it to finish, then try again"
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // URL allowlist for remote downloads (SEC-003)
 //
@@ -858,25 +878,14 @@ pub async fn run_with_root_hook(
         }
     };
 
-    // One pull at a time per workspace, taken before anything is fetched:
-    // two runs would each apply exports and records the other is changing
-    // (an older export over a newer delivery, removals, adopted hashes).
-    // Held until the run ends. A fixed path next to the project binding,
-    // independent of the export (and its agentic root), checked before it
-    // is created. A dry run writes nothing and takes no lock.
-    const RUN_LOCK: &str = ".nexus/pull.lock";
+    // Taken before anything is fetched: two runs would each apply exports
+    // and records the other is changing (an older export over a newer
+    // delivery, removals, adopted hashes). A dry run writes nothing and
+    // takes no lock.
     let _run_lock = if dry_run {
         None
     } else {
-        if let Err(e) = validate_agent_file_target_path(&workspace, RUN_LOCK) {
-            anyhow::bail!("{RUN_LOCK} cannot be used: {e}");
-        }
-        match super::json_store::try_run_lock(&workspace.join(RUN_LOCK))? {
-            Some(lock) => Some(lock),
-            None => anyhow::bail!(
-                "another nexus pull is running in this workspace; wait for it to finish, then try again"
-            ),
-        }
+        Some(lock_workspace(&workspace)?)
     };
 
     // Resolve authentication token
@@ -3265,13 +3274,23 @@ fn sync_local_scripts(
     if !dropped.is_empty() {
         let outcomes = apply_dropped_workspace_files(workspace, &dropped)?;
         outcomes.iter().for_each(print_dropped_local_script);
-        let still_there: Vec<DroppedFile> = outcomes
-            .into_iter()
-            .filter(|o| !matches!(o, DroppedFile::Remove(..)))
-            .collect();
+        let still_there = still_on_disk(workspace, outcomes);
         super::shadow::apply_local_script_excludes(workspace, &excluded_with(&still_there));
     }
     Ok(written)
+}
+
+/// The dropped scripts that are on disk after the removals: every one that
+/// was kept, and a removed one that was created again meanwhile (an editor
+/// saving it), so its exclude rule stays and Git does not pick it up.
+fn still_on_disk(workspace: &Path, outcomes: Vec<DroppedFile>) -> Vec<DroppedFile> {
+    outcomes
+        .into_iter()
+        .filter(|o| match o {
+            DroppedFile::Remove(path, _) => fs::symlink_metadata(workspace.join(path)).is_ok(),
+            _ => true,
+        })
+        .collect()
 }
 
 /// Workspace-relative directories of the skill projection pull manages for
@@ -9615,6 +9634,31 @@ mod tests {
         assert_eq!(preview_workspace_files(ws, &manifest, &linked), 0);
         let plain = [("scripts/new.sh", "x\n", true)];
         assert_eq!(preview_workspace_files(ws, &manifest, &plain), 1);
+    }
+
+    /// A removed local script that is back on disk after the removal (an
+    /// editor saved it again) keeps its exclude rule; a removed one that
+    /// stayed gone loses it; a kept one keeps it.
+    #[test]
+    fn test_recreated_local_script_stays_excluded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("scripts/local")).unwrap();
+        fs::write(ws.join("scripts/local/back.sh"), "#!/bin/sh\n").unwrap();
+        fs::write(ws.join("scripts/local/kept.sh"), "#!/bin/sh\nmine\n").unwrap();
+        let outcomes = vec![
+            DroppedFile::Remove("scripts/local/back.sh".into(), "h".into()),
+            DroppedFile::Remove("scripts/local/gone.sh".into(), "h".into()),
+            DroppedFile::KeepModified("scripts/local/kept.sh".into()),
+        ];
+        let paths: Vec<String> = still_on_disk(ws, outcomes)
+            .iter()
+            .map(|d| d.path().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["scripts/local/back.sh", "scripts/local/kept.sh"]
+        );
     }
 
     /// Pull and dry run share one TASKS.md decision: a managed snapshot is

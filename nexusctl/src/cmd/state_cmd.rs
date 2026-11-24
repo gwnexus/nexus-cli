@@ -453,6 +453,9 @@ pub async fn reset(
     assume_yes: bool,
 ) -> anyhow::Result<()> {
     let (workspace, project_id, client) = connect(api_url, cli_project_id)?;
+    // The state is read and restored under the workspace lock, so no
+    // other command changes a file or record between the two.
+    let _workspace_lock = super::pull::lock_workspace(&workspace)?;
     let state = workspace_state::load(&client, &project_id, &workspace).await?;
     let selected: Vec<&Entry> = match path {
         Some(p) => state.matching(p).collect(),

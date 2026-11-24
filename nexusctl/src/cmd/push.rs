@@ -499,6 +499,12 @@ pub async fn run(
     let workspace = std::env::current_dir()?;
 
     let project_id = config::resolve_project_id(cli_project_id, Some(&workspace))?;
+    // Records and files stay as checked until the push ends.
+    let _workspace_lock = if dry_run {
+        None
+    } else {
+        Some(super::pull::lock_workspace(&workspace)?)
+    };
     let token = resolve_token().ok_or_else(|| {
         anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
     })?;

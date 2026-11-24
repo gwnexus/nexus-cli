@@ -153,6 +153,7 @@ fn collect_modified_in_dir(
 
 /// `nexus stash`: save local workspace changes to a stash.
 pub fn save(workspace: &Path) -> anyhow::Result<()> {
+    let _workspace_lock = super::pull::lock_workspace(workspace)?;
     let modified = detect_modified_files(workspace);
 
     if modified.is_empty() {
@@ -329,6 +330,7 @@ fn restore_plan(
 
 /// `nexus stash pop`: restore the most recent stash.
 pub fn pop(workspace: &Path) -> anyhow::Result<()> {
+    let _workspace_lock = super::pull::lock_workspace(workspace)?;
     let stash_base = workspace.join(STASH_DIR);
     if !stash_base.exists() {
         println!("   {} No stashes found.", style("!").yellow());
