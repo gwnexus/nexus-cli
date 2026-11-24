@@ -39,6 +39,26 @@ pub(crate) const MANAGED_MARKER: &str = "source: nexus-platform";
 pub(crate) const TASKS_SNAPSHOT_HEAD: &str =
     "---\nsource: nexus-platform\n---\n\n# Active Tasks\n\n";
 
+/// The lock every command that changes workspace files or their records
+/// holds for its whole run. A fixed path next to the project binding,
+/// independent of the export and its agentic root.
+pub(crate) const WORKSPACE_LOCK: &str = ".nexus/pull.lock";
+
+/// Take the workspace lock without waiting: one pull, push, reset, stash
+/// or deinit at a time per workspace, so none of them checks a record or a
+/// file that another one is changing meanwhile. Held until it is dropped.
+pub(crate) fn lock_workspace(workspace: &Path) -> anyhow::Result<super::json_store::RunLock> {
+    if let Err(e) = validate_agent_file_target_path(workspace, WORKSPACE_LOCK) {
+        anyhow::bail!("{WORKSPACE_LOCK} cannot be used: {e}");
+    }
+    match super::json_store::try_run_lock(&workspace.join(WORKSPACE_LOCK))? {
+        Some(lock) => Ok(lock),
+        None => anyhow::bail!(
+            "another nexus command (pull, push, reset, stash or deinit) is changing this workspace; wait for it to finish, then try again"
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // URL allowlist for remote downloads (SEC-003)
 //
@@ -858,25 +878,14 @@ pub async fn run_with_root_hook(
         }
     };
 
-    // One pull at a time per workspace, taken before anything is fetched:
-    // two runs would each apply exports and records the other is changing
-    // (an older export over a newer delivery, removals, adopted hashes).
-    // Held until the run ends. A fixed path next to the project binding,
-    // independent of the export (and its agentic root), checked before it
-    // is created. A dry run writes nothing and takes no lock.
-    const RUN_LOCK: &str = ".nexus/pull.lock";
+    // Taken before anything is fetched: two runs would each apply exports
+    // and records the other is changing (an older export over a newer
+    // delivery, removals, adopted hashes). A dry run writes nothing and
+    // takes no lock.
     let _run_lock = if dry_run {
         None
     } else {
-        if let Err(e) = validate_agent_file_target_path(&workspace, RUN_LOCK) {
-            anyhow::bail!("{RUN_LOCK} cannot be used: {e}");
-        }
-        match super::json_store::try_run_lock(&workspace.join(RUN_LOCK))? {
-            Some(lock) => Some(lock),
-            None => anyhow::bail!(
-                "another nexus pull is running in this workspace; wait for it to finish, then try again"
-            ),
-        }
+        Some(lock_workspace(&workspace)?)
     };
 
     // Resolve authentication token
@@ -3265,6 +3274,8 @@ fn sync_local_scripts(
     if !dropped.is_empty() {
         let outcomes = apply_dropped_workspace_files(workspace, &dropped)?;
         outcomes.iter().for_each(print_dropped_local_script);
+        // A removed script that is back on disk meanwhile keeps its rule:
+        // the block keeps every listed path whose file is still there.
         let still_there: Vec<DroppedFile> = outcomes
             .into_iter()
             .filter(|o| !matches!(o, DroppedFile::Remove(..)))

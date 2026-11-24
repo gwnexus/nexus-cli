@@ -586,15 +586,35 @@ pub fn apply_server_excludes(workspace: &Path, paths: &[String]) -> ServerExclud
 }
 
 /// Rewrite the `.git/info/exclude` block for machine-local scripts so it
-/// holds exactly `paths` (an empty list removes the block). The block is
-/// the lifecycle source for these files, so a path listed elsewhere in the
-/// file is still written here.
+/// holds `paths` (an empty list removes the block), plus every path the
+/// block already lists whose file is still on disk: a script stays hidden
+/// from Git until it is gone, also when it was created again after pull
+/// removed it and no record names it any more. The block is the lifecycle
+/// source for these files, so a path listed elsewhere in the file is still
+/// written here.
 pub fn apply_local_script_excludes(workspace: &Path, paths: &[String]) -> ServerExcludeReport {
+    let mut keep = paths.to_vec();
+    if let Ok(Some(repo)) = repo_at(workspace) {
+        if let Ok(text) = read_exclude(&repo.exclude) {
+            for p in block_entries(&text, LOCAL_MARKER_START, LOCAL_MARKER_END) {
+                // Only a file known to be gone loses its rule; one that
+                // cannot be checked (permissions) keeps it.
+                let gone = !valid_exclude_path(&p)
+                    || matches!(
+                        fs::symlink_metadata(workspace.join(p.trim_start_matches('/'))),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                    );
+                if !gone && !keep.contains(&p) {
+                    keep.push(p);
+                }
+            }
+        }
+    }
     apply_exclude_block(
         workspace,
         LOCAL_MARKER_START,
         LOCAL_MARKER_END,
-        paths,
+        &keep,
         false,
     )
 }
@@ -2467,6 +2487,52 @@ mod tests {
         assert_eq!(policy_value("nexus"), Some("nexus"));
         assert_eq!(policy_value("off"), Some("off"));
         assert_eq!(policy_value("status"), None);
+    }
+
+    /// A local script listed in the block keeps its rule as long as it is
+    /// on disk, on every later update, even when no caller names it.
+    #[test]
+    fn test_local_script_rule_stays_while_the_file_is_on_disk() {
+        let dir = git_repo("local-scripts");
+        fs::create_dir_all(dir.join("scripts/local")).unwrap();
+        fs::write(dir.join("scripts/local/a.sh"), "#!/bin/sh\n").unwrap();
+        fs::write(dir.join("scripts/local/b.sh"), "#!/bin/sh\n").unwrap();
+        let both = ["scripts/local/a.sh", "scripts/local/b.sh"].map(String::from);
+        apply_local_script_excludes(&dir, &both);
+        // b was removed and created again; later updates name neither.
+        apply_local_script_excludes(&dir, &[]);
+        apply_local_script_excludes(&dir, &[]);
+        assert_eq!(
+            block_entries(&exclude_of(&dir), LOCAL_MARKER_START, LOCAL_MARKER_END),
+            both.to_vec()
+        );
+        // Once a file is gone, its rule goes with the next update.
+        fs::remove_file(dir.join("scripts/local/a.sh")).unwrap();
+        apply_local_script_excludes(&dir, &[]);
+        assert_eq!(
+            block_entries(&exclude_of(&dir), LOCAL_MARKER_START, LOCAL_MARKER_END),
+            vec!["scripts/local/b.sh"]
+        );
+        // A file that cannot be checked keeps its rule.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = dir.join("scripts/local");
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+            let unreadable = fs::symlink_metadata(locked.join("b.sh")).is_err();
+            apply_local_script_excludes(&dir, &[]);
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            if unreadable {
+                assert_eq!(
+                    block_entries(&exclude_of(&dir), LOCAL_MARKER_START, LOCAL_MARKER_END),
+                    vec!["scripts/local/b.sh"]
+                );
+            }
+        }
+        fs::remove_file(dir.join("scripts/local/b.sh")).unwrap();
+        apply_local_script_excludes(&dir, &[]);
+        assert!(!exclude_of(&dir).contains(LOCAL_MARKER_START));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

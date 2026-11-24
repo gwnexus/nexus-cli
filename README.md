@@ -306,9 +306,10 @@ under a lock (a `<file>.lock` file next to them), so concurrent `nexus`
 commands keep each other's records; a manifest locked for more than about
 five seconds stops the command with "locked by another nexus command; try
 again", and a manifest that cannot be parsed is reported, never reset.
-Only one `nexus pull` runs per workspace at a time (a lock on
-`.nexus/pull.lock`); a second one stops with "another nexus pull is running
-in this workspace". If the local workspace was never pulled, or you need
+Only one command that changes the workspace (`nexus pull`, `push`, `reset`,
+`stash save`/`pop` and `deinit`) runs per workspace at a time (a lock on
+`.nexus/pull.lock`; a dry run takes none); a second one stops with "another
+nexus command ... is changing this workspace". If the local workspace was never pulled, or you need
 to publish local edits without risking an older server-side fork
 overwriting them, use `nexus push --adopt-local` to bootstrap a new fork
 directly from the current local files, bypassing that check:
@@ -1275,9 +1276,11 @@ the CLI applies them as sent:
   (`nexus shadow check-msg`). A rejected message names the rule; `git commit
   --no-verify` bypasses the check once. The hook checks the message git will
   store: comment lines are skipped only when git strips them (editor flow
-  with `commit.cleanup` `strip` or `default`), the `scissors` mode cuts at the
-  scissors line, and with any other setting (or `-m`/`-F`) every line is
-  checked. An existing untracked hook is kept (as `commit-msg.pre-nexus`) and
+  with `strip` or `default` as the `git commit --cleanup` option, or as
+  `commit.cleanup` without one), the `scissors` mode cuts at the scissors
+  line, and with any other mode (or `-m`/`-F`) every line is checked. The
+  `--cleanup` option is read from the `git commit` command line where the
+  platform shows it (Linux and macOS). An existing untracked hook is kept (as `commit-msg.pre-nexus`) and
   run first; a hook tracked in the repository or owned by a hook manager
   (husky, lefthook, pre-commit) is left alone, also when the tracked hook was
   deleted locally, and pull prints the one line to add to it. A Nexus hook

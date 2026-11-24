@@ -104,6 +104,8 @@ pub struct Entry {
     pub local: Option<String>,
     /// Content the backend / next pull wants; `None` if it would be removed.
     pub desired: Option<String>,
+    /// Why the file could not be read (for an `Unreadable` entry).
+    pub error: Option<String>,
 }
 
 impl Entry {
@@ -127,9 +129,12 @@ impl Entry {
             (FileClass::Projection, State::Dropped) => {
                 "no longer exported, edited locally; delete it when no longer needed".into()
             }
-            (_, State::Unreadable) => {
-                "cannot be read; restore read access, then run nexus pull again".into()
-            }
+            (_, State::Unreadable) => match &self.error {
+                Some(e) => {
+                    format!("cannot be read ({e}); restore read access, then run nexus pull again")
+                }
+                None => "cannot be read; restore read access, then run nexus pull again".into(),
+            },
             (_, State::Dropped) => {
                 format!("no longer in the workspace, edited locally; delete it, or nexus push {p} to add it back")
             }
@@ -457,6 +462,7 @@ pub async fn load(
             marker,
         ) {
             entries.push(Entry {
+                error: None,
                 path: af.target_path.clone(),
                 class,
                 state,
@@ -498,6 +504,7 @@ pub async fn load(
                     FileState::Orphaned => State::Orphaned,
                 };
                 entries.push(Entry {
+                    error: None,
                     path: plan.target_path,
                     class: FileClass::Projection,
                     state,
@@ -532,6 +539,7 @@ pub async fn load(
             };
             if let Some(state) = state {
                 entries.push(Entry {
+                    error: None,
                     path: "CLAUDE.md".into(),
                     class: FileClass::Projection,
                     state,
@@ -576,6 +584,7 @@ pub async fn load(
                 v.map(|v| serde_json::to_string_pretty(v).unwrap_or_default() + "\n")
             };
             entries.push(Entry {
+                error: None,
                 path: format!(".claude/settings.json#{key}"),
                 class: FileClass::Projection,
                 state,
@@ -600,15 +609,16 @@ pub async fn load(
         for item in
             super::pull::plan_dropped_skill_files(workspace, &agentic_root, is_claude, &desired)
         {
-            let (path, state) = match item {
-                super::pull::DroppedFile::Remove(p, _) => (p, State::Orphaned),
+            let (path, state, error) = match item {
+                super::pull::DroppedFile::Remove(p, _) => (p, State::Orphaned, None),
                 super::pull::DroppedFile::KeepModified(p)
                 | super::pull::DroppedFile::Changed(p)
-                | super::pull::DroppedFile::Failed(p, _) => (p, State::Dropped),
-                super::pull::DroppedFile::Unreadable(p, _) => (p, State::Unreadable),
+                | super::pull::DroppedFile::Failed(p, _) => (p, State::Dropped, None),
+                super::pull::DroppedFile::Unreadable(p, e) => (p, State::Unreadable, Some(e)),
                 super::pull::DroppedFile::Gone(_) => continue,
             };
             entries.push(Entry {
+                error,
                 local: read_text_inside(workspace, &path),
                 path,
                 class: FileClass::Projection,
@@ -657,6 +667,7 @@ pub async fn load(
             super::pull::GeneratedState::LocallyModified => State::Drifted,
         };
         entries.push(Entry {
+            error: None,
             path,
             class: FileClass::Projection,
             state,
@@ -680,6 +691,7 @@ pub async fn load(
     );
     if super::projection_cleanup::plan(workspace, unselected, &cleanup_ctx).has_leftovers() {
         entries.push(Entry {
+            error: None,
             path: unselected.dir().to_string(),
             class: FileClass::Projection,
             state: State::Stale,
@@ -793,6 +805,7 @@ async fn workspace_entries(
                 (_, state) => state,
             };
             entries.push(Entry {
+                error: None,
                 path,
                 class,
                 state,
@@ -839,6 +852,7 @@ async fn workspace_entries(
             Some(_) => continue,
         };
         entries.push(Entry {
+            error: None,
             local,
             path,
             class,
@@ -1062,6 +1076,7 @@ mod tests {
 
     fn entry(path: &str, class: FileClass, state: State, kind: Kind) -> Entry {
         Entry {
+            error: None,
             path: path.into(),
             class,
             state,
@@ -1069,6 +1084,26 @@ mod tests {
             local: None,
             desired: None,
         }
+    }
+
+    /// An unreadable entry names the read error in its next step.
+    #[test]
+    fn test_next_action_shows_read_error() {
+        let mut e = entry(
+            ".claude/skills/a/SKILL.md",
+            FileClass::Projection,
+            State::Unreadable,
+            Kind::Generated,
+        );
+        assert_eq!(
+            e.next_action(),
+            "cannot be read; restore read access, then run nexus pull again"
+        );
+        e.error = Some("Permission denied (os error 13)".into());
+        assert_eq!(
+            e.next_action(),
+            "cannot be read (Permission denied (os error 13)); restore read access, then run nexus pull again"
+        );
     }
 
     #[test]

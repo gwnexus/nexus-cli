@@ -487,6 +487,9 @@ fn print_push_result(result: &nexus_core::api::WorkspacePushResponse) {
 /// With `only` (the workspace paths `nexus push <path>` selected), only
 /// those files are pushed; every other file keeps its version from the
 /// current fork, so local edits outside the selection stay local.
+///
+/// `locked`: the caller already holds the workspace lock for this run.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     api_url: &str,
     cli_project_id: Option<&str>,
@@ -495,10 +498,17 @@ pub async fn run(
     adopt_local: bool,
     include_named: &[String],
     only: Option<&[String]>,
+    locked: bool,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
     let project_id = config::resolve_project_id(cli_project_id, Some(&workspace))?;
+    // Records and files stay as checked until the push ends.
+    let _workspace_lock = if dry_run || locked {
+        None
+    } else {
+        Some(super::pull::lock_workspace(&workspace)?)
+    };
     let token = resolve_token().ok_or_else(|| {
         anyhow::anyhow!("No authentication token found. Run 'nexus login' first.")
     })?;

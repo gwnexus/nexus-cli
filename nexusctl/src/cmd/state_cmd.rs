@@ -337,10 +337,27 @@ pub async fn push(
     adopt_local: bool,
 ) -> anyhow::Result<()> {
     if adopt_local {
-        return super::push::run(api_url, cli_project_id, fork_name, dry_run, true, &[], None)
-            .await;
+        return super::push::run(
+            api_url,
+            cli_project_id,
+            fork_name,
+            dry_run,
+            true,
+            &[],
+            None,
+            false,
+        )
+        .await;
     }
     let (workspace, project_id, client) = connect(api_url, cli_project_id)?;
+    // One lock for the whole push: the state is checked, the agent files
+    // are uploaded and the workspace is pushed without another command
+    // (a reset, say) changing those files in between. A dry run takes none.
+    let _workspace_lock = if dry_run {
+        None
+    } else {
+        Some(super::pull::lock_workspace(&workspace)?)
+    };
     let state = workspace_state::load(&client, &project_id, &workspace).await?;
 
     let selected: Vec<&Entry> = match path {
@@ -429,6 +446,7 @@ pub async fn push(
             false,
             &include_named,
             selection.as_deref(),
+            true,
         )
         .await?;
     }
@@ -453,6 +471,9 @@ pub async fn reset(
     assume_yes: bool,
 ) -> anyhow::Result<()> {
     let (workspace, project_id, client) = connect(api_url, cli_project_id)?;
+    // The state is read and restored under the workspace lock, so no
+    // other command changes a file or record between the two.
+    let _workspace_lock = super::pull::lock_workspace(&workspace)?;
     let state = workspace_state::load(&client, &project_id, &workspace).await?;
     let selected: Vec<&Entry> = match path {
         Some(p) => state.matching(p).collect(),
@@ -661,6 +682,7 @@ mod tests {
 
     fn entry(path: &str, class: FileClass, state: State, kind: Kind) -> Entry {
         Entry {
+            error: None,
             path: path.into(),
             class,
             state,
@@ -674,6 +696,7 @@ mod tests {
     fn test_entry_diff_direction() {
         // Content: local additions appear as `+` against the backend base.
         let e = Entry {
+            error: None,
             path: "devbox.json".into(),
             class: FileClass::Content,
             state: State::Modified,
@@ -700,6 +723,7 @@ mod tests {
     fn test_entry_diff_without_backend_version() {
         // Compared with the record only: no diff against an empty body.
         let e = Entry {
+            error: None,
             path: "scripts/devbox/setup.sh".into(),
             class: FileClass::Content,
             state: State::Modified,

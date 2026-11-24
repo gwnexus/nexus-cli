@@ -170,3 +170,54 @@ fn is_root() -> bool {
     // SAFETY: geteuid has no preconditions.
     unsafe { geteuid() == 0 }
 }
+
+/// While another command holds the workspace lock, the commands that
+/// change files or records stop without writing; a dry run still runs.
+#[cfg(unix)]
+#[test]
+fn workspace_writers_wait_for_the_workspace_lock() {
+    use std::os::unix::io::AsRawFd;
+    let (api, ws) = pulled();
+    ws.write(SETUP, "#!/bin/sh\necho mine\n");
+    ws.write(".nexus/AGENTS.md", "# my edited agents\n");
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(ws.path(".nexus/pull.lock"))
+        .unwrap();
+    // SAFETY: the descriptor belongs to `lock`, which outlives the calls.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let before = snapshot(&ws);
+    for args in [
+        &["reset", SETUP][..],
+        &["push"][..],
+        // Only an agent file: no workspace push follows.
+        &["push", ".nexus/AGENTS.md"][..],
+        &["stash", "save"][..],
+        &["pull", "--trust"][..],
+    ] {
+        let run = ws.nexus(&api, args);
+        assert!(!run.ok, "{args:?} ran under the lock:\n{}", run.all());
+        assert!(
+            run.all().contains("is changing this workspace"),
+            "{args:?}:\n{}",
+            run.all()
+        );
+    }
+    assert_eq!(snapshot(&ws), before, "a locked command wrote");
+    // Exports may be read before the lock; nothing is pushed.
+    assert!(api.pushes().is_empty(), "a locked push was sent");
+    assert!(
+        !api.writes().iter().any(|r| r.body.contains("\"af_sync\"")),
+        "a locked agent file push was sent"
+    );
+    ws.nexus(&api, &["push", "--dry-run"]).assert_ok();
+
+    drop(lock);
+    ws.nexus(&api, &["reset", SETUP, "-y"]).assert_ok();
+    assert_eq!(ws.read(SETUP), "#!/bin/sh\necho setup\n");
+}

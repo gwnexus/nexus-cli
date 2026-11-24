@@ -580,14 +580,17 @@ pub enum Cleanup {
 
 /// The cleanup git applies to this commit, as far as the hook can tell.
 ///
-/// The hook sees neither `git commit --cleanup=<mode>` nor the comment
-/// string git picks for `auto`. Policy: comment lines are skipped only in
+/// Git does not pass `git commit --cleanup=<mode>` to the hook, nor the
+/// comment string it picks for `auto`. The hook runs as a direct child of
+/// `git commit` (its script `exec`s `nexus`), so the mode is read from the
+/// parent's arguments where the platform shows them, and from
+/// `commit.cleanup` otherwise. Policy: comment lines are skipped only in
 /// the editor flow (git runs the hook with `GIT_EDITOR=:` for `-m` and
 /// `-F`), where git's own template comments would otherwise be scanned,
-/// and only when the configured mode strips them. Without an editor every
-/// line is checked, also when the configuration would strip comments: a
-/// `--cleanup=whitespace -m` commit keeps them. The remaining blind spot
-/// is `--cleanup=whitespace` together with an editor.
+/// and only when the mode strips them. Without an editor every line is
+/// checked, also when the mode would strip comments. If the parent's
+/// arguments cannot be read, a `--cleanup=whitespace` given with an
+/// editor stays unseen and its comment lines are not checked.
 fn message_cleanup() -> Cleanup {
     // Read as git sees it in the hook, so the hook's environment applies.
     let config = |key: &str| -> Result<Option<String>, ()> {
@@ -608,8 +611,12 @@ fn message_cleanup() -> Cleanup {
         }
     };
     let edited = std::env::var_os("GIT_EDITOR").is_none_or(|v| v != ":");
-    let Ok(mode) = config("commit.cleanup") else {
-        return Cleanup::Keep;
+    let mode = match parent_args().and_then(|args| cleanup_arg(&args)) {
+        Some(mode) => Some(mode),
+        None => match config("commit.cleanup") {
+            Ok(mode) => mode,
+            Err(()) => return Cleanup::Keep,
+        },
     };
     let comment = match (config("core.commentString"), config("core.commentChar")) {
         (Ok(Some(c)), _) | (Ok(None), Ok(Some(c))) if c != "auto" && !c.is_empty() => Some(c),
@@ -617,6 +624,189 @@ fn message_cleanup() -> Cleanup {
         _ => None,
     };
     cleanup_for(mode.as_deref(), edited, comment)
+}
+
+/// The arguments of the process that runs this one (`git commit` for the
+/// hook), with their boundaries: `/proc` on Linux, `KERN_PROCARGS2` on
+/// macOS. `None` elsewhere or when they cannot be read.
+fn parent_args() -> Option<Vec<String>> {
+    #[cfg(unix)]
+    {
+        let pid = std::os::unix::process::parent_id();
+        if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) {
+            return Some(
+                raw.split(|b| *b == 0)
+                    .filter(|a| !a.is_empty())
+                    .map(|a| String::from_utf8_lossy(a).into_owned())
+                    .collect(),
+            );
+        }
+        #[cfg(target_os = "macos")]
+        return macos_args(pid);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// The argument vector of `pid` from `sysctl(KERN_PROCARGS2)`: the
+/// argument count, the executable path, padding, then the arguments, each
+/// ending in a NUL byte.
+#[cfg(target_os = "macos")]
+fn macos_args(pid: u32) -> Option<Vec<String>> {
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        libc::c_int::try_from(pid).ok()?,
+    ];
+    let mut size: libc::size_t = 0;
+    // SAFETY: `mib` holds three valid entries; a null buffer asks for the
+    // size only.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size < 4 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: `buf` is `size` bytes long, as passed in `size`.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    buf.truncate(size);
+    procargs2_args(&buf)
+}
+
+/// Parse a `KERN_PROCARGS2` buffer (see [`macos_args`]).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn procargs2_args(buf: &[u8]) -> Option<Vec<String>> {
+    let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
+    let rest = &buf[4..];
+    let rest = &rest[rest.iter().position(|b| *b == 0)?..];
+    let rest = &rest[rest.iter().position(|b| *b != 0)?..];
+    let args: Vec<String> = rest
+        .split(|b| *b == 0)
+        .take(argc)
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect();
+    (args.len() == argc).then_some(args)
+}
+
+/// Global `git` options that take the next argument as their operand.
+const GIT_OPERAND_OPTIONS: &[&str] = &[
+    "-c",
+    "-C",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+];
+
+/// `git commit` long options that take an operand (`--name value` or
+/// `--name=value`).
+const COMMIT_OPERAND_LONG: &[&str] = &[
+    "--message",
+    "--file",
+    "--reuse-message",
+    "--reedit-message",
+    "--fixup",
+    "--squash",
+    "--author",
+    "--date",
+    "--template",
+    "--cleanup",
+    "--trailer",
+    "--pathspec-from-file",
+];
+
+/// `git commit` short options that take an operand (`-m msg`, `-mmsg`,
+/// also last in a group such as `-qm msg`).
+const COMMIT_OPERAND_SHORT: &[char] = &['m', 'F', 'C', 'c', 't'];
+
+/// `git commit` short options with an optional operand, attached only
+/// (`-S<keyid>`, `-u<mode>`): the rest of the group is that operand.
+const COMMIT_OPTIONAL_SHORT: &[char] = &['S', 'u'];
+
+/// The `--cleanup` mode of a `git commit` argument vector (`git` first);
+/// the last one wins, as in git. Operands of other options are skipped, so
+/// a message such as `-m --cleanup=strip` is not taken for the option.
+/// `None` for another command or without the option. Abbreviated long
+/// options are not recognized.
+fn cleanup_arg(args: &[String]) -> Option<String> {
+    let mut i = 1;
+    loop {
+        let a = args.get(i)?;
+        if a == "commit" {
+            break;
+        }
+        if !a.starts_with('-') {
+            return None;
+        }
+        i += if GIT_OPERAND_OPTIONS.contains(&a.as_str()) {
+            2
+        } else {
+            1
+        };
+    }
+    i += 1;
+    let mut mode = None;
+    while let Some(a) = args.get(i) {
+        i += 1;
+        if a == "--" {
+            break;
+        }
+        if let Some(long) = a.strip_prefix("--") {
+            let (name, value) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v.to_string())),
+                None => (long, None),
+            };
+            let name = format!("--{name}");
+            if COMMIT_OPERAND_LONG.contains(&name.as_str()) {
+                let value = match value {
+                    Some(v) => Some(v),
+                    None => {
+                        i += 1;
+                        args.get(i - 1).cloned()
+                    }
+                };
+                if name == "--cleanup" {
+                    mode = value;
+                }
+            }
+        } else if let Some(group) = a.strip_prefix('-') {
+            // The first option in a group that takes an operand ends the
+            // scan: the rest of the group is its operand; when it ends the
+            // group, a required operand is the next argument.
+            let first = group
+                .find(|c| COMMIT_OPERAND_SHORT.contains(&c) || COMMIT_OPTIONAL_SHORT.contains(&c));
+            if let Some(pos) = first {
+                let required = group[pos..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| COMMIT_OPERAND_SHORT.contains(&c));
+                if required && pos + 1 == group.len() {
+                    i += 1;
+                }
+            }
+        }
+    }
+    mode
 }
 
 fn cleanup_for(mode: Option<&str>, edited: bool, comment: Option<String>) -> Cleanup {
@@ -1400,6 +1590,93 @@ mod tests {
         let raw = format!("fix: x\n; see {REF}\n");
         assert!(check_message(&g, &raw, &Cleanup::Strip(";".into())).is_empty());
         assert_eq!(check_message(&g, &raw, &strip).len(), 1);
+    }
+
+    #[test]
+    fn test_cleanup_arg_reads_the_commit_command_line() {
+        let args = |v: &[&str]| -> Vec<String> { v.iter().map(|a| a.to_string()).collect() };
+        let mode = |v: &[&str]| cleanup_arg(&args(v));
+        assert_eq!(
+            mode(&["git", "commit", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+        assert_eq!(
+            mode(&["git", "-c", "a=b", "commit", "--cleanup", "verbatim", "-q"]).as_deref(),
+            Some("verbatim")
+        );
+        // The last one wins; nothing after `--`.
+        assert_eq!(
+            mode(&[
+                "git",
+                "commit",
+                "--cleanup=strip",
+                "--cleanup=scissors",
+                "--",
+                "--cleanup=x"
+            ])
+            .as_deref(),
+            Some("scissors")
+        );
+        assert_eq!(mode(&["git", "commit", "-q"]), None);
+        assert_eq!(mode(&["git", "merge", "--cleanup=strip"]), None);
+        // A global option's operand that looks like the subcommand.
+        assert_eq!(
+            mode(&["git", "-C", "commit", "commit", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+        // Operands of other options are messages, not options.
+        assert_eq!(
+            mode(&["git", "commit", "--edit", "-m", "--cleanup=strip"]),
+            None
+        );
+        assert_eq!(
+            mode(&["git", "commit", "--edit", "-qm", "--cleanup=strip"]),
+            None
+        );
+        assert_eq!(
+            mode(&["git", "commit", "--message", "--cleanup=strip"]),
+            None
+        );
+        assert_eq!(
+            mode(&["git", "commit", "--edit", "--message=fix --cleanup=strip"]),
+            None
+        );
+        assert_eq!(
+            mode(&["git", "commit", "-mfix", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+        assert_eq!(
+            mode(&["git", "commit", "-F", "-", "--cleanup", "strip"]).as_deref(),
+            Some("strip")
+        );
+        // An attached optional operand is not searched for option letters:
+        // `-Skeym` signs with key `keym`, the next argument is an option.
+        assert_eq!(
+            mode(&["git", "commit", "-Skeym", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+        assert_eq!(
+            mode(&["git", "commit", "-qS", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+        assert_eq!(
+            mode(&["git", "commit", "-unom", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+    }
+
+    /// A `KERN_PROCARGS2` buffer keeps each argument whole, spaces included.
+    #[test]
+    fn test_procargs2_args_keep_argument_boundaries() {
+        let mut buf = 3i32.to_ne_bytes().to_vec();
+        buf.extend_from_slice(
+            b"/usr/bin/git\0\0\0git\0commit\0--message=fix --cleanup=strip\0PATH=/bin\0",
+        );
+        assert_eq!(
+            procargs2_args(&buf).unwrap(),
+            vec!["git", "commit", "--message=fix --cleanup=strip"]
+        );
+        assert_eq!(procargs2_args(&buf[..3]), None);
     }
 
     #[test]

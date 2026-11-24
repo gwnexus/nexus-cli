@@ -117,9 +117,12 @@ impl ProjectTokenStore {
     /// `change` and save, all under an exclusive lock, so a concurrent
     /// `nexus project` command cannot overwrite another project's entry
     /// with an older snapshot. The lock is waited for at most a few
-    /// seconds, so an async caller is never blocked indefinitely.
+    /// seconds, so an async caller is never blocked indefinitely; on a
+    /// multi-thread runtime the wait runs in `block_in_place`, so the
+    /// worker's other tasks move on meanwhile.
     pub fn update<R>(change: impl FnOnce(&mut Self) -> R) -> Result<R, Error> {
-        Self::update_at(&Self::path()?, change)
+        let path = Self::path()?;
+        off_worker(|| Self::update_at(&path, change))
     }
 
     fn update_at<R>(
@@ -165,6 +168,18 @@ impl ProjectTokenStore {
 struct StoreLock {
     #[cfg(unix)]
     _file: std::fs::File,
+}
+
+/// Run blocking `work` without holding up an async worker: on a
+/// multi-thread runtime through `block_in_place` (the worker's other tasks
+/// move on), otherwise directly (`block_in_place` is not available there).
+fn off_worker<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
 }
 
 impl StoreLock {
@@ -263,6 +278,37 @@ mod tests {
             expires_at: None,
             created_at: None,
             previous_token_id: None,
+        }
+    }
+
+    /// The locked update runs from any context: no runtime, a
+    /// current-thread runtime and a multi-thread runtime.
+    #[test]
+    fn test_off_worker_runs_in_every_runtime_flavor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("project-tokens.toml");
+        let update = |id: &'static str| {
+            let path = path.clone();
+            move || off_worker(|| ProjectTokenStore::update_at(&path, |s| s.set(id, entry(id))))
+        };
+        update("a")().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async { update("b")() })
+            .unwrap();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let work = update("c");
+                tokio::spawn(async move { work() }).await.unwrap()
+            })
+            .unwrap();
+        let store = ProjectTokenStore::load_from(&path).unwrap();
+        for id in ["a", "b", "c"] {
+            assert!(store.get(id).is_some(), "{id} missing");
         }
     }
 
