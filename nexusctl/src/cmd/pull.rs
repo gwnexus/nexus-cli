@@ -3885,39 +3885,7 @@ fn write_mcp_configs(
 
             // Plugin servers
             for (name, cfg) in plugin_mcp_servers {
-                // Build env object: map env_keys to shell-style template variables ${KEY}
-                // so secrets are resolved at runtime, never persisted to disk.
-                // Also overlay inline environment vars from the platform.
-                let mut env: serde_json::Map<String, serde_json::Value> = cfg
-                    .env_keys
-                    .iter()
-                    .map(|k: &String| {
-                        let template = format!("${{{}}}", k);
-                        (k.clone(), serde_json::Value::String(template))
-                    })
-                    .collect();
-                for (k, v) in &cfg.environment {
-                    env.insert(k.clone(), serde_json::Value::String(v.clone()));
-                }
-
-                // mcp.json uses Claude Code format: command = string, args = array.
-                // cfg.command is Vec<String> (array form from backend), so split
-                // first element as command and remainder + cfg.args as args.
-                let cmd_str = cfg.command.first().cloned().unwrap_or_default();
-                let args: Vec<serde_json::Value> = cfg.command[1..]
-                    .iter()
-                    .chain(cfg.args.iter())
-                    .map(|s| serde_json::Value::String(s.clone()))
-                    .collect();
-
-                servers_block.insert(
-                    name.to_string(),
-                    serde_json::json!({
-                        "command": cmd_str,
-                        "args": args,
-                        "env": env
-                    }),
-                );
+                servers_block.insert(name.to_string(), claude_mcp_plugin_entry(cfg));
             }
 
             let claude_mcp_json = serde_json::json!({
@@ -4636,6 +4604,35 @@ pub(crate) fn is_other_runtime_path(
     }
 }
 
+/// The `.mcp.json` entry Nexus writes for a plugin MCP server (Claude
+/// Code format: `command` string, `args` array, `env` with `${KEY}`
+/// templates so secrets are resolved at runtime, never written to disk).
+pub(crate) fn claude_mcp_plugin_entry(cfg: &nexus_core::api::McpServerConfig) -> serde_json::Value {
+    let mut env: serde_json::Map<String, serde_json::Value> = cfg
+        .env_keys
+        .iter()
+        .map(|k: &String| (k.clone(), serde_json::Value::String(format!("${{{k}}}"))))
+        .collect();
+    for (k, v) in &cfg.environment {
+        env.insert(k.clone(), serde_json::Value::String(v.clone()));
+    }
+    // `cfg.command` is the array form: its first element is the command,
+    // the rest go before `cfg.args`.
+    let cmd_str = cfg.command.first().cloned().unwrap_or_default();
+    let args: Vec<serde_json::Value> = cfg
+        .command
+        .iter()
+        .skip(1)
+        .chain(cfg.args.iter())
+        .map(|s| serde_json::Value::String(s.clone()))
+        .collect();
+    serde_json::json!({
+        "command": cmd_str,
+        "args": args,
+        "env": env
+    })
+}
+
 /// The [`super::projection_cleanup::CleanupContext`] for this pull: the
 /// selected runtime's paths are kept; the unselected runtime's rendered
 /// content identifies its unmodified files.
@@ -4652,9 +4649,30 @@ pub(crate) fn cleanup_context(
         project_name: project_name.to_string(),
         plugin_filenames: super::init::platform_plugin_filenames(),
         mcp_server_names: af_export.mcp_servers.keys().cloned().collect(),
+        mcp_server_entries: af_export
+            .mcp_servers
+            .iter()
+            .map(|(name, cfg)| (name.clone(), claude_mcp_plugin_entry(cfg)))
+            .collect(),
         force,
         ..Default::default()
     };
+    // Routing-guard inputs as the current export renders them.
+    let spec = af_export.runtime_spec.as_ref();
+    for (name, content) in [
+        (
+            "routing-catalog.json",
+            super::claude_render::routing_catalog_content(spec),
+        ),
+        (
+            "agent-routing.json",
+            super::claude_render::agent_routing_content(spec),
+        ),
+    ] {
+        if let Some(content) = content {
+            ctx.add_known(&format!("{agentic_root}/generated/{name}"), &content);
+        }
+    }
     for af in &af_export.agent_files {
         let ccx_file = af.category == super::ccx::CCX_CATEGORY;
         if is_other_runtime_path(&af.target_path, is_claude, agentic_root)

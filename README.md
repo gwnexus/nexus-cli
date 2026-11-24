@@ -101,7 +101,7 @@ nexus actors validate|import <path>     Check or import actor profiles (flat or 
 nexus actors export --target claude     Print the Claude Code agents and lane actors as JSON
 nexus skills export [--project-id <id>] Export enabled skills as JSON
 nexus preflight                         Run environment readiness checks
-nexus deinit [--force]                  Remove all AI scaffold files from the workspace
+nexus deinit [--force]                  Remove the files Nexus wrote (edited ones stay)
 nexus shadow on|off [--target T,...]    Hide (or stop hiding) agentic files, the workspace and Nexus internals from Git
 nexus shadow status                     Effective state per target, excluded paths, hook and check summary
 nexus shadow check [--commits N]        Scan tracked files and recent commit messages with the shadow rules

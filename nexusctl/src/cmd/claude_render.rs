@@ -419,21 +419,41 @@ pub fn write_routing_catalog(
     agentic_root: &str,
     runtime_spec: Option<&serde_json::Value>,
 ) -> anyhow::Result<Option<String>> {
-    let Some(routes) = runtime_spec.and_then(|rs| rs.get("model_routes")) else {
+    let Some(content) = routing_catalog_content(runtime_spec) else {
         return Ok(None);
     };
-    super::pull::validate_agent_file_target_path(
-        target,
-        &format!("{agentic_root}/generated/routing-catalog.json"),
-    )?;
+    let rel = format!("{agentic_root}/generated/routing-catalog.json");
+    super::pull::validate_agent_file_target_path(target, &rel)?;
     let generated_dir = target.join(agentic_root).join("generated");
     fs::create_dir_all(&generated_dir)?;
-    let content = serde_json::to_string_pretty(&serde_json::json!({ "model_routes": routes }))?;
-    fs::write(generated_dir.join("routing-catalog.json"), content + "\n")?;
-    Ok(Some(format!(
-        "{}/generated/routing-catalog.json",
-        agentic_root
-    )))
+    fs::write(generated_dir.join("routing-catalog.json"), &content)?;
+    // Recorded, so the projection cleanup can tell it from a local edit.
+    super::pull::record_generated_many(target, agentic_root, &[(rel.clone(), content)])?;
+    Ok(Some(rel))
+}
+
+/// The routing catalog Nexus writes for `runtime_spec`, if any.
+pub(crate) fn routing_catalog_content(runtime_spec: Option<&serde_json::Value>) -> Option<String> {
+    let routes = runtime_spec?.get("model_routes")?;
+    let content =
+        serde_json::to_string_pretty(&serde_json::json!({ "model_routes": routes })).ok()?;
+    Some(content + "\n")
+}
+
+/// The agent-routing table Nexus writes for `runtime_spec`, if any.
+pub(crate) fn agent_routing_content(runtime_spec: Option<&serde_json::Value>) -> Option<String> {
+    let rs = runtime_spec?;
+    let actors = rs.get("actors");
+    let primary_agents = rs.get("primary_agents");
+    if actors.is_none() && primary_agents.is_none() {
+        return None;
+    }
+    let content = serde_json::to_string_pretty(&serde_json::json!({
+        "actors": actors.cloned().unwrap_or(serde_json::Value::Array(vec![])),
+        "primary_agents": primary_agents.cloned().unwrap_or(serde_json::Value::Array(vec![])),
+    }))
+    .ok()?;
+    Some(content + "\n")
 }
 
 /// Write the agent-routing table consumed by the Claude Code `routing-guard`
@@ -448,30 +468,16 @@ pub fn write_agent_routing(
     agentic_root: &str,
     runtime_spec: Option<&serde_json::Value>,
 ) -> anyhow::Result<Option<String>> {
-    let Some(rs) = runtime_spec else {
+    let Some(content) = agent_routing_content(runtime_spec) else {
         return Ok(None);
     };
-    let actors = rs.get("actors");
-    let primary_agents = rs.get("primary_agents");
-    if actors.is_none() && primary_agents.is_none() {
-        return Ok(None);
-    }
-
-    super::pull::validate_agent_file_target_path(
-        target,
-        &format!("{agentic_root}/generated/agent-routing.json"),
-    )?;
+    let rel = format!("{agentic_root}/generated/agent-routing.json");
+    super::pull::validate_agent_file_target_path(target, &rel)?;
     let generated_dir = target.join(agentic_root).join("generated");
     fs::create_dir_all(&generated_dir)?;
-    let content = serde_json::to_string_pretty(&serde_json::json!({
-        "actors": actors.cloned().unwrap_or(serde_json::Value::Array(vec![])),
-        "primary_agents": primary_agents.cloned().unwrap_or(serde_json::Value::Array(vec![])),
-    }))?;
-    fs::write(generated_dir.join("agent-routing.json"), content + "\n")?;
-    Ok(Some(format!(
-        "{}/generated/agent-routing.json",
-        agentic_root
-    )))
+    fs::write(generated_dir.join("agent-routing.json"), &content)?;
+    super::pull::record_generated_many(target, agentic_root, &[(rel.clone(), content)])?;
+    Ok(Some(rel))
 }
 
 /// Convert a Claude Code hook event name from PascalCase to kebab-case,
