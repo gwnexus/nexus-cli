@@ -145,6 +145,9 @@ pub enum KeepReason {
     GitMetadata,
     /// Its path crosses a symlink; left alone.
     Linked,
+    /// Carries the Nexus marker, but no record says what Nexus wrote, so a
+    /// local edit cannot be ruled out.
+    Unrecorded,
 }
 
 impl KeepReason {
@@ -155,6 +158,7 @@ impl KeepReason {
             KeepReason::Tracked => "tracked in git",
             KeepReason::GitMetadata => "contains a nested git repository",
             KeepReason::Linked => "path crosses a symlink",
+            KeepReason::Unrecorded => "no record of the Nexus version",
         }
     }
 }
@@ -224,6 +228,23 @@ impl CleanupReport {
 // ---------------------------------------------------------------------------
 
 /// Plan the removal of `projection` from `workspace`. Reads only.
+/// Whether the file at `rel` is exactly what Nexus recorded (or `ctx`
+/// renders) for it: the only evidence on which a file outside a projection
+/// plan is deleted without `--force`.
+pub(crate) fn is_pristine(workspace: &Path, ctx: &CleanupContext, rel: &str) -> bool {
+    let Ok(bytes) = fs::read(workspace.join(rel)) else {
+        return false;
+    };
+    let sync_manifest = super::sync::load_manifest_pub(workspace);
+    let pull_manifest = super::pull::load_pull_manifest(workspace, &ctx.agentic_root);
+    let records = Records {
+        ctx,
+        sync_manifest: &sync_manifest,
+        pull_manifest: &pull_manifest,
+    };
+    records.origin(rel, &bytes, false) == Origin::Pristine
+}
+
 pub fn plan(workspace: &Path, projection: Projection, ctx: &CleanupContext) -> Plan {
     let sync_manifest = super::sync::load_manifest_pub(workspace);
     let pull_manifest = super::pull::load_pull_manifest(workspace, &ctx.agentic_root);
@@ -1260,11 +1281,17 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut attempt = 0u32;
     let (tmp, mut file) = loop {
         let tmp = dir.join(format!(".{name}.{}.{attempt}.tmp", std::process::id()));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        // Created with the original's mode (owner-only when unknown), so the
+        // content is never readable by others before the rename, even for
+        // a token-bearing file.
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            opts.mode(permissions.as_ref().map_or(0o600, |p| p.mode() & 0o777));
+        }
+        match opts.open(&tmp) {
             Ok(f) => break (tmp, f),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 => attempt += 1,
             Err(e) => return Err(e),
@@ -2825,6 +2852,15 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o640);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "no temp file left");
+        // An owner-only original stays owner-only.
+        fs::set_permissions(dir.join("f.json"), fs::Permissions::from_mode(0o600)).unwrap();
+        replace_file(&dir.join("f.json"), b"newer\n").unwrap();
+        let mode = fs::metadata(dir.join("f.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
         let _ = fs::remove_dir_all(&dir);
     }
 

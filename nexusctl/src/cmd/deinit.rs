@@ -54,8 +54,16 @@ fn scaffold_entries(
     cwd: &Path,
     agentic_root: &str,
     planned: &[String],
-) -> Vec<(PathBuf, RemovalKind)> {
+    kept: &[String],
+    is_pristine: impl Fn(&str) -> bool,
+) -> (Vec<(PathBuf, RemovalKind)>, Vec<String>) {
     let mut out = Vec::new();
+    let mut unrecorded = Vec::new();
+    let rel_of = |p: &Path| {
+        p.strip_prefix(cwd)
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
     let nexus_dir = cwd.join(".nexus");
     if is_symlink(&nexus_dir) {
         // Its entries live elsewhere: only the link goes.
@@ -66,37 +74,75 @@ fn scaffold_entries(
         for path in entries {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
             if !name.is_some_and(|n| NEXUS_KEPT_ENTRIES.contains(&n.as_str())) {
-                out.push((path, RemovalKind::Full));
+                push_unless_kept(cwd, &path, kept, &mut out);
             }
         }
     }
     if agentic_root != ".nexus" && agentic_root != ".claude" {
         let alt_dir = cwd.join(agentic_root);
         if alt_dir.exists() {
-            out.push((alt_dir, RemovalKind::Full));
+            push_unless_kept(cwd, &alt_dir, kept, &mut out);
         }
     }
+    // Marker files outside the projection plans: removed only when their
+    // content is what Nexus recorded, otherwise reported as kept.
+    let mut marker_file = |path: PathBuf| {
+        let rel = rel_of(&path);
+        if planned.contains(&rel) {
+            return;
+        }
+        if is_pristine(&rel) {
+            out.push((path, RemovalKind::ManagedFile));
+        } else {
+            unrecorded.push(rel);
+        }
+    };
     let claude_dir = cwd.join(".claude");
     if claude_dir.is_dir() && !is_symlink(&claude_dir) {
         for m in collect_managed_files(&claude_dir) {
-            let rel = m
-                .strip_prefix(cwd)
-                .map(|r| r.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if !planned.contains(&rel) {
-                out.push((m, RemovalKind::ManagedFile));
-            }
+            marker_file(m);
         }
     }
     // A root AGENTS.md is Nexus's only with the default root and the marker.
     let agents_md = cwd.join("AGENTS.md");
-    if agentic_root == ".claude"
-        && is_managed_file(&agents_md)
-        && !planned.iter().any(|p| p == "AGENTS.md")
-    {
-        out.push((agents_md, RemovalKind::ManagedFile));
+    if agentic_root == ".claude" && is_managed_file(&agents_md) {
+        marker_file(agents_md);
     }
-    out
+    (out, unrecorded)
+}
+
+/// Add `path` for full removal, unless a kept path lies at or below it:
+/// then a directory is split into its entries, so only those holding no
+/// kept path go.
+fn push_unless_kept(
+    cwd: &Path,
+    path: &Path,
+    kept: &[String],
+    out: &mut Vec<(PathBuf, RemovalKind)>,
+) {
+    let rel = path
+        .strip_prefix(cwd)
+        .map(|r| r.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if kept.iter().any(|k| k.trim_end_matches('/') == rel) {
+        return;
+    }
+    let prefix = format!("{rel}/");
+    if !kept.iter().any(|k| k.starts_with(&prefix)) {
+        out.push((path.to_path_buf(), RemovalKind::Full));
+        return;
+    }
+    if is_symlink(path) || !path.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for child in entries {
+        push_unless_kept(cwd, &child, kept, out);
+    }
 }
 
 /// Run the `nexus deinit` command.
@@ -124,9 +170,20 @@ pub fn run(force: bool) -> anyhow::Result<()> {
             | Action::Keep { path, .. } => path.clone(),
         })
         .collect();
-    let to_remove = scaffold_entries(&cwd, &agentic_root, &planned);
+    let kept_paths: Vec<String> = plans
+        .iter()
+        .flat_map(|p| p.actions.iter())
+        .filter_map(|a| match a {
+            Action::Keep { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    let (to_remove, unrecorded) =
+        scaffold_entries(&cwd, &agentic_root, &planned, &kept_paths, |rel| {
+            projection_cleanup::is_pristine(&cwd, &ctx, rel)
+        });
 
-    if to_remove.is_empty() && plans.iter().all(|p| !p.has_leftovers()) {
+    if to_remove.is_empty() && unrecorded.is_empty() && plans.iter().all(|p| !p.has_leftovers()) {
         println!(
             "{} No Nexus scaffold files found in this directory.",
             style("--").bold().yellow()
@@ -154,6 +211,11 @@ pub fn run(force: bool) -> anyhow::Result<()> {
             Action::Keep { path, reason } => kept.push((path.clone(), *reason)),
         }
     }
+    kept.extend(
+        unrecorded
+            .iter()
+            .map(|p| (p.clone(), projection_cleanup::KeepReason::Unrecorded)),
+    );
     for (path, kind) in &to_remove {
         let relative = path.strip_prefix(&cwd).unwrap_or(path);
         let suffix = if path.is_dir() && !is_symlink(path) {
@@ -641,7 +703,9 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join(".claude/notes.md"), "source: nexus-platform\n").unwrap();
-        let entries: Vec<PathBuf> = scaffold_entries(&dir, ".nexus", &[])
+        let pristine = |_: &str| true;
+        let entries: Vec<PathBuf> = scaffold_entries(&dir, ".nexus", &[], &[], pristine)
+            .0
             .into_iter()
             .map(|(p, _)| p)
             .collect();
@@ -654,7 +718,47 @@ mod tests {
         );
         // Already in a projection plan: not listed twice.
         let planned = vec![".claude/skills/nx/SKILL.md".to_string()];
-        assert_eq!(scaffold_entries(&dir, ".nexus", &planned).len(), 1);
+        assert_eq!(
+            scaffold_entries(&dir, ".nexus", &planned, &[], pristine)
+                .0
+                .len(),
+            1
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A directory holding a path the projection cleanup keeps is split:
+    /// only its other entries go.
+    #[test]
+    fn test_scaffold_keeps_paths_the_cleanup_keeps() {
+        let dir = temp_dir("scaffold-kept");
+        fs::create_dir_all(dir.join(".nexus/generated")).unwrap();
+        fs::write(dir.join(".nexus/generated/agent-routing.json"), "edited").unwrap();
+        fs::write(dir.join(".nexus/generated/other.json"), "x").unwrap();
+        let kept = vec![".nexus/generated/agent-routing.json".to_string()];
+        let (entries, _) = scaffold_entries(&dir, ".nexus", &[], &kept, |_| true);
+        let entries: Vec<PathBuf> = entries.into_iter().map(|(p, _)| p).collect();
+        assert_eq!(entries, vec![dir.join(".nexus/generated/other.json")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A marker file whose content Nexus did not record is kept and
+    /// reported, never deleted on the marker alone.
+    #[test]
+    fn test_unrecorded_marker_files_are_kept() {
+        let dir = temp_dir("scaffold-unrecorded");
+        fs::create_dir_all(dir.join(".claude/skills/nx")).unwrap();
+        fs::write(
+            dir.join(".claude/skills/nx/SKILL.md"),
+            "---\nsource: nexus-platform\n---\nedited\n",
+        )
+        .unwrap();
+        fs::write(dir.join("AGENTS.md"), "---\nsource: nexus-platform\n---\n").unwrap();
+        let (entries, unrecorded) =
+            scaffold_entries(&dir, ".claude", &[], &[], |rel| rel == "AGENTS.md");
+        let entries: Vec<PathBuf> = entries.into_iter().map(|(p, _)| p).collect();
+        assert_eq!(entries, vec![dir.join("AGENTS.md")]);
+        assert_eq!(unrecorded, vec![".claude/skills/nx/SKILL.md".to_string()]);
         let _ = fs::remove_dir_all(&dir);
     }
 
