@@ -204,6 +204,7 @@ impl Workspace {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()

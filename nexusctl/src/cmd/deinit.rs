@@ -130,8 +130,9 @@ const NEXUS_STATE_ENTRIES: &[&str] =
 
 /// Plan the entries below an agentic root (`.nexus/` or an alternate one):
 /// Nexus state goes whole; a file goes when it is what Nexus recorded, or
-/// a Nexus-marked task snapshot (never recorded, rewritten on every pull).
-/// Edited files and files Nexus did not write stay and are reported.
+/// when it is the task snapshot at the top of the root (never recorded,
+/// rewritten on every pull). Edited files, files Nexus did not write and
+/// symlinks (Nexus writes none there) stay and are reported.
 #[allow(clippy::too_many_arguments)]
 fn root_entries(
     cwd: &Path,
@@ -162,9 +163,9 @@ fn root_entries(
         if top && NEXUS_STATE_ENTRIES.contains(&name.as_str()) {
             push_unless_kept(cwd, &path, kept, out);
         } else if is_symlink(&path) {
-            // Only the link goes; what it points to stays.
+            // Nexus never writes a link here: an operator's link stays.
             if !kept.iter().any(|k| k.trim_end_matches('/') == rel) {
-                out.push((path, RemovalKind::Full));
+                unrecorded.push(rel);
             }
         } else if path.is_dir() {
             root_entries(cwd, &path, false, kept, origin, out, unrecorded);
@@ -173,13 +174,19 @@ fn root_entries(
         } else {
             match origin(&rel) {
                 Some(Origin::Pristine) => out.push((path, RemovalKind::ManagedFile)),
-                Some(Origin::Owned) if name == "TASKS.md" => {
+                Some(Origin::Owned) if top && name == "TASKS.md" && is_task_snapshot(&path) => {
                     out.push((path, RemovalKind::ManagedFile))
                 }
                 _ => unrecorded.push(rel),
             }
         }
     }
+}
+
+/// Whether `path` begins the way `nexus pull` writes the task snapshot, so
+/// a file that merely quotes the marker is not taken for it.
+fn is_task_snapshot(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|b| b.starts_with(super::pull::TASKS_SNAPSHOT_HEAD.as_bytes()))
 }
 
 /// Add `path` for full removal, unless a kept path lies at or below it:
@@ -845,20 +852,32 @@ mod tests {
         let dir = temp_dir("scaffold-root");
         fs::create_dir_all(dir.join(".nexus/skills/a")).unwrap();
         fs::create_dir_all(dir.join(".nexus/generated")).unwrap();
+        fs::create_dir_all(dir.join(".nexus/research")).unwrap();
         for f in [
             ".nexus/AGENTS.md",
             ".nexus/directives.md",
-            ".nexus/TASKS.md",
             ".nexus/notes.md",
             ".nexus/skills/a/SKILL.md",
             ".nexus/sync-manifest.json",
         ] {
             fs::write(dir.join(f), "x").unwrap();
         }
+        let snapshot = format!("{}- [ ] one\n", super::super::pull::TASKS_SNAPSHOT_HEAD);
+        fs::write(dir.join(".nexus/TASKS.md"), &snapshot).unwrap();
+        // The operator's own task list quoting the marker is no snapshot,
+        // neither below the top nor without the snapshot's head.
+        fs::write(dir.join(".nexus/research/TASKS.md"), &snapshot).unwrap();
+        fs::write(
+            dir.join(".nexus/research/notes.md"),
+            "quoted: source: nexus-platform\n",
+        )
+        .unwrap();
         let origin = |rel: &str| match rel {
             ".nexus/AGENTS.md" => Some(Origin::Modified),
             ".nexus/directives.md" | ".nexus/skills/a/SKILL.md" => Some(Origin::Pristine),
-            ".nexus/TASKS.md" => Some(Origin::Owned),
+            ".nexus/TASKS.md" | ".nexus/research/TASKS.md" | ".nexus/research/notes.md" => {
+                Some(Origin::Owned)
+            }
             _ => Some(Origin::Unknown),
         };
         let (entries, unrecorded) = scaffold_entries(&dir, ".nexus", &[], &[], origin);
@@ -877,7 +896,50 @@ mod tests {
                 ".nexus/sync-manifest.json",
             ]
         );
-        assert_eq!(unrecorded, vec![".nexus/AGENTS.md", ".nexus/notes.md"]);
+        assert_eq!(
+            unrecorded,
+            vec![
+                ".nexus/AGENTS.md",
+                ".nexus/notes.md",
+                ".nexus/research/TASKS.md",
+                ".nexus/research/notes.md",
+            ]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A top-level `TASKS.md` that does not begin like the snapshot (only
+    /// quotes the marker) is kept and reported.
+    #[test]
+    fn test_task_list_quoting_the_marker_is_kept() {
+        let dir = temp_dir("scaffold-tasks");
+        fs::create_dir_all(dir.join(".nexus")).unwrap();
+        fs::write(
+            dir.join(".nexus/TASKS.md"),
+            "# My tasks\n\nsee `source: nexus-platform`\n",
+        )
+        .unwrap();
+        let (entries, unrecorded) =
+            scaffold_entries(&dir, ".nexus", &[], &[], |_| Some(Origin::Owned));
+        assert!(entries.is_empty());
+        assert_eq!(unrecorded, vec![".nexus/TASKS.md"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An operator's link below the agentic root stays (with its target)
+    /// and is reported; Nexus writes no links there.
+    #[cfg(unix)]
+    #[test]
+    fn test_links_below_agentic_root_are_kept() {
+        let dir = temp_dir("scaffold-links");
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.join(".nexus/skills")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join(".nexus/reference")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join(".nexus/skills/linked")).unwrap();
+        let (entries, unrecorded) =
+            scaffold_entries(&dir, ".nexus", &[], &[], |_| Some(Origin::Pristine));
+        assert!(entries.is_empty(), "{entries:?}");
+        assert_eq!(unrecorded, vec![".nexus/reference", ".nexus/skills/linked"]);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -34,6 +34,11 @@ use super::shadow;
 /// overwritten by `nexus pull`.
 pub(crate) const MANAGED_MARKER: &str = "source: nexus-platform";
 
+/// How every `<agentic_root>/TASKS.md` snapshot written by `write_tasks`
+/// begins; `nexus deinit` removes only a file that starts this way.
+pub(crate) const TASKS_SNAPSHOT_HEAD: &str =
+    "---\nsource: nexus-platform\n---\n\n# Active Tasks\n\n";
+
 // ---------------------------------------------------------------------------
 // URL allowlist for remote downloads (SEC-003)
 //
@@ -5773,11 +5778,7 @@ pub fn write_tasks(
         pa.cmp(&pb).then_with(|| b.updated_at.cmp(&a.updated_at))
     });
 
-    let mut out = String::new();
-    out.push_str("---\n");
-    out.push_str("source: nexus-platform\n");
-    out.push_str("---\n\n");
-    out.push_str("# Active Tasks\n\n");
+    let mut out = String::from(TASKS_SNAPSHOT_HEAD);
     out.push_str(&format!(
         "> {} open task{} pulled from Nexus platform.\n\n",
         sorted.len(),

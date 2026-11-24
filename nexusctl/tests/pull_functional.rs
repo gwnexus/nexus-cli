@@ -48,10 +48,14 @@ fn pull_writes_everything_and_is_idempotent() {
     api.clear_requests();
     ws.nexus(&api, &["pull", "--trust"]).assert_ok();
     let after = snapshot(&ws);
-    let changed: Vec<_> = after
-        .iter()
-        .filter(|(k, v)| before.get(*k) != Some(*v))
-        .map(|(k, _)| k.clone())
+    // Added, modified and deleted files all count as a change.
+    let changed: Vec<_> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|k| before.get(*k) != after.get(*k))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .cloned()
         .collect();
     assert!(changed.is_empty(), "second pull changed {changed:?}");
     assert!(api.writes().iter().all(|r| r.body.contains("\"action\"")));
