@@ -562,17 +562,19 @@ pub async fn run(
             "push stopped: the current workspace fork could not be read ({e}); nothing was pushed"
         ),
     };
+    let exported = export.as_ref().map(exported_paths);
     // A file that should go into the new fork but cannot be read would be
     // dropped from it silently.
     let blocked: Vec<&String> = unreadable
         .iter()
         .filter(|k| !outside_selection(k, only))
         .filter(|k| {
-            is_manifest_tracked(k, &manifest)
-                || include_named.iter().any(|p| p == *k)
-                || export.as_ref().is_some_and(|e| {
-                    k.as_str() == "devbox.json" || e.scripts.iter().any(|s| &s.path == *k)
-                })
+            unreadable_blocks_push(
+                k,
+                is_manifest_tracked(k, &manifest),
+                exported.as_deref(),
+                include_named,
+            )
         })
         .collect();
     if !blocked.is_empty() {
@@ -585,7 +587,6 @@ pub async fn run(
                 .join(", ")
         );
     }
-    let exported = export.as_ref().map(exported_paths);
     if only.is_some() && export.is_none() {
         anyhow::bail!(
             "push stopped: the current workspace fork could not be read, so the files outside the selection cannot keep their fork version; nothing was pushed"
@@ -813,6 +814,24 @@ fn exported_paths(export: &nexus_core::api::WorkspaceForkExportResponse) -> Vec<
     std::iter::once("devbox.json".to_string())
         .chain(export.scripts.iter().map(|s| s.path.clone()))
         .collect()
+}
+
+/// Whether an unreadable `key` stops the push: it is named, or it would go
+/// into the new fork (tracked or in the current fork). Generated scripts are
+/// never pushed, and a tracked file the fork dropped is skipped anyway.
+fn unreadable_blocks_push(
+    key: &str,
+    tracked: bool,
+    exported: Option<&[String]>,
+    include_named: &[String],
+) -> bool {
+    if include_named.iter().any(|p| p == key) {
+        return true;
+    }
+    if is_generated_script(key) || is_dropped(key, exported, include_named) {
+        return false;
+    }
+    tracked || exported.is_some_and(|ex| ex.iter().any(|p| p == key))
 }
 
 /// A tracked file the fork no longer contains and that was not named
@@ -1057,6 +1076,37 @@ mod tests {
         // A fork devbox.json that does not parse stops the push.
         let bad: HashMap<String, String> = [("devbox.json".to_string(), "{".to_string())].into();
         assert!(with_kept_fork_files(None, None, &bad).is_err());
+    }
+
+    #[test]
+    fn test_unreadable_blocks_push() {
+        let exported = vec!["devbox.json".to_string(), format!("{SCRIPTS_DIR}/a.sh")];
+        let a = format!("{SCRIPTS_DIR}/a.sh");
+        let old = format!("{SCRIPTS_DIR}/old.sh");
+        let generated = format!("{SCRIPTS_DIR}/dbx_init.sh");
+        assert!(is_generated_script(&generated));
+        // In the fork or named: stops the push.
+        assert!(unreadable_blocks_push(&a, false, Some(&exported), &[]));
+        assert!(unreadable_blocks_push(
+            &old,
+            false,
+            Some(&exported),
+            std::slice::from_ref(&old)
+        ));
+        // Dropped from the fork and not named: skipped.
+        assert!(!unreadable_blocks_push(&old, true, Some(&exported), &[]));
+        // Generated scripts are never pushed.
+        let mut with_gen = exported.clone();
+        with_gen.push(generated.clone());
+        assert!(!unreadable_blocks_push(
+            &generated,
+            true,
+            Some(&with_gen),
+            &[]
+        ));
+        // No fork: a tracked file stops the push.
+        assert!(unreadable_blocks_push(&old, true, None, &[]));
+        assert!(!unreadable_blocks_push(&old, false, None, &[]));
     }
 
     #[test]
