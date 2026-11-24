@@ -342,6 +342,8 @@ pub struct WorkspaceState {
     pub entries: Vec<Entry>,
     /// `.claude/settings.json` as the next pull would leave it.
     pub settings_after: serde_json::Value,
+    /// Workspace scripts the backend delivers as executable.
+    pub executable_scripts: std::collections::BTreeSet<String>,
 }
 
 impl WorkspaceState {
@@ -468,7 +470,9 @@ pub async fn load(
     }
 
     // Devbox workspace (content).
-    entries.extend(workspace_entries(client, project_id, workspace, &manifest).await);
+    let (ws_entries, executable_scripts) =
+        workspace_entries(client, project_id, workspace, &manifest).await;
+    entries.extend(ws_entries);
 
     // CCX files, CLAUDE.md block and managed settings keys (Claude Code).
     let lock = ccx::load_lock(workspace, &agentic_root);
@@ -691,6 +695,7 @@ pub async fn load(
         export,
         entries,
         settings_after,
+        executable_scripts,
     })
 }
 
@@ -727,11 +732,18 @@ async fn workspace_entries(
     project_id: &str,
     workspace: &Path,
     manifest: &serde_json::Value,
-) -> Vec<Entry> {
+) -> (Vec<Entry>, std::collections::BTreeSet<String>) {
     let mut entries = Vec::new();
     let mut desired: Vec<(String, String)> = Vec::new();
+    let mut executable = std::collections::BTreeSet::new();
     let exported = match client.export_workspace_mcp(project_id).await {
         Ok(ws) => {
+            executable.extend(
+                ws.scripts
+                    .iter()
+                    .filter(|s| s.executable)
+                    .map(|s| s.path.clone()),
+            );
             desired.push(("devbox.json".into(), ws.devbox_json));
             desired.extend(ws.scripts.into_iter().map(|s| (s.path, s.body)));
             true
@@ -814,7 +826,7 @@ async fn workspace_entries(
         });
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
-    entries
+    (entries, executable)
 }
 
 #[cfg(test)]
@@ -1114,6 +1126,7 @@ mod tests {
                 ),
             ],
             settings_after: serde_json::json!({}),
+            executable_scripts: Default::default(),
         };
         let m: Vec<_> = state
             .matching(".claude/rules")
@@ -1183,7 +1196,8 @@ mod tests {
         );
         // No backend: the local-only view.
         let client = NexusClient::new("http://127.0.0.1:0", None).unwrap();
-        let entries = workspace_entries(&client, "p", dir.path(), &serde_json::json!({})).await;
+        let (entries, _) =
+            workspace_entries(&client, "p", dir.path(), &serde_json::json!({})).await;
         let states: Vec<(&str, State)> =
             entries.iter().map(|e| (e.path.as_str(), e.state)).collect();
         assert_eq!(

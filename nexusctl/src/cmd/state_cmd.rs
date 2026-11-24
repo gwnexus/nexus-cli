@@ -325,7 +325,8 @@ pub async fn push(
     adopt_local: bool,
 ) -> anyhow::Result<()> {
     if adopt_local {
-        return super::push::run(api_url, cli_project_id, fork_name, dry_run, true, &[]).await;
+        return super::push::run(api_url, cli_project_id, fork_name, dry_run, true, &[], None)
+            .await;
     }
     let (workspace, project_id, client) = connect(api_url, cli_project_id)?;
     let state = workspace_state::load(&client, &project_id, &workspace).await?;
@@ -363,6 +364,15 @@ pub async fn push(
         })
         .map(|e| e.path.clone())
         .collect();
+    // A named path pushes only the workspace files it selects; the others
+    // keep their fork version.
+    let selection: Option<Vec<String>> = path.map(|_| {
+        selected
+            .iter()
+            .filter(|e| e.kind == Kind::Workspace)
+            .map(|e| e.path.clone())
+            .collect()
+    });
     let workspace_changes = !include_named.is_empty()
         || selected.iter().any(|e| {
             e.kind == Kind::Workspace
@@ -406,6 +416,7 @@ pub async fn push(
             dry_run,
             false,
             &include_named,
+            selection.as_deref(),
         )
         .await?;
     }
@@ -532,6 +543,13 @@ fn reset_entry(state: &WorkspaceState, e: &Entry) -> anyhow::Result<Option<Strin
                     &e.path,
                     &nexus_core::hash::with_single_trailing_newline(body),
                 )?;
+                // As nexus pull writes it: a script the backend delivers
+                // as executable is executable again.
+                #[cfg(unix)]
+                if state.executable_scripts.contains(&e.path) {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(ws.join(&e.path), fs::Permissions::from_mode(0o755))?;
+                }
                 super::sync::update_workspace_manifest_after_pull(ws, &e.path, &sha256_hex(body))?;
                 Ok(None)
             }
@@ -561,7 +579,18 @@ fn reset_entry(state: &WorkspaceState, e: &Entry) -> anyhow::Result<Option<Strin
                 Ok(None)
             }
             None => {
-                let _ = fs::remove_file(ws.join(&e.path));
+                // The lock entry records ownership: drop it only once the
+                // file is gone.
+                super::pull::validate_agent_file_target_path(ws, &e.path)?;
+                match fs::remove_file(ws.join(&e.path)) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        return Ok(Some(format!(
+                            "could not be removed ({err}); left as is and still owned by Nexus"
+                        )))
+                    }
+                }
                 super::ccx::set_lock_file_entry(ws, root, &e.path, None)?;
                 Ok(None)
             }
@@ -705,6 +734,7 @@ mod tests {
             .unwrap(),
             entries,
             settings_after: serde_json::json!({"statusLine": {"command": "hud"}}),
+            executable_scripts: Default::default(),
         }
     }
 
@@ -760,6 +790,63 @@ mod tests {
             lock.files[".claude/rules/10.md"].sha256,
             sha256_hex("desired\n")
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_reset_recreates_an_executable_script_as_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("reset-exec");
+        let mut e = entry(
+            "scripts/devbox/run.sh",
+            FileClass::Content,
+            State::Deleted,
+            Kind::Workspace,
+        );
+        e.local = None;
+        let mut plain = e.clone();
+        plain.path = "scripts/devbox/data.txt".into();
+        let mut state = state_with(vec![e.clone(), plain.clone()], &dir);
+        state.executable_scripts.insert(e.path.clone());
+        assert!(reset_entry(&state, &e).unwrap().is_none());
+        assert!(reset_entry(&state, &plain).unwrap().is_none());
+        let mode = |p: &str| fs::metadata(dir.join(p)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("scripts/devbox/run.sh"), 0o755);
+        assert_eq!(mode("scripts/devbox/data.txt") & 0o111, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reset_keeps_the_lock_entry_when_removal_fails() {
+        let dir = tmp("reset-ccx-remove");
+        let path = ".claude/rules/old.md";
+        super::super::ccx::set_lock_file_entry(
+            &dir,
+            ".nexus",
+            path,
+            Some(super::super::ccx::CcxLockFileEntry {
+                file_key: "old".into(),
+                sha256: sha256_hex("x"),
+            }),
+        )
+        .unwrap();
+        // A directory in its place: remove_file fails with another error
+        // than NotFound.
+        fs::create_dir_all(dir.join(path).join("child")).unwrap();
+        let mut e = entry(path, FileClass::Projection, State::Orphaned, Kind::Ccx);
+        e.desired = None;
+        let state = state_with(vec![e.clone()], &dir);
+        let note = reset_entry(&state, &e).unwrap();
+        assert!(note.is_some_and(|n| n.contains("could not be removed")));
+        let lock = super::super::ccx::load_lock(&dir, ".nexus").unwrap();
+        assert!(lock.files.contains_key(path));
+
+        // Already gone counts as removed: the entry is dropped.
+        fs::remove_dir_all(dir.join(path)).unwrap();
+        assert!(reset_entry(&state, &e).unwrap().is_none());
+        let lock = super::super::ccx::load_lock(&dir, ".nexus").unwrap();
+        assert!(!lock.files.contains_key(path));
         let _ = fs::remove_dir_all(&dir);
     }
 

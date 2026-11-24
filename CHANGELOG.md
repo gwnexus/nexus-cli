@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`nexus reload -y` keeps edited Claude Code files.** `-y` no longer counts as `--force` for edited locked Claude Code files and modified leftovers; only `--force` or `--force-unmanaged` replaces or removes them, as in `nexus pull`. Other files follow pull's `-y` handling.
 - **`nexus reload` compares what pull changed.** It snapshots the agentic root that pull selects from the export (not always `.nexus`) and uses it for the plugin step; files are compared by their bytes, so a change in a non-UTF-8 file is not missed.
 - **Plugin changes in `nexus reload` are reported only when known.** An unavailable plugin list is no longer read as empty (which reported every plugin as new) and no longer ends in "the running session is up to date", and installations of one plugin at user and project scope are compared separately.
+- **`nexus push <path>` pushes only what it names.** Devbox files outside the selection keep their version from the current fork instead of carrying other local edits into the new fork; when the fork cannot be read, a selective push stops.
+- **`nexus reset` restores executable scripts executable** and keeps the ownership record of a Claude Code file it could not remove (a file already gone counts as removed).
 
 ## [0.51.0] - 2026-11-24
 

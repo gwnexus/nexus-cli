@@ -245,7 +245,12 @@ files with the same fork export `nexus status` uses, so a freshly pulled
 workspace has nothing to push. New local scripts are pushed when named
 (`nexus push scripts/devbox/<file>`). A fork script you deleted locally
 (`DELETED`) is pushed as a removal (`D`): the new fork is built from the
-pushed files, so it no longer carries the script:
+pushed files, so it no longer carries the script. A named path pushes only
+the devbox files it selects (`nexus push scripts/devbox/a.sh`): every other
+file keeps its version from the current fork, so local edits elsewhere stay
+local; when the fork cannot be read, such a push stops. `nexus reset` of a
+deleted executable script writes it back executable, and a leftover Claude
+Code file that cannot be removed keeps its ownership record:
 
 ```bash
 nexus push --name "v3.1 ansible"    # push with custom fork name
