@@ -1526,6 +1526,7 @@ nexus-cli/
 │       ├── common/     # Harness: mock API, temporary git workspace, fixtures
 │       ├── pull_functional.rs
 │       ├── workspace_functional.rs  # push, status, reset, stash, deinit
+│       ├── status_functional.rs  # status and diff
 │       ├── shadow_functional.rs
 │       └── init_functional.rs
 ├── nexus-core/         # Library crate (shared modules)

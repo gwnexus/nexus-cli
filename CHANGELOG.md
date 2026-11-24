@@ -84,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- **Functional tests run the real `nexus` binary** against a local fake backend in a temporary git workspace with its own home directory: pull (first pull, idempotence, dry run, local edits, dropped files, consent, scopes, task snapshot, user-managed directives, `opencode.json` settings, broken and unreadable files), push, status, reset, stash, deinit, shadow and init.
+- **Functional tests run the real `nexus` binary** against a local fake backend in a temporary git workspace with its own home directory: pull (first pull, idempotence, dry run, local edits, dropped files, consent, scopes, task snapshot, user-managed directives, `opencode.json` settings, broken and unreadable files), push, status (including the legacy export fallback), diff, reset, stash, deinit, shadow and init.
 
 ## [0.51.0] - 2026-11-24
 
