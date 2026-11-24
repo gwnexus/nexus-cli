@@ -14,7 +14,10 @@ use nexus_core::config::{Config, ConfigSource, DEFAULT_API_URL};
 
 use crate::{Cli, Command};
 
-/// Commands that never send a token to the API.
+/// Commands that never send a token to the API. Classified by action
+/// where a command has local and remote forms: `status --agents` reads the
+/// local observer, `stash` only moves local files, and `shadow check-msg`
+/// checks a commit message against the cached rules.
 fn sends_token(command: &Command) -> bool {
     !matches!(
         command,
@@ -23,6 +26,11 @@ fn sends_token(command: &Command) -> bool {
             | Command::Config { .. }
             | Command::Upgrade
             | Command::Man { .. }
+            | Command::Stash { .. }
+            | Command::Status { agents: true, .. }
+            | Command::Shadow {
+                action: crate::ShadowAction::CheckMsg { .. }
+            }
     )
 }
 
@@ -166,6 +174,9 @@ mod tests {
             vec!["nexus", "logout"],
             vec!["nexus", "config", "show"],
             vec!["nexus", "upgrade"],
+            vec!["nexus", "status", "--agents"],
+            vec!["nexus", "stash", "list"],
+            vec!["nexus", "shadow", "check-msg", "--guard", "g.json", "MSG"],
         ] {
             let cli = Cli::try_parse_from(&args).unwrap();
             assert!(!sends_token(&cli.command), "{args:?}");

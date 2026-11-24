@@ -229,10 +229,30 @@ pub async fn status(api_url: &str, api_url_source: &str) -> anyhow::Result<()> {
                     );
                     auth_valid = true;
                 }
-                Err(e) => {
+                // Only a rejection by the hub makes the token invalid; an
+                // unreachable hub or another failure leaves it unknown.
+                Err(e @ nexus_core::error::Error::Unauthorized(_)) => {
                     status_line(
                         "Auth:",
                         format_args!("{} Token invalid: {}", style("ERR").bold().red(), e),
+                    );
+                    status_line(
+                        "",
+                        format_args!(
+                            "Token: {}{}",
+                            style(prefix).dim(),
+                            style(source_label).dim()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    status_line(
+                        "Auth:",
+                        format_args!(
+                            "{} Could not verify the token: {}",
+                            style("!").bold().yellow(),
+                            e
+                        ),
                     );
                     status_line(
                         "",

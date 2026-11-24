@@ -836,8 +836,9 @@ impl NexusClient {
 
     /// Send a DELETE request and deserialize the JSON response.
     ///
-    /// Endpoints that return an empty body should be requested with
-    /// `T = serde_json::Value`, which tolerates `null`/empty responses.
+    /// An empty success body (e.g. `204 No Content`) is read as JSON `null`
+    /// here, so endpoints without a body should be requested with a type
+    /// that accepts `null`, such as `serde_json::Value` or `Option<T>`.
     async fn delete<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
         let url = format!("{}{}", self.base_url, path);
         debug!("DELETE {}", url);

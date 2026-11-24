@@ -227,6 +227,8 @@ pub struct EffectiveConfig {
     pub local_path: Option<PathBuf>,
     /// Path to the global config file (may not exist yet).
     pub global_path: PathBuf,
+    /// Keys the global file sets explicitly (dotted, e.g. `run.default_tool`).
+    pub global_keys: std::collections::BTreeSet<String>,
 }
 
 impl Config {
@@ -343,17 +345,31 @@ impl Config {
         workspace: Option<&std::path::Path>,
     ) -> Result<EffectiveConfig, Error> {
         let global_path = Self::path()?;
-        let global_exists = global_path.exists();
-        let mut config = Self::load()?;
-
-        let base_source = if global_exists {
-            ConfigSource::Global
-        } else {
-            ConfigSource::Default
+        // One read for the values and their provenance: a key the global
+        // file leaves out comes from the compiled defaults, even when the
+        // file exists.
+        let (mut config, global_keys) = match std::fs::read_to_string(&global_path) {
+            Ok(text) => {
+                let config: Config = toml::from_str(&text)?;
+                let mut keys = std::collections::BTreeSet::new();
+                collect_keys("", &toml::from_str::<toml::Table>(&text)?, &mut keys);
+                (config, keys)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (Self::default(), Default::default())
+            }
+            Err(e) => return Err(e.into()),
         };
-        let mut api_url_source = base_source;
-        let mut default_output_source = base_source;
-        let mut no_color_source = base_source;
+        let source = |key: &str| {
+            if global_keys.contains(key) {
+                ConfigSource::Global
+            } else {
+                ConfigSource::Default
+            }
+        };
+        let mut api_url_source = source("api_url");
+        let mut default_output_source = source("default_output");
+        let mut no_color_source = source("no_color");
 
         let local_overrides = load_project_config(workspace)?.and_then(|pc| pc.config);
         let local_path = project_config_path(workspace).ok().filter(|p| p.exists());
@@ -380,7 +396,35 @@ impl Config {
             no_color_source,
             local_path,
             global_path,
+            global_keys,
         })
+    }
+}
+
+impl EffectiveConfig {
+    /// Where a key without a local override comes from: the global file
+    /// when it sets the key, otherwise the compiled default.
+    pub fn global_source(&self, key: &str) -> ConfigSource {
+        if self.global_keys.contains(key) {
+            ConfigSource::Global
+        } else {
+            ConfigSource::Default
+        }
+    }
+}
+
+/// Every key path of `table`, dotted (`run.default_tool`).
+fn collect_keys(prefix: &str, table: &toml::Table, out: &mut std::collections::BTreeSet<String>) {
+    for (key, value) in table {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        if let toml::Value::Table(sub) = value {
+            collect_keys(&path, sub, out);
+        }
+        out.insert(path);
     }
 }
 
@@ -841,4 +885,43 @@ pub fn resolve_project_id(
          - Run 'nexus link' to link this directory to a project"
             .to_string(),
     ))
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn test_global_source_is_per_key() {
+        let mut keys = std::collections::BTreeSet::new();
+        let table: toml::Table =
+            toml::from_str("no_color = true\napi_url = \"https://nexus.example\"\n[run]\ndefault_tool = \"claude\"\n")
+                .unwrap();
+        collect_keys("", &table, &mut keys);
+        let effective = EffectiveConfig {
+            config: Config::default(),
+            api_url_source: ConfigSource::Global,
+            default_output_source: ConfigSource::Default,
+            no_color_source: ConfigSource::Global,
+            local_path: None,
+            global_path: PathBuf::from("/nonexistent/config.toml"),
+            global_keys: keys,
+        };
+        // Stored explicitly, even when equal to the compiled default.
+        assert_eq!(effective.global_source("api_url"), ConfigSource::Global);
+        assert_eq!(
+            effective.global_source("run.default_tool"),
+            ConfigSource::Global
+        );
+        // Left out of the file: the compiled default.
+        assert_eq!(
+            effective.global_source("default_output"),
+            ConfigSource::Default
+        );
+        assert_eq!(
+            effective.global_source("run.launch_countdown_secs"),
+            ConfigSource::Default
+        );
+        assert_eq!(effective.global_source("mcp_source"), ConfigSource::Default);
+    }
 }

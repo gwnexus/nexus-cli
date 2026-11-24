@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Project token changes no longer overwrite each other.** `nexus project link`, `rotate` and `unlink` change `project-tokens.toml` under an exclusive lock and re-read it first, so a concurrent command for another project keeps its entry; `unlink` removes only the token it revoked.
 - **`generated_at` is ignored only in the front matter.** A `generated_at:` line in the body of an agent file is content again, and a re-stamped `generated_at` together with a changed final newline no longer shows as a local edit.
 - **`nexus pull` names a stale cached run target.** When the cached agent owner or run target in `.nexus/config.toml` cannot be updated, pull says which one, each on its own.
+- **`nexus auth status` tells a rejected token from an unreachable hub.** Only a token the hub rejects is reported as invalid; a connection or other failure says the token could not be verified.
+- **`nexus config show` lists every effective setting with its source per key.** `check_updates`, `mcp_source`, `run.default_tool` and `run.launch_countdown_secs` are shown too, and a key the global file leaves out is reported as `default` instead of `global`.
+- **Local commands work with an unapproved repository API URL.** `nexus status --agents`, `nexus stash` and the commit-message check of shadow mode never send a token, so the API trust check no longer blocks them.
+- **The Dispatch runner retries a Dispatch it could not read.** Only a Dispatch that is gone or not readable for the token is announced without its title; a failed or incomplete read stops the poll before the cursor moves, so the next poll tries again.
+- **Optional fields are left out of requests.** The runner registration omits an unknown runtime version, and actor imports omit unset description, routing and profile fields instead of sending `null`.
 
 ## [0.51.0] - 2026-11-24
 

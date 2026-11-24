@@ -38,7 +38,38 @@ pub fn show() -> anyhow::Result<()> {
         "  no_color       = {} ({})",
         effective.config.no_color, effective.no_color_source
     );
-    println!("  code_signals   = {}", effective.config.code_signals);
+    let global = |key: &str| effective.global_source(key);
+    println!(
+        "  code_signals   = {} ({})",
+        effective.config.code_signals,
+        global("code_signals")
+    );
+    println!(
+        "  check_updates  = {} ({})",
+        effective.config.check_updates,
+        global("check_updates")
+    );
+    // Read by init, pull and run; global file only.
+    println!(
+        "  mcp_source     = {} ({})",
+        effective.config.mcp_source,
+        global("mcp_source")
+    );
+    println!(
+        "  run.default_tool          = {} ({})",
+        effective
+            .config
+            .run
+            .default_tool
+            .as_deref()
+            .unwrap_or("(from the project's agent owner)"),
+        global("run.default_tool")
+    );
+    println!(
+        "  run.launch_countdown_secs = {} ({})",
+        effective.config.run.launch_countdown_secs,
+        global("run.launch_countdown_secs")
+    );
 
     Ok(())
 }
