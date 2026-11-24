@@ -1192,19 +1192,31 @@ the CLI applies them as sent:
   paths and binaries skipped) and the last N commit messages of the current
   branch (default 50), and lists excluded paths git still tracks with the
   one-time fix (`git rm --cached -r -- <path>`, never run for you). Read-only;
-  exit code 1 when anything is found, so it works in CI.
+  exit code 1 when anything is found, so it works in CI. When git cannot read
+  the index or the commit history the check fails with an error instead of
+  reporting a clean result; an empty index or a branch without commits is
+  clean.
 - `nexus pull` caches the rules in `<agentic_root>/generated/shadow-guard.json`
   and installs a `commit-msg` hook that checks each message offline
   (`nexus shadow check-msg`). A rejected message names the rule; `git commit
-  --no-verify` bypasses the check once. An existing untracked hook is kept
-  and run first; a hook tracked in the repository or owned by a hook manager
-  (husky, lefthook, pre-commit) is left alone, and pull prints the one line to
-  add to it. The hook is removed again when the level is `off` or the project
-  switches the check off; a hook inside the work tree (`core.hooksPath`) is
-  git-excluded.
+  --no-verify` bypasses the check once. The hook checks the message git will
+  store: comment lines are skipped only when git strips them (editor flow
+  with `commit.cleanup` `strip` or `default`), the `scissors` mode cuts at the
+  scissors line, and with any other setting (or `-m`/`-F`) every line is
+  checked. An existing untracked hook is kept (as `commit-msg.pre-nexus`) and
+  run first; a hook tracked in the repository or owned by a hook manager
+  (husky, lefthook, pre-commit) is left alone, also when the tracked hook was
+  deleted locally, and pull prints the one line to add to it. A Nexus hook
+  without the executable bit is not reported as installed and is repaired to
+  mode 0755 by the next pull. The hook is removed again when the level is
+  `off` or the project switches the check off; a hook inside the work tree
+  (`core.hooksPath`), and the chained `commit-msg.pre-nexus`, are
+  git-excluded. A `core.hooksPath` that git cannot reach (a `..` after a
+  missing directory or a file) is reported as an error.
 - `nexus shadow status` and `nexus shadow <level>` always print the effective
   state (level, excluded paths and how many are still tracked, hook) and a
-  check summary, also when the level did not change. Switching shadow on does
+  check summary, also when the level did not change; when the check cannot
+  run they print a `Check: failed: <reason>` line. Switching shadow on does
   not clean content that is already committed.
 
 ### User-Invoked Skills
