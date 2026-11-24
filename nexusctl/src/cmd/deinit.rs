@@ -1,95 +1,189 @@
 //! The `nexus deinit` command.
 //!
-//! Removes all Nexus/AI scaffold files from the current directory.
-//! Without `--force`, prints the list and asks for confirmation.
+//! Removes the Nexus scaffold from the current directory: only what Nexus
+//! verifiably wrote. Without `--force`, prints the list and asks for
+//! confirmation (`--force` skips the question; it never widens what is
+//! removed).
 //!
-//! When the project uses an alternate `agentic_root` (e.g. `.nexus`),
-//! only Nexus-managed files are removed. Customer-owned files in
-//! `.claude/` are left untouched.
+//! - `.claude/` and `.opencode/`: the files the projection cleanup proves
+//!   Nexus wrote (recorded hashes, the CCX lock, the `source:
+//!   nexus-platform` front matter, rendered content); mixed files lose only
+//!   their Nexus parts. Directories go only once they are empty.
+//! - `.nexus/`: everything except `config.toml` (the project binding) and
+//!   `stash/` (saved local edits, possibly the only copy).
+//! - An alternate agentic root other than `.nexus` and `.claude` is removed.
 
 use console::style;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cmd::pull::is_managed_file;
+use super::projection_cleanup::{self, Action, CleanupContext, Projection};
 
-/// Nexus-owned scaffold entries that are always safe to remove.
-/// NOTE: .nexus/ is handled specially: config.toml is preserved.
-const NEXUS_OWNED_ENTRIES: &[&str] = &[".opencode", "opencode.json", "opencode.jsonc"];
+/// Entries of `.nexus/` that deinit keeps.
+const NEXUS_KEPT_ENTRIES: &[&str] = &["config.toml", "stash"];
+
+/// Whether `content` carries the Nexus marker as a line of its front matter
+/// (`---` at the start up to the closing `---`). A marker quoted in the
+/// document text is not ownership.
+pub(crate) fn has_managed_front_matter(content: &str) -> bool {
+    let mut lines = content.lines();
+    if lines.next().map(|l| l.trim_end_matches('\r')) != Some("---") {
+        return false;
+    }
+    for line in lines {
+        let line = line.trim_end_matches('\r');
+        if line == "---" {
+            return false;
+        }
+        if line.trim() == super::pull::MANAGED_MARKER {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the file at `path` carries the Nexus front matter marker.
+fn is_managed_file(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|b| has_managed_front_matter(&String::from_utf8_lossy(&b)))
+}
+
+/// The scaffold entries outside the projections: `.nexus/` without the kept
+/// entries, an alternate agentic root, and Nexus files under `.claude/` and
+/// a root `AGENTS.md` that the projection plans do not cover.
+fn scaffold_entries(
+    cwd: &Path,
+    agentic_root: &str,
+    planned: &[String],
+    kept: &[String],
+    is_pristine: impl Fn(&str) -> bool,
+) -> (Vec<(PathBuf, RemovalKind)>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut unrecorded = Vec::new();
+    let rel_of = |p: &Path| {
+        p.strip_prefix(cwd)
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let nexus_dir = cwd.join(".nexus");
+    if is_symlink(&nexus_dir) {
+        // Its entries live elsewhere: only the link goes.
+        out.push((nexus_dir, RemovalKind::Full));
+    } else if let Ok(entries) = fs::read_dir(&nexus_dir) {
+        let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            if !name.is_some_and(|n| NEXUS_KEPT_ENTRIES.contains(&n.as_str())) {
+                push_unless_kept(cwd, &path, kept, &mut out);
+            }
+        }
+    }
+    if agentic_root != ".nexus" && agentic_root != ".claude" {
+        let alt_dir = cwd.join(agentic_root);
+        if alt_dir.exists() {
+            push_unless_kept(cwd, &alt_dir, kept, &mut out);
+        }
+    }
+    // Marker files outside the projection plans: removed only when their
+    // content is what Nexus recorded, otherwise reported as kept.
+    let mut marker_file = |path: PathBuf| {
+        let rel = rel_of(&path);
+        if planned.contains(&rel) {
+            return;
+        }
+        if is_pristine(&rel) {
+            out.push((path, RemovalKind::ManagedFile));
+        } else {
+            unrecorded.push(rel);
+        }
+    };
+    let claude_dir = cwd.join(".claude");
+    if claude_dir.is_dir() && !is_symlink(&claude_dir) {
+        for m in collect_managed_files(&claude_dir) {
+            marker_file(m);
+        }
+    }
+    // A root AGENTS.md is Nexus's only with the default root and the marker.
+    let agents_md = cwd.join("AGENTS.md");
+    if agentic_root == ".claude" && is_managed_file(&agents_md) {
+        marker_file(agents_md);
+    }
+    (out, unrecorded)
+}
+
+/// Add `path` for full removal, unless a kept path lies at or below it:
+/// then a directory is split into its entries, so only those holding no
+/// kept path go.
+fn push_unless_kept(
+    cwd: &Path,
+    path: &Path,
+    kept: &[String],
+    out: &mut Vec<(PathBuf, RemovalKind)>,
+) {
+    let rel = path
+        .strip_prefix(cwd)
+        .map(|r| r.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if kept.iter().any(|k| k.trim_end_matches('/') == rel) {
+        return;
+    }
+    let prefix = format!("{rel}/");
+    if !kept.iter().any(|k| k.starts_with(&prefix)) {
+        out.push((path.to_path_buf(), RemovalKind::Full));
+        return;
+    }
+    if is_symlink(path) || !path.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for child in entries {
+        push_unless_kept(cwd, &child, kept, out);
+    }
+}
 
 /// Run the `nexus deinit` command.
 pub fn run(force: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
-
-    // Determine the agentic_root for this workspace.
-    // If we can read the project config, check the server-configured root.
-    // Otherwise fall back to ".claude" (the default).
     let agentic_root = detect_agentic_root(&cwd);
+    let ctx = CleanupContext {
+        agentic_root: agentic_root.clone(),
+        project_name: nexus_core::config::load_linked_project(Some(&cwd))
+            .ok()
+            .flatten()
+            .map(|p| p.name)
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    let plans =
+        [Projection::OpenCode, Projection::Claude].map(|p| projection_cleanup::plan(&cwd, p, &ctx));
+    let planned: Vec<String> = plans
+        .iter()
+        .flat_map(|p| p.actions.iter())
+        .map(|a| match a {
+            Action::RemoveFile { path, .. }
+            | Action::RemoveDir { path, .. }
+            | Action::Rewrite { path, .. }
+            | Action::Keep { path, .. } => path.clone(),
+        })
+        .collect();
+    let kept_paths: Vec<String> = plans
+        .iter()
+        .flat_map(|p| p.actions.iter())
+        .filter_map(|a| match a {
+            Action::Keep { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    let (to_remove, unrecorded) =
+        scaffold_entries(&cwd, &agentic_root, &planned, &kept_paths, |rel| {
+            projection_cleanup::is_pristine(&cwd, &ctx, rel)
+        });
 
-    // Collect entries to remove
-    let mut to_remove: Vec<(PathBuf, RemovalKind)> = Vec::new();
-
-    // Always-safe Nexus-owned entries
-    for entry in NEXUS_OWNED_ENTRIES {
-        let path = cwd.join(entry);
-        if path.exists() {
-            to_remove.push((path, RemovalKind::Full));
-        }
-    }
-
-    // .nexus/: remove all contents EXCEPT config.toml (user-managed project config)
-    let nexus_dir = cwd.join(".nexus");
-    if is_symlink(&nexus_dir) {
-        // Its entries live elsewhere: only the link goes.
-        to_remove.push((nexus_dir.clone(), RemovalKind::Full));
-    } else if nexus_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&nexus_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                if name != "config.toml" {
-                    to_remove.push((entry.path(), RemovalKind::Full));
-                }
-            }
-        }
-    }
-
-    // Handle agentic root directory
-    if agentic_root == ".claude" {
-        // Default root: .claude/ is Nexus-managed: remove it entirely
-        let claude_dir = cwd.join(".claude");
-        if claude_dir.exists() {
-            to_remove.push((claude_dir, RemovalKind::Full));
-        }
-        // Root-level AGENTS.md is also Nexus-managed in default mode
-        let agents_md = cwd.join("AGENTS.md");
-        if agents_md.exists() && is_managed_file(&agents_md) {
-            to_remove.push((agents_md, RemovalKind::Full));
-        }
-    } else {
-        // Alternate root (e.g. ".nexus"): only remove the agentic root dir
-        // if it's different from ".nexus" (which is already in NEXUS_OWNED_ENTRIES).
-        // .claude/ is customer-owned: do NOT touch it.
-        if agentic_root != ".nexus" {
-            let alt_dir = cwd.join(&agentic_root);
-            if alt_dir.exists() {
-                to_remove.push((alt_dir, RemovalKind::Full));
-            }
-        }
-        // AGENTS.md inside the agentic root is already covered by
-        // removing the agentic root directory. Root-level AGENTS.md
-        // belongs to the customer: do NOT touch it.
-
-        // Remove only Nexus-managed files from .claude/ if any exist
-        let claude_dir = cwd.join(".claude");
-        if claude_dir.exists() && !is_symlink(&claude_dir) {
-            let managed = collect_managed_files(&claude_dir);
-            for m in managed {
-                to_remove.push((m, RemovalKind::ManagedFile));
-            }
-        }
-    }
-
-    if to_remove.is_empty() {
+    if to_remove.is_empty() && unrecorded.is_empty() && plans.iter().all(|p| !p.has_leftovers()) {
         println!(
             "{} No Nexus scaffold files found in this directory.",
             style("--").bold().yellow()
@@ -97,15 +191,38 @@ pub fn run(force: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Display what will be removed
     println!(
         "{} The following files/directories will be removed:",
         style(">>").bold().cyan()
     );
     println!();
+    let mut kept = Vec::new();
+    for action in plans.iter().flat_map(|p| p.actions.iter()) {
+        match action {
+            Action::RemoveFile { path, .. } | Action::RemoveDir { path, .. } => {
+                println!("   {} {}", style("-").bold().red(), path)
+            }
+            Action::Rewrite { path, note, .. } => println!(
+                "   {} {} {}",
+                style("~").bold().blue(),
+                path,
+                style(format!("({note})")).dim()
+            ),
+            Action::Keep { path, reason } => kept.push((path.clone(), *reason)),
+        }
+    }
+    kept.extend(
+        unrecorded
+            .iter()
+            .map(|p| (p.clone(), projection_cleanup::KeepReason::Unrecorded)),
+    );
     for (path, kind) in &to_remove {
         let relative = path.strip_prefix(&cwd).unwrap_or(path);
-        let suffix = if path.is_dir() { "/" } else { "" };
+        let suffix = if path.is_dir() && !is_symlink(path) {
+            "/"
+        } else {
+            ""
+        };
         let label = match kind {
             RemovalKind::Full => "",
             RemovalKind::ManagedFile => " (nexus-managed)",
@@ -118,23 +235,27 @@ pub fn run(force: bool) -> anyhow::Result<()> {
             style(label).dim()
         );
     }
-
-    // Show what will be preserved (if alternate root)
-    if agentic_root != ".claude" {
-        let claude_dir = cwd.join(".claude");
-        if claude_dir.exists() {
-            let preserved = count_non_managed_files(&claude_dir);
-            if preserved > 0 {
-                println!();
-                println!(
-                    "   {} .claude/ contains {} customer-owned file(s): preserved",
-                    style("i").bold().blue(),
-                    preserved
-                );
-            }
+    if !kept.is_empty() {
+        println!();
+        println!(
+            "   {} kept (not verifiably written by Nexus, or changed since):",
+            style("i").bold().blue()
+        );
+        for (path, reason) in &kept {
+            println!("     {path} ({reason:?})");
         }
     }
-
+    let claude_dir = cwd.join(".claude");
+    if claude_dir.is_dir() {
+        let preserved = count_non_managed_files(&claude_dir);
+        if preserved > 0 {
+            println!(
+                "   {} .claude/ contains {} other file(s): preserved",
+                style("i").bold().blue(),
+                preserved
+            );
+        }
+    }
     println!();
 
     // Confirm unless --force
@@ -143,18 +264,29 @@ pub fn run(force: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Remove each entry
+    // The projections first: their records live in .nexus/.
+    for plan in &plans {
+        let report = projection_cleanup::apply(&cwd, plan, &ctx)?;
+        for (path, _) in &report.removed {
+            println!("   {} {}", style("x").bold().red(), path);
+        }
+        for (path, _) in &report.rewritten {
+            println!(
+                "   {} {} (Nexus parts removed)",
+                style("~").bold().blue(),
+                path
+            );
+        }
+    }
     for (path, _) in &to_remove {
         remove_entry(path)?;
     }
-
-    // Clean up empty .claude/ directory after removing managed files
-    if agentic_root != ".claude" {
-        let claude_dir = cwd.join(".claude");
-        if claude_dir.is_dir() && is_dir_empty(&claude_dir) {
-            fs::remove_dir_all(&claude_dir)?;
+    // Directories left empty; never one that still holds anything.
+    for dir in [".claude", ".opencode"] {
+        let path = cwd.join(dir);
+        if path.is_dir() && !is_symlink(&path) && prune_empty_dirs(&path) {
             println!(
-                "   {} .claude/ (empty after cleanup)",
+                "   {} {dir}/ (empty after cleanup)",
                 style("x").bold().red()
             );
         }
@@ -168,6 +300,12 @@ pub fn run(force: bool) -> anyhow::Result<()> {
             style("i").bold().blue()
         );
     }
+    if cwd.join(".nexus").join("stash").exists() {
+        println!(
+            "   {} .nexus/stash/ preserved (saved local edits; nexus stash list)",
+            style("i").bold().blue()
+        );
+    }
 
     // Clean up .git/info/exclude entries added by nexus init / nexus shadow
     cleanup_git_exclude(&cwd);
@@ -175,10 +313,32 @@ pub fn run(force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Remove empty directories below and including `dir`, bottom-up, without
+/// following symlinks. Returns whether `dir` itself was removed.
+fn prune_empty_dirs(dir: &Path) -> bool {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                prune_empty_dirs(&entry.path());
+            }
+        }
+    }
+    is_dir_empty(dir) && fs::remove_dir(dir).is_ok()
+}
+
+/// Lines `nexus init` writes into its `.git/info/exclude` block.
+const INIT_EXCLUDE_LINES: &[&str] = &[".nexus/", ".opencode/", "opencode.json", ".env.local"];
+
+/// Closing line of the block `nexus init` writes (older versions wrote
+/// none).
+const INIT_EXCLUDE_END: &str = "# Nexus CLI: end";
+
 /// Clean up Nexus-managed entries from `.git/info/exclude`.
 ///
 /// Removes:
-/// - Lines between a `# Nexus CLI` marker and the next blank line (or EOF)
+/// - The `# Nexus CLI` block: its marker, closing line and the lines
+///   `nexus init` writes; any other rule in it (added by the operator,
+///   e.g. right after an old block without a closing line) stays
 /// - Any `# >>> nexus shadow` / `# <<< nexus shadow` blocks
 fn cleanup_git_exclude(target: &Path) {
     let exclude_path = target.join(".git").join("info").join("exclude");
@@ -220,7 +380,13 @@ fn cleanup_git_exclude(target: &Path) {
             continue;
         }
 
-        // Handle Nexus CLI block (marker line to next blank line or EOF)
+        // The Nexus CLI block: up to its closing line, a blank line or EOF;
+        // only the lines init writes go.
+        if trimmed == INIT_EXCLUDE_END {
+            skip_nexus_block = false;
+            cleaned_something = true;
+            continue;
+        }
         if trimmed.starts_with(nexus_marker) {
             skip_nexus_block = true;
             cleaned_something = true;
@@ -232,7 +398,9 @@ fn cleanup_git_exclude(target: &Path) {
                 // Skip the blank line separator too
                 continue;
             }
-            continue;
+            if INIT_EXCLUDE_LINES.contains(&trimmed) {
+                continue;
+            }
         }
 
         result.push_str(line);
@@ -498,6 +666,126 @@ mod tests {
 
         assert_eq!(count_non_managed_files(&dir.join(".claude")), 1);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_marker_counts_only_in_front_matter() {
+        assert!(has_managed_front_matter(
+            "---\nname: x\nsource: nexus-platform\n---\nbody\n"
+        ));
+        assert!(has_managed_front_matter(
+            "---\r\nsource: nexus-platform\r\n---\r\n"
+        ));
+        // Quoted in the text, or after the front matter: not ownership.
+        assert!(!has_managed_front_matter(
+            "# Doc\n\nsource: nexus-platform\n"
+        ));
+        assert!(!has_managed_front_matter(
+            "---\nname: x\n---\nsource: nexus-platform\n"
+        ));
+        assert!(!has_managed_front_matter(
+            "```\nsource: nexus-platform\n```\n"
+        ));
+    }
+
+    #[test]
+    fn test_scaffold_keeps_config_and_stash() {
+        let dir = temp_dir("scaffold");
+        fs::create_dir_all(dir.join(".nexus/stash/20261124-001/files")).unwrap();
+        fs::write(dir.join(".nexus/stash/20261124-001/stash.json"), "{}").unwrap();
+        fs::write(dir.join(".nexus/config.toml"), "[project]\n").unwrap();
+        fs::create_dir_all(dir.join(".nexus/generated")).unwrap();
+        fs::create_dir_all(dir.join(".claude/skills/nx")).unwrap();
+        fs::write(
+            dir.join(".claude/skills/nx/SKILL.md"),
+            "---\nsource: nexus-platform\n---\n",
+        )
+        .unwrap();
+        fs::write(dir.join(".claude/notes.md"), "source: nexus-platform\n").unwrap();
+        let pristine = |_: &str| true;
+        let entries: Vec<PathBuf> = scaffold_entries(&dir, ".nexus", &[], &[], pristine)
+            .0
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                dir.join(".nexus/generated"),
+                dir.join(".claude/skills/nx/SKILL.md"),
+            ]
+        );
+        // Already in a projection plan: not listed twice.
+        let planned = vec![".claude/skills/nx/SKILL.md".to_string()];
+        assert_eq!(
+            scaffold_entries(&dir, ".nexus", &planned, &[], pristine)
+                .0
+                .len(),
+            1
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A directory holding a path the projection cleanup keeps is split:
+    /// only its other entries go.
+    #[test]
+    fn test_scaffold_keeps_paths_the_cleanup_keeps() {
+        let dir = temp_dir("scaffold-kept");
+        fs::create_dir_all(dir.join(".nexus/generated")).unwrap();
+        fs::write(dir.join(".nexus/generated/agent-routing.json"), "edited").unwrap();
+        fs::write(dir.join(".nexus/generated/other.json"), "x").unwrap();
+        let kept = vec![".nexus/generated/agent-routing.json".to_string()];
+        let (entries, _) = scaffold_entries(&dir, ".nexus", &[], &kept, |_| true);
+        let entries: Vec<PathBuf> = entries.into_iter().map(|(p, _)| p).collect();
+        assert_eq!(entries, vec![dir.join(".nexus/generated/other.json")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A marker file whose content Nexus did not record is kept and
+    /// reported, never deleted on the marker alone.
+    #[test]
+    fn test_unrecorded_marker_files_are_kept() {
+        let dir = temp_dir("scaffold-unrecorded");
+        fs::create_dir_all(dir.join(".claude/skills/nx")).unwrap();
+        fs::write(
+            dir.join(".claude/skills/nx/SKILL.md"),
+            "---\nsource: nexus-platform\n---\nedited\n",
+        )
+        .unwrap();
+        fs::write(dir.join("AGENTS.md"), "---\nsource: nexus-platform\n---\n").unwrap();
+        let (entries, unrecorded) =
+            scaffold_entries(&dir, ".claude", &[], &[], |rel| rel == "AGENTS.md");
+        let entries: Vec<PathBuf> = entries.into_iter().map(|(p, _)| p).collect();
+        assert_eq!(entries, vec![dir.join("AGENTS.md")]);
+        assert_eq!(unrecorded, vec![".claude/skills/nx/SKILL.md".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_git_exclude_cleanup_keeps_operator_rules() {
+        let dir = temp_dir("exclude");
+        fs::create_dir_all(dir.join(".git/info")).unwrap();
+        let exclude = dir.join(".git/info/exclude");
+        // An old block without a closing line, a rule added right after it.
+        fs::write(
+            &exclude,
+            "# mine\n*.log\n\n# Nexus CLI: local workspace\n.nexus/\n.opencode/\nopencode.json\n.env.local\nmy-rule/\n",
+        )
+        .unwrap();
+        cleanup_git_exclude(&dir);
+        assert_eq!(
+            fs::read_to_string(&exclude).unwrap(),
+            "# mine\n*.log\n\nmy-rule/\n"
+        );
+        // A new block with its closing line.
+        fs::write(
+            &exclude,
+            "# Nexus CLI: local workspace\n.nexus/\n.env.local\n# Nexus CLI: end\nafter/\n",
+        )
+        .unwrap();
+        cleanup_git_exclude(&dir);
+        assert_eq!(fs::read_to_string(&exclude).unwrap(), "after/\n");
         let _ = fs::remove_dir_all(&dir);
     }
 }

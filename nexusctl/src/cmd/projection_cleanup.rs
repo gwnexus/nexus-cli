@@ -67,11 +67,29 @@ impl Projection {
 
 /// OpenCode install artifacts (created by OpenCode / its package manager,
 /// never user content) directly under `.opencode/`.
-const OPENCODE_ARTIFACTS: &[&str] = &[
-    ".opencode/package-lock.json",
-    ".opencode/bun.lock",
-    ".opencode/.gitignore",
+const OPENCODE_ARTIFACTS: &[&str] = &[".opencode/package-lock.json", ".opencode/bun.lock"];
+
+/// Rules OpenCode writes into `.opencode/.gitignore`. A file with any other
+/// rule was customized and is kept without `--force`.
+const OPENCODE_GITIGNORE_RULES: &[&str] = &[
+    "node_modules",
+    "node_modules/",
+    "/node_modules",
+    "package.json",
+    "package-lock.json",
+    "bun.lock",
+    "bun.lockb",
+    ".gitignore",
 ];
+
+/// Whether `content` is a `.opencode/.gitignore` as OpenCode generates it.
+fn is_generated_opencode_gitignore(content: &str) -> bool {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .all(|l| OPENCODE_GITIGNORE_RULES.contains(&l))
+}
 
 /// Root files of the OpenCode projection (token-bearing, git-excluded).
 const OPENCODE_ROOT_FILES: &[&str] = &["opencode.json", "opencode.jsonc"];
@@ -89,8 +107,12 @@ pub struct CleanupContext {
     pub known: BTreeMap<String, Vec<String>>,
     /// File names of registry-downloaded OpenCode plugins.
     pub plugin_filenames: Vec<String>,
-    /// Plugin MCP server names Nexus adds to `.mcp.json`.
+    /// Plugin MCP server names Nexus adds to `opencode.json` and `.mcp.json`.
     pub mcp_server_names: Vec<String>,
+    /// The `.mcp.json` entries Nexus renders for those plugin servers: an
+    /// entry whose local definition differs was replaced by the operator
+    /// and is kept without `--force`.
+    pub mcp_server_entries: BTreeMap<String, serde_json::Value>,
     /// `--force` / `--force-unmanaged` (never `-y` alone).
     pub force: bool,
 }
@@ -123,6 +145,9 @@ pub enum KeepReason {
     GitMetadata,
     /// Its path crosses a symlink; left alone.
     Linked,
+    /// Carries the Nexus marker, but no record says what Nexus wrote, so a
+    /// local edit cannot be ruled out.
+    Unrecorded,
 }
 
 impl KeepReason {
@@ -133,6 +158,7 @@ impl KeepReason {
             KeepReason::Tracked => "tracked in git",
             KeepReason::GitMetadata => "contains a nested git repository",
             KeepReason::Linked => "path crosses a symlink",
+            KeepReason::Unrecorded => "no record of the Nexus version",
         }
     }
 }
@@ -202,6 +228,23 @@ impl CleanupReport {
 // ---------------------------------------------------------------------------
 
 /// Plan the removal of `projection` from `workspace`. Reads only.
+/// Whether the file at `rel` is exactly what Nexus recorded (or `ctx`
+/// renders) for it: the only evidence on which a file outside a projection
+/// plan is deleted without `--force`.
+pub(crate) fn is_pristine(workspace: &Path, ctx: &CleanupContext, rel: &str) -> bool {
+    let Ok(bytes) = fs::read(workspace.join(rel)) else {
+        return false;
+    };
+    let sync_manifest = super::sync::load_manifest_pub(workspace);
+    let pull_manifest = super::pull::load_pull_manifest(workspace, &ctx.agentic_root);
+    let records = Records {
+        ctx,
+        sync_manifest: &sync_manifest,
+        pull_manifest: &pull_manifest,
+    };
+    records.origin(rel, &bytes, false) == Origin::Pristine
+}
+
 pub fn plan(workspace: &Path, projection: Projection, ctx: &CleanupContext) -> Plan {
     let sync_manifest = super::sync::load_manifest_pub(workspace);
     let pull_manifest = super::pull::load_pull_manifest(workspace, &ctx.agentic_root);
@@ -378,6 +421,11 @@ fn plan_opencode(workspace: &Path, ctx: &CleanupContext, records: &Records) -> V
                     continue;
                 }
                 if rel.ends_with('/') {
+                    // A subtree holding a path the pull keeps is never
+                    // removed whole.
+                    if ctx.keep.iter().any(|k| k.starts_with(rel.as_str())) {
+                        continue;
+                    }
                     actions.push(Action::RemoveDir {
                         path: rel,
                         note: "install artifact",
@@ -395,6 +443,24 @@ fn plan_opencode(workspace: &Path, ctx: &CleanupContext, records: &Records) -> V
                 let Ok(bytes) = fs::read(workspace.join(&rel)) else {
                     continue;
                 };
+                if rel == ".opencode/.gitignore" {
+                    actions.push(
+                        if ctx.force
+                            || is_generated_opencode_gitignore(&String::from_utf8_lossy(&bytes))
+                        {
+                            Action::RemoveFile {
+                                path: rel,
+                                note: "install artifact",
+                            }
+                        } else {
+                            Action::Keep {
+                                path: rel,
+                                reason: KeepReason::Modified,
+                            }
+                        },
+                    );
+                    continue;
+                }
                 let registry_plugin = rel.starts_with(".opencode/plugins/")
                     && ctx.plugin_filenames.iter().any(|f| f == name);
                 actions.push(match records.origin(&rel, &bytes, registry_plugin) {
@@ -402,7 +468,9 @@ fn plan_opencode(workspace: &Path, ctx: &CleanupContext, records: &Records) -> V
                         path: rel,
                         note: "projection removed",
                     },
-                    Origin::Owned if ctx.force => Action::RemoveFile {
+                    // The directory stays (a kept path inside): --force
+                    // still removes the other Nexus files one by one.
+                    Origin::Owned | Origin::Modified if ctx.force => Action::RemoveFile {
                         path: rel,
                         note: "projection removed",
                     },
@@ -449,16 +517,29 @@ fn plan_opencode(workspace: &Path, ctx: &CleanupContext, records: &Records) -> V
             });
             continue;
         }
-        let Some(current) = fs::read_to_string(workspace.join(rel))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        else {
+        let Ok(bytes) = fs::read(workspace.join(rel)) else {
             actions.push(Action::Keep {
                 path: (*rel).into(),
                 reason: KeepReason::Modified,
             });
             continue;
         };
+        let Ok(current) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            actions.push(Action::Keep {
+                path: (*rel).into(),
+                reason: KeepReason::Modified,
+            });
+            continue;
+        };
+        // Positive evidence that Nexus wrote it: a hash record, or the
+        // `nexus` MCP server Nexus puts into every opencode.json it writes.
+        // Without it the file is the operator's.
+        let recorded = records.origin(rel, &bytes, false) != Origin::Unknown;
+        let nexus_server = current.get("mcp").and_then(|m| m.get("nexus")).is_some();
+        if !recorded && !nexus_server {
+            // Not a leftover of the projection at all.
+            continue;
+        }
         match opencode_json_user_part(&current, ctx) {
             None => actions.push(Action::RemoveFile {
                 path: (*rel).into(),
@@ -692,15 +773,23 @@ fn plan_claude(
         }
     }
 
-    // Routing-guard adapter inputs (Claude Code only).
+    // Routing-guard adapter inputs (Claude Code only): generated files,
+    // removed when unchanged; an edited one stays without --force.
     for name in ["routing-catalog.json", "agent-routing.json"] {
         let rel = format!("{root}/generated/{name}");
-        if workspace.join(&rel).is_file() && !ctx.keep.contains(&rel) {
-            actions.push(Action::RemoveFile {
+        if planned.contains(&rel) || ctx.keep.contains(&rel) || !workspace.join(&rel).is_file() {
+            continue;
+        }
+        let Ok(bytes) = fs::read(workspace.join(&rel)) else {
+            continue;
+        };
+        actions.push(match records.origin(&rel, &bytes, true) {
+            Origin::Pristine => Action::RemoveFile {
                 path: rel,
                 note: "projection removed",
-            });
-        }
+            },
+            _ => remove_or_keep(rel, false),
+        });
     }
 
     // .claude/settings.json: only the Nexus-managed parts.
@@ -719,10 +808,29 @@ fn plan_claude(
             }
         }
     } else if !ctx.keep.contains(settings_rel) {
-        if let Some(settings) = fs::read_to_string(workspace.join(settings_rel))
+        let parsed = fs::read_to_string(workspace.join(settings_rel))
             .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        {
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        let previous = lock.as_ref().and_then(|l| l.settings.as_ref());
+        // Managed values the operator edited stay without --force; the lock
+        // keeps their provenance, so a later --force still knows them. An
+        // unreadable file keeps it too.
+        if let (Some(kl), Some(previous)) = (kept_lock.as_mut(), previous) {
+            let still_there = match &parsed {
+                Some(settings) if !ctx.force => {
+                    let mut cleaned = settings.clone();
+                    strip_nexus_settings(&mut cleaned, lock.as_ref(), false);
+                    managed_settings_remain(&cleaned, previous)
+                }
+                Some(_) => false,
+                None => workspace.join(settings_rel).exists(),
+            };
+            if still_there {
+                kl.settings = Some(previous.clone());
+                keep_any_lock_entry = true;
+            }
+        }
+        if let Some(settings) = parsed {
             let mut cleaned = settings.clone();
             if strip_nexus_settings(&mut cleaned, lock.as_ref(), ctx.force) {
                 actions.push(if settings_only_schema(&cleaned) {
@@ -753,7 +861,7 @@ fn plan_claude(
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         {
             let mut cleaned = mcp.clone();
-            if strip_nexus_mcp_servers(&mut cleaned, &ctx.mcp_server_names, ctx.force) {
+            if strip_nexus_mcp_servers(&mut cleaned, &ctx.mcp_server_entries, ctx.force) {
                 actions.push(if cleaned.as_object().is_some_and(|o| o.is_empty()) {
                     Action::RemoveFile {
                         path: ".mcp.json".into(),
@@ -897,12 +1005,22 @@ pub(crate) fn strip_nexus_settings(
         obj.remove("includeCoAuthoredBy");
     }
 
-    // Containers emptied by the removals above.
-    if let Some(hooks) = obj.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-        hooks.retain(|_, v| !v.as_array().is_some_and(|a| a.is_empty()));
-    }
-    if let Some(perms) = obj.get_mut("permissions").and_then(|p| p.as_object_mut()) {
-        perms.retain(|_, v| !v.as_array().is_some_and(|a| a.is_empty()));
+    // Containers emptied by the removals above; one that was empty before
+    // is the operator's and stays.
+    let was_empty = |v: Option<&serde_json::Value>| {
+        v.is_none_or(|v| {
+            v.as_array().is_some_and(|a| a.is_empty())
+                || v.as_object().is_some_and(|o| o.is_empty())
+        })
+    };
+    for container in ["hooks", "permissions"] {
+        let before_map = before.get(container);
+        if let Some(map) = obj.get_mut(container).and_then(|h| h.as_object_mut()) {
+            map.retain(|k, v| {
+                !v.as_array().is_some_and(|a| a.is_empty())
+                    || was_empty(before_map.and_then(|m| m.get(k)))
+            });
+        }
     }
     for key in [
         "hooks",
@@ -915,12 +1033,34 @@ pub(crate) fn strip_nexus_settings(
         if obj
             .get(key)
             .is_some_and(|v| v.as_object().is_some_and(|o| o.is_empty()))
+            && !was_empty(before.get(key))
         {
             obj.remove(key);
         }
     }
 
     *settings != before
+}
+
+/// Whether `settings` still holds a value the lock records as Nexus's:
+/// a keyed-map entry or array entry Nexus wrote, or a managed scalar key.
+fn managed_settings_remain(
+    settings: &serde_json::Value,
+    previous: &nexus_core::api::ClaudeSettingsSpec,
+) -> bool {
+    previous.managed_keys.iter().any(|key| {
+        let local = ccx::json_get_path(settings, key);
+        match (previous.value(key), local) {
+            (_, None) => false,
+            (Some(serde_json::Value::Object(lock_map)), Some(serde_json::Value::Object(map))) => {
+                lock_map.keys().any(|k| map.contains_key(k))
+            }
+            (Some(serde_json::Value::Array(lock_arr)), Some(serde_json::Value::Array(arr))) => {
+                lock_arr.iter().any(|v| arr.contains(v))
+            }
+            (_, Some(_)) => true,
+        }
+    })
 }
 
 /// Whether a settings value has nothing left but (at most) `$schema`.
@@ -932,11 +1072,13 @@ fn settings_only_schema(settings: &serde_json::Value) -> bool {
 
 /// Remove the Nexus MCP servers from a `.mcp.json` value: `nexus` (it
 /// carries the token), `nexus-local-tools` when unchanged (or with
-/// `force`), and the plugin servers Nexus adds. An empty `mcpServers` is
-/// removed too. Returns whether anything changed.
+/// `force`), and the plugin servers Nexus adds when their definition is
+/// the one Nexus renders (or with `force`): an entry the operator replaced
+/// under the same name stays. An empty `mcpServers` is removed too.
+/// Returns whether anything changed.
 pub(crate) fn strip_nexus_mcp_servers(
     mcp: &mut serde_json::Value,
-    plugin_servers: &[String],
+    plugin_servers: &BTreeMap<String, serde_json::Value>,
     force: bool,
 ) -> bool {
     let Some(obj) = mcp.as_object_mut() else {
@@ -951,8 +1093,10 @@ pub(crate) fn strip_nexus_mcp_servers(
     if force || servers.get("nexus-local-tools") == Some(&local_default) {
         servers.remove("nexus-local-tools");
     }
-    for name in plugin_servers {
-        servers.remove(name);
+    for (name, rendered) in plugin_servers {
+        if force || servers.get(name) == Some(rendered) {
+            servers.remove(name);
+        }
     }
     let changed = servers.len() != before;
     if changed && servers.is_empty() {
@@ -1008,7 +1152,9 @@ pub(crate) fn strip_claude_md(
     };
     let is_template = rest.trim_start().starts_with("---\ntype: bootstrap")
         && rest.contains(super::pull::MANAGED_MARKER);
-    if rest.trim().is_empty() || templates.contains(&rest) {
+    // Empty only because the Nexus block went; a file that was blank
+    // already is the operator's.
+    if (had_block && rest.trim().is_empty()) || templates.contains(&rest) {
         return ClaudeMdCleanup::Remove;
     }
     if force && is_template {
@@ -1040,7 +1186,9 @@ fn foreign_managed_blocks(content: &str) -> Vec<&str> {
         };
         let end_marker = format!("<!-- END:{} -->", &after[..name_end]);
         let Some(end) = rest[start..].find(&end_marker) else {
-            break;
+            // Unclosed: look for the next complete block after its opener.
+            rest = &rest[start + "<!-- BEGIN:".len()..];
+            continue;
         };
         let stop = start + end + end_marker.len();
         blocks.push(&rest[start..stop]);
@@ -1053,6 +1201,119 @@ fn foreign_managed_blocks(content: &str) -> Vec<&str> {
 // Applying
 // ---------------------------------------------------------------------------
 
+/// One action of [`apply`]. A file already gone counts as removed for the
+/// records (an earlier, interrupted run removed it) but is not reported.
+fn apply_action(
+    workspace: &Path,
+    action: &Action,
+    report: &mut CleanupReport,
+    removed_files: &mut HashSet<String>,
+    removed_dirs: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    if let Action::RemoveFile { path, .. }
+    | Action::RemoveDir { path, .. }
+    | Action::Rewrite { path, .. } = action
+    {
+        if through_symlink(workspace, path) {
+            report.kept.push((path.clone(), KeepReason::Linked));
+            return Ok(());
+        }
+    }
+    match action {
+        Action::RemoveFile { path, note } => {
+            match fs::remove_file(workspace.join(path)) {
+                Ok(()) => report.removed.push((path.clone(), note)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            removed_files.insert(path.clone());
+        }
+        Action::RemoveDir { path, note } => {
+            let target = workspace.join(path.trim_end_matches('/'));
+            if fs::symlink_metadata(&target).is_err() {
+                removed_dirs.push(path.clone());
+                return Ok(());
+            }
+            // The directory itself a symlink: remove_dir_all would
+            // not follow it, but its contents are not ours either.
+            if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+                report.kept.push((path.clone(), KeepReason::Linked));
+                return Ok(());
+            }
+            if contains_git_metadata(&target) {
+                report.kept.push((path.clone(), KeepReason::GitMetadata));
+                return Ok(());
+            }
+            fs::remove_dir_all(&target)?;
+            removed_dirs.push(path.clone());
+            report.removed.push((path.clone(), note));
+        }
+        Action::Rewrite {
+            path,
+            content,
+            note,
+        } => {
+            // Never write through a symlink at the file itself.
+            let target = workspace.join(path);
+            if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+                report.kept.push((path.clone(), KeepReason::Linked));
+                return Ok(());
+            }
+            replace_file(&target, content.as_bytes())?;
+            report.rewritten.push((path.clone(), note));
+        }
+        Action::Keep { path, reason } => report.kept.push((path.clone(), *reason)),
+    }
+    Ok(())
+}
+
+/// Replace `path` with `bytes` through a temporary file in the same
+/// directory: a failed write (a full disk) leaves the original intact. The
+/// original's permissions carry over.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let permissions = fs::metadata(path).ok().map(|m| m.permissions());
+    let mut attempt = 0u32;
+    let (tmp, mut file) = loop {
+        let tmp = dir.join(format!(".{name}.{}.{attempt}.tmp", std::process::id()));
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        // Created with the original's mode (owner-only when unknown), so the
+        // content is never readable by others before the rename, even for
+        // a token-bearing file.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            opts.mode(permissions.as_ref().map_or(0o600, |p| p.mode() & 0o777));
+        }
+        match opts.open(&tmp) {
+            Ok(f) => break (tmp, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 => attempt += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| match &permissions {
+            Some(p) => fs::set_permissions(&tmp, p.clone()),
+            None => Ok(()),
+        })
+        .and_then(|()| {
+            drop(file);
+            fs::rename(&tmp, path)
+        });
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// Apply `plan`: delete/rewrite files, update the CCX lock, prune the sync
 /// and pull manifests for everything removed, and remove directories left
 /// empty inside the projection.
@@ -1061,66 +1322,31 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
     let mut removed_files: HashSet<String> = HashSet::new();
     let mut removed_dirs: Vec<String> = Vec::new();
 
+    // A failure stops the remaining actions, but the records of what was
+    // already removed are still pruned below, so a later run is not left
+    // with records of files that are gone.
+    let mut failed: Option<anyhow::Error> = None;
     for action in &plan.actions {
-        if let Action::RemoveFile { path, .. }
-        | Action::RemoveDir { path, .. }
-        | Action::Rewrite { path, .. } = action
-        {
-            if through_symlink(workspace, path) {
-                report.kept.push((path.clone(), KeepReason::Linked));
-                continue;
-            }
-        }
-        match action {
-            Action::RemoveFile { path, note } => {
-                let target = workspace.join(path);
-                match fs::remove_file(&target) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(e) => return Err(e.into()),
-                }
-                removed_files.insert(path.clone());
-                report.removed.push((path.clone(), note));
-            }
-            Action::RemoveDir { path, note } => {
-                let target = workspace.join(path.trim_end_matches('/'));
-                if !target.exists() {
-                    continue;
-                }
-                // The directory itself a symlink: remove_dir_all would
-                // not follow it, but its contents are not ours either.
-                if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
-                    report.kept.push((path.clone(), KeepReason::Linked));
-                    continue;
-                }
-                if contains_git_metadata(&target) {
-                    report.kept.push((path.clone(), KeepReason::GitMetadata));
-                    continue;
-                }
-                fs::remove_dir_all(&target)?;
-                removed_dirs.push(path.clone());
-                report.removed.push((path.clone(), note));
-            }
-            Action::Rewrite {
-                path,
-                content,
-                note,
-            } => {
-                // Never write through a symlink at the file itself.
-                let target = workspace.join(path);
-                if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
-                    report.kept.push((path.clone(), KeepReason::Linked));
-                    continue;
-                }
-                fs::write(&target, content)?;
-                report.rewritten.push((path.clone(), note));
-            }
-            Action::Keep { path, reason } => report.kept.push((path.clone(), *reason)),
+        if let Err(e) = apply_action(
+            workspace,
+            action,
+            &mut report,
+            &mut removed_files,
+            &mut removed_dirs,
+        ) {
+            failed = Some(e);
+            break;
         }
     }
 
     let root = ctx.agentic_root.as_str();
-    match &plan.lock_after {
+    let lock_after = if failed.is_some() {
+        // Incomplete: the lock still describes files that were not removed.
+        &LockAfter::Untouched
+    } else {
+        &plan.lock_after
+    };
+    match lock_after {
         LockAfter::Untouched => {}
         // A lock path through a symlink is neither read, deleted nor
         // saved; the lock stays as it is and the report says so.
@@ -1148,8 +1374,11 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
                 .iter()
                 .any(|d| path.starts_with(d.as_str()) || path == d.trim_end_matches('/'))
     };
-    super::sync::remove_manifest_entries(workspace, removed)?;
-    super::pull::remove_generated_records(workspace, root, removed)?;
+    // Only records of paths that are gone: a file that still exists keeps
+    // its record. A failed update leaves the records for the next run.
+    let gone = |path: &str| removed(path) && fs::symlink_metadata(workspace.join(path)).is_err();
+    super::sync::remove_manifest_entries(workspace, gone)?;
+    super::pull::remove_generated_records(workspace, root, gone)?;
 
     // Directories emptied by the removals, bottom-up, inside the
     // projection only (never the agentic root itself).
@@ -1159,6 +1388,14 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
         Projection::Claude => vec![".claude".into(), format!("{root}/claude")],
     };
     let mut dirs: Vec<String> = removed_files
+        .iter()
+        .cloned()
+        .chain(
+            removed_dirs
+                .iter()
+                .map(|d| d.trim_end_matches('/').to_string()),
+        )
+        .collect::<Vec<_>>()
         .iter()
         .flat_map(|f| {
             let mut parents = Vec::new();
@@ -1188,7 +1425,10 @@ pub fn apply(workspace: &Path, plan: &Plan, ctx: &CleanupContext) -> anyhow::Res
         }
     }
 
-    Ok(report)
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(report),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1207,15 +1447,33 @@ pub fn print_report(
         return;
     }
     let only_kept = report.removed.is_empty() && report.rewritten.is_empty();
+    // --force removes modified and unmanaged files, never a path that
+    // crosses a symlink or holds a nested repository.
+    let (forceable, guarded): (Vec<_>, Vec<_>) = report
+        .kept
+        .iter()
+        .cloned()
+        .partition(|(_, r)| !matches!(r, KeepReason::Linked | KeepReason::GitMetadata));
     if only_kept && switched.is_none() {
-        println!(
-            "   {} {} file(s) of the unused {} projection kept ({}); {} removes them.",
-            style("!").bold().yellow(),
-            report.kept.len(),
-            projection.label(),
-            summarize_reasons(&report.kept),
-            style("nexus pull --force").bold()
-        );
+        if !forceable.is_empty() {
+            println!(
+                "   {} {} file(s) of the unused {} projection kept ({}); {} removes them.",
+                style("!").bold().yellow(),
+                forceable.len(),
+                projection.label(),
+                summarize_reasons(&forceable),
+                style("nexus pull --force").bold()
+            );
+        }
+        if !guarded.is_empty() {
+            println!(
+                "   {} {} path(s) of the unused {} projection left alone ({}); remove them by hand if wanted.",
+                style("!").bold().yellow(),
+                guarded.len(),
+                projection.label(),
+                summarize_reasons(&guarded)
+            );
+        }
         return;
     }
     println!();
@@ -1247,7 +1505,10 @@ pub fn print_report(
             reason.text()
         );
     }
-    if !report.kept.is_empty() {
+    if !guarded.is_empty() {
+        println!("   Paths that cross a symlink or hold a nested repository are never removed, also not with --force.");
+    }
+    if !forceable.is_empty() {
         let hint = match projection {
             Projection::OpenCode => "removes them (and the rest of .opencode/)",
             Projection::Claude => "removes modified Nexus files",
@@ -1308,6 +1569,11 @@ mod tests {
             project_name: "Demo".into(),
             plugin_filenames: super::super::init::platform_plugin_filenames(),
             mcp_server_names: vec!["task-master-ai".into()],
+            mcp_server_entries: [(
+                "task-master-ai".to_string(),
+                serde_json::json!({ "command": "npx" }),
+            )]
+            .into(),
             force,
             ..Default::default()
         }
@@ -1383,7 +1649,8 @@ mod tests {
             ".opencode/node_modules/@opencode-ai/plugin/index.js",
             "x",
         );
-        put(dir, "opencode.json", "{\"mcp\":{}}\n");
+        // As Nexus writes it: with the `nexus` server.
+        put(dir, "opencode.json", "{\"mcp\":{\"nexus\":{}}}\n");
         // Records of earlier pulls.
         put(
             dir,
@@ -1599,7 +1866,7 @@ mod tests {
             &serde_json::json!({".opencode/commands/a.md": sha256_hex(CMD_A)}).to_string(),
         );
         put(&dir, ".opencode/package-lock.json", "{}");
-        put(&dir, "opencode.json", "{}");
+        put(&dir, "opencode.json", "{\"mcp\":{\"nexus\":{}}}");
         let report = run(&dir, Projection::OpenCode, &ctx(false));
         assert!(report.kept.is_empty());
         assert!(!dir.join(".opencode").exists());
@@ -2322,7 +2589,8 @@ mod tests {
                 "task-master-ai": {}
             }
         });
-        let plugins = vec!["task-master-ai".to_string()];
+        let plugins: BTreeMap<String, serde_json::Value> =
+            [("task-master-ai".to_string(), serde_json::json!({}))].into();
         assert!(strip_nexus_mcp_servers(&mut mcp, &plugins, false));
         // A customized local-tools server stays without --force.
         assert_eq!(
@@ -2334,6 +2602,275 @@ mod tests {
         assert!(strip_nexus_mcp_servers(&mut mcp, &plugins, true));
         assert_eq!(mcp, serde_json::json!({}));
         assert!(!strip_nexus_mcp_servers(&mut mcp, &plugins, true));
+    }
+
+    /// A plugin server the operator redefined under the same name is
+    /// theirs: kept without --force, removed with it.
+    #[test]
+    fn test_strip_keeps_a_replaced_plugin_server() {
+        let rendered = serde_json::json!({ "command": "npx", "args": ["tm"], "env": {} });
+        let plugins: BTreeMap<String, serde_json::Value> =
+            [("task-master-ai".to_string(), rendered.clone())].into();
+        let mine = serde_json::json!({ "command": "/opt/tm", "args": [] });
+        let mut mcp = serde_json::json!({ "mcpServers": { "task-master-ai": mine.clone() } });
+        assert!(!strip_nexus_mcp_servers(&mut mcp, &plugins, false));
+        assert_eq!(mcp["mcpServers"]["task-master-ai"], mine);
+        assert!(strip_nexus_mcp_servers(&mut mcp, &plugins, true));
+        let mut mcp = serde_json::json!({ "mcpServers": { "task-master-ai": rendered } });
+        assert!(strip_nexus_mcp_servers(&mut mcp, &plugins, false));
+        assert_eq!(mcp, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_kept_descendant_protects_its_subtree() {
+        let dir = temp_dir("keep-descendant");
+        put(&dir, ".opencode/node_modules/pkg/file", "kept\n");
+        put(&dir, ".opencode/node_modules/other/x", "x\n");
+        let mut c = ctx(false);
+        c.keep.insert(".opencode/node_modules/pkg/file".into());
+        let p = plan(&dir, Projection::OpenCode, &c);
+        assert!(!p.actions.iter().any(
+            |a| matches!(a, Action::RemoveDir { path, .. } if path == ".opencode/node_modules/")
+        ));
+        apply(&dir, &p, &c).unwrap();
+        assert!(dir.join(".opencode/node_modules/pkg/file").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_customized_opencode_gitignore_is_kept() {
+        let dir = temp_dir("oc-gitignore");
+        put(&dir, ".opencode/.gitignore", "node_modules\nsecrets/\n");
+        let report = run(&dir, Projection::OpenCode, &ctx(false));
+        assert_eq!(
+            kept(&report),
+            vec![(".opencode/.gitignore".into(), KeepReason::Modified)]
+        );
+        assert!(is_generated_opencode_gitignore(
+            "node_modules\npackage.json\nbun.lock\n.gitignore\n"
+        ));
+        assert!(!is_generated_opencode_gitignore("node_modules\n*.env\n"));
+        let report = run(&dir, Projection::OpenCode, &ctx(true));
+        assert!(removed(&report).iter().any(|p| p.starts_with(".opencode")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// With a kept path the directory stays, but --force still removes the
+    /// other modified Nexus files.
+    #[test]
+    fn test_force_removes_modified_files_when_the_directory_stays() {
+        let dir = temp_dir("oc-force-modified");
+        opencode_projection(&dir);
+        let mut c = ctx(true);
+        c.keep.insert(".opencode/commands/a.md".into());
+        let report = run(&dir, Projection::OpenCode, &c);
+        assert!(removed(&report).contains(&".opencode/commands/b.md".to_string()));
+        assert!(dir.join(".opencode/commands/a.md").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_operator_opencode_json_without_evidence_is_untouched() {
+        let dir = temp_dir("oc-json-operator");
+        let mine = "{\"model\":\"dgx/x\",\"provider\":{\"dgx\":{}}}\n";
+        put(&dir, "opencode.json", mine);
+        let p = plan(&dir, Projection::OpenCode, &ctx(false));
+        assert!(p.actions.is_empty(), "{:?}", p.actions);
+        apply(&dir, &p, &ctx(false)).unwrap();
+        assert_eq!(read(&dir, "opencode.json"), mine);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_edited_routing_file_is_kept_without_force() {
+        let dir = temp_dir("routing-edited");
+        let mut c = claude_ctx(false);
+        c.add_known(".nexus/generated/agent-routing.json", "{\"actors\":[]}\n");
+        c.add_known(
+            ".nexus/generated/routing-catalog.json",
+            "{\"model_routes\":[]}\n",
+        );
+        put(
+            &dir,
+            ".nexus/generated/agent-routing.json",
+            "{\"actors\":[\"mine\"]}\n",
+        );
+        put(
+            &dir,
+            ".nexus/generated/routing-catalog.json",
+            "{\"model_routes\":[]}\n",
+        );
+        let report = run(&dir, Projection::Claude, &c);
+        assert!(removed(&report).contains(&".nexus/generated/routing-catalog.json".to_string()));
+        assert!(kept(&report).contains(&(
+            ".nexus/generated/agent-routing.json".to_string(),
+            KeepReason::Modified
+        )));
+        let report = run(&dir, Projection::Claude, &claude_ctx(true));
+        assert!(removed(&report).contains(&".nexus/generated/agent-routing.json".to_string()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_settings_containers_empty_before_stay() {
+        let mut settings = serde_json::json!({ "permissions": { "allow": [] }, "hooks": {} });
+        assert!(!strip_nexus_settings(&mut settings, None, false));
+        assert_eq!(
+            settings,
+            serde_json::json!({ "permissions": { "allow": [] }, "hooks": {} })
+        );
+        let nexus = claude_render::BASELINE_MCP_PERMISSIONS[0];
+        let mut settings = serde_json::json!({
+            "permissions": { "allow": [nexus], "deny": [] }
+        });
+        assert!(strip_nexus_settings(&mut settings, None, false));
+        // `allow` was emptied by the removal, `deny` was empty already.
+        assert_eq!(
+            settings,
+            serde_json::json!({ "permissions": { "deny": [] } })
+        );
+    }
+
+    #[test]
+    fn test_edited_managed_settings_keep_their_lock_record() {
+        let dir = temp_dir("lock-settings");
+        let lock = ccx::CcxLock {
+            schema: 1,
+            bundle: None,
+            version: None,
+            revision: None,
+            compatibility: Default::default(),
+            applied_at: String::new(),
+            files: Default::default(),
+            settings: Some(
+                serde_json::from_value(serde_json::json!({
+                    "managed_keys": ["enabledPlugins"],
+                    "values": { "enabledPlugins": { "nexus@m": true } }
+                }))
+                .unwrap(),
+            ),
+            claude_md_block_sha256: None,
+            hooks: Default::default(),
+            plugins: Default::default(),
+        };
+        ccx::save_lock(&dir, ".nexus", &lock).unwrap();
+        // Edited by the operator: kept without --force, with its record.
+        put(
+            &dir,
+            ".claude/settings.json",
+            "{\"enabledPlugins\":{\"nexus@m\":false,\"mine@m\":true}}\n",
+        );
+        let p = plan(&dir, Projection::Claude, &claude_ctx(false));
+        match &p.lock_after {
+            LockAfter::Save(kept) => assert!(kept.settings.is_some()),
+            other => panic!("lock must be kept: {other:?}"),
+        }
+        apply(&dir, &p, &claude_ctx(false)).unwrap();
+        // A later --force still knows the entry: only the operator's stays.
+        run(&dir, Projection::Claude, &claude_ctx(true));
+        assert_eq!(
+            json(&dir, ".claude/settings.json"),
+            serde_json::json!({ "enabledPlugins": { "mine@m": true } })
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_blank_claude_md_without_block_is_untouched() {
+        for force in [false, true] {
+            assert_eq!(
+                strip_claude_md("\n", None, &[], force),
+                ClaudeMdCleanup::Untouched
+            );
+        }
+    }
+
+    #[test]
+    fn test_foreign_blocks_after_an_unclosed_one_are_found() {
+        let content = "<!-- BEGIN:a -->\nopen\n<!-- BEGIN:b -->\nkeep\n<!-- END:b -->\n";
+        assert_eq!(
+            foreign_managed_blocks(content),
+            vec!["<!-- BEGIN:b -->\nkeep\n<!-- END:b -->"]
+        );
+    }
+
+    /// A later failure does not lose the records of files already removed;
+    /// a record whose file still exists stays.
+    #[test]
+    fn test_interrupted_apply_prunes_completed_records() {
+        let dir = temp_dir("partial");
+        put(&dir, ".opencode/commands/a.md", CMD_A);
+        fs::create_dir_all(dir.join(".opencode/commands/blocked.md")).unwrap();
+        put(
+            &dir,
+            ".nexus/generated/pull-manifest.json",
+            &serde_json::json!({
+                ".opencode/commands/a.md": sha256_hex(CMD_A),
+                ".opencode/commands/blocked.md": "x",
+            })
+            .to_string(),
+        );
+        let p = Plan {
+            projection: Projection::OpenCode,
+            actions: vec![
+                Action::RemoveFile {
+                    path: ".opencode/commands/a.md".into(),
+                    note: "projection removed",
+                },
+                Action::RemoveFile {
+                    path: ".opencode/commands/blocked.md".into(),
+                    note: "projection removed",
+                },
+            ],
+            lock_after: LockAfter::Untouched,
+        };
+        assert!(apply(&dir, &p, &ctx(false)).is_err());
+        let records = super::super::pull::load_pull_manifest(&dir, ".nexus");
+        assert!(!records.contains_key(".opencode/commands/a.md"));
+        assert!(records.contains_key(".opencode/commands/blocked.md"));
+        // Reapplying the same plan: the gone file counts as removed.
+        fs::remove_dir(dir.join(".opencode/commands/blocked.md")).unwrap();
+        let report = apply(&dir, &p, &ctx(false)).unwrap();
+        assert!(report.removed.is_empty());
+        assert!(super::super::pull::load_pull_manifest(&dir, ".nexus").is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rewrite_replaces_the_file_and_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("replace");
+        put(&dir, "f.json", "old\n");
+        fs::set_permissions(dir.join("f.json"), fs::Permissions::from_mode(0o640)).unwrap();
+        replace_file(&dir.join("f.json"), b"new\n").unwrap();
+        assert_eq!(read(&dir, "f.json"), "new\n");
+        let mode = fs::metadata(dir.join("f.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o640);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "no temp file left");
+        // An owner-only original stays owner-only.
+        fs::set_permissions(dir.join("f.json"), fs::Permissions::from_mode(0o600)).unwrap();
+        replace_file(&dir.join("f.json"), b"newer\n").unwrap();
+        let mode = fs::metadata(dir.join("f.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_directory_left_empty_by_a_removed_subtree_goes() {
+        let dir = temp_dir("oc-only-node-modules");
+        put(&dir, ".opencode/node_modules/x/index.js", "x");
+        run(&dir, Projection::OpenCode, &ctx(false));
+        assert!(!dir.join(".opencode").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

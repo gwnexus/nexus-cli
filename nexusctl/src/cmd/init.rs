@@ -1060,12 +1060,15 @@ fn append_gitignore(target: &Path) -> anyhow::Result<()> {
         }
     }
 
+    // The closing line lets deinit find the end of the block even when
+    // the operator adds rules right after it.
     let ignores = r#"
 # Nexus CLI: local workspace
 .nexus/
 .opencode/
 opencode.json
 .env.local
+# Nexus CLI: end
 "#;
 
     let mut file = fs::OpenOptions::new()
@@ -2429,7 +2432,7 @@ mod tests {
         .unwrap();
 
         let exclude = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
-        let marker_count = exclude.matches("# Nexus CLI").count();
+        let marker_count = exclude.matches("# Nexus CLI: local workspace").count();
         assert_eq!(marker_count, 1, "exclude marker should appear only once");
 
         // Verify that opencode.json and .nexus/ are in .git/info/exclude
@@ -2561,7 +2564,7 @@ mod tests {
         // Idempotency: calling again should not duplicate
         append_gitignore(&dir).unwrap();
         let exclude2 = fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
-        let marker_count = exclude2.matches("# Nexus CLI").count();
+        let marker_count = exclude2.matches("# Nexus CLI: local workspace").count();
         assert_eq!(marker_count, 1, "marker should appear only once");
 
         let _ = fs::remove_dir_all(&dir);
