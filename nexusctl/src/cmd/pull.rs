@@ -1020,10 +1020,13 @@ pub async fn run_with_root_hook(
 
     // One pull at a time per workspace: two runs would each plan from the
     // records the other is changing (removals, adopted hashes). Held until
-    // the run ends.
-    let _run_lock = match super::json_store::try_run_lock(
-        &workspace.join(&agentic_root).join("generated/pull.lock"),
-    )? {
+    // the run ends. A fixed path next to the project binding, independent
+    // of the export (and its agentic root), checked before it is created.
+    const RUN_LOCK: &str = ".nexus/pull.lock";
+    if let Err(e) = validate_agent_file_target_path(&workspace, RUN_LOCK) {
+        anyhow::bail!("{RUN_LOCK} cannot be used: {e}");
+    }
+    let _run_lock = match super::json_store::try_run_lock(&workspace.join(RUN_LOCK))? {
         Some(lock) => lock,
         None => anyhow::bail!(
             "another nexus pull is running in this workspace; wait for it to finish, then try again"

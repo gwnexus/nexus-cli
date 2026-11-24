@@ -307,8 +307,8 @@ commands keep each other's records; a manifest locked for more than about
 five seconds stops the command with "locked by another nexus command; try
 again", and a manifest that cannot be parsed is reported, never reset.
 Only one `nexus pull` runs per workspace at a time (a lock on
-`<agentic_root>/generated/pull.lock`); a second one stops with "another nexus
-pull is running in this workspace". If the local workspace was never pulled, or you need
+`.nexus/pull.lock`); a second one stops with "another nexus pull is running
+in this workspace". If the local workspace was never pulled, or you need
 to publish local edits without risking an older server-side fork
 overwriting them, use `nexus push --adopt-local` to bootstrap a new fork
 directly from the current local files, bypassing that check:
