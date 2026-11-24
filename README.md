@@ -1150,13 +1150,14 @@ never untracks committed files on its own, `off` never stages them: it prints
 `git add <path>` for each previously excluded path that exists but is not
 tracked.
 
-An exclude only hides files git does not track. Files that were committed
-before (for example `devbox.json` and `scripts/devbox/` in an existing
-repository) keep showing up in `git status`; `nexus shadow on` lists them in
-one hint with both ways out:
+An exclude only hides files git does not track. Files git tracks, committed
+or only staged (for example `devbox.json` and `scripts/devbox/` in an
+existing repository), keep showing up in `git status`; `nexus shadow on`
+never takes them out of the index on its own and lists them in one hint
+with both ways out:
 
 ```
-  ! 14 file(s) are tracked by git (committed before), so git status keeps showing their changes; an exclude only hides untracked files:
+  ! 14 file(s) are tracked by git (committed or staged), so git status keeps showing their changes; an exclude only hides untracked files:
       devbox.json
       devbox.lock
       scripts/devbox/ (12 file(s))
@@ -1166,8 +1167,13 @@ one hint with both ways out:
       git ls-files -z -- devbox.json devbox.lock scripts/devbox | xargs -0 git update-index --skip-worktree
 ```
 
-`--untrack` takes them out of the git index (`git rm -r --cached`); review
-with `git status` and commit. A teammate's `git pull` then deletes their
+`--untrack` takes them out of the git index (`git rm --cached`); review
+with `git status` and commit. It selects files the way git applies the
+exclude rules, so `.claude/` also covers a nested `sub/.claude/`, and it
+only touches the targets being switched. A file whose staged content
+differs from both the last commit and the work tree is not forced out: git
+refuses it, the command names it and exits non-zero, and the files untracked
+before stay untracked. A teammate's `git pull` then deletes their
 copies, and `nexus pull` writes them again. `nexus shadow
 ai|nexus` and `nexus workspace shadow on|off|status` still work and print
 the new command.
@@ -1225,7 +1231,7 @@ the CLI applies them as sent:
   the index or the commit history the check fails with an error instead of
   reporting a clean result; an empty index or a branch without commits is
   clean.
-- `nexus pull` caches the rules in `<agentic_root>/generated/shadow-guard.json`
+- `nexus pull` caches the rules in `.nexus/generated/shadow-guard.json` (for every agentic root)
   and installs a `commit-msg` hook that checks each message offline
   (`nexus shadow check-msg`). A rejected message names the rule; `git commit
   --no-verify` bypasses the check once. The hook checks the message git will

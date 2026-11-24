@@ -1164,7 +1164,9 @@ pub async fn run_with_root_hook(
             }
             super::shadow::print_server_exclude_report(&report, af_export.shadow.as_deref());
             if untrack {
-                super::shadow::untrack_server_entries();
+                if let Err(e) = super::shadow::untrack_server_paths(&workspace, &report.entries) {
+                    println!("   {} {e}", style("!").bold().yellow());
+                }
             }
         }
         // The server decides the workspace target too once it reports it.
@@ -1671,7 +1673,7 @@ pub async fn run_with_root_hook(
                 .as_ref()
                 .is_some_and(|g| g.commit_msg_hook);
             let allow_hook = !wants_hook
-                || super::shadow_guard::hook_consent_item(&workspace, &agentic_root)
+                || super::shadow_guard::hook_consent_item(&workspace)
                     .is_none_or(|item| consent.local(&item));
             super::shadow_guard::sync(
                 &workspace,
@@ -3169,7 +3171,16 @@ fn sync_local_scripts(
             )
             .collect()
     };
-    super::shadow::apply_local_script_excludes(workspace, &excluded_with(&dropped));
+    // Without the exclude rule a new script could be committed by accident.
+    if let Some(e) =
+        super::shadow::apply_local_script_excludes(workspace, &excluded_with(&dropped)).error
+    {
+        println!(
+            "   {} local scripts not synced: .git/info/exclude could not be updated ({e})",
+            style("!").bold().yellow()
+        );
+        return Ok(0);
+    }
 
     let mut written = 0;
     for (rel, body) in accepted.iter().filter(|(p, _)| !held.contains(*p)) {
@@ -5761,6 +5772,30 @@ mod tests {
         assert!(!exclude_file(dir).contains("nexus local scripts"));
         let manifest = super::super::sync::load_manifest_pub(dir);
         assert!(super::super::sync::local_script_manifest_entries(&manifest).is_empty());
+    }
+
+    /// An exclude file that cannot be updated stops the local-script sync:
+    /// nothing is written and nothing dropped is removed.
+    #[test]
+    fn test_local_scripts_skip_when_the_exclude_cannot_be_updated() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path();
+        init_git_repo(dir, &[]);
+        assert_eq!(sync_local(dir, &local_map(&[(LOCAL_SH, "v1\n")])), 1);
+        let mut bytes = fs::read(dir.join(".git/info/exclude")).unwrap();
+        bytes.extend_from_slice(b"# \xff\n");
+        fs::write(dir.join(".git/info/exclude"), &bytes).unwrap();
+        let new = "scripts/devbox/local/new.sh";
+        // LOCAL_SH is no longer delivered (unchanged: would be removed).
+        assert_eq!(sync_local(dir, &local_map(&[(new, "n\n")])), 0);
+        assert!(!dir.join(new).exists());
+        assert!(dir.join(LOCAL_SH).exists());
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        assert_eq!(
+            super::super::sync::local_script_manifest_entries(&manifest).len(),
+            1
+        );
+        assert_eq!(fs::read(dir.join(".git/info/exclude")).unwrap(), bytes);
     }
 
     #[test]
@@ -8984,7 +9019,11 @@ mod tests {
     #[test]
     fn test_sync_claude_workspace_writes_excludes_and_keeps_local_edit() {
         let dir = temp_pull_dir("claude-workspace");
-        fs::create_dir_all(dir.join(".git/info")).unwrap();
+        assert!(crate::cmd::shadow_guard::git_in(&dir)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
         let v1 = claude_layout("layout { pane }\n");
         let path = dir.join(&v1.path);
 
@@ -9061,7 +9100,11 @@ mod tests {
     #[test]
     fn test_sync_and_remove_zellij_config() {
         let dir = temp_pull_dir("zellij-config");
-        fs::create_dir_all(dir.join(".git/info")).unwrap();
+        assert!(crate::cmd::shadow_guard::git_in(&dir)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
         let v1 = zellij_config("copy_command \"pbcopy\"\n");
         let path = dir.join(&v1.path);
         assert_eq!(
