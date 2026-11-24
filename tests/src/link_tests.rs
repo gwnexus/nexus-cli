@@ -558,3 +558,42 @@ fn test_agent_owner_noop_without_linked_project() {
     assert!(!update_agent_owner(Some(&dir), Some("claude-cli")).unwrap());
     assert_eq!(load_agent_owner(Some(&dir)), None);
 }
+
+#[test]
+fn test_config_writes_keep_unknown_tables_and_keys() {
+    let dir = temp_dir("keep-unknown");
+    fs::create_dir_all(dir.join(".nexus")).unwrap();
+    let path = dir.join(".nexus/config.toml");
+    fs::write(
+        &path,
+        "[project]\nid = \"p-1\"\nname = \"Demo\"\nslug = \"demo\"\nteam_note = \"keep me\"\n\n[custom]\nflag = true\n",
+    )
+    .unwrap();
+
+    // A cache update keeps the unknown table and the unknown sibling key.
+    assert!(nexus_core::config::update_agent_owner(Some(&dir), Some("claude-cli")).unwrap());
+    let doc: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(doc["custom"]["flag"].as_bool(), Some(true));
+    assert_eq!(doc["project"]["team_note"].as_str(), Some("keep me"));
+    assert_eq!(doc["project"]["agent_owner"].as_str(), Some("claude-cli"));
+
+    // Removing the project section keeps the unknown table.
+    assert!(remove_project_section(Some(&dir)).unwrap());
+    let doc: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(doc.get("project").is_none());
+    assert_eq!(doc["custom"]["flag"].as_bool(), Some(true));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_config_write_refuses_to_replace_an_unreadable_file() {
+    let dir = temp_dir("unreadable");
+    fs::create_dir_all(dir.join(".nexus")).unwrap();
+    let path = dir.join(".nexus/config.toml");
+    fs::write(&path, "[project\nbroken").unwrap();
+    let config = ProjectConfig::default();
+    assert!(save_project_config(Some(&dir), &config).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "[project\nbroken");
+    let _ = fs::remove_dir_all(&dir);
+}

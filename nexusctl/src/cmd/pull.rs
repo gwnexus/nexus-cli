@@ -1296,16 +1296,20 @@ pub async fn run_with_root_hook(
     // right artifacts and binary offline.
     // Nonfatal, but a refused config (e.g. a symlink out of the
     // workspace) is reported.
-    let cached = nexus_core::config::update_agent_owner(Some(&workspace), tool_flavor.as_deref())
-        .and_then(|_| match af_export_result {
-            Ok(ref af_export) => nexus_core::config::update_run_target(
-                Some(&workspace),
-                af_export.run_target.as_ref(),
-            ),
-            Err(_) => Ok(false),
-        });
-    if let Err(e) = cached {
-        eprintln!("  warning: .nexus/config.toml not updated: {e}");
+    // Each value separately: a failed owner update must not leave the run
+    // target stale without saying so.
+    if let Err(e) = nexus_core::config::update_agent_owner(Some(&workspace), tool_flavor.as_deref())
+    {
+        eprintln!("  warning: the cached agent owner in .nexus/config.toml was not updated: {e}");
+    }
+    if let Ok(ref af_export) = af_export_result {
+        if let Err(e) =
+            nexus_core::config::update_run_target(Some(&workspace), af_export.run_target.as_ref())
+        {
+            eprintln!(
+                "  warning: the cached run target in .nexus/config.toml was not updated; nexus run may use an old one offline: {e}"
+            );
+        }
     }
 
     let plugin_mcp_servers = af_export_result

@@ -99,13 +99,38 @@ impl ProjectTokenStore {
 
     /// Load the store from disk. Returns an empty store if the file is absent.
     pub fn load() -> Result<Self, Error> {
-        let path = Self::path()?;
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let content = std::fs::read_to_string(&path)?;
+        Self::load_from(&Self::path()?)
+    }
+
+    /// Load the store at `path`; only a missing file is an empty store.
+    fn load_from(path: &std::path::Path) -> Result<Self, Error> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e.into()),
+        };
         let store: ProjectTokenStore = toml::from_str(&content)?;
         Ok(store)
+    }
+
+    /// Change the store in one locked step: read the current file, apply
+    /// `change` and save, all under an exclusive lock, so a concurrent
+    /// `nexus project` command cannot overwrite another project's entry
+    /// with an older snapshot.
+    pub fn update<R>(change: impl FnOnce(&mut Self) -> R) -> Result<R, Error> {
+        Self::update_at(&Self::path()?, change)
+    }
+
+    fn update_at<R>(
+        path: &std::path::Path,
+        change: impl FnOnce(&mut Self) -> R,
+    ) -> Result<R, Error> {
+        let _lock = StoreLock::acquire(path)?;
+        let mut store = Self::load_from(path)?;
+        let out = change(&mut store);
+        let content = toml::to_string_pretty(&store)?;
+        crate::fsutil::write_private_atomic(path, content.as_bytes())?;
+        Ok(out)
     }
 
     /// Save the store to disk with restrictive file permissions (0600 on Unix).
@@ -134,6 +159,44 @@ impl ProjectTokenStore {
     }
 }
 
+/// An exclusive lock on `<store>.lock`, released on drop (Unix; elsewhere
+/// a no-op).
+struct StoreLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+impl StoreLock {
+    fn acquire(store: &std::path::Path) -> Result<Self, Error> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            use std::os::unix::io::AsRawFd;
+            let mut name = store.as_os_str().to_owned();
+            name.push(".lock");
+            if let Some(dir) = store.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(std::path::PathBuf::from(name))?;
+            // SAFETY: the descriptor belongs to `file`, which the lock owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            Ok(Self { _file: file })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = store;
+            Ok(Self {})
+        }
+    }
+}
+
 /// Validate that a token string has the correct project-token prefix.
 pub fn validate_project_token_format(token: &str) -> Result<(), Error> {
     if !token.starts_with(PROJECT_TOKEN_PREFIX) {
@@ -158,13 +221,92 @@ pub fn validate_project_token_format(token: &str) -> Result<(), Error> {
 ///
 /// Returns `None` if no token is available.
 pub fn resolve_project_token(project_id: &str) -> Option<String> {
+    try_resolve_project_token(project_id).ok().flatten()
+}
+
+/// [`resolve_project_token`], with a store that cannot be read reported
+/// as an error instead of "no token" (which would ask for a new link).
+pub fn try_resolve_project_token(project_id: &str) -> Result<Option<String>, Error> {
     if let Ok(token) = std::env::var(PROJECT_TOKEN_ENV) {
         if !token.is_empty() {
-            return Some(token);
+            return Ok(Some(token));
         }
     }
-    match ProjectTokenStore::load() {
-        Ok(store) => store.get(project_id).map(|e| e.token.clone()),
-        Err(_) => None,
+    Ok(ProjectTokenStore::load()?
+        .get(project_id)
+        .map(|e| e.token.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str) -> ProjectTokenEntry {
+        ProjectTokenEntry {
+            token: format!("{PROJECT_TOKEN_PREFIX}synthetic-{id}"),
+            token_id: id.to_string(),
+            token_prefix: None,
+            runtime_id: "rt".into(),
+            expires_at: None,
+            created_at: None,
+            previous_token_id: None,
+        }
+    }
+
+    #[test]
+    fn test_update_rereads_the_store_and_keeps_other_projects() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("project-tokens.toml");
+        ProjectTokenStore::update_at(&path, |s| s.set("a", entry("a1"))).unwrap();
+        // A stale snapshot taken before another command linked project b.
+        let stale = ProjectTokenStore::load_from(&path).unwrap();
+        ProjectTokenStore::update_at(&path, |s| s.set("b", entry("b1"))).unwrap();
+        // Changing a through update keeps b; saving the stale snapshot
+        // would have dropped it.
+        drop(stale);
+        ProjectTokenStore::update_at(&path, |s| {
+            s.remove("a");
+        })
+        .unwrap();
+        let store = ProjectTokenStore::load_from(&path).unwrap();
+        assert!(store.get("a").is_none());
+        assert_eq!(store.get("b").map(|e| e.token_id.as_str()), Some("b1"));
+    }
+
+    #[test]
+    fn test_concurrent_updates_keep_every_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("project-tokens.toml");
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    ProjectTokenStore::update_at(&path, |s| {
+                        s.set(&format!("p{i}"), entry(&format!("t{i}")))
+                    })
+                    .unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let store = ProjectTokenStore::load_from(&path).unwrap();
+        assert_eq!(store.projects.len(), 8);
+    }
+
+    #[test]
+    fn test_a_broken_store_is_an_error_not_an_empty_store() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("project-tokens.toml");
+        assert!(ProjectTokenStore::load_from(&path)
+            .unwrap()
+            .projects
+            .is_empty());
+        std::fs::write(&path, "[projects\nbroken").unwrap();
+        assert!(ProjectTokenStore::load_from(&path).is_err());
+        // An update does not replace a store it cannot read.
+        assert!(ProjectTokenStore::update_at(&path, |s| s.set("a", entry("a1"))).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[projects\nbroken");
     }
 }

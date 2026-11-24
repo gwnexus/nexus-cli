@@ -585,12 +585,19 @@ pub async fn run(
     }
     // Never fall back to a claude.ai login: without the project token the
     // process would run on the subscription.
-    let token = resolve_project_token(&project_id).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no project inference token for this project; run nexus project link first \
+    let token = nexus_core::auth::try_resolve_project_token(&project_id)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "the project token store cannot be read ({e}); fix or remove \
+                 ~/.config/nexus/project-tokens.toml, then run nexus project link"
+            )
+        })?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no project inference token for this project; run nexus project link first \
              (the local lane never uses a claude.ai login)"
-        )
-    })?;
+            )
+        })?;
     nexus_core::auth::validate_project_token_format(&token)?;
     if !super::run::on_path("claude") {
         anyhow::bail!("claude not found on PATH (nexus doctor claude --fix)");

@@ -826,6 +826,7 @@ name = "nexus-core"
 version = "0.51.0"
 dependencies = [
  "dirs",
+ "libc",
  "open",
  "reqwest",
  "serde",

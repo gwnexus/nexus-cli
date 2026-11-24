@@ -18,17 +18,35 @@ pub fn sha256_hex_bytes(content: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// SHA-256 of agent-file content without its `generated_at:` lines, which
-/// the backend re-stamps on every export even when nothing else changed.
-/// Byte-identical to [`sha256_hex`] for content without such a line.
+/// SHA-256 of agent-file content without the `generated_at:` field of its
+/// front matter, which the backend re-stamps on every export even when
+/// nothing else changed. Only the front matter (between a leading `---`
+/// line and the next `---` line) counts: a `generated_at:` line in the
+/// document body is content. Byte-identical to [`sha256_hex`] for content
+/// without such a field.
 pub fn sha256_hex_normalized(content: &str) -> String {
-    if !content.lines().any(|l| l.starts_with("generated_at:")) {
+    let mut lines = content.split_inclusive('\n');
+    let is_fence = |l: &str| l.trim_end_matches(['\n', '\r']) == "---";
+    match lines.next() {
+        Some(first) if is_fence(first) => {}
+        _ => return sha256_hex(content),
+    }
+    let mut kept = String::with_capacity(content.len());
+    let mut in_front = true;
+    let mut stripped = false;
+    for (i, line) in content.split_inclusive('\n').enumerate() {
+        if i > 0 && in_front && is_fence(line) {
+            in_front = false;
+        } else if i > 0 && in_front && line.starts_with("generated_at:") {
+            stripped = true;
+            continue;
+        }
+        kept.push_str(line);
+    }
+    // An unterminated front matter is no front matter.
+    if !stripped || in_front {
         return sha256_hex(content);
     }
-    let kept: String = content
-        .split_inclusive('\n')
-        .filter(|l| !l.starts_with("generated_at:"))
-        .collect();
     sha256_hex(&kept)
 }
 
@@ -92,9 +110,12 @@ pub fn hash_matches_text(recorded: &str, content: &str) -> bool {
         return true;
     }
     let trimmed = trim_trailing_newlines(content);
-    ["", "\n", "\r\n", "\n\n"]
-        .iter()
-        .any(|end| recorded == sha256_hex(&format!("{trimmed}{end}")))
+    // Both raw and normalized: a re-stamped `generated_at` and a changed
+    // final newline together are still no edit.
+    ["", "\n", "\r\n", "\n\n"].iter().any(|end| {
+        let variant = format!("{trimmed}{end}");
+        recorded == sha256_hex(&variant) || recorded == sha256_hex_normalized(&variant)
+    })
 }
 
 #[cfg(test)]
@@ -130,6 +151,34 @@ mod tests {
         assert!(hash_matches_text(&sha256_hex("x\r\n"), "x\n"));
         assert!(hash_matches_text(&sha256_hex("x\n\n"), "x\n"));
         assert!(!hash_matches_text(&recorded, "{\"a\":2}\n"));
+    }
+
+    #[test]
+    fn test_normalized_keeps_generated_at_lines_in_the_body() {
+        let a = "---\ntitle: x\n---\ngenerated_at: keep\n";
+        let b = "---\ntitle: x\n---\ngenerated_at: change\n";
+        assert_ne!(sha256_hex_normalized(a), sha256_hex_normalized(b));
+        // Without front matter the line is content too.
+        assert_eq!(
+            sha256_hex_normalized("generated_at: 1\nbody\n"),
+            sha256_hex("generated_at: 1\nbody\n")
+        );
+        // An unterminated front matter is not stripped.
+        let open = "---\ngenerated_at: 1\nbody\n";
+        assert_eq!(sha256_hex_normalized(open), sha256_hex(open));
+    }
+
+    #[test]
+    fn test_text_match_tolerates_restamp_and_final_newline_together() {
+        let recorded = sha256_hex_normalized("---\ngenerated_at: old\n---\nbody\n");
+        assert!(hash_matches_text(
+            &recorded,
+            "---\ngenerated_at: new\n---\nbody"
+        ));
+        assert!(!hash_matches_text(
+            &recorded,
+            "---\ngenerated_at: new\n---\nother"
+        ));
     }
 
     #[test]

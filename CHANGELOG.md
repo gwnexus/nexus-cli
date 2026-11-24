@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Plugin changes in `nexus reload` are reported only when known.** An unavailable plugin list is no longer read as empty (which reported every plugin as new) and no longer ends in "the running session is up to date", and installations of one plugin at user and project scope are compared separately.
 - **`nexus push <path>` pushes only what it names.** Devbox files outside the selection keep their version from the current fork instead of carrying other local edits into the new fork; when the fork cannot be read, a selective push stops.
 - **`nexus reset` restores executable scripts executable** and keeps the ownership record of a Claude Code file it could not remove (a file already gone counts as removed).
+- **`.nexus/config.toml` keeps what Nexus does not know.** Saving the project config (link, unlink, the cached agent owner and run target) keeps unknown tables and keys, also inside `[project]`, and replaces the file atomically; a file that does not parse is no longer overwritten.
+- **Broken credential files are reported.** A project or global `credentials.toml` that cannot be read or parsed is named in a warning instead of being treated as "not logged in", and a broken project login no longer falls back to the global account silently. A project token store that cannot be read is reported by the local lane instead of asking for a new link.
+- **Project token changes no longer overwrite each other.** `nexus project link`, `rotate` and `unlink` change `project-tokens.toml` under an exclusive lock and re-read it first, so a concurrent command for another project keeps its entry; `unlink` removes only the token it revoked.
+- **`generated_at` is ignored only in the front matter.** A `generated_at:` line in the body of an agent file is content again, and a re-stamped `generated_at` together with a changed final newline no longer shows as a local edit.
+- **`nexus pull` names a stale cached run target.** When the cached agent owner or run target in `.nexus/config.toml` cannot be updated, pull says which one, each on its own.
 
 ## [0.51.0] - 2026-11-24
 

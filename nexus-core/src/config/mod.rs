@@ -651,12 +651,50 @@ pub fn save_project_config(
     config: &ProjectConfig,
 ) -> Result<(), Error> {
     let path = confined_project_config_path(from)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    write_project_config(&path, config)
+}
+
+/// Write `config` to `path`, keeping what the file holds beyond the typed
+/// fields (unknown tables and keys, also inside known tables), atomically:
+/// a failed write leaves the previous file intact.
+fn write_project_config(path: &std::path::Path, config: &ProjectConfig) -> Result<(), Error> {
+    let mut doc = toml::Table::try_from(config)
+        .map_err(|e| Error::Config(format!("cannot serialize project config: {e}")))?;
+    match std::fs::read_to_string(path) {
+        Ok(old_text) => {
+            let old: toml::Table = toml::from_str(&old_text)?;
+            let typed: ProjectConfig = toml::from_str(&old_text)?;
+            let known = toml::Table::try_from(&typed)
+                .map_err(|e| Error::Config(format!("cannot serialize project config: {e}")))?;
+            keep_unknown_keys(&old, &known, &mut doc);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
-    let content = toml::to_string_pretty(config)?;
-    std::fs::write(&path, content)?;
+    let content = toml::to_string_pretty(&doc)?;
+    crate::fsutil::write_private_atomic(path, content.as_bytes())?;
     Ok(())
+}
+
+/// Copy into `new` every key of `old` that the typed config does not know
+/// (absent from `known`, the typed round trip of `old`), recursing into
+/// tables both sides keep.
+fn keep_unknown_keys(old: &toml::Table, known: &toml::Table, new: &mut toml::Table) {
+    for (key, value) in old {
+        match known.get(key) {
+            None => {
+                new.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+            Some(toml::Value::Table(known_sub)) => {
+                if let (toml::Value::Table(old_sub), Some(toml::Value::Table(new_sub))) =
+                    (value, new.get_mut(key))
+                {
+                    keep_unknown_keys(old_sub, known_sub, new_sub);
+                }
+            }
+            Some(_) => {}
+        }
+    }
 }
 
 /// Remove the `[project]` section from `.nexus/config.toml`.
@@ -672,8 +710,7 @@ pub fn remove_project_section(from: Option<&std::path::Path>) -> Result<bool, Er
         return Ok(false);
     }
     config.project = None;
-    let new_content = toml::to_string_pretty(&config)?;
-    std::fs::write(&path, new_content)?;
+    write_project_config(&path, &config)?;
     Ok(true)
 }
 
