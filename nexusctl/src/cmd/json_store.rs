@@ -48,6 +48,45 @@ pub(crate) fn read_object(
     }
 }
 
+/// An exclusive lock on `path` for a whole command run, taken without
+/// waiting: `None` when another process holds it. Released on drop.
+pub(crate) fn try_run_lock(path: &Path) -> anyhow::Result<Option<RunLock>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        // SAFETY: the descriptor belongs to `file`, which the lock owns.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(RunLock { _file: file }));
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            return Ok(None);
+        }
+        Err(err.into())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(Some(RunLock {}))
+    }
+}
+
+/// See [`try_run_lock`].
+pub(crate) struct RunLock {
+    #[cfg(unix)]
+    _file: fs::File,
+}
+
 /// An exclusive advisory lock on `<path>.lock`, released on drop.
 struct FileLock {
     #[cfg(unix)]
@@ -124,6 +163,18 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "{ broken");
         fs::write(&path, "[]").unwrap();
         assert!(read_object(&path).is_err());
+    }
+
+    #[test]
+    fn test_run_lock_is_exclusive_until_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g/pull.lock");
+        let held = try_run_lock(&path).unwrap();
+        assert!(held.is_some());
+        #[cfg(unix)]
+        assert!(try_run_lock(&path).unwrap().is_none());
+        drop(held);
+        assert!(try_run_lock(&path).unwrap().is_some());
     }
 
     #[test]

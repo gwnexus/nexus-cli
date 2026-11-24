@@ -999,6 +999,9 @@ pub async fn run_with_root_hook(
             ));
             declared.extend(export.executables.iter().cloned());
         }
+        if pull_scope("directives") {
+            dry_run_directives(&client, &project_id, &workspace, &agentic_root, force).await;
+        }
         if pull_scope("tasks") {
             dry_run_tasks(&client, &project_id, &workspace, &agentic_root).await;
         }
@@ -1015,14 +1018,31 @@ pub async fn run_with_root_hook(
         return Ok(());
     }
 
+    // One pull at a time per workspace: two runs would each plan from the
+    // records the other is changing (removals, adopted hashes). Held until
+    // the run ends.
+    let _run_lock = match super::json_store::try_run_lock(
+        &workspace.join(&agentic_root).join("generated/pull.lock"),
+    )? {
+        Some(lock) => lock,
+        None => anyhow::bail!(
+            "another nexus pull is running in this workspace; wait for it to finish, then try again"
+        ),
+    };
+
     // Executable content (hooks, settings commands, plugins, MCP servers,
     // layouts, scripts) needs consent before anything is written; a refused
     // item keeps its local version.
     let mut consent = super::consent::Gate::open(&workspace, trust);
+    // Only the selected scopes are offered: a `--scope tasks` pull never
+    // asks about (or records consent for) agent or skill executables.
     consent.exports(
         &workspace,
-        af_export_result.as_mut().ok(),
-        Some(&mut export),
+        af_export_result
+            .as_mut()
+            .ok()
+            .filter(|_| pull_scope("agents")),
+        pull_scope("skills").then_some(&mut export),
         is_claude,
         &agentic_root,
     );
@@ -1100,7 +1120,7 @@ pub async fn run_with_root_hook(
                     // Check for existing directives file
                     let directives_path = workspace.join(&agentic_root).join("directives.md");
                     if directives_path.exists() && !force {
-                        if !is_managed_file(&directives_path) {
+                        if directives_user_managed(&directives_path, force) {
                             println!(
                             "   {} {}/directives.md is user-managed (no nexus-platform marker), skipping",
                             style("--").yellow(),
@@ -1911,36 +1931,36 @@ pub async fn run_with_root_hook(
             .await
         {
             Ok(task_response) => {
-                let snapshot = workspace.join(&agentic_root).join("TASKS.md");
-                // Only a snapshot Nexus wrote is cleared; the operator's own
-                // TASKS.md stays, and a symlink is never followed.
-                if task_response.tasks.is_empty()
-                    && !is_symlink(&snapshot)
-                    && is_managed_file(&snapshot)
-                {
-                    // The last open task closed: the snapshot says so instead
-                    // of listing it on.
-                    write_tasks(&workspace, &task_response.tasks, &agentic_root)?;
-                    println!(
-                        "   {} No open tasks; {}/TASKS.md updated.",
-                        style("✓").green(),
+                let count = task_response.tasks.len();
+                match tasks_snapshot_plan(&workspace, &agentic_root, count) {
+                    TasksPlan::Refused(why) => println!(
+                        "   {} {}/TASKS.md not written: {why}",
+                        style("!").bold().yellow(),
                         agentic_root
-                    );
-                } else if task_response.tasks.is_empty() {
-                    println!("   {} No open tasks to export.", style("·").dim());
-                } else {
-                    write_tasks(&workspace, &task_response.tasks, &agentic_root)?;
-                    println!(
-                        "   {} Wrote {} task{} to {}/TASKS.md",
-                        style("✓").green(),
-                        task_response.tasks.len(),
-                        if task_response.tasks.len() == 1 {
-                            ""
-                        } else {
-                            "s"
-                        },
-                        agentic_root,
-                    );
+                    ),
+                    TasksPlan::Nothing => {
+                        println!("   {} No open tasks to export.", style("·").dim())
+                    }
+                    TasksPlan::Clear => {
+                        // The last open task closed: the snapshot says so
+                        // instead of listing it on.
+                        write_tasks(&workspace, &task_response.tasks, &agentic_root)?;
+                        println!(
+                            "   {} No open tasks; {}/TASKS.md updated.",
+                            style("✓").green(),
+                            agentic_root
+                        );
+                    }
+                    TasksPlan::Write => {
+                        write_tasks(&workspace, &task_response.tasks, &agentic_root)?;
+                        println!(
+                            "   {} Wrote {} task{} to {}/TASKS.md",
+                            style("✓").green(),
+                            count,
+                            if count == 1 { "" } else { "s" },
+                            agentic_root,
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -2193,6 +2213,20 @@ pub async fn run_with_root_hook(
     skipped_modified.append(&mut ws_report.skipped_modified);
     overwrote_modified.append(&mut ws_report.overwrote_modified);
 
+    // Unreadable files are not edits: neither stash nor --force helps.
+    if !ws_report.unreadable.is_empty() {
+        println!();
+        println!(
+            "   {} {} file(s) kept because they cannot be read:",
+            style("!").bold().yellow(),
+            ws_report.unreadable.len(),
+        );
+        for path in &ws_report.unreadable {
+            println!("      {}", style(path).yellow());
+        }
+        println!("   Restore read access, then run nexus pull again.");
+    }
+
     // Summary: locally modified files
     if !skipped_modified.is_empty() {
         println!();
@@ -2424,6 +2458,8 @@ fn is_pull_managed(workspace: &Path, target_path: &str, manifest: &serde_json::V
 #[derive(Debug, Default)]
 pub(crate) struct WorkspaceSyncReport {
     pub skipped_modified: Vec<String>,
+    /// Files kept because they cannot be read (not local edits).
+    pub unreadable: Vec<String>,
     pub overwrote_modified: Vec<String>,
     /// Committed files kept because the fork version differs (no --force).
     pub skipped_committed: Vec<String>,
@@ -2626,13 +2662,14 @@ fn sync_file_as(
     let local_bytes = match read_existing(&target) {
         Ok(local) => local,
         Err(e) => {
+            // Not a local edit: --force would not help either.
             println!(
-                "   {} skipped: {} (cannot be read: {})",
+                "   {} skipped: {} (cannot be read: {}; restore read access, it is checked again on the next pull)",
                 style("!").bold().yellow(),
                 rel,
                 e
             );
-            report.skipped_modified.push(rel.to_string());
+            report.unreadable.push(rel.to_string());
             return Ok(false);
         }
     };
@@ -2933,6 +2970,16 @@ fn apply_dropped(
                 continue;
             }
         };
+        // Confinement checked again (the plan was made before network
+        // calls): a parent that became a link out of the workspace or into
+        // `.git` is never followed; the record stays.
+        if let Err(e) = validate_agent_file_target_path(workspace, path) {
+            outcomes.push(DroppedFile::Failed(
+                path.clone(),
+                format!("not removed: {e}"),
+            ));
+            continue;
+        }
         let target = workspace.join(path);
         // Checked right before the removal; as for writes, the check and
         // the unlink are not atomic, so a save landing in between is lost.
@@ -3425,6 +3472,52 @@ async fn prune_dropped_skill_files(
 }
 
 /// Dry run: what the task snapshot would become.
+/// An existing `directives.md` without the Nexus marker is the operator's:
+/// a pull without `--force` leaves it alone.
+fn directives_user_managed(path: &Path, force: bool) -> bool {
+    !force && path.exists() && !is_managed_file(path)
+}
+
+/// Dry run: what a pull would do with `directives.md`.
+async fn dry_run_directives(
+    client: &NexusClient,
+    project_id: &str,
+    workspace: &Path,
+    agentic_root: &str,
+    force: bool,
+) {
+    let rel = format!("{agentic_root}/directives.md");
+    let path = workspace.join(&rel);
+    match client.export_directives(project_id).await {
+        Ok(d) if d.directives.is_empty() => {
+            println!("   {} No directives for this project.", style("·").dim())
+        }
+        Ok(_) if directives_user_managed(&path, force) => println!(
+            "   {} {rel} (user-managed, no nexus-platform marker)",
+            style("SKIP").bold().yellow()
+        ),
+        Ok(d) => {
+            let label = if !path.exists() {
+                "CREATE"
+            } else if content_matches(&path, &render_directives_markdown(&d.directives)) {
+                "SAME"
+            } else {
+                "UPDATE"
+            };
+            println!(
+                "   {} {rel} ({} directive(s))",
+                style(label).bold().green(),
+                d.directives.len()
+            );
+        }
+        Err(e) => println!(
+            "   {} Could not fetch directives: {}",
+            style("!").yellow(),
+            e
+        ),
+    }
+}
+
 async fn dry_run_tasks(
     client: &NexusClient,
     project_id: &str,
@@ -3432,18 +3525,28 @@ async fn dry_run_tasks(
     agentic_root: &str,
 ) {
     let snapshot = workspace.join(agentic_root).join("TASKS.md");
+    // The same decision as the pull itself.
     match client
         .list_tasks(project_id, Some(&["open", "in_progress", "blocked"]))
         .await
-    {
-        Ok(r) if r.tasks.is_empty() && is_managed_file(&snapshot) => println!(
+        .map(|r| {
+            (
+                tasks_snapshot_plan(workspace, agentic_root, r.tasks.len()),
+                r,
+            )
+        }) {
+        Ok((TasksPlan::Refused(why), _)) => println!(
+            "   {} {agentic_root}/TASKS.md ({why})",
+            style("SKIP").bold().yellow()
+        ),
+        Ok((TasksPlan::Clear, _)) => println!(
             "   {} {agentic_root}/TASKS.md (no open tasks)",
             style("UPDATE").bold().green()
         ),
-        Ok(r) if r.tasks.is_empty() => {
+        Ok((TasksPlan::Nothing, _)) => {
             println!("   {} No open tasks to export.", style("·").dim())
         }
-        Ok(r) => println!(
+        Ok((TasksPlan::Write, r)) => println!(
             "   {} {agentic_root}/TASKS.md ({} open task(s))",
             style(if snapshot.exists() {
                 "UPDATE"
@@ -3467,6 +3570,12 @@ fn preview_workspace_files(
 ) -> usize {
     let mut changes = 0;
     for (rel, body, executable) in files {
+        // The same target check as the pull: a path through a link out of
+        // the workspace is skipped, never previewed as a write.
+        if let Err(e) = validate_agent_file_target_path(workspace, rel) {
+            println!("   {} {rel} ({e})", style("SKIP").bold().yellow());
+            continue;
+        }
         let local = match read_existing(&workspace.join(rel)) {
             Ok(local) => local.map(|b| String::from_utf8_lossy(&b).into_owned()),
             Err(e) => {
@@ -4179,6 +4288,8 @@ fn write_mcp_configs(
         // Parse the existing file once (if applicable) and reuse it for the
         // merges below. Without --force a file that cannot be read or parsed
         // is left alone instead of being replaced.
+        // The bytes the merge starts from; checked again before writing.
+        let merge_input = (exists && !force).then(|| fs::read(&opencode_path).ok());
         let existing_parsed: Result<Option<serde_json::Value>, String> = if exists && !force {
             fs::read_to_string(&opencode_path)
                 .map_err(|e| e.to_string())
@@ -4201,7 +4312,9 @@ fn write_mcp_configs(
         if existing_parsed.is_err() {
             opencode_usable = false;
         }
-        if let (true, Err(e)) = (needs_write, &existing_parsed) {
+        // Reported whether or not a write was planned: the cleanup that
+        // depends on it is blocked either way.
+        if let Err(e) = &existing_parsed {
             println!(
                 "   {} opencode.json not updated: it cannot be read ({e}); fix it or use --force",
                 style("!").bold().yellow()
@@ -4373,6 +4486,17 @@ fn write_mcp_configs(
             let opencode_json = serde_json::Value::Object(opencode_obj);
             let opencode_content = serde_json::to_string_pretty(&opencode_json)? + "\n";
             let unchanged = content_matches(&opencode_path, &opencode_content);
+            // Saved by the operator while pull merged: their settings stay;
+            // the next pull merges again from the new file.
+            if let Some(input) = &merge_input {
+                if !unchanged && fs::read(&opencode_path).ok() != *input {
+                    println!(
+                        "   {} opencode.json not updated: it changed during the pull; run nexus pull again",
+                        style("!").bold().yellow()
+                    );
+                    return Ok(false);
+                }
+            }
             // Token-bearing: git-excluded first, then written owner-only.
             if unchanged {
                 shadow::protect_token_file(
@@ -4824,7 +4948,8 @@ fn sync_generated_files_with(
                     style("!").bold().yellow(),
                     path
                 );
-                skipped.push(path.clone());
+                // Reported here, not with the local edits (stash or
+                // --force would not help).
                 continue;
             }
         };
@@ -5496,16 +5621,63 @@ fn capitalize(s: &str) -> String {
 ///
 /// The file is always overwritten (it is a snapshot of the current backlog,
 /// not a user-editable document).
+/// What a pull does with `TASKS.md` for `count` open tasks.
+#[derive(Debug, PartialEq)]
+enum TasksPlan {
+    /// Write the open tasks.
+    Write,
+    /// No open tasks and a snapshot Nexus wrote: rewrite it empty.
+    Clear,
+    /// No open tasks and no Nexus snapshot: nothing to do.
+    Nothing,
+    /// The destination cannot be written safely.
+    Refused(String),
+}
+
+fn tasks_snapshot_plan(workspace: &Path, agentic_root: &str, count: usize) -> TasksPlan {
+    if let Some(why) = tasks_snapshot_refusal(workspace, agentic_root) {
+        return TasksPlan::Refused(why);
+    }
+    let snapshot = workspace.join(agentic_root).join("TASKS.md");
+    match (count, is_managed_file(&snapshot)) {
+        (0, true) => TasksPlan::Clear,
+        (0, false) => TasksPlan::Nothing,
+        _ => TasksPlan::Write,
+    }
+}
+
+/// Why `<agentic_root>/TASKS.md` must not be written: outside the
+/// workspace or into `.git`, or a symlink as the file or any directory on
+/// the way (also one pointing inside the workspace).
+fn tasks_snapshot_refusal(workspace: &Path, agentic_root: &str) -> Option<String> {
+    let rel = format!("{agentic_root}/TASKS.md");
+    if let Err(e) = validate_agent_file_target_path(workspace, &rel) {
+        return Some(e.to_string());
+    }
+    let mut at = workspace.to_path_buf();
+    for part in Path::new(&rel).components() {
+        at.push(part);
+        if is_symlink(&at) {
+            let shown = at
+                .strip_prefix(workspace)
+                .unwrap_or(&at)
+                .display()
+                .to_string();
+            return Some(format!("{shown} is a symlink"));
+        }
+    }
+    None
+}
+
 pub fn write_tasks(
     workspace: &Path,
     tasks: &[nexus_core::api::TaskSummary],
     agentic_root: &str,
 ) -> anyhow::Result<()> {
-    // Inside the workspace, never through a symlink or into `.git`; the
-    // snapshot itself is never a link (not even to another workspace file).
-    validate_agent_file_target_path(workspace, &format!("{agentic_root}/TASKS.md"))?;
-    if is_symlink(&workspace.join(agentic_root).join("TASKS.md")) {
-        anyhow::bail!("{agentic_root}/TASKS.md is a symlink; not written");
+    // Inside the workspace, never through a symlink (file or directory)
+    // or into `.git`.
+    if let Some(why) = tasks_snapshot_refusal(workspace, agentic_root) {
+        anyhow::bail!("{agentic_root}/TASKS.md not written: {why}");
     }
     let dir = workspace.join(agentic_root);
     fs::create_dir_all(&dir)?;
@@ -6363,7 +6535,9 @@ mod tests {
         )
         .unwrap();
         assert!(!written);
-        assert_eq!(report.skipped_modified, vec!["devbox.json".to_string()]);
+        // Reported as unreadable, not as a local edit (no --force advice).
+        assert_eq!(report.unreadable, vec!["devbox.json".to_string()]);
+        assert!(report.skipped_modified.is_empty());
         fs::set_permissions(dir.join("devbox.json"), fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(
             fs::read_to_string(dir.join("devbox.json")).unwrap(),
@@ -9302,6 +9476,84 @@ mod tests {
             .collect();
         assert!(recorded.contains(&"scripts/devbox/a.sh".to_string()));
         assert!(!recorded.contains(&"scripts/devbox/b.sh".to_string()));
+    }
+
+    /// The workspace preview skips a target the pull would refuse and
+    /// still counts a new file under a confined directory.
+    #[cfg(unix)]
+    #[test]
+    fn test_preview_workspace_files_skips_linked_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        fs::create_dir_all(ws.join("scripts")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.join("scripts/devbox")).unwrap();
+        let manifest = serde_json::json!({});
+        let linked = [("scripts/devbox/new.sh", "x\n", true)];
+        assert_eq!(preview_workspace_files(ws, &manifest, &linked), 0);
+        let plain = [("scripts/new.sh", "x\n", true)];
+        assert_eq!(preview_workspace_files(ws, &manifest, &plain), 1);
+    }
+
+    /// Pull and dry run share one TASKS.md decision: a managed snapshot is
+    /// cleared, the operator's own file stays, and a link (file or any
+    /// directory on the way, even inside the workspace) is refused.
+    #[test]
+    fn test_tasks_snapshot_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        assert_eq!(tasks_snapshot_plan(ws, ".nexus", 0), TasksPlan::Nothing);
+        assert_eq!(tasks_snapshot_plan(ws, ".nexus", 2), TasksPlan::Write);
+        write_tasks(ws, &[], ".nexus").unwrap();
+        assert_eq!(tasks_snapshot_plan(ws, ".nexus", 0), TasksPlan::Clear);
+        fs::write(ws.join(".nexus/TASKS.md"), "my own notes\n").unwrap();
+        assert_eq!(tasks_snapshot_plan(ws, ".nexus", 0), TasksPlan::Nothing);
+        #[cfg(unix)]
+        {
+            // A managed snapshot reached through a linked agentic root.
+            write_tasks(ws, &[], ".nexus").unwrap();
+            std::os::unix::fs::symlink(ws.join(".nexus"), ws.join(".agent")).unwrap();
+            assert!(matches!(
+                tasks_snapshot_plan(ws, ".agent", 0),
+                TasksPlan::Refused(_)
+            ));
+            assert!(write_tasks(ws, &[], ".agent").is_err());
+            // The snapshot itself as a link.
+            fs::create_dir_all(ws.join(".other")).unwrap();
+            std::os::unix::fs::symlink(ws.join(".nexus/TASKS.md"), ws.join(".other/TASKS.md"))
+                .unwrap();
+            assert!(matches!(
+                tasks_snapshot_plan(ws, ".other", 3),
+                TasksPlan::Refused(_)
+            ));
+        }
+    }
+
+    /// A parent that became a link out of the workspace after the plan:
+    /// nothing outside is removed and the record stays.
+    #[cfg(unix)]
+    #[test]
+    fn test_apply_dropped_refuses_a_parent_linked_after_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        pulled_workspace_file(dir, "scripts/devbox/sub/a.sh", "a");
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        let plan = plan_dropped_workspace_files(dir, &manifest, &["devbox.json"]);
+        assert_eq!(plan.len(), 1);
+        // The directory moves out and a link takes its place; same bytes.
+        fs::rename(dir.join("scripts/devbox/sub"), outside.path().join("sub")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("sub"), dir.join("scripts/devbox/sub"))
+            .unwrap();
+        let outcomes = apply_dropped_workspace_files(dir, &plan).unwrap();
+        assert!(
+            matches!(&outcomes[0], DroppedFile::Failed(p, _) if p == "scripts/devbox/sub/a.sh")
+        );
+        assert!(outside.path().join("sub/a.sh").exists());
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        assert!(super::super::sync::workspace_manifest_entries(&manifest)
+            .iter()
+            .any(|(p, _)| p == "scripts/devbox/sub/a.sh"));
     }
 
     #[cfg(unix)]
