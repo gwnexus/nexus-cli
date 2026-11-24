@@ -496,18 +496,45 @@ fn legacy_guard_near(guard_path: &Path) -> Option<ShadowGuard> {
     } else {
         base
     };
-    let mut dirs: Vec<PathBuf> = fs::read_dir(base)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|e| e.path())
-        .collect();
-    dirs.sort();
-    let guard = dirs
-        .iter()
-        .find_map(|d| load_cache(&d.join("generated/shadow-guard.json")))?;
+    let guard = find_legacy_cache(base, LEGACY_SEARCH_DEPTH)?;
     eprintln!("shadow guard: using the cache of an earlier version; run nexus pull to update it");
     Some(guard)
+}
+
+/// How deep below the worktree an agentic root (and so an older cache)
+/// is looked for: `config/agent/generated/...` is depth 2.
+const LEGACY_SEARCH_DEPTH: usize = 4;
+
+/// The first `<dir>/generated/shadow-guard.json` below `base` (sorted,
+/// breadth first, real directories only, `.git` and dependency folders
+/// skipped).
+fn find_legacy_cache(base: &Path, depth: usize) -> Option<ShadowGuard> {
+    const SKIP: &[&str] = &[".git", "node_modules", "target", ".devbox"];
+    let mut level = vec![base.to_path_buf()];
+    for _ in 0..depth {
+        let mut next = Vec::new();
+        for dir in &level {
+            let Ok(entries) = fs::read_dir(dir) else {
+                continue;
+            };
+            let mut dirs: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter(|e| !SKIP.iter().any(|s| e.file_name() == *s))
+                .map(|e| e.path())
+                .collect();
+            dirs.sort();
+            if let Some(g) = dirs
+                .iter()
+                .find_map(|d| load_cache(&d.join("generated/shadow-guard.json")))
+            {
+                return Some(g);
+            }
+            next.extend(dirs);
+        }
+        level = next;
+    }
+    None
 }
 
 /// `nexus shadow check-msg`: check a commit message file against the cached
@@ -1009,8 +1036,18 @@ pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>, a
         Some(g) => {
             let json = serde_json::to_string_pretty(g).unwrap_or_default() + "\n";
             if fs::read_to_string(&cache).ok().as_deref() != Some(json.as_str()) {
-                // A cache git tracks (or may track) is the repository's
-                // file: never overwritten.
+                // A cache that is a link (it would write through to its
+                // target), or that git tracks or may track, is the
+                // repository's file: never overwritten.
+                let linked = fs::symlink_metadata(&cache).is_ok_and(|m| m.file_type().is_symlink());
+                if linked {
+                    println!(
+                        "   {} shadow guard not cached: {} is a symbolic link; remove it to let nexus manage it. The commit-msg hook was not changed",
+                        style("!").bold().yellow(),
+                        cache_rel_path()
+                    );
+                    return;
+                }
                 if nexus_core::config::trust::git_tracking(&cache) != Some(false) {
                     println!(
                         "   {} shadow guard not cached: {} is tracked by git (or git cannot tell); untrack it to let nexus manage it. The commit-msg hook was not changed",
@@ -1487,6 +1524,36 @@ mod tests {
         fs::create_dir_all(legacy.parent().unwrap()).unwrap();
         fs::write(&legacy, serde_json::to_string(&contract_guard()).unwrap()).unwrap();
         assert_eq!(check_message_file(&current, &msg).unwrap(), 1);
+        // A nested agentic root (`config/agent`) is found too.
+        fs::remove_dir_all(dir.join(".agent")).unwrap();
+        assert_eq!(check_message_file(&current, &msg).unwrap(), 0);
+        let nested = dir.join("config/agent/generated/shadow-guard.json");
+        fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        fs::write(&nested, serde_json::to_string(&contract_guard()).unwrap()).unwrap();
+        assert_eq!(check_message_file(&current, &msg).unwrap(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The cache path as a link to a tracked file: the file keeps its bytes
+    /// and no hook is installed.
+    #[cfg(unix)]
+    #[test]
+    fn test_cache_is_not_written_through_a_link() {
+        let dir = repo("linked-cache");
+        fs::write(dir.join("notes.json"), "committed\n").unwrap();
+        git(&dir, &["add", "notes.json"]);
+        fs::write(dir.join("notes.json"), "local edit\n").unwrap();
+        let cache = dir.join(cache_rel_path());
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../../notes.json", &cache).unwrap();
+        let mut g = guard(vec![]);
+        g.commit_msg_hook = true;
+        sync(&dir, ".nexus", Some(&g), true);
+        assert_eq!(
+            fs::read_to_string(dir.join("notes.json")).unwrap(),
+            "local edit\n"
+        );
+        assert!(!dir.join(".git/hooks/commit-msg").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
