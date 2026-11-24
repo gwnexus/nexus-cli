@@ -597,9 +597,14 @@ pub fn apply_local_script_excludes(workspace: &Path, paths: &[String]) -> Server
     if let Ok(Some(repo)) = repo_at(workspace) {
         if let Ok(text) = read_exclude(&repo.exclude) {
             for p in block_entries(&text, LOCAL_MARKER_START, LOCAL_MARKER_END) {
-                let on_disk = valid_exclude_path(&p)
-                    && fs::symlink_metadata(workspace.join(p.trim_start_matches('/'))).is_ok();
-                if on_disk && !keep.contains(&p) {
+                // Only a file known to be gone loses its rule; one that
+                // cannot be checked (permissions) keeps it.
+                let gone = !valid_exclude_path(&p)
+                    || matches!(
+                        fs::symlink_metadata(workspace.join(p.trim_start_matches('/'))),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                    );
+                if !gone && !keep.contains(&p) {
                     keep.push(p);
                 }
             }
@@ -2508,6 +2513,22 @@ mod tests {
             block_entries(&exclude_of(&dir), LOCAL_MARKER_START, LOCAL_MARKER_END),
             vec!["scripts/local/b.sh"]
         );
+        // A file that cannot be checked keeps its rule.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = dir.join("scripts/local");
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+            let unreadable = fs::symlink_metadata(locked.join("b.sh")).is_err();
+            apply_local_script_excludes(&dir, &[]);
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            if unreadable {
+                assert_eq!(
+                    block_entries(&exclude_of(&dir), LOCAL_MARKER_START, LOCAL_MARKER_END),
+                    vec!["scripts/local/b.sh"]
+                );
+            }
+        }
         fs::remove_file(dir.join("scripts/local/b.sh")).unwrap();
         apply_local_script_excludes(&dir, &[]);
         assert!(!exclude_of(&dir).contains(LOCAL_MARKER_START));

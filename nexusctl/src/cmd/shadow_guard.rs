@@ -739,6 +739,10 @@ const COMMIT_OPERAND_LONG: &[&str] = &[
 /// also last in a group such as `-qm msg`).
 const COMMIT_OPERAND_SHORT: &[char] = &['m', 'F', 'C', 'c', 't'];
 
+/// `git commit` short options with an optional operand, attached only
+/// (`-S<keyid>`, `-u<mode>`): the rest of the group is that operand.
+const COMMIT_OPTIONAL_SHORT: &[char] = &['S', 'u'];
+
 /// The `--cleanup` mode of a `git commit` argument vector (`git` first);
 /// the last one wins, as in git. Operands of other options are skipped, so
 /// a message such as `-m --cleanup=strip` is not taken for the option.
@@ -786,10 +790,17 @@ fn cleanup_arg(args: &[String]) -> Option<String> {
                 }
             }
         } else if let Some(group) = a.strip_prefix('-') {
-            // The first operand option in a group takes the rest of the
-            // group, or the next argument when it ends the group.
-            if let Some(pos) = group.find(|c| COMMIT_OPERAND_SHORT.contains(&c)) {
-                if pos + 1 == group.len() {
+            // The first option in a group that takes an operand ends the
+            // scan: the rest of the group is its operand; when it ends the
+            // group, a required operand is the next argument.
+            let first = group
+                .find(|c| COMMIT_OPERAND_SHORT.contains(&c) || COMMIT_OPTIONAL_SHORT.contains(&c));
+            if let Some(pos) = first {
+                let required = group[pos..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| COMMIT_OPERAND_SHORT.contains(&c));
+                if required && pos + 1 == group.len() {
                     i += 1;
                 }
             }
@@ -1637,6 +1648,20 @@ mod tests {
         assert_eq!(
             mode(&["git", "commit", "-F", "-", "--cleanup", "strip"]).as_deref(),
             Some("strip")
+        );
+        // An attached optional operand is not searched for option letters:
+        // `-Skeym` signs with key `keym`, the next argument is an option.
+        assert_eq!(
+            mode(&["git", "commit", "-Skeym", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+        assert_eq!(
+            mode(&["git", "commit", "-qS", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
+        );
+        assert_eq!(
+            mode(&["git", "commit", "-unom", "--cleanup=whitespace"]).as_deref(),
+            Some("whitespace")
         );
     }
 
