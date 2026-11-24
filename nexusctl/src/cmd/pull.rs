@@ -2649,13 +2649,22 @@ fn sync_file_as(
         force,
         explicit_force,
     );
+    // A record that cannot be saved (manifest locked or broken) is
+    // reported: the next pull would otherwise take the file for an edit.
     let record = || {
         let hash = sha256_hex(body);
-        let _ = if local_only {
+        let saved = if local_only {
             super::sync::update_local_script_manifest_after_pull(workspace, rel, &hash)
         } else {
             super::sync::update_workspace_manifest_after_pull(workspace, rel, &hash)
         };
+        if let Err(e) = saved {
+            println!(
+                "   {} {} is up to date, but its record was not saved: {e}; run nexus pull again",
+                style("!").bold().yellow(),
+                rel
+            );
+        }
     };
     match action {
         WorkspaceAction::Unchanged => {
@@ -4639,6 +4648,43 @@ fn pull_manifest_path(workspace: &Path, agentic_root: &str) -> std::path::PathBu
         .join("pull-manifest.json")
 }
 
+/// Whether a workspace export failed only because the project has no
+/// active workspace fork (an expected state, not an error).
+pub(crate) fn is_no_workspace_fork(e: &impl std::fmt::Display) -> bool {
+    e.to_string().contains("No active workspace fork")
+}
+
+/// The records of a parsed pull manifest. Every record is a hash string;
+/// any other value is corruption and an error.
+fn pull_records(
+    m: &serde_json::Map<String, serde_json::Value>,
+    path: &Path,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    m.iter()
+        .map(|(k, v)| match v.as_str() {
+            Some(h) => Ok((k.clone(), h.to_string())),
+            None => Err(anyhow::anyhow!(
+                "{}: the record for {k} is not a hash; fix or remove the file",
+                path.display()
+            )),
+        })
+        .collect()
+}
+
+/// The pull manifest, strictly: missing is empty, but a file that cannot
+/// be read or parsed, or a record that is not a hash, is an error. Used
+/// before anything is written, so a broken manifest stops the write.
+fn read_pull_manifest(
+    workspace: &Path,
+    agentic_root: &str,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let path = pull_manifest_path(workspace, agentic_root);
+    match super::json_store::read_object(&path)? {
+        Some(m) => pull_records(&m, &path),
+        None => Ok(Default::default()),
+    }
+}
+
 pub(crate) fn load_pull_manifest(
     workspace: &Path,
     agentic_root: &str,
@@ -4715,7 +4761,8 @@ fn sync_generated_files_with(
     force: bool,
     confirm: impl FnOnce() -> anyhow::Result<bool>,
 ) -> anyhow::Result<(usize, Vec<String>)> {
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
+    let recorded = read_pull_manifest(workspace, agentic_root)?;
+    let mut updates: Vec<(String, String)> = Vec::new();
     // Each file's bytes as classified; `Err` when it cannot be read (then
     // it is left alone, never treated as missing).
     let locals: Vec<std::io::Result<Option<Vec<u8>>>> = files
@@ -4811,17 +4858,12 @@ fn sync_generated_files_with(
                 written += 1;
             }
         }
-        recorded.insert(path.clone(), sha256_hex(content));
+        updates.push((path.clone(), sha256_hex(content)));
     }
 
-    let manifest_path = pull_manifest_path(workspace, agentic_root);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&recorded)? + "\n",
-    )?;
+    // Merged into the current records under the lock: another run's
+    // records written meanwhile stay.
+    update_pull_manifest(workspace, agentic_root, |m| m.extend(updates))?;
     Ok((written, skipped))
 }
 
@@ -4996,24 +5038,31 @@ pub(crate) fn remove_zellij_config(
     force: bool,
 ) -> anyhow::Result<ZellijConfigRemoval> {
     let path = zellij_config_default_path(agentic_root);
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
-    let Some(hash) = recorded.remove(&path) else {
+    let recorded = read_pull_manifest(workspace, agentic_root)?;
+    let Some(hash) = recorded.get(&path).cloned() else {
         return Ok(ZellijConfigRemoval::None);
     };
+    // Checked again right before the removal: a parent that became a
+    // link out of the workspace (or into `.git`) is never followed.
+    if let Err(e) = validate_agent_file_target_path(workspace, &path) {
+        anyhow::bail!("{path} not removed: {e}");
+    }
     let target = workspace.join(&path);
     let outcome = match fs::read(&target) {
         Ok(local) if !force && nexus_core::hash::sha256_hex_bytes(&local) != hash => {
-            ZellijConfigRemoval::KeptLocalEdit(path)
+            ZellijConfigRemoval::KeptLocalEdit(path.clone())
         }
         Ok(_) => {
             fs::remove_file(&target)?;
-            ZellijConfigRemoval::Removed(path)
+            ZellijConfigRemoval::Removed(path.clone())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => ZellijConfigRemoval::None,
         // Kept with its record, so a later pull still knows it owns it.
         Err(e) => return Ok(ZellijConfigRemoval::Unreadable(path, e.to_string())),
     };
-    write_pull_manifest(workspace, agentic_root, &recorded)?;
+    update_pull_manifest(workspace, agentic_root, |m| {
+        m.remove(&path);
+    })?;
     Ok(outcome)
 }
 
@@ -5040,7 +5089,7 @@ fn sync_personal_file(
     let excludes: Vec<&str> = excludes.iter().map(String::as_str).collect();
     super::shadow::ensure_git_excluded_in(workspace, &excludes, reason);
 
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
+    let recorded = read_pull_manifest(workspace, agentic_root)?;
     let target = workspace.join(path);
     // An unreadable file is kept like a local edit, never replaced as new.
     let local = match read_existing(&target) {
@@ -5064,25 +5113,30 @@ fn sync_personal_file(
             ClaudeWorkspaceOutcome::Written
         }
     };
-    recorded.insert(path.to_string(), sha256_hex(body));
-    write_pull_manifest(workspace, agentic_root, &recorded)?;
+    update_pull_manifest(workspace, agentic_root, |m| {
+        m.insert(path.to_string(), sha256_hex(body));
+    })?;
     Ok(outcome)
 }
 
-fn write_pull_manifest(
+/// Change the pull manifest under its lock (see [`super::json_store`]):
+/// re-read, apply `change`, write back atomically. A manifest that cannot
+/// be parsed is an error, never reset to empty.
+fn update_pull_manifest<T>(
     workspace: &Path,
     agentic_root: &str,
-    recorded: &std::collections::BTreeMap<String, String>,
-) -> anyhow::Result<()> {
-    let manifest_path = pull_manifest_path(workspace, agentic_root);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(recorded)? + "\n",
-    )?;
-    Ok(())
+    change: impl FnOnce(&mut std::collections::BTreeMap<String, String>) -> T,
+) -> anyhow::Result<T> {
+    let path = pull_manifest_path(workspace, agentic_root);
+    super::json_store::update_object(&path, |m| {
+        let mut records = pull_records(m, &path)?;
+        let result = change(&mut records);
+        *m = records
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect();
+        Ok(result)
+    })?
 }
 
 fn print_zellij_config_outcome(path: &str, outcome: &ClaudeWorkspaceOutcome) {
@@ -5186,19 +5240,11 @@ pub(crate) fn record_generated_many(
     agentic_root: &str,
     files: &[(String, String)],
 ) -> anyhow::Result<()> {
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
-    let mut changed = false;
-    for (rel, content) in files {
-        let hash = sha256_hex(content);
-        if recorded.get(rel) != Some(&hash) {
-            recorded.insert(rel.clone(), hash);
-            changed = true;
+    update_pull_manifest(workspace, agentic_root, |m| {
+        for (rel, content) in files {
+            m.insert(rel.clone(), sha256_hex(content));
         }
-    }
-    if !changed {
-        return Ok(());
-    }
-    save_pull_manifest(workspace, agentic_root, &recorded)
+    })
 }
 
 /// Drop the pull-manifest records of the paths matching `remove`. Returns
@@ -5217,30 +5263,11 @@ pub(crate) fn remove_generated_records_with(
     agentic_root: &str,
     remove: impl Fn(&str, Option<&str>) -> bool,
 ) -> anyhow::Result<usize> {
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
-    let before = recorded.len();
-    recorded.retain(|path, hash| !remove(path, Some(hash.as_str())));
-    let dropped = before - recorded.len();
-    if dropped > 0 {
-        save_pull_manifest(workspace, agentic_root, &recorded)?;
-    }
-    Ok(dropped)
-}
-
-fn save_pull_manifest(
-    workspace: &Path,
-    agentic_root: &str,
-    recorded: &std::collections::BTreeMap<String, String>,
-) -> anyhow::Result<()> {
-    let manifest_path = pull_manifest_path(workspace, agentic_root);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(recorded)? + "\n",
-    )?;
-    Ok(())
+    update_pull_manifest(workspace, agentic_root, |m| {
+        let before = m.len();
+        m.retain(|path, hash| !remove(path, Some(hash.as_str())));
+        before - m.len()
+    })
 }
 
 /// Record `content` as last written by pull for `rel` in the pull manifest.
@@ -5250,21 +5277,9 @@ fn record_generated(
     rel: &str,
     content: &str,
 ) -> anyhow::Result<()> {
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
-    let hash = sha256_hex(content);
-    if recorded.get(rel) == Some(&hash) {
-        return Ok(());
-    }
-    recorded.insert(rel.to_string(), hash);
-    let manifest_path = pull_manifest_path(workspace, agentic_root);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&recorded)? + "\n",
-    )?;
-    Ok(())
+    update_pull_manifest(workspace, agentic_root, |m| {
+        m.insert(rel.to_string(), sha256_hex(content));
+    })
 }
 
 /// Whether an agent file belongs to the OpenCode projection.
@@ -5580,6 +5595,59 @@ pub fn write_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A broken manifest stops the personal and generated writers before
+    /// they change any file.
+    #[test]
+    fn test_broken_pull_manifest_stops_writes_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let path = pull_manifest_path(ws, ".nexus");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{\"broken\":17}").unwrap();
+        let layout = ".nexus/claude/zellij.local.kdl";
+        assert!(sync_personal_file(ws, ".nexus", layout, "x", None, &[], "test", true).is_err());
+        assert!(!ws.join(layout).exists());
+        let generated = vec![(".nexus/skills/a/SKILL.md".to_string(), "a".to_string())];
+        assert!(sync_generated_files_with(ws, ".nexus", &generated, true, || Ok(true)).is_err());
+        assert!(!ws.join(".nexus/skills/a/SKILL.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remove_zellij_config_refuses_a_linked_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let path = zellij_config_default_path(".nexus");
+        let body = "layout {}\n";
+        update_pull_manifest(ws, ".nexus", |m| {
+            m.insert(path.clone(), sha256_hex(body));
+        })
+        .unwrap();
+        // The parent now links out of the workspace to a matching file.
+        let rel_parent = Path::new(&path).parent().unwrap();
+        let name = Path::new(&path).file_name().unwrap();
+        fs::write(outside.path().join(name), body).unwrap();
+        fs::create_dir_all(ws.join(rel_parent).parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.join(rel_parent)).unwrap();
+        assert!(remove_zellij_config(ws, ".nexus", true).is_err());
+        assert!(outside.path().join(name).exists());
+    }
+
+    #[test]
+    fn test_update_pull_manifest_rejects_non_hash_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = pull_manifest_path(dir.path(), ".nexus");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let raw = "{\"valid\":\"abc\",\"broken\":17}";
+        fs::write(&path, raw).unwrap();
+        let r = update_pull_manifest(dir.path(), ".nexus", |m| {
+            m.insert("x".into(), "y".into());
+        });
+        assert!(r.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), raw);
+    }
 
     #[test]
     fn test_disabled_skills_reason() {

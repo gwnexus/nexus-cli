@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`nexus shadow` resolves the repository through git.** A submodule (where `.git` is a file) gets its own repository's exclude file instead of the enclosing repository's; linked worktrees share their repository's `info/exclude`, so a switch in one worktree applies to its sibling worktrees too.
 - **`nexus shadow check` finds the cached rules for any agentic root.** The guard is cached under `.nexus/generated/` whatever the agentic root, so the offline check runs the rules `nexus pull` cached.
 
+- **A dropped Zellij config is removed only when that is safe.** A file that cannot be read keeps its pull-manifest record and is reported (only a missing file is forgotten silently), and the path is checked again right before the removal, so a parent that became a link out of the workspace is never followed.
+- **`nexus pull` reports a workspace record it could not save** (manifest locked past the wait, or broken) with the path and a hint to pull again, instead of keeping the previous hash silently.
 - **`nexus shadow check` no longer reports clean when git cannot read the index or history.** An unreadable index or commit history makes the check fail with a non-zero exit instead of passing with nothing scanned.
 - **The shadow guard commit-msg hook checks the message git will store.** Comment lines are skipped only in the editor flow and when the configured cleanup strips them (`commit.cleanup`, `core.commentChar`); with `-m` or `-F` every line is checked, and only the complete scissors line cuts the message. An unreadable branch reference is no longer taken for an empty history.
 - **The shadow guard hook leaves tracked hooks alone, also when deleted locally.** Tracking is checked before the file is read; an existing hook moved aside for chaining is excluded from git before it is moved (a hook left to a hook manager is not excluded), a hooks path through the git directory (`.git/../.githooks`) is resolved first, and a hook without its executable bit is repaired and no longer reported as installed.
@@ -61,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`nexus status` reports an unreadable dropped skill as unreadable** instead of as edited.
 - **`nexus pull --scope` limits what is written.** Skills, directives, agent files (with runtime configs, plugins and the projection cleanup) and tasks are written only when their scope is selected.
 - **`TASKS.md` is refreshed when the last open task closes,** instead of listing it on.
+- **Concurrent runs no longer overwrite each other's file records.** The sync manifest and the pull manifest are updated under a lock, re-read before each change and replaced atomically; a record file that cannot be parsed is reported instead of being reset to empty.
+- **`nexus push` stops instead of publishing an incomplete fork.** A workspace file to push that cannot be read, or a current fork that cannot be fetched (other than "no fork yet"), stops the push with nothing published (generated scripts, which are never pushed, are skipped, and so are files the fork dropped unless they are named). A file unchanged locally whose fork version is newer goes into the new fork with the fork version instead of the stale local copy.
+- **A pushed agent file updates only its own record.** After `nexus push <file>` the new hash is recorded only if the record still names the uploaded file and version; otherwise pull is suggested.
 - **Optional fields are left out of requests.** The runner registration omits an unknown runtime version, and actor imports omit unset description, routing and profile fields instead of sending `null`.
 
 ## [0.51.0] - 2026-11-24

@@ -28,15 +28,14 @@ fn load_manifest(workspace: &Path) -> serde_json::Value {
     serde_json::json!({})
 }
 
-/// Save the sync manifest.
-fn save_manifest(workspace: &Path, manifest: &serde_json::Value) -> anyhow::Result<()> {
-    let path = workspace.join(SYNC_MANIFEST);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let content = serde_json::to_string_pretty(manifest)?;
-    fs::write(&path, content)?;
-    Ok(())
+/// Change the sync manifest under its lock (see [`super::json_store`]):
+/// re-read, apply `change`, write back atomically. A manifest that cannot
+/// be parsed is an error, never reset to empty.
+fn update_manifest<T>(
+    workspace: &Path,
+    change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> T,
+) -> anyhow::Result<T> {
+    super::json_store::update_object(&workspace.join(SYNC_MANIFEST), change)
 }
 
 /// `nexus sync push <file>`: upload local agent file changes to the platform.
@@ -80,6 +79,10 @@ pub async fn push(
 
     let content = fs::read_to_string(&local_path)?;
     let local_hash = sha256_hex(&content);
+    // The binding the upload belongs to: its record is updated afterwards
+    // only if no other command changed it meanwhile.
+    let recorded_hash = manifest[file_key]["hash"].as_str().map(str::to_string);
+    let target_path = target_path.to_string();
 
     println!(
         "{} Pushing {} to platform...",
@@ -98,12 +101,23 @@ pub async fn push(
         .await
     {
         Ok(resp) => {
-            // Update manifest with new hash
-            let mut manifest = load_manifest(&workspace);
-            if let Some(entry) = manifest.get_mut(file_key) {
-                entry["hash"] = serde_json::json!(resp.new_hash.as_deref().unwrap_or(&local_hash));
+            let new_hash = resp.new_hash.as_deref().unwrap_or(&local_hash).to_string();
+            let updated = update_manifest(&workspace, |m| {
+                record_pushed_hash(
+                    m,
+                    file_key,
+                    &target_path,
+                    recorded_hash.as_deref(),
+                    &new_hash,
+                )
+            })?;
+            if !updated {
+                println!(
+                    "   {} {} was pushed, but its local record changed meanwhile; run nexus pull.",
+                    style("!").bold().yellow(),
+                    file_key
+                );
             }
-            save_manifest(&workspace, &manifest)?;
 
             println!(
                 "   {} {} pushed successfully.",
@@ -120,6 +134,27 @@ pub async fn push(
     Ok(())
 }
 
+/// Set the hash of `file_key` after a push, only when the entry is still
+/// the binding that was uploaded (same target path and previous hash):
+/// another command may have re-bound or re-pulled it meanwhile.
+fn record_pushed_hash(
+    manifest: &mut serde_json::Map<String, serde_json::Value>,
+    file_key: &str,
+    target_path: &str,
+    previous_hash: Option<&str>,
+    new_hash: &str,
+) -> bool {
+    let Some(entry) = manifest.get_mut(file_key) else {
+        return false;
+    };
+    let same_binding = entry["target_path"].as_str() == Some(target_path)
+        && entry["hash"].as_str() == previous_hash;
+    if same_binding {
+        entry["hash"] = serde_json::json!(new_hash);
+    }
+    same_binding
+}
+
 /// Public accessor for the sync manifest, used by pull.rs for local-modification detection.
 pub fn load_manifest_pub(workspace: &Path) -> serde_json::Value {
     load_manifest(workspace)
@@ -133,18 +168,15 @@ pub fn update_manifest_after_pull(
     target_path: &str,
     content_hash: &str,
 ) -> anyhow::Result<()> {
-    let mut manifest = load_manifest(workspace);
-    let obj = manifest
-        .as_object_mut()
-        .expect("manifest should be an object");
-    obj.insert(
-        file_key.to_string(),
-        serde_json::json!({
-            "target_path": target_path,
-            "hash": content_hash,
-        }),
-    );
-    save_manifest(workspace, &manifest)
+    update_manifest(workspace, |m| {
+        m.insert(
+            file_key.to_string(),
+            serde_json::json!({
+                "target_path": target_path,
+                "hash": content_hash,
+            }),
+        );
+    })
 }
 
 /// Record a devbox workspace file (`devbox.json`, a script) as last written
@@ -155,19 +187,16 @@ pub fn update_workspace_manifest_after_pull(
     path: &str,
     content_hash: &str,
 ) -> anyhow::Result<()> {
-    let mut manifest = load_manifest(workspace);
-    let obj = manifest
-        .as_object_mut()
-        .expect("manifest should be an object");
-    obj.insert(
-        path.to_string(),
-        serde_json::json!({
-            "target_path": path,
-            "hash": content_hash,
-            "kind": WORKSPACE_KIND,
-        }),
-    );
-    save_manifest(workspace, &manifest)
+    update_manifest(workspace, |m| {
+        m.insert(
+            path.to_string(),
+            serde_json::json!({
+                "target_path": path,
+                "hash": content_hash,
+                "kind": WORKSPACE_KIND,
+            }),
+        );
+    })
 }
 
 /// `kind` of sync-manifest entries for devbox workspace files.
@@ -187,19 +216,16 @@ pub fn update_local_script_manifest_after_pull(
     path: &str,
     content_hash: &str,
 ) -> anyhow::Result<()> {
-    let mut manifest = load_manifest(workspace);
-    let obj = manifest
-        .as_object_mut()
-        .expect("manifest should be an object");
-    obj.insert(
-        path.to_string(),
-        serde_json::json!({
-            "target_path": path,
-            "hash": content_hash,
-            "kind": LOCAL_SCRIPT_KIND,
-        }),
-    );
-    save_manifest(workspace, &manifest)
+    update_manifest(workspace, |m| {
+        m.insert(
+            path.to_string(),
+            serde_json::json!({
+                "target_path": path,
+                "hash": content_hash,
+                "kind": LOCAL_SCRIPT_KIND,
+            }),
+        );
+    })
 }
 
 /// The machine-local scripts recorded in the sync manifest, as
@@ -266,21 +292,73 @@ pub fn remove_manifest_entries_with(
     workspace: &Path,
     remove: impl Fn(&str, Option<&str>) -> bool,
 ) -> anyhow::Result<usize> {
-    let mut manifest = load_manifest(workspace);
-    let Some(obj) = manifest.as_object_mut() else {
-        return Ok(0);
-    };
-    let before = obj.len();
-    obj.retain(|key, entry| {
-        let target = entry
-            .get("target_path")
-            .and_then(|t| t.as_str())
-            .unwrap_or(key);
-        !remove(target, entry.get("hash").and_then(|h| h.as_str()))
-    });
-    let dropped = before - obj.len();
-    if dropped > 0 {
-        save_manifest(workspace, &manifest)?;
+    update_manifest(workspace, |m| {
+        let before = m.len();
+        m.retain(|key, entry| {
+            let target = entry
+                .get("target_path")
+                .and_then(|t| t.as_str())
+                .unwrap_or(key);
+            !remove(target, entry.get("hash").and_then(|h| h.as_str()))
+        });
+        before - m.len()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pushed_hash_only_for_the_uploaded_binding() {
+        let mut m = serde_json::json!({
+            "AGENTS.md": { "target_path": ".nexus/AGENTS.md", "hash": "old" }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        // Re-bound or re-pulled meanwhile: untouched.
+        assert!(!record_pushed_hash(
+            &mut m,
+            "AGENTS.md",
+            ".nexus/OTHER.md",
+            Some("old"),
+            "new"
+        ));
+        assert!(!record_pushed_hash(
+            &mut m,
+            "AGENTS.md",
+            ".nexus/AGENTS.md",
+            Some("x"),
+            "new"
+        ));
+        assert!(!record_pushed_hash(
+            &mut m,
+            "gone",
+            ".nexus/AGENTS.md",
+            Some("old"),
+            "new"
+        ));
+        assert_eq!(m["AGENTS.md"]["hash"], "old");
+        assert!(record_pushed_hash(
+            &mut m,
+            "AGENTS.md",
+            ".nexus/AGENTS.md",
+            Some("old"),
+            "new"
+        ));
+        assert_eq!(m["AGENTS.md"]["hash"], "new");
     }
-    Ok(dropped)
+
+    #[test]
+    fn test_corrupt_sync_manifest_is_not_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".nexus")).unwrap();
+        fs::write(dir.path().join(SYNC_MANIFEST), "{ broken").unwrap();
+        assert!(update_workspace_manifest_after_pull(dir.path(), "devbox.json", "h").is_err());
+        assert_eq!(
+            fs::read_to_string(dir.path().join(SYNC_MANIFEST)).unwrap(),
+            "{ broken"
+        );
+    }
 }
