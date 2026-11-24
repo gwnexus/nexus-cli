@@ -116,7 +116,7 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
     let client = NexusClient::new(api_url, Some(token))?;
 
     let project_id = resolve_project_id(project_id)?;
-    let mut store = ProjectTokenStore::load()?;
+    let store = ProjectTokenStore::load()?;
     let current = store.get(&project_id).cloned().ok_or_else(|| {
         anyhow::anyhow!("No project token stored for this project. Run 'nexus project link' first.")
     })?;
@@ -146,10 +146,14 @@ pub async fn rotate(api_url: &str, project_id: Option<&str>, finalize: bool) -> 
                 .revoke_inference_token(&project_id, &prev_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to revoke previous token: {}", e))?;
-            let mut updated = current;
-            updated.previous_token_id = None;
-            store.set(&project_id, updated);
-            store.save()?;
+            // Re-read under the lock: only this project's entry changes.
+            ProjectTokenStore::update(|s| {
+                if let Some(entry) = s.projects.get_mut(&project_id) {
+                    if entry.previous_token_id.as_deref() == Some(prev_id.as_str()) {
+                        entry.previous_token_id = None;
+                    }
+                }
+            })?;
             println!("{} Rotation finalized.", style("OK").bold().green());
         } else {
             println!(
@@ -243,8 +247,7 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
                 let failed = revoke_all(&client, &project_id, &ids).await;
                 // Keep the unconfirmed ids before touching the workspace, so
                 // a failed cleanup there loses nothing.
-                record_pending(&mut store, &project_id, failed.clone());
-                store.save()?;
+                ProjectTokenStore::update(|s| record_pending(s, &project_id, failed.clone()))?;
                 if owns_workspace && workspace_env_token(&workspace)?.is_some() {
                     clear_env_token(&workspace)?;
                 }
@@ -302,8 +305,15 @@ pub async fn unlink(api_url: &str, project_id: Option<&str>) -> anyhow::Result<(
     } else {
         print_workspace_skipped(&project_id);
     }
-    store.remove(&project_id);
-    finish_revocations(&mut store, &project_id, failed)?;
+    ProjectTokenStore::update(|s| {
+        // Only the entry this unlink revoked: a link that finished in the
+        // meantime issued a new one, which stays.
+        if s.get(&project_id).map(|e| &e.token_id) == Some(&entry.token_id) {
+            s.remove(&project_id);
+        }
+        record_pending(s, &project_id, failed.clone());
+    })?;
+    report_unconfirmed(&failed)?;
 
     println!();
     println!(
@@ -336,18 +346,6 @@ async fn revoke_all(client: &NexusClient, project_id: &str, ids: &[String]) -> V
         }
     }
     failed
-}
-
-/// Record unconfirmed revocations and save the store; an error tells the
-/// caller the remote side is not done yet.
-fn finish_revocations(
-    store: &mut ProjectTokenStore,
-    project_id: &str,
-    failed: Vec<String>,
-) -> anyhow::Result<()> {
-    record_pending(store, project_id, failed.clone());
-    store.save()?;
-    report_unconfirmed(&failed)
 }
 
 /// An error when revocations are still unconfirmed (local state is done).
@@ -558,20 +556,16 @@ fn persist_token(
     runtime_id: &str,
     previous_token_id: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut store = ProjectTokenStore::load()?;
-    store.set(
-        project_id,
-        ProjectTokenEntry {
-            token: issued.token.expose().to_string(),
-            token_id: issued.token_id.clone(),
-            token_prefix: issued.token_prefix.clone(),
-            runtime_id: runtime_id.to_string(),
-            expires_at: issued.expires_at.clone(),
-            created_at: Some(unix_to_rfc3339(now_secs())),
-            previous_token_id,
-        },
-    );
-    store.save()?;
+    let entry = ProjectTokenEntry {
+        token: issued.token.expose().to_string(),
+        token_id: issued.token_id.clone(),
+        token_prefix: issued.token_prefix.clone(),
+        runtime_id: runtime_id.to_string(),
+        expires_at: issued.expires_at.clone(),
+        created_at: Some(unix_to_rfc3339(now_secs())),
+        previous_token_id,
+    };
+    ProjectTokenStore::update(|s| s.set(project_id, entry))?;
     Ok(())
 }
 

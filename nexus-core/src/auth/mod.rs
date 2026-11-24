@@ -19,8 +19,8 @@ use crate::Error;
 mod project_token;
 
 pub use project_token::{
-    resolve_project_token, validate_project_token_format, ProjectTokenEntry, ProjectTokenStore,
-    PROJECT_TOKEN_ENV, PROJECT_TOKEN_PREFIX,
+    resolve_project_token, try_resolve_project_token, validate_project_token_format,
+    ProjectTokenEntry, ProjectTokenStore, PROJECT_TOKEN_ENV, PROJECT_TOKEN_PREFIX,
 };
 
 /// Expected prefix for Nexus personal access tokens.
@@ -99,10 +99,13 @@ impl Credentials {
     /// Load credentials from an explicit file path.
     /// Returns `None` if the file does not exist.
     pub fn load_from(path: &Path) -> Result<Option<Self>, Error> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        let content = std::fs::read_to_string(path)?;
+        // Only a missing file is "no credentials"; any other read error is
+        // reported (`Path::exists` would turn it into "missing").
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
         let creds: Credentials = toml::from_str(&content)?;
         Ok(Some(creds))
     }
@@ -199,15 +202,40 @@ pub fn resolve_token_with_source() -> Option<(String, TokenSource)> {
     }
     if let Ok(local_path) = Credentials::local_path(None) {
         if local_credentials_usable(&local_path) {
-            if let Ok(Some(creds)) = Credentials::load_from(&local_path) {
-                return Some((creds.token, TokenSource::Local));
+            match Credentials::load_from(&local_path) {
+                Ok(Some(creds)) => return Some((creds.token, TokenSource::Local)),
+                Ok(None) => {}
+                // A broken project login must not silently switch to the
+                // global account.
+                Err(e) => {
+                    warn_broken_credentials(&local_path, &e);
+                    return None;
+                }
             }
         }
     }
-    match Credentials::load() {
+    let global = Credentials::global_path().ok()?;
+    match Credentials::load_from(&global) {
         Ok(Some(creds)) => Some((creds.token, TokenSource::Global)),
-        _ => None,
+        Ok(None) => None,
+        Err(e) => {
+            warn_broken_credentials(&global, &e);
+            None
+        }
     }
+}
+
+/// Say once that a credentials file exists but cannot be used, instead of
+/// reporting the user as not logged in. The error carries no file content
+/// (TOML errors are redacted).
+fn warn_broken_credentials(path: &Path, err: &Error) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "warning: {} cannot be read ({err}); fix it or log in again with nexus login",
+            path.display()
+        );
+    });
 }
 
 /// Whether a project-local credentials file may supply the token. A file
@@ -272,6 +300,20 @@ pub fn require_token() -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_load_from_tells_broken_files_from_missing_ones() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("credentials.toml");
+        assert!(Credentials::load_from(&path).unwrap().is_none());
+        std::fs::write(&path, "token = \"unterminated\n").unwrap();
+        let err = Credentials::load_from(&path).unwrap_err().to_string();
+        assert!(!err.contains("unterminated"), "{err}");
+        // A directory in its place is not "missing" either.
+        let dir_path = dir.path().join("as-dir");
+        std::fs::create_dir(&dir_path).unwrap();
+        assert!(Credentials::load_from(&dir_path).is_err());
+    }
 
     #[test]
     fn test_local_credentials_tracked_by_git_are_ignored() {
