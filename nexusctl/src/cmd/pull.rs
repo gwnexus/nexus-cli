@@ -4051,6 +4051,12 @@ fn pull_manifest_path(workspace: &Path, agentic_root: &str) -> std::path::PathBu
         .join("pull-manifest.json")
 }
 
+/// Whether a workspace export failed only because the project has no
+/// active workspace fork (an expected state, not an error).
+pub(crate) fn is_no_workspace_fork(e: &impl std::fmt::Display) -> bool {
+    e.to_string().contains("No active workspace fork")
+}
+
 pub(crate) fn load_pull_manifest(
     workspace: &Path,
     agentic_root: &str,
@@ -4112,7 +4118,8 @@ fn sync_generated_files_with(
     force: bool,
     confirm: impl FnOnce() -> anyhow::Result<bool>,
 ) -> anyhow::Result<(usize, Vec<String>)> {
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
+    let recorded = load_pull_manifest(workspace, agentic_root);
+    let mut updates: Vec<(String, String)> = Vec::new();
     let states: Vec<GeneratedState> = files
         .iter()
         .map(|(path, content)| {
@@ -4167,17 +4174,12 @@ fn sync_generated_files_with(
                 written += 1;
             }
         }
-        recorded.insert(path.clone(), sha256_hex(content));
+        updates.push((path.clone(), sha256_hex(content)));
     }
 
-    let manifest_path = pull_manifest_path(workspace, agentic_root);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&recorded)? + "\n",
-    )?;
+    // Merged into the current records under the lock: another run's
+    // records written meanwhile stay.
+    update_pull_manifest(workspace, agentic_root, |m| m.extend(updates))?;
     Ok((written, skipped))
 }
 
@@ -4343,22 +4345,26 @@ pub(crate) fn remove_zellij_config(
     force: bool,
 ) -> anyhow::Result<ZellijConfigRemoval> {
     let path = zellij_config_default_path(agentic_root);
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
-    let Some(hash) = recorded.remove(&path) else {
+    let recorded = load_pull_manifest(workspace, agentic_root);
+    let Some(hash) = recorded.get(&path).cloned() else {
         return Ok(ZellijConfigRemoval::None);
     };
     let target = workspace.join(&path);
     let outcome = match fs::read(&target) {
         Ok(local) if !force && nexus_core::hash::sha256_hex_bytes(&local) != hash => {
-            ZellijConfigRemoval::KeptLocalEdit(path)
+            ZellijConfigRemoval::KeptLocalEdit(path.clone())
         }
         Ok(_) => {
             fs::remove_file(&target)?;
-            ZellijConfigRemoval::Removed(path)
+            ZellijConfigRemoval::Removed(path.clone())
         }
-        Err(_) => ZellijConfigRemoval::None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ZellijConfigRemoval::None,
+        // Unreadable: kept, and so is its record.
+        Err(_) => return Ok(ZellijConfigRemoval::KeptLocalEdit(path)),
     };
-    write_pull_manifest(workspace, agentic_root, &recorded)?;
+    update_pull_manifest(workspace, agentic_root, |m| {
+        m.remove(&path);
+    })?;
     Ok(outcome)
 }
 
@@ -4385,7 +4391,7 @@ fn sync_personal_file(
     let excludes: Vec<&str> = excludes.iter().map(String::as_str).collect();
     super::shadow::ensure_git_excluded_in(workspace, &excludes, reason);
 
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
+    let recorded = load_pull_manifest(workspace, agentic_root);
     let target = workspace.join(path);
     let local = fs::read(&target).ok();
     let outcome = match classify_generated(
@@ -4405,25 +4411,32 @@ fn sync_personal_file(
             ClaudeWorkspaceOutcome::Written
         }
     };
-    recorded.insert(path.to_string(), sha256_hex(body));
-    write_pull_manifest(workspace, agentic_root, &recorded)?;
+    update_pull_manifest(workspace, agentic_root, |m| {
+        m.insert(path.to_string(), sha256_hex(body));
+    })?;
     Ok(outcome)
 }
 
-fn write_pull_manifest(
+/// Change the pull manifest under its lock (see [`super::json_store`]):
+/// re-read, apply `change`, write back atomically. A manifest that cannot
+/// be parsed is an error, never reset to empty.
+fn update_pull_manifest<T>(
     workspace: &Path,
     agentic_root: &str,
-    recorded: &std::collections::BTreeMap<String, String>,
-) -> anyhow::Result<()> {
-    let manifest_path = pull_manifest_path(workspace, agentic_root);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(recorded)? + "\n",
-    )?;
-    Ok(())
+    change: impl FnOnce(&mut std::collections::BTreeMap<String, String>) -> T,
+) -> anyhow::Result<T> {
+    super::json_store::update_object(&pull_manifest_path(workspace, agentic_root), |m| {
+        let mut records: std::collections::BTreeMap<String, String> = m
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+            .collect();
+        let result = change(&mut records);
+        *m = records
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect();
+        result
+    })
 }
 
 fn print_zellij_config_outcome(path: &str, outcome: &ClaudeWorkspaceOutcome) {
@@ -4517,19 +4530,11 @@ pub(crate) fn record_generated_many(
     agentic_root: &str,
     files: &[(String, String)],
 ) -> anyhow::Result<()> {
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
-    let mut changed = false;
-    for (rel, content) in files {
-        let hash = sha256_hex(content);
-        if recorded.get(rel) != Some(&hash) {
-            recorded.insert(rel.clone(), hash);
-            changed = true;
+    update_pull_manifest(workspace, agentic_root, |m| {
+        for (rel, content) in files {
+            m.insert(rel.clone(), sha256_hex(content));
         }
-    }
-    if !changed {
-        return Ok(());
-    }
-    save_pull_manifest(workspace, agentic_root, &recorded)
+    })
 }
 
 /// Drop the pull-manifest records of the paths matching `remove`. Returns
@@ -4539,30 +4544,11 @@ pub(crate) fn remove_generated_records(
     agentic_root: &str,
     remove: impl Fn(&str) -> bool,
 ) -> anyhow::Result<usize> {
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
-    let before = recorded.len();
-    recorded.retain(|path, _| !remove(path));
-    let dropped = before - recorded.len();
-    if dropped > 0 {
-        save_pull_manifest(workspace, agentic_root, &recorded)?;
-    }
-    Ok(dropped)
-}
-
-fn save_pull_manifest(
-    workspace: &Path,
-    agentic_root: &str,
-    recorded: &std::collections::BTreeMap<String, String>,
-) -> anyhow::Result<()> {
-    let manifest_path = pull_manifest_path(workspace, agentic_root);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(recorded)? + "\n",
-    )?;
-    Ok(())
+    update_pull_manifest(workspace, agentic_root, |m| {
+        let before = m.len();
+        m.retain(|path, _| !remove(path));
+        before - m.len()
+    })
 }
 
 /// Record `content` as last written by pull for `rel` in the pull manifest.
@@ -4572,21 +4558,9 @@ fn record_generated(
     rel: &str,
     content: &str,
 ) -> anyhow::Result<()> {
-    let mut recorded = load_pull_manifest(workspace, agentic_root);
-    let hash = sha256_hex(content);
-    if recorded.get(rel) == Some(&hash) {
-        return Ok(());
-    }
-    recorded.insert(rel.to_string(), hash);
-    let manifest_path = pull_manifest_path(workspace, agentic_root);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&recorded)? + "\n",
-    )?;
-    Ok(())
+    update_pull_manifest(workspace, agentic_root, |m| {
+        m.insert(rel.to_string(), sha256_hex(content));
+    })
 }
 
 /// Whether an agent file belongs to the OpenCode projection.
