@@ -309,7 +309,8 @@ fn shadowed_project_keeps_tracked_devbox_files() {
     ws.nexus(&api, &["pull", "--trust", "-y"])
         .assert_ok()
         .assert_contains("kept: scripts/devbox/setup.sh (tracked by git in a shadowed project")
-        .assert_contains("1 tracked file(s) of this shadowed project were kept");
+        .assert_contains("1 tracked file(s) of this shadowed project were kept")
+        .assert_contains("git rm --cached -- <file>");
     assert_eq!(ws.read(SETUP), committed);
     // Untracked workspace files are delivered as before.
     assert!(ws.read(CHECK).contains("echo check"));
@@ -327,6 +328,25 @@ fn shadowed_project_keeps_tracked_devbox_files() {
         .assert_contains("kept: scripts/devbox/setup.sh")
         .assert_contains("git restore -- scripts/devbox/setup.sh");
     assert!(!ws.read(SETUP).contains("v2"));
+
+    // A devbox file that is a link to a tracked file is checked against
+    // the file it points to.
+    #[cfg(unix)]
+    {
+        let link = "scripts/devbox/alias.sh";
+        std::os::unix::fs::symlink("setup.sh", ws.path(link)).unwrap();
+        ws.git(&["restore", "--", SETUP]);
+        let mut linked = next.clone();
+        linked
+            .scripts
+            .push((link.into(), "#!/bin/sh\necho via link\n".into(), true));
+        linked.install(&api);
+        ws.nexus(&api, &["pull", "--trust", "-y"])
+            .assert_ok()
+            .assert_contains("kept: scripts/devbox/alias.sh");
+        assert_eq!(ws.read(SETUP), committed);
+        std::fs::remove_file(ws.path(link)).unwrap();
+    }
 
     // The committed content equals the Nexus version: a plain update.
     next.scripts[0].1 = committed.into();

@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **Shadowed projects keep tracked devbox files as committed.** A git exclude does not cover tracked files, so `nexus pull` no longer writes the Nexus version of `devbox.json` or a devbox script over a file git tracks with different committed content when the project is shadowed (level `ai` or `nexus`, or the devbox files shadowed). The file is kept with a `kept:` line and listed at the end, also with `-y`; `--force` still writes it. A working copy that already carries an earlier Nexus version is kept too, with a hint to `git diff` and `git restore`. `nexus pull --dry-run` shows such files as `KEEP tracked, shadowed project`.
+- **Shadowed projects keep tracked devbox files as committed.** A git exclude does not cover tracked files, so `nexus pull` no longer writes the Nexus version of `devbox.json` or a devbox script over a file git tracks with different committed content when the project is shadowed (level `ai` or `nexus`, or the devbox files shadowed). The file is kept with a `kept:` line and listed at the end, also with `-y`; `--force` still writes it. A working copy that already carries an earlier Nexus version is kept too, with a hint to `git diff` and `git restore`. `nexus pull --dry-run` shows such files as `KEEP tracked, shadowed project`. A devbox file that is a symlink is checked against the tracked file it points to.
 
 ### Tests
 - Functional tests for a shadowed project with a tracked devbox script (kept with `-y`, previewed by the dry run, written only with `--force`, uncommitted Nexus content kept with the restore hint) and for the unchanged update of delivered tracked files without shadow.

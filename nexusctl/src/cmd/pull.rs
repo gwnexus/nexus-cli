@@ -2516,6 +2516,20 @@ pub(crate) fn keeps_tracked_workspace(
     level || workspace
 }
 
+/// The workspace path git tracks for `rel`: the file a symlink at `rel`
+/// points to (a write goes through the link), else `rel` itself.
+fn tracked_rel(workspace: &Path, rel: &str) -> String {
+    let target = workspace.join(rel);
+    if is_symlink(&target) {
+        if let (Ok(file), Ok(root)) = (fs::canonicalize(&target), fs::canonicalize(workspace)) {
+            if let Ok(inner) = file.strip_prefix(&root) {
+                return inner.to_string_lossy().into_owned();
+            }
+        }
+    }
+    rel.to_string()
+}
+
 /// In a shadowed project: whether a workspace file is kept because git
 /// tracks it (`head` is its committed content) and the Nexus version
 /// differs from both the committed and the local copy. Only an explicit
@@ -2747,7 +2761,7 @@ fn sync_file_as(
             local.as_deref(),
             body,
             || {
-                head = git_head_content(workspace, rel);
+                head = git_head_content(workspace, &tracked_rel(workspace, rel));
                 head.clone()
             },
             explicit_force,
@@ -2913,8 +2927,11 @@ fn print_committed_workspace_summary(report: &WorkspaceSyncReport) {
             println!("      {}", style(path).yellow());
         }
         println!(
-            "   Remove them from the index ({}) to let Nexus manage them outside git, or run {} to write the Nexus version.",
-            style("nexus pull --untrack-shadowed").bold(),
+            "   To let Nexus manage them outside git, remove each from the index ({}) and commit that;",
+            style("git rm --cached -- <file>").bold()
+        );
+        println!(
+            "   to write the Nexus version anyway, run {}.",
             style("nexus pull --force").bold()
         );
     }
@@ -3706,7 +3723,7 @@ fn preview_workspace_files(
             && shadow_keeps_tracked(
                 local.as_deref(),
                 body,
-                || git_head_content(workspace, rel),
+                || git_head_content(workspace, &tracked_rel(workspace, rel)),
                 false,
             )
         {

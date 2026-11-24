@@ -1248,7 +1248,8 @@ end. `-y` does not change that; `nexus pull --force` writes the Nexus
 version anyway. When the working copy already carries an earlier Nexus
 version, the message points to `git diff` and `git restore`. To let Nexus
 manage such a file outside git, remove it from the index
-(`nexus pull --untrack-shadowed`). `nexus pull --dry-run` shows these files
+(`git rm --cached -- <file>`) and commit that. A devbox file that is a
+symlink is checked against the file it points to. `nexus pull --dry-run` shows these files
 as `KEEP tracked, shadowed project`.
 
 When the server sets a level, `nexus shadow status` labels the old local
