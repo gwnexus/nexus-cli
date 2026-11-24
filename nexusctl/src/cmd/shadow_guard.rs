@@ -481,11 +481,40 @@ pub fn cached_guard(workspace: &Path) -> Option<ShadowGuard> {
 // commit-msg hook
 // ---------------------------------------------------------------------------
 
+/// The guard an earlier version cached under an agentic root
+/// (`<root>/generated/shadow-guard.json`) next to the current location of
+/// `guard_path` (`<base>/.nexus/generated/shadow-guard.json`): the shared
+/// hook keeps checking a linked worktree that was not pulled since.
+fn legacy_guard_near(guard_path: &Path) -> Option<ShadowGuard> {
+    // Only for the current cache location, never for another path.
+    if !guard_path.ends_with(cache_rel_path()) {
+        return None;
+    }
+    let base = guard_path.parent()?.parent()?.parent()?;
+    let base = if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    };
+    let mut dirs: Vec<PathBuf> = fs::read_dir(base)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    let guard = dirs
+        .iter()
+        .find_map(|d| load_cache(&d.join("generated/shadow-guard.json")))?;
+    eprintln!("shadow guard: using the cache of an earlier version; run nexus pull to update it");
+    Some(guard)
+}
+
 /// `nexus shadow check-msg`: check a commit message file against the cached
 /// guard. Returns the exit code (1 = rejected). A missing cache means the
 /// guard is off: the message passes.
 pub fn check_message_file(guard_path: &Path, message_path: &Path) -> anyhow::Result<i32> {
-    let Some(guard) = load_cache(guard_path) else {
+    let Some(guard) = load_cache(guard_path).or_else(|| legacy_guard_near(guard_path)) else {
         return Ok(0);
     };
     let raw = String::from_utf8_lossy(&fs::read(message_path)?).into_owned();
@@ -980,6 +1009,16 @@ pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>, a
         Some(g) => {
             let json = serde_json::to_string_pretty(g).unwrap_or_default() + "\n";
             if fs::read_to_string(&cache).ok().as_deref() != Some(json.as_str()) {
+                // A cache git tracks (or may track) is the repository's
+                // file: never overwritten.
+                if nexus_core::config::trust::git_tracking(&cache) != Some(false) {
+                    println!(
+                        "   {} shadow guard not cached: {} is tracked by git (or git cannot tell); untrack it to let nexus manage it. The commit-msg hook was not changed",
+                        style("!").bold().yellow(),
+                        cache_rel_path()
+                    );
+                    return;
+                }
                 let written = match cache.parent() {
                     Some(parent) => fs::create_dir_all(parent),
                     None => Ok(()),
@@ -1439,6 +1478,32 @@ mod tests {
         assert_eq!(check_message_file(&cache, &msg).unwrap(), 1);
         fs::write(&msg, "fix(api): handle null ids\n").unwrap();
         assert_eq!(check_message_file(&cache, &msg).unwrap(), 0);
+        // A worktree not pulled since the move: the legacy cache under its
+        // agentic root still checks the message.
+        fs::write(&msg, format!("see {REF}\n")).unwrap();
+        let current = dir.join(cache_rel_path());
+        assert_eq!(check_message_file(&current, &msg).unwrap(), 0);
+        let legacy = dir.join(".agent/generated/shadow-guard.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, serde_json::to_string(&contract_guard()).unwrap()).unwrap();
+        assert_eq!(check_message_file(&current, &msg).unwrap(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A cache git tracks is never overwritten, and the hook stays as is.
+    #[cfg(unix)]
+    #[test]
+    fn test_tracked_cache_is_not_overwritten() {
+        let dir = repo("tracked-cache");
+        let cache = dir.join(cache_rel_path());
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fs::write(&cache, "{\"mine\": true}\n").unwrap();
+        git(&dir, &["add", "-f", ".nexus/generated/shadow-guard.json"]);
+        let mut g = guard(vec![]);
+        g.commit_msg_hook = true;
+        sync(&dir, ".nexus", Some(&g), true);
+        assert_eq!(fs::read_to_string(&cache).unwrap(), "{\"mine\": true}\n");
+        assert!(!dir.join(".git/hooks/commit-msg").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
