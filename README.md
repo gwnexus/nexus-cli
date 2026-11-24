@@ -1202,7 +1202,7 @@ the CLI applies them as sent:
   the index or the commit history the check fails with an error instead of
   reporting a clean result; an empty index or a branch without commits is
   clean.
-- `nexus pull` caches the rules in `<agentic_root>/generated/shadow-guard.json`
+- `nexus pull` caches the rules in `.nexus/generated/shadow-guard.json` (for every agentic root)
   and installs a `commit-msg` hook that checks each message offline
   (`nexus shadow check-msg`). A rejected message names the rule; `git commit
   --no-verify` bypasses the check once. The hook checks the message git will
