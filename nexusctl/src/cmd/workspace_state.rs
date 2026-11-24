@@ -481,23 +481,53 @@ pub async fn load(
     entries.extend(ws_entries);
 
     // CCX files, CLAUDE.md block and managed settings keys (Claude Code).
-    let lock = ccx::load_lock(workspace, &agentic_root);
+    // A lock that cannot be read is reported; without its provenance the
+    // CCX files are not compared (pull stops on it too).
+    let lock_read = ccx::load_lock_for_update(workspace, &agentic_root);
+    let lock_error = lock_read.as_ref().err().map(|e| e.to_string());
+    let lock = lock_read.ok().flatten();
     let settings_before = claude_render::read_claude_settings(workspace);
     let mut settings_after = settings_before.clone();
     if is_claude {
         if export.ccx.is_some() {
-            // A CCX file that cannot be read does not stop the status of
-            // everything else; it is named instead.
-            let plans = ccx::plan_files(
-                workspace,
-                &ccx::ccx_files(&export.agent_files),
-                lock.as_ref(),
-                &manifest,
-            )
-            .unwrap_or_else(|e| {
-                eprintln!("   ! CCX files not compared: {e}");
-                Vec::new()
-            });
+            // A CCX file that cannot be read is reported on its own; the
+            // others are still compared.
+            let plans = match &lock_error {
+                Some(e) => {
+                    entries.push(Entry {
+                        error: Some(e.clone()),
+                        path: ccx::lock_rel(&agentic_root),
+                        class: FileClass::Projection,
+                        state: State::Unreadable,
+                        kind: Kind::Ccx,
+                        local: None,
+                        desired: None,
+                    });
+                    Vec::new()
+                }
+                None => ccx::plan_each(
+                    workspace,
+                    &ccx::ccx_files(&export.agent_files),
+                    lock.as_ref(),
+                    &manifest,
+                )?,
+            };
+            let mut readable = Vec::new();
+            for plan in plans {
+                match plan {
+                    Ok(plan) => readable.push(plan),
+                    Err((path, e)) => entries.push(Entry {
+                        error: Some(e.to_string()),
+                        path,
+                        class: FileClass::Projection,
+                        state: State::Unreadable,
+                        kind: Kind::Ccx,
+                        local: None,
+                        desired: None,
+                    }),
+                }
+            }
+            let plans = readable;
             for plan in plans {
                 let state = match plan.state {
                     FileState::Clean => continue,
