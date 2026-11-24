@@ -1032,6 +1032,9 @@ pub async fn run_with_root_hook(
             "another nexus pull is running in this workspace; wait for it to finish, then try again"
         ),
     };
+    // Read again under the lock: a pull that ran while this one fetched
+    // the exports may have recorded files since.
+    let manifest = super::sync::load_manifest_pub(&workspace);
 
     // Executable content (hooks, settings commands, plugins, MCP servers,
     // layouts, scripts) needs consent before anything is written; a refused
