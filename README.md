@@ -1519,9 +1519,15 @@ nexus-cli/
 │   ├── ci.yml          # CI: test matrix (ubuntu + macos), clippy, rustfmt
 │   └── release.yml     # Release: 4-target cross-compile, checksums, GH release
 ├── nexusctl/           # Binary crate (builds the `nexus` binary)
-│   └── src/
-│       ├── main.rs     # CLI entry point (clap derive)
-│       └── cmd/        # Command implementations
+│   ├── src/
+│   │   ├── main.rs     # CLI entry point (clap derive)
+│   │   └── cmd/        # Command implementations
+│   └── tests/          # Functional tests: the real binary against a fake backend
+│       ├── common/     # Harness: mock API, temporary git workspace, fixtures
+│       ├── pull_functional.rs
+│       ├── workspace_functional.rs  # push, status, reset, stash, deinit
+│       ├── shadow_functional.rs
+│       └── init_functional.rs
 ├── nexus-core/         # Library crate (shared modules)
 │   └── src/
 │       ├── api/        # HTTP client + API types
@@ -1552,7 +1558,15 @@ cargo build --release
 
 ```bash
 cargo test --workspace
+cargo test -p nexusctl --test pull_functional   # one functional suite
 ```
+
+The functional tests in `nexusctl/tests/` build and run the `nexus` binary.
+Each test gets a fresh git repository, its own `HOME` (no real
+configuration or credentials are read) and a fake Nexus API on
+`127.0.0.1`, so they need no network and no login. They check what a command
+writes, keeps, removes and sends, and that dry runs and refused steps leave
+the workspace byte for byte unchanged.
 
 ## Development
 
