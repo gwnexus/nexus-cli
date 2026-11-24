@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-11-24
+
 ### Fixed
 
 - **`nexus status` sees what `nexus pull` would do.** It resolves the runtime the same way (agent-file export, project detail, then the cached owner), uses the same agentic root and runtime path rule (agent files under a legacy `.claude` root are reported), includes the native Claude Code skill files, and falls back to the legacy workspace export when the fork export fails. A workspace file whose backend version could not be fetched shows "backend version unavailable" instead of a diff against an empty file.
