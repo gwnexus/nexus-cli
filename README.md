@@ -1251,7 +1251,7 @@ registers it without losing the conversation.
 
 `-y` answers questions as in `nexus pull`; edited Claude Code files
 (`.claude/` rules, skills, agents and other locked files) are replaced and
-modified leftovers removed only with `--force`. Other files follow pull's
+modified leftovers removed only with `--force` or `--force-unmanaged`. Other files follow pull's
 `-y` handling (for example `.mcp.json` is rewritten from the backend). When
 `claude plugin list` is unavailable before or after the pull, reload says
 that plugin changes could not be checked instead of reporting every plugin
