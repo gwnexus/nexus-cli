@@ -345,16 +345,19 @@ impl Config {
         workspace: Option<&std::path::Path>,
     ) -> Result<EffectiveConfig, Error> {
         let global_path = Self::path()?;
-        let mut config = Self::load()?;
-        // Per key: a key the global file leaves out comes from the
-        // compiled defaults, even when the file exists.
-        let global_keys = match std::fs::read_to_string(&global_path) {
+        // One read for the values and their provenance: a key the global
+        // file leaves out comes from the compiled defaults, even when the
+        // file exists.
+        let (mut config, global_keys) = match std::fs::read_to_string(&global_path) {
             Ok(text) => {
+                let config: Config = toml::from_str(&text)?;
                 let mut keys = std::collections::BTreeSet::new();
                 collect_keys("", &toml::from_str::<toml::Table>(&text)?, &mut keys);
-                keys
+                (config, keys)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (Self::default(), Default::default())
+            }
             Err(e) => return Err(e.into()),
         };
         let source = |key: &str| {
