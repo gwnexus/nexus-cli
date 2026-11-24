@@ -1690,13 +1690,23 @@ pub async fn run_with_root_hook(
         // Claude Code only: an OpenCode project gets no .claude/rules etc.
         if let (true, Ok(ref af_export)) = (is_claude, &af_export_result) {
             if let Some(ref info) = af_export.ccx {
-                let lock = super::ccx::load_lock(&workspace, &agentic_root);
+                let lock = super::ccx::load_lock_for_update(&workspace, &agentic_root)?;
                 let desired = super::ccx::ccx_files(&af_export.agent_files);
                 let plans = super::ccx::plan_files(&workspace, &desired, lock.as_ref(), &manifest)?;
-                let (outcomes, files) =
-                    super::ccx::apply_file_plans(&workspace, &plans, ccx_force)?;
-                super::ccx::record_ccx_in_lock(&workspace, &agentic_root, info, files)?;
-                ccx_outcomes = outcomes;
+                let applied = super::ccx::apply_file_plans(
+                    &workspace,
+                    &plans,
+                    ccx_force,
+                    consent.held_files(),
+                );
+                if let Some(e) = applied.error {
+                    // The files written so far are recorded, so the next
+                    // pull applies a newer revision over them.
+                    super::ccx::record_ccx_files_in_lock(&workspace, &agentic_root, applied.files)?;
+                    return Err(e);
+                }
+                super::ccx::record_ccx_in_lock(&workspace, &agentic_root, info, applied.files)?;
+                ccx_outcomes = applied.outcomes;
             }
         }
 

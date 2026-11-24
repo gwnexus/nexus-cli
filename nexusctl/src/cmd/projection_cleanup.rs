@@ -2031,7 +2031,8 @@ mod tests {
         ];
         let desired: Vec<&ExportedAgentFile> = files.iter().collect();
         let plans = ccx::plan_files(dir, &desired, None, &serde_json::json!({})).unwrap();
-        let (_, locked) = ccx::apply_file_plans(dir, &plans, ccx::ForceMode::None).unwrap();
+        let locked =
+            ccx::apply_file_plans(dir, &plans, ccx::ForceMode::None, &Default::default()).files;
         let info = CcxBundleInfo {
             bundle: "engineering".into(),
             version: "1.0.0".into(),

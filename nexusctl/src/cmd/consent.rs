@@ -1038,6 +1038,8 @@ pub struct Gate {
     store: Store,
     answer: Answer,
     held: Vec<String>,
+    /// Target paths of agent files whose new content was refused.
+    held_files: std::collections::BTreeSet<String>,
     accepted: usize,
 }
 
@@ -1062,6 +1064,7 @@ impl Gate {
             store,
             answer,
             held: Vec::new(),
+            held_files: Default::default(),
             accepted: 0,
         }
     }
@@ -1093,12 +1096,24 @@ impl Gate {
         }
         let refused = self.resolve(&items, &declared, &mut prompt);
         let refused: Vec<&Item> = refused.iter().map(|&i| &items[i]).collect();
+        self.held_files.extend(
+            refused
+                .iter()
+                .filter(|item| matches!(item.slot, Slot::AgentFile(_)))
+                .map(|item| item.target_path.clone()),
+        );
         if let Some(af) = af {
             hold_agent_export(workspace, af, &refused, is_claude);
         }
         if let Some(sk) = skills {
             hold_skills(&mut sk.skills, &refused);
         }
+    }
+
+    /// Target paths of agent files whose new content was refused: they keep
+    /// their local version, which must not be taken over as managed.
+    pub fn held_files(&self) -> &std::collections::BTreeSet<String> {
+        &self.held_files
     }
 
     /// Gate one item the CLI writes on its own (no server declaration):

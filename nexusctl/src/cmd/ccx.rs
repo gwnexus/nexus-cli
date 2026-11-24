@@ -122,10 +122,47 @@ pub fn lock_path(workspace: &Path, agentic_root: &str) -> PathBuf {
 /// exists but fails to parse, since a corrupt lock should not block a
 /// pull -- it is treated the same as "no lock yet" and will be rewritten.
 pub fn load_lock(workspace: &Path, agentic_root: &str) -> Option<CcxLock> {
-    super::pull::validate_agent_file_target_path(workspace, &lock_rel(agentic_root)).ok()?;
-    let path = lock_path(workspace, agentic_root);
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    load_lock_for_update(workspace, agentic_root).ok().flatten()
+}
+
+/// [`load_lock`] for a change to the lock: a lock that exists but cannot
+/// be read is an error, so its provenance is never replaced by an empty
+/// lock. A missing lock is `None`; one that does not parse is `None` too
+/// and is rewritten, as documented on [`load_lock`].
+pub fn load_lock_for_update(
+    workspace: &Path,
+    agentic_root: &str,
+) -> anyhow::Result<Option<CcxLock>> {
+    let rel = lock_rel(agentic_root);
+    super::pull::validate_agent_file_target_path(workspace, &rel)?;
+    match std::fs::read(lock_path(workspace, agentic_root)) {
+        Ok(raw) => Ok(serde_json::from_slice(&raw).ok()),
+        Err(e) if is_absent(&e) => Ok(None),
+        Err(e) => {
+            anyhow::bail!("cannot read {rel}: {e}; restore read access, then run nexus pull again")
+        }
+    }
+}
+
+/// Whether a read error means the file is not there (also when a path
+/// component is a file).
+fn is_absent(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// The bytes of a CCX file on disk: `None` when it does not exist, an
+/// error naming the file when it exists but cannot be read.
+fn read_local(workspace: &Path, rel: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(workspace.join(rel)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if is_absent(&e) => Ok(None),
+        Err(e) => {
+            anyhow::bail!("cannot read {rel}: {e}; restore read access, then run nexus pull again")
+        }
+    }
 }
 
 /// Write the CCX lock file atomically (write to a temp file in the same
@@ -167,7 +204,7 @@ pub fn record_settings_in_lock(
     agentic_root: &str,
     settings: Option<&ClaudeSettingsSpec>,
 ) -> anyhow::Result<()> {
-    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+    let mut lock = load_lock_for_update(workspace, agentic_root)?.unwrap_or_else(empty_lock);
 
     if lock.settings.as_ref() == settings {
         return Ok(());
@@ -189,7 +226,7 @@ pub fn record_hooks_in_lock(
     agentic_root: &str,
     hooks: std::collections::BTreeMap<String, CcxLockHookEntry>,
 ) -> anyhow::Result<()> {
-    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+    let mut lock = load_lock_for_update(workspace, agentic_root)?.unwrap_or_else(empty_lock);
 
     if lock.hooks == hooks {
         return Ok(());
@@ -223,7 +260,7 @@ pub fn record_plugins_in_lock(
     agentic_root: &str,
     plugins: std::collections::BTreeMap<String, CcxLockPluginEntry>,
 ) -> anyhow::Result<()> {
-    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+    let mut lock = load_lock_for_update(workspace, agentic_root)?.unwrap_or_else(empty_lock);
 
     if lock.plugins == plugins {
         return Ok(());
@@ -263,13 +300,27 @@ pub fn record_ccx_in_lock(
     info: &CcxBundleInfo,
     files: BTreeMap<String, CcxLockFileEntry>,
 ) -> anyhow::Result<()> {
-    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+    let mut lock = load_lock_for_update(workspace, agentic_root)?.unwrap_or_else(empty_lock);
     lock.bundle = Some(info.bundle.clone());
     lock.version = Some(info.version.clone());
     lock.revision = Some(info.revision.clone());
     lock.compatibility = CcxCompatibility {
         claude_code: info.compatibility.claude_code.clone(),
     };
+    lock.files = files;
+    lock.applied_at = chrono_like_now();
+    save_lock(workspace, agentic_root, &lock)
+}
+
+/// Record only the per-file hashes, keeping the bundle metadata: after a
+/// CCX pull that stopped on an error, so the files it already wrote are
+/// recognised as Nexus's own on the next pull.
+pub fn record_ccx_files_in_lock(
+    workspace: &Path,
+    agentic_root: &str,
+    files: BTreeMap<String, CcxLockFileEntry>,
+) -> anyhow::Result<()> {
+    let mut lock = load_lock_for_update(workspace, agentic_root)?.unwrap_or_else(empty_lock);
     lock.files = files;
     lock.applied_at = chrono_like_now();
     save_lock(workspace, agentic_root, &lock)
@@ -283,7 +334,7 @@ pub fn set_lock_file_entry(
     target_path: &str,
     entry: Option<CcxLockFileEntry>,
 ) -> anyhow::Result<()> {
-    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+    let mut lock = load_lock_for_update(workspace, agentic_root)?.unwrap_or_else(empty_lock);
     match entry {
         Some(e) => lock.files.insert(target_path.to_string(), e),
         None => lock.files.remove(target_path),
@@ -299,7 +350,7 @@ pub fn record_claude_md_block_in_lock(
     agentic_root: &str,
     block_sha256: &str,
 ) -> anyhow::Result<()> {
-    let mut lock = load_lock(workspace, agentic_root).unwrap_or_else(empty_lock);
+    let mut lock = load_lock_for_update(workspace, agentic_root)?.unwrap_or_else(empty_lock);
     if lock.claude_md_block_sha256.as_deref() == Some(block_sha256) {
         return Ok(());
     }
@@ -456,7 +507,7 @@ pub fn plan_files(
 
     for af in desired {
         super::pull::validate_agent_file_target_path(workspace, &af.target_path)?;
-        let local = std::fs::read(workspace.join(&af.target_path)).ok();
+        let local = read_local(workspace, &af.target_path)?;
         let locked = lock
             .and_then(|l| l.files.get(&af.target_path))
             .map(|e| e.sha256.clone())
@@ -497,7 +548,7 @@ pub fn plan_files(
                 file_key: entry.file_key.clone(),
                 state: FileState::Orphaned,
                 desired: None,
-                local: std::fs::read(workspace.join(path)).ok(),
+                local: read_local(workspace, path)?,
                 locked: Some(entry.sha256.clone()),
             });
         }
@@ -535,6 +586,23 @@ pub enum FileAction {
     Deleted,
     /// Orphaned file was already gone; dropped from the lock.
     Dropped,
+    /// The file changed on disk after planning: left alone, checked again
+    /// on the next pull.
+    Changed,
+    /// The new content was refused at the consent prompt: the local file
+    /// stays and is not taken over as managed.
+    Refused,
+}
+
+/// The result of [`apply_file_plans`]. `files` is the new `files` section
+/// of the lock; after an `error` it holds the files written before the
+/// failure and the previous entries of the rest, so a retry recognises
+/// Nexus's own writes.
+#[derive(Debug)]
+pub struct Applied {
+    pub outcomes: Vec<FileOutcome>,
+    pub files: BTreeMap<String, CcxLockFileEntry>,
+    pub error: Option<anyhow::Error>,
 }
 
 #[derive(Debug, Clone)]
@@ -546,20 +614,39 @@ pub struct FileOutcome {
 
 /// Apply the plans from [`plan_files`] and return what happened plus the
 /// new `files` section for the lock. Hashes recorded are always over the
-/// exact bytes written (or found) on disk.
+/// exact bytes written (or found) on disk. `held` are the target paths
+/// whose new content was refused at the consent prompt.
+///
+/// Without `--force`, each file is read again right before it is written
+/// or deleted; one that changed since planning is left alone. An I/O
+/// error stops the run and is returned in [`Applied::error`] together
+/// with the lock entries so far.
 pub fn apply_file_plans(
     workspace: &Path,
     plans: &[FilePlan],
     force: ForceMode,
-) -> anyhow::Result<(Vec<FileOutcome>, BTreeMap<String, CcxLockFileEntry>)> {
+    held: &std::collections::BTreeSet<String>,
+) -> Applied {
     let mut outcomes = Vec::new();
     let mut files = BTreeMap::new();
     let entry = |plan: &FilePlan, sha256: String| CcxLockFileEntry {
         file_key: plan.file_key.clone(),
         sha256,
     };
+    // Keep the previous lock hash, so a local edit stays detectable as
+    // drifted/conflict on the next pull.
+    let keep_locked = |files: &mut BTreeMap<String, CcxLockFileEntry>, plan: &FilePlan| {
+        if let Some(locked) = &plan.locked {
+            files.insert(plan.target_path.clone(), entry(plan, locked.clone()));
+        }
+    };
+    // Unchanged since planning: the same bytes, or still absent.
+    let unchanged = |plan: &FilePlan, path: &Path| match std::fs::read(path) {
+        Ok(now) => plan.local.as_deref() == Some(now.as_slice()),
+        Err(e) => is_absent(&e) && plan.local.is_none(),
+    };
 
-    for plan in plans {
+    for (index, plan) in plans.iter().enumerate() {
         let path = workspace.join(&plan.target_path);
         // Checked again right before the change: the tree may have moved
         // since planning (a directory replaced by a symlink). A refused
@@ -579,9 +666,7 @@ pub fn apply_file_plans(
         };
         if let Err(e) = checked {
             println!("   {} {e}", console::style("!").bold().yellow());
-            if let Some(locked) = &plan.locked {
-                files.insert(plan.target_path.clone(), entry(plan, locked.clone()));
-            }
+            keep_locked(&mut files, plan);
             outcomes.push(FileOutcome {
                 target_path: plan.target_path.clone(),
                 state: plan.state,
@@ -589,20 +674,33 @@ pub fn apply_file_plans(
             });
             continue;
         }
-        let action = if plan.state == FileState::Orphaned {
-            let pristine = match (&plan.local, &plan.locked) {
-                (Some(local), Some(locked)) => sha256_hex_bytes(local) == *locked,
-                _ => false,
-            };
-            if plan.local.is_none() {
-                FileAction::Dropped
-            } else if pristine || force != ForceMode::None {
-                std::fs::remove_file(&path)?;
-                FileAction::Deleted
-            } else {
-                FileAction::Kept
+        // A protected file that exists (e.g. `.env`) is never written,
+        // taken over or deleted, and is no longer recorded.
+        let protected =
+            super::pull::is_protected_target(workspace, &plan.target_path) && path.exists();
+        let step: std::io::Result<FileAction> = (|| {
+            if plan.state == FileState::Orphaned {
+                let pristine = match (&plan.local, &plan.locked) {
+                    (Some(local), Some(locked)) => sha256_hex_bytes(local) == *locked,
+                    _ => false,
+                };
+                return Ok(if plan.local.is_none() {
+                    FileAction::Dropped
+                } else if protected {
+                    FileAction::Kept
+                } else if force == ForceMode::None && !unchanged(plan, &path) {
+                    FileAction::Changed
+                } else if pristine || force != ForceMode::None {
+                    std::fs::remove_file(&path)?;
+                    FileAction::Deleted
+                } else {
+                    FileAction::Kept
+                });
             }
-        } else {
+            if held.contains(&plan.target_path) {
+                keep_locked(&mut files, plan);
+                return Ok(FileAction::Refused);
+            }
             let desired = plan
                 .desired
                 .as_deref()
@@ -613,35 +711,53 @@ pub fn apply_file_plans(
                 FileState::Unmanaged => force == ForceMode::ForceUnmanaged,
                 FileState::Clean | FileState::Adopt | FileState::Orphaned => false,
             };
-            let protected =
-                super::pull::is_protected_target(workspace, &plan.target_path) && path.exists();
             if overwrite && !protected {
+                if force == ForceMode::None && !unchanged(plan, &path) {
+                    keep_locked(&mut files, plan);
+                    return Ok(FileAction::Changed);
+                }
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&path, desired)?;
                 files.insert(plan.target_path.clone(), entry(plan, sha256_hex(desired)));
-                FileAction::Written
-            } else if matches!(plan.state, FileState::Clean | FileState::Adopt) {
+                Ok(FileAction::Written)
+            } else if plan.state == FileState::Clean
+                || (plan.state == FileState::Adopt && !protected)
+            {
                 files.insert(plan.target_path.clone(), entry(plan, sha256_hex(desired)));
-                FileAction::Recorded
+                Ok(FileAction::Recorded)
             } else {
-                // Keep the previous lock hash, so a local edit stays
-                // detectable as drifted/conflict on the next pull.
-                if let Some(locked) = &plan.locked {
-                    files.insert(plan.target_path.clone(), entry(plan, locked.clone()));
-                }
-                FileAction::Kept
+                keep_locked(&mut files, plan);
+                Ok(FileAction::Kept)
             }
-        };
-        outcomes.push(FileOutcome {
-            target_path: plan.target_path.clone(),
-            state: plan.state,
-            action,
-        });
+        })();
+        match step {
+            Ok(action) => outcomes.push(FileOutcome {
+                target_path: plan.target_path.clone(),
+                state: plan.state,
+                action,
+            }),
+            Err(e) => {
+                // Stop here: this file and the rest keep their previous
+                // entries, the files written so far are recorded.
+                for rest in &plans[index..] {
+                    keep_locked(&mut files, rest);
+                }
+                return Applied {
+                    outcomes,
+                    files,
+                    error: Some(anyhow::anyhow!("{}: {e}", plan.target_path)),
+                };
+            }
+        }
     }
 
-    Ok((outcomes, files))
+    Applied {
+        outcomes,
+        files,
+        error: None,
+    }
 }
 
 /// Status label and optional note for one line of the CCX pull output.
@@ -651,6 +767,12 @@ pub fn outcome_label(outcome: &FileOutcome) -> (&'static str, &'static str) {
     match (outcome.state, outcome.action) {
         (S::Create, A::Written) => ("CREATE", ""),
         (S::Updated, A::Written) => ("UPDATE", ""),
+        (_, A::Changed) => (
+            "KEPT",
+            "changed during the pull, checked again on the next pull",
+        ),
+        (_, A::Refused) => ("REFUSED", "not approved, local version kept"),
+        (S::Adopt, A::Kept) => ("SKIPPED", "protected file, not taken over"),
         (S::Create | S::Updated, _) => ("SKIPPED", "protected file, never overwritten"),
         (S::Clean, _) => ("CLEAN", ""),
         (S::Adopt, _) => ("ADOPT", "already matches, now managed"),
@@ -1134,9 +1256,10 @@ mod tests {
         let lock = load_lock(dir, ".nexus");
         let desired: Vec<&ExportedAgentFile> = files.iter().collect();
         let plans = plan_files(dir, &desired, lock.as_ref(), manifest).unwrap();
-        let (outcomes, lock_files) = apply_file_plans(dir, &plans, force).unwrap();
-        record_ccx_in_lock(dir, ".nexus", &bundle("rev-1"), lock_files).unwrap();
-        outcomes
+        let applied = apply_file_plans(dir, &plans, force, &Default::default());
+        assert!(applied.error.is_none(), "{:?}", applied.error);
+        record_ccx_in_lock(dir, ".nexus", &bundle("rev-1"), applied.files).unwrap();
+        applied.outcomes
     }
 
     fn states(outcomes: &[FileOutcome]) -> Vec<(String, FileState, FileAction)> {
@@ -1409,28 +1532,185 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_error_leaves_previous_lock_untouched() {
+    fn test_apply_error_records_completed_writes() {
         let dir = tmp_dir("apply-error-lock");
         pull(&dir, &[ccx_file(RULE, "v1\n")], ForceMode::None);
-        let before = std::fs::read_to_string(lock_path(&dir, ".nexus")).unwrap();
 
-        // A directory where a new file must go makes the write fail.
-        let blocked = ".claude/rules/blocked.md";
-        std::fs::create_dir_all(dir.join(blocked).join("sub")).unwrap();
+        // A file where a directory must go makes the second write fail
+        // during apply (planning sees the target as absent).
+        let blocked = ".claude/rules/blocked/x.md";
+        fs_write(&dir, ".claude/rules/blocked", "a file\n");
         let files = [ccx_file(RULE, "v2\n"), ccx_file(blocked, "x")];
         let lock = load_lock(&dir, ".nexus");
         let desired: Vec<&ExportedAgentFile> = files.iter().collect();
         let plans = plan_files(&dir, &desired, lock.as_ref(), &serde_json::json!({})).unwrap();
-        assert!(apply_file_plans(&dir, &plans, ForceMode::None).is_err());
-
-        // The pull bails out before record_ccx_in_lock: lock unchanged.
+        assert_eq!(plans[1].state, FileState::Create);
+        let applied = apply_file_plans(&dir, &plans, ForceMode::None, &Default::default());
+        assert!(applied.error.unwrap().to_string().contains(blocked));
+        assert_eq!(applied.files[RULE].sha256, sha256_hex("v2\n"));
+        assert!(!applied.files.contains_key(blocked));
+        record_ccx_files_in_lock(&dir, ".nexus", applied.files).unwrap();
+        // The bundle metadata of the last complete pull stays.
         assert_eq!(
-            std::fs::read_to_string(lock_path(&dir, ".nexus")).unwrap(),
-            before
+            load_lock(&dir, ".nexus").unwrap().revision.as_deref(),
+            Some("rev-1")
         );
-        // The file that was written is recognised as clean next time.
-        let out = pull(&dir, &[ccx_file(RULE, "v2\n")], ForceMode::None);
-        assert_eq!(out[0].state, FileState::Clean);
+
+        // A retry with a newer revision updates Nexus's own write without
+        // --force, while an operator edit would still be kept.
+        let out = pull(&dir, &[ccx_file(RULE, "v3\n")], ForceMode::None);
+        assert_eq!(
+            (out[0].state, out[0].action),
+            (FileState::Updated, FileAction::Written)
+        );
+        assert_eq!(std::fs::read_to_string(dir.join(RULE)).unwrap(), "v3\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unreadable_lock_and_files_are_not_treated_as_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads everything
+        }
+        let dir = tmp_dir("unreadable");
+        pull(&dir, &[ccx_file(RULE, "v1\n")], ForceMode::None);
+        let lock = lock_path(&dir, ".nexus");
+        let before = std::fs::read(&lock).unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o200)).unwrap();
+        let err = record_settings_in_lock(&dir, ".nexus", None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot read .nexus/claude/manifest.lock.json"));
+        assert!(load_lock_for_update(&dir, ".nexus").is_err());
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&lock).unwrap(), before);
+
+        // An unreadable rule is not planned as a new file.
+        let rule = dir.join(RULE);
+        std::fs::set_permissions(&rule, std::fs::Permissions::from_mode(0o200)).unwrap();
+        let files = [ccx_file(RULE, "v2\n")];
+        let desired: Vec<&ExportedAgentFile> = files.iter().collect();
+        let lock = load_lock(&dir, ".nexus");
+        let err = plan_files(&dir, &desired, lock.as_ref(), &serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains(RULE));
+        // Nor is an unreadable orphan dropped as if it were gone.
+        let err = plan_files(&dir, &[], lock.as_ref(), &serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains(RULE));
+        std::fs::set_permissions(&rule, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_apply_keeps_files_changed_after_planning() {
+        let dir = tmp_dir("changed-after-plan");
+        let orphan = ".claude/rules/old.md";
+        pull(
+            &dir,
+            &[ccx_file(RULE, "v1\n"), ccx_file(orphan, "o\n")],
+            ForceMode::None,
+        );
+        let fresh = ".claude/rules/new.md";
+        let files = [ccx_file(RULE, "v2\n"), ccx_file(fresh, "n\n")];
+        let lock = load_lock(&dir, ".nexus");
+        let desired: Vec<&ExportedAgentFile> = files.iter().collect();
+        let plans = plan_files(&dir, &desired, lock.as_ref(), &serde_json::json!({})).unwrap();
+        // Saved by the operator between planning and apply.
+        fs_write(&dir, RULE, "my edit\n");
+        fs_write(&dir, fresh, "mine\n");
+        fs_write(&dir, orphan, "kept edit\n");
+        let applied = apply_file_plans(&dir, &plans, ForceMode::None, &Default::default());
+        assert!(applied.error.is_none());
+        assert!(applied
+            .outcomes
+            .iter()
+            .all(|o| o.action == FileAction::Changed));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(RULE)).unwrap(),
+            "my edit\n"
+        );
+        assert_eq!(std::fs::read_to_string(dir.join(fresh)).unwrap(), "mine\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(orphan)).unwrap(),
+            "kept edit\n"
+        );
+        // The previous lock hash stays, so the edit reads as drifted later.
+        assert_eq!(applied.files[RULE].sha256, sha256_hex("v1\n"));
+        assert!(!applied.files.contains_key(fresh));
+        // An unchanged pristine orphan is still removed.
+        let plans = plan_files(&dir, &desired, lock.as_ref(), &serde_json::json!({})).unwrap();
+        fs_write(&dir, orphan, "o\n");
+        let plans: Vec<FilePlan> = plans
+            .into_iter()
+            .map(|mut p| {
+                if p.target_path == orphan {
+                    p.local = Some(b"o\n".to_vec());
+                }
+                p
+            })
+            .collect();
+        let applied = apply_file_plans(&dir, &plans, ForceMode::None, &Default::default());
+        let gone = applied
+            .outcomes
+            .iter()
+            .find(|o| o.target_path == orphan)
+            .unwrap();
+        assert_eq!(gone.action, FileAction::Deleted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_refused_content_is_not_taken_over() {
+        let dir = tmp_dir("refused");
+        let script = ".claude/hooks/check.sh";
+        pull(&dir, &[ccx_file(script, "v1\n")], ForceMode::None);
+        fs_write(&dir, script, "my edit\n");
+        // The consent gate refused v2 and put the local body into the
+        // export: desired equals local.
+        let files = [ccx_file(script, "my edit\n")];
+        let lock = load_lock(&dir, ".nexus");
+        let desired: Vec<&ExportedAgentFile> = files.iter().collect();
+        let plans = plan_files(&dir, &desired, lock.as_ref(), &serde_json::json!({})).unwrap();
+        let held = std::collections::BTreeSet::from([script.to_string()]);
+        let applied = apply_file_plans(&dir, &plans, ForceMode::None, &held);
+        assert_eq!(applied.outcomes[0].action, FileAction::Refused);
+        // The lock keeps the last Nexus version, not the local edit.
+        assert_eq!(applied.files[script].sha256, sha256_hex("v1\n"));
+        record_ccx_in_lock(&dir, ".nexus", &bundle("rev-2"), applied.files).unwrap();
+        // When the export drops the script, the edit is kept.
+        let out = pull(&dir, &[], ForceMode::None);
+        assert_eq!(out[0].action, FileAction::Kept);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(script)).unwrap(),
+            "my edit\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_protected_files_are_not_adopted_or_deleted() {
+        let dir = tmp_dir("protected-adopt");
+        fs_write(&dir, ".env", "SECRET=1\n");
+        let out = pull(&dir, &[ccx_file(".env", "SECRET=1\n")], ForceMode::None);
+        assert_eq!(out[0].action, FileAction::Kept);
+        assert!(!load_lock(&dir, ".nexus")
+            .unwrap()
+            .files
+            .contains_key(".env"));
+        // A protected path already in a lock is never deleted as an orphan.
+        let mut files = BTreeMap::new();
+        files.insert(
+            ".env".to_string(),
+            CcxLockFileEntry {
+                file_key: "k".into(),
+                sha256: sha256_hex("SECRET=1\n"),
+            },
+        );
+        record_ccx_in_lock(&dir, ".nexus", &bundle("rev-2"), files).unwrap();
+        let out = pull(&dir, &[], ForceMode::Force);
+        assert_eq!(out[0].action, FileAction::Kept);
+        assert!(dir.join(".env").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1445,7 +1725,8 @@ mod tests {
         // After planning, `.claude` becomes a link out of the workspace.
         std::fs::remove_dir_all(dir.join(".claude")).ok();
         std::os::unix::fs::symlink(outside.path(), dir.join(".claude")).unwrap();
-        let (out, lock_files) = apply_file_plans(&dir, &plans, ForceMode::None).unwrap();
+        let applied = apply_file_plans(&dir, &plans, ForceMode::None, &Default::default());
+        let (out, lock_files) = (applied.outcomes, applied.files);
         assert_eq!(out[0].action, FileAction::Kept);
         assert!(lock_files.is_empty());
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
@@ -1465,7 +1746,7 @@ mod tests {
         let target = dir.join(RULE);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(dir.join("user-data/mine.md"), &target).unwrap();
-        let (out, _) = apply_file_plans(&dir, &plans, ForceMode::None).unwrap();
+        let out = apply_file_plans(&dir, &plans, ForceMode::None, &Default::default()).outcomes;
         assert_eq!(out[0].action, FileAction::Kept);
         assert_eq!(
             std::fs::read_to_string(dir.join("user-data/mine.md")).unwrap(),
@@ -1473,7 +1754,7 @@ mod tests {
         );
         // An ordinary absent target is still written.
         std::fs::remove_file(&target).unwrap();
-        let (out, _) = apply_file_plans(&dir, &plans, ForceMode::None).unwrap();
+        let out = apply_file_plans(&dir, &plans, ForceMode::None, &Default::default()).outcomes;
         assert_eq!(out[0].action, FileAction::Written);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -486,12 +486,18 @@ pub async fn load(
     let mut settings_after = settings_before.clone();
     if is_claude {
         if export.ccx.is_some() {
+            // A CCX file that cannot be read does not stop the status of
+            // everything else; it is named instead.
             let plans = ccx::plan_files(
                 workspace,
                 &ccx::ccx_files(&export.agent_files),
                 lock.as_ref(),
                 &manifest,
-            )?;
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("   ! CCX files not compared: {e}");
+                Vec::new()
+            });
             for plan in plans {
                 let state = match plan.state {
                     FileState::Clean => continue,

@@ -10,7 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Shadowed projects keep tracked devbox files as committed.** A git exclude does not cover tracked files, so `nexus pull` no longer writes the Nexus version of `devbox.json` or a devbox script over a file git tracks with different committed content when the project is shadowed (level `ai` or `nexus`, or the devbox files shadowed). The file is kept with a `kept:` line and listed at the end, also with `-y`; `--force` still writes it. A working copy that already carries an earlier Nexus version is kept too, with a hint to `git diff` and `git restore`. `nexus pull --dry-run` shows such files as `KEEP tracked, shadowed project`. A devbox file that is a symlink is checked against the tracked file it points to.
 
+- **Claude Code Experience files keep operator data.** An existing CCX lock that cannot be read stops the pull with its path instead of being replaced by an empty lock, and an unreadable CCX file is no longer planned as new or dropped as an orphan. Each file is read again right before it is written or deleted, so a file saved during the pull is kept. Content refused at the consent prompt and existing protected files such as `.env` are no longer taken over as managed, and protected files are never deleted as orphans. A pull that stops on a write error records the files it already wrote, so a retry with a newer revision updates them without `--force`. `nexus status` names an unreadable CCX file instead of failing.
+
 ### Tests
+- Unit tests for the CCX lock and file reconciliation: unreadable lock and files, files changed between planning and writing, refused content, protected files, and the retry after a partial failure.
 - Functional tests for a shadowed project with a tracked devbox script (kept with `-y`, previewed by the dry run, written only with `--force`, uncommitted Nexus content kept with the restore hint) and for the unchanged update of delivered tracked files without shadow.
 
 ## [0.52.0] - 2026-11-24
