@@ -441,6 +441,15 @@ or `[devbox shell: inactive, start with devbox shell]` when the workspace
 has a `devbox.json` but no shell is active (JSON: `devbox_shell`). `--output json` is supported; the exit
 code is 1 when changes are pending.
 
+The file list compares against what `nexus pull` would write, with the
+same choices: the runtime from the agent-file export, then the project
+detail, then the cached owner; the same agentic root; for Claude Code the
+native skill files under `.claude/skills/` as well; and the legacy
+workspace export when the fork export fails (no fork: only local changes
+against the last pull). When the backend version of a workspace file
+cannot be fetched, `nexus diff` prints "backend version unavailable" for a
+locally changed file instead of a diff against an empty file.
+
 ```bash
 nexus status
 ```
@@ -1040,7 +1049,9 @@ nexus code-report             # send it now
 Directives are short binding rules: a platform
 catalog plus project rules. `nexus pull` renders them into
 `.nexus/directives.md` as a compact list, grouped by category in the order
-the server sends them:
+the server sends them (`nexus init` uses the same writer and records the
+file the same way, so `nexus status` tracks it; a target linked out of the
+workspace or into `.git` is not written):
 
 ```markdown
 ## Security
@@ -1048,7 +1059,9 @@ the server sends them:
 **Screenshots stay in the local vault.** `nexus link` and `nexus init`
 create `.vault/` with `.vault/screenshots/`, the default output for browser
 screenshots, which can show customer data. When git does not ignore
-`.vault/` yet, they add `.vault/` to the repository's `.gitignore`; in a
+`.vault/` yet, they append `.vault/` to the repository's `.gitignore` (the
+existing bytes stay as they are, in any encoding; a `.gitignore` that
+cannot be read is left unchanged and the vault is reported as not ignored); in a
 shadowed project (or when the shadow level is unknown, e.g. offline) to
 `.git/info/exclude` instead, so nothing visible changes. Existing vault
 content is never moved or deleted. When git already tracks files under
@@ -1100,7 +1113,9 @@ Zellij layouts, OpenCode plugins, agent files in runnable locations, skill
 scripts and skills with inline shell (`!` followed by a command in
 backticks), `devbox.json` and devbox scripts. `nexus pull` and `nexus init`
 fingerprint each item as it would be written (MCP servers including their
-env values) and ask before a new or changed item lands on disk:
+env values) and ask before a new or changed item lands on disk. An
+OpenCode plugin download that fails or arrives empty (in `nexus pull` and
+`nexus init`) leaves the installed plugin as it is:
 
 ```
    ? 2 executable item(s) from the server need your consent:
@@ -1571,7 +1586,7 @@ cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 
 - Run `nexus pull` periodically (or after skill/agent file changes in the dashboard) to keep your workspace in sync. While a Claude Code session runs, `nexus reload` in a second pane does the same and tells the session what changed; leaving the session or the terminal workspace is only needed for `.mcp.json`, devbox and layout changes, and `claude --continue` keeps the conversation across such a restart.
 - Start the agent environment with `nexus run`, then use `/nexus-init` inside OpenCode or Claude Code to bootstrap the agent.
-- Each project uses exactly one runtime (`agent_owner`: OpenCode or Claude Code); `nexus pull` only writes that runtime's files. Run `nexus link` to see which runtime is configured.
+- Each project uses exactly one runtime (`agent_owner`: OpenCode or Claude Code); `nexus pull` only writes that runtime's files. Run `nexus link` to see which runtime is configured. When the backend cannot report the owner (project detail unreachable, or no owner while Claude Code is cached), pull keeps the owner cached in `.nexus/config.toml` and removes nothing of the other runtime.
 - Switching `agent_owner` is safe at any time: the next `nexus pull` writes the new runtime's projection and then removes what Nexus had put on disk for the old one (OpenCode: `.opencode/` commands, plugins, install artifacts, the Nexus parts of `opencode.json`; Claude Code: CCX files and hooks, rendered skills and agents, the Nexus keys in `.claude/settings.json`, the Nexus servers in `.mcp.json`, the `CLAUDE.md` managed block). Locally modified Nexus files are kept and listed; `nexus pull --force` removes them too (for OpenCode the whole `.opencode/`). Files Nexus never wrote under `.claude/` and `.claude/settings.local.json` are never touched. Switching back recreates everything.
 - Committed workspace files are protected: when `devbox.json` or a script equals `HEAD`, differs from what Nexus last delivered and the workspace fork has a different version, `nexus pull` keeps it and suggests `nexus diff`, then `nexus push` (publish the committed version) or `nexus pull --force` (take the fork version, with a warning to review `git diff`).
 - If the repo ships `.githooks/pre-commit`, `nexus pull` offers to set `git config core.hooksPath .githooks` when it is unset (a value set on purpose is never overridden, only hinted) and warns when the hook needs `gitleaks` but it is not installed. Hooks run code on every commit, so they are activated only after a confirmation on a terminal (default no) or with `--trust`; a non-interactive pull leaves them inactive and prints how to enable them.
