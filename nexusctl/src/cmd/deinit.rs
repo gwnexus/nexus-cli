@@ -97,13 +97,19 @@ fn scaffold_entries(
         }
     }
     // Marker files outside the projection plans: removed only when their
-    // content is what Nexus recorded, otherwise reported as kept.
+    // content is what Nexus recorded (or it is the task snapshot of the
+    // default root), otherwise reported as kept.
+    let snapshot_rel = format!("{agentic_root}/TASKS.md");
     let mut marker_file = |path: PathBuf| {
         let rel = rel_of(&path);
         if planned.contains(&rel) {
             return;
         }
-        if is_pristine(&rel) {
+        let snapshot = agentic_root == ".claude"
+            && rel == snapshot_rel
+            && !kept.iter().any(|k| k == &rel)
+            && is_task_snapshot(&path);
+        if snapshot || is_pristine(&rel) {
             out.push((path, RemovalKind::ManagedFile));
         } else {
             unrecorded.push(rel);
@@ -923,6 +929,31 @@ mod tests {
             scaffold_entries(&dir, ".nexus", &[], &[], |_| Some(Origin::Owned));
         assert!(entries.is_empty());
         assert_eq!(unrecorded, vec![".nexus/TASKS.md"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// With the default `.claude` root, its task snapshot goes; a task list
+    /// that only quotes the marker, or a snapshot deeper down, stays.
+    #[test]
+    fn test_claude_root_task_snapshot_is_removed() {
+        let dir = temp_dir("scaffold-claude-tasks");
+        fs::create_dir_all(dir.join(".claude/notes")).unwrap();
+        let snapshot = format!("{}- [ ] one\n", super::super::pull::TASKS_SNAPSHOT_HEAD);
+        fs::write(dir.join(".claude/TASKS.md"), &snapshot).unwrap();
+        fs::write(dir.join(".claude/notes/TASKS.md"), &snapshot).unwrap();
+        let (entries, unrecorded) =
+            scaffold_entries(&dir, ".claude", &[], &[], |_| Some(Origin::Owned));
+        let entries: Vec<PathBuf> = entries.into_iter().map(|(p, _)| p).collect();
+        assert_eq!(entries, vec![dir.join(".claude/TASKS.md")]);
+        assert_eq!(unrecorded, vec![".claude/notes/TASKS.md"]);
+
+        fs::write(
+            dir.join(".claude/TASKS.md"),
+            "# My tasks\n\nsee `source: nexus-platform`\n",
+        )
+        .unwrap();
+        let (entries, _) = scaffold_entries(&dir, ".claude", &[], &[], |_| Some(Origin::Owned));
+        assert!(entries.is_empty(), "{entries:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 
