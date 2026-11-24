@@ -19,7 +19,14 @@ pub(crate) const SCRIPTS_DIR: &str = "scripts/devbox";
 
 /// Collect local workspace file hashes for comparison.
 pub fn collect_workspace_hashes(workspace: &Path) -> HashMap<String, String> {
+    collect_workspace_files(workspace).0
+}
+
+/// Local workspace file hashes, plus the workspace files that exist but
+/// cannot be read (as text).
+pub fn collect_workspace_files(workspace: &Path) -> (HashMap<String, String>, Vec<String>) {
     let mut hashes = HashMap::new();
+    let mut unreadable = Vec::new();
 
     // devbox.json
     let devbox_path = workspace.join("devbox.json");
@@ -28,19 +35,24 @@ pub fn collect_workspace_hashes(workspace: &Path) -> HashMap<String, String> {
             Ok(content) => {
                 hashes.insert("devbox.json".to_string(), sha256_hex(&content));
             }
-            Err(e) => warn!("Failed to read devbox.json: {}", e),
+            Err(e) => {
+                warn!("Failed to read devbox.json: {}", e);
+                unreadable.push("devbox.json".to_string());
+            }
         }
     }
 
     // scripts/devbox/**, without the machine-local scripts
     let scripts_dir = workspace.join(SCRIPTS_DIR);
     if scripts_root_ok(workspace) {
-        collect_script_hashes(workspace, &scripts_dir, &mut hashes);
+        collect_script_hashes(workspace, &scripts_dir, &mut hashes, &mut unreadable);
     }
     let manifest = super::sync::load_manifest_pub(workspace);
     hashes.retain(|path, _| !super::sync::is_local_script(&manifest, path));
+    unreadable.retain(|path| !super::sync::is_local_script(&manifest, path));
+    unreadable.sort();
 
-    hashes
+    (hashes, unreadable)
 }
 
 /// Whether the scripts directory is a real directory inside the
@@ -54,7 +66,12 @@ fn scripts_root_ok(workspace: &Path) -> bool {
 
 /// Recursively collect script file hashes using workspace-relative paths.
 /// Symlinks are skipped (never followed), the same set as the upload.
-fn collect_script_hashes(workspace: &Path, dir: &Path, hashes: &mut HashMap<String, String>) {
+fn collect_script_hashes(
+    workspace: &Path,
+    dir: &Path,
+    hashes: &mut HashMap<String, String>,
+    unreadable: &mut Vec<String>,
+) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -66,15 +83,18 @@ fn collect_script_hashes(workspace: &Path, dir: &Path, hashes: &mut HashMap<Stri
                 continue;
             };
             if kind.is_dir() {
-                collect_script_hashes(workspace, &path, hashes);
+                collect_script_hashes(workspace, &path, hashes, unreadable);
             } else if kind.is_file() {
+                let rel = path.strip_prefix(workspace).unwrap_or(&path);
+                let key = rel.display().to_string();
                 match fs::read_to_string(&path) {
                     Ok(content) => {
-                        let rel = path.strip_prefix(workspace).unwrap_or(&path);
-                        let key = rel.display().to_string();
                         hashes.insert(key, sha256_hex(&content));
                     }
-                    Err(e) => warn!("Failed to read {}: {}", path.display(), e),
+                    Err(e) => {
+                        warn!("Failed to read {}: {}", path.display(), e);
+                        unreadable.push(key);
+                    }
                 }
             }
         }
@@ -311,6 +331,20 @@ fn workspace_change(
     }
 }
 
+/// The fork's body when the local file is unchanged since the last pull
+/// and the fork has a newer version: the push must carry that version, not
+/// the stale local copy.
+fn newer_fork_body<'a>(
+    local: &str,
+    recorded: Option<&str>,
+    desired: Option<&'a String>,
+) -> Option<&'a String> {
+    let body = desired?;
+    (nexus_core::hash::hash_matches_text(recorded?, local)
+        && !nexus_core::hash::text_equivalent(local, body))
+    .then_some(body)
+}
+
 /// Hash recorded in the sync manifest for a workspace path.
 fn recorded_hash<'a>(key: &str, manifest: &'a serde_json::Value) -> Option<&'a str> {
     manifest
@@ -511,17 +545,48 @@ pub async fn run(
     }
 
     // Collect local hashes
-    let all_hashes = collect_workspace_hashes(&workspace);
-    if all_hashes.is_empty() {
+    let (all_hashes, unreadable) = collect_workspace_files(&workspace);
+    if all_hashes.is_empty() && unreadable.is_empty() {
         println!("   {} No workspace files found.", style("!").yellow());
         return Ok(());
     }
 
     // The current fork, the same baseline `nexus status` compares with;
-    // `None` when there is none or it cannot be read, then local files are
-    // compared with the sync manifest and nothing is treated as dropped.
-    let export = client.export_workspace_mcp(&project_id).await.ok();
+    // `None` when there is none, then local files are compared with the
+    // sync manifest and nothing is treated as dropped. A fork that cannot
+    // be read stops the push: the new fork would be built without it.
+    let export = match client.export_workspace_mcp(&project_id).await {
+        Ok(export) => Some(export),
+        Err(e) if super::pull::is_no_workspace_fork(&e) => None,
+        Err(e) => anyhow::bail!(
+            "push stopped: the current workspace fork could not be read ({e}); nothing was pushed"
+        ),
+    };
     let exported = export.as_ref().map(exported_paths);
+    // A file that should go into the new fork but cannot be read would be
+    // dropped from it silently.
+    let blocked: Vec<&String> = unreadable
+        .iter()
+        .filter(|k| !outside_selection(k, only))
+        .filter(|k| {
+            unreadable_blocks_push(
+                k,
+                is_manifest_tracked(k, &manifest),
+                exported.as_deref(),
+                include_named,
+            )
+        })
+        .collect();
+    if !blocked.is_empty() {
+        anyhow::bail!(
+            "push stopped: {} cannot be read; fix the file(s) and push again (nothing was pushed)",
+            blocked
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if only.is_some() && export.is_none() {
         anyhow::bail!(
             "push stopped: the current workspace fork could not be read, so the files outside the selection cannot keep their fork version; nothing was pushed"
@@ -540,6 +605,9 @@ pub async fn run(
     // Files to push (manifest-tracked or named explicitly) and their changes.
     let mut tracked = HashSet::new();
     let mut changes = Vec::new();
+    // Files unchanged locally whose fork version is newer: the new fork
+    // takes the fork version, not the stale local copy.
+    let mut newer_in_fork: Vec<(String, String)> = Vec::new();
     let mut sorted: Vec<_> = all_hashes.into_keys().collect();
     sorted.sort();
     for key in sorted {
@@ -547,7 +615,9 @@ pub async fn run(
         if outside(&key) {
             continue;
         }
-        let local = fs::read_to_string(workspace.join(&key)).unwrap_or_default();
+        let local = fs::read_to_string(workspace.join(&key)).map_err(|e| {
+            anyhow::anyhow!("push stopped: {key} cannot be read ({e}); nothing was pushed")
+        })?;
         if is_generated_script(&key) {
             // The backend generates these and strips them from a push.
             if desired
@@ -597,13 +667,16 @@ pub async fn run(
             );
             continue;
         }
+        let recorded = recorded_hash(&key, &manifest);
         if let Some(change) = workspace_change(
             &local,
-            recorded_hash(&key, &manifest),
+            recorded,
             desired.get(&key).map(String::as_str),
             exported.is_some(),
         ) {
             changes.push((change, key.clone()));
+        } else if let Some(body) = newer_fork_body(&local, recorded, desired.get(&key)) {
+            newer_in_fork.push((key.clone(), body.clone()));
         }
         tracked.insert(key);
     }
@@ -618,7 +691,8 @@ pub async fn run(
         .collect();
     deleted.sort();
     // Fork files outside the selection go into the new fork unchanged.
-    let kept = kept_fork_files(&desired, only);
+    let mut kept = kept_fork_files(&desired, only);
+    kept.extend(newer_in_fork);
     tracked.extend(kept.keys().cloned());
     changes.extend(deleted.iter().map(|k| (Change::Deleted, k.clone())));
 
@@ -740,6 +814,28 @@ fn exported_paths(export: &nexus_core::api::WorkspaceForkExportResponse) -> Vec<
     std::iter::once("devbox.json".to_string())
         .chain(export.scripts.iter().map(|s| s.path.clone()))
         .collect()
+}
+
+/// Whether an unreadable `key` stops the push: it is named, or it would go
+/// into the new fork (tracked or in the current fork). Generated scripts are
+/// never pushed (also when named), and a tracked file the fork dropped is
+/// skipped unless named.
+fn unreadable_blocks_push(
+    key: &str,
+    tracked: bool,
+    exported: Option<&[String]>,
+    include_named: &[String],
+) -> bool {
+    if is_generated_script(key) {
+        return false;
+    }
+    if include_named.iter().any(|p| p == key) {
+        return true;
+    }
+    if is_dropped(key, exported, include_named) {
+        return false;
+    }
+    tracked || exported.is_some_and(|ex| ex.iter().any(|p| p == key))
 }
 
 /// A tracked file the fork no longer contains and that was not named
@@ -987,6 +1083,43 @@ mod tests {
     }
 
     #[test]
+    fn test_unreadable_blocks_push() {
+        let exported = vec!["devbox.json".to_string(), format!("{SCRIPTS_DIR}/a.sh")];
+        let a = format!("{SCRIPTS_DIR}/a.sh");
+        let old = format!("{SCRIPTS_DIR}/old.sh");
+        let generated = format!("{SCRIPTS_DIR}/dbx_init.sh");
+        assert!(is_generated_script(&generated));
+        // In the fork or named: stops the push.
+        assert!(unreadable_blocks_push(&a, false, Some(&exported), &[]));
+        assert!(unreadable_blocks_push(
+            &old,
+            false,
+            Some(&exported),
+            std::slice::from_ref(&old)
+        ));
+        // Dropped from the fork and not named: skipped.
+        assert!(!unreadable_blocks_push(&old, true, Some(&exported), &[]));
+        // Generated scripts are never pushed.
+        let mut with_gen = exported.clone();
+        with_gen.push(generated.clone());
+        assert!(!unreadable_blocks_push(
+            &generated,
+            true,
+            Some(&with_gen),
+            &[]
+        ));
+        assert!(!unreadable_blocks_push(
+            &generated,
+            true,
+            Some(&with_gen),
+            std::slice::from_ref(&generated)
+        ));
+        // No fork: a tracked file stops the push.
+        assert!(unreadable_blocks_push(&old, true, None, &[]));
+        assert!(!unreadable_blocks_push(&old, false, None, &[]));
+    }
+
+    #[test]
     fn test_is_dropped() {
         let exported = vec![
             "devbox.json".to_string(),
@@ -1188,5 +1321,47 @@ mod tests {
         assert!(tracked.contains_key("devbox.json"));
         assert!(tracked.contains_key("scripts/devbox/tracked.sh"));
         assert!(!tracked.contains_key("scripts/devbox/untracked.sh"));
+    }
+
+    #[test]
+    fn test_newer_fork_body_only_for_unchanged_local_files() {
+        let fork = "v2\n".to_string();
+        let v1 = sha256_hex("v1\n");
+        // Unchanged since the pull, fork newer: the fork version goes.
+        assert_eq!(newer_fork_body("v1\n", Some(&v1), Some(&fork)), Some(&fork));
+        // Edited locally, same as the fork, or not recorded: no.
+        assert_eq!(newer_fork_body("mine\n", Some(&v1), Some(&fork)), None);
+        assert_eq!(
+            newer_fork_body("v2\n", Some(&sha256_hex("v2\n")), Some(&fork)),
+            None
+        );
+        assert_eq!(newer_fork_body("v1\n", None, Some(&fork)), None);
+        assert_eq!(newer_fork_body("v1\n", Some(&v1), None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unreadable_workspace_files_are_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = tempfile::tempdir().unwrap();
+        let dir = ws.path().join(SCRIPTS_DIR);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.sh"), "a").unwrap();
+        fs::write(dir.join("b.sh"), [0xff, 0xfe]).unwrap();
+        let (hashes, unreadable) = collect_workspace_files(ws.path());
+        assert!(hashes.contains_key(&format!("{SCRIPTS_DIR}/a.sh")));
+        // Not valid UTF-8: not readable as text.
+        assert_eq!(unreadable, vec![format!("{SCRIPTS_DIR}/b.sh")]);
+        fs::write(ws.path().join("devbox.json"), "{}").unwrap();
+        fs::set_permissions(
+            ws.path().join("devbox.json"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        if fs::read(ws.path().join("devbox.json")).is_err() {
+            assert!(collect_workspace_files(ws.path())
+                .1
+                .contains(&"devbox.json".to_string()));
+        }
     }
 }

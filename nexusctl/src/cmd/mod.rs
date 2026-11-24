@@ -24,6 +24,7 @@ pub(crate) mod git;
 pub(crate) mod githooks;
 pub(crate) mod import;
 mod init;
+pub(crate) mod json_store;
 mod lane;
 mod link;
 mod man;
