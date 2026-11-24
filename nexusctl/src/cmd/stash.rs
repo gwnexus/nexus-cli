@@ -190,10 +190,14 @@ pub fn save(workspace: &Path) -> anyhow::Result<()> {
 
 /// Create a new stash directory named after `timestamp`, with a numbered
 /// suffix when one of that second exists. The names sort in creation
-/// order: `<ts>` before `<ts>-001`, and both before the next second.
+/// order: `<ts>` before `<ts>-001`, and both before the next second. A new
+/// name is always above every existing one of that second, so a removed
+/// earlier reservation (a failed save) is never reused; the exclusive
+/// creation keeps concurrent saves apart.
 fn create_unique_stash_dir(base: &Path, timestamp: &str) -> anyhow::Result<(PathBuf, String)> {
     fs::create_dir_all(base)?;
-    for n in 0..1000u32 {
+    let first = highest_suffix(base, timestamp)?.map_or(0, |n| n + 1);
+    for n in first..1000u32 {
         let name = if n == 0 {
             timestamp.to_string()
         } else {
@@ -207,6 +211,25 @@ fn create_unique_stash_dir(base: &Path, timestamp: &str) -> anyhow::Result<(Path
         }
     }
     anyhow::bail!("no free stash name for {timestamp} in {}", base.display())
+}
+
+/// The highest number used by a stash of `timestamp` (`<ts>` counts as 0).
+fn highest_suffix(base: &Path, timestamp: &str) -> anyhow::Result<Option<u32>> {
+    let suffixed = format!("{timestamp}-");
+    let mut highest = None;
+    for entry in fs::read_dir(base)?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let n = if name == timestamp {
+            Some(0)
+        } else {
+            name.strip_prefix(&suffixed)
+                .filter(|rest| rest.len() == 3)
+                .and_then(|rest| rest.parse::<u32>().ok())
+        };
+        highest = highest.max(n);
+    }
+    Ok(highest)
 }
 
 /// Write the saved files under [`PAYLOAD_DIR`] and then the metadata.
@@ -639,6 +662,21 @@ mod tests {
         sorted.sort();
         assert_eq!(sorted.last().unwrap(), "2026-11-24T10-01-00Z");
         assert_eq!(&sorted[..3], &names[..]);
+    }
+
+    #[test]
+    fn test_a_failed_reservation_is_not_reused() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("stash");
+        let ts = "2026-11-24T10-00-59Z";
+        // A reserves, B completes, A fails and is removed, C saves.
+        let (a, _) = create_unique_stash_dir(&base, ts).unwrap();
+        let (_, b) = create_unique_stash_dir(&base, ts).unwrap();
+        fs::remove_dir_all(&a).unwrap();
+        let (_, c) = create_unique_stash_dir(&base, ts).unwrap();
+        assert_eq!(b, "2026-11-24T10-00-59Z-001");
+        assert_eq!(c, "2026-11-24T10-00-59Z-002");
+        assert!(c > b, "the newer save sorts last and pops first");
     }
 
     #[test]
