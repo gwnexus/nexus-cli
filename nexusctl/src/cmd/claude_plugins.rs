@@ -438,11 +438,23 @@ fn location_key(source: &serde_json::Value) -> Option<String> {
     };
     // A remote source may name a catalog other than the default one.
     Some(
-        match text("path").map(str::trim).filter(|p| !p.is_empty()) {
+        match text("path")
+            .map(normalize_catalog_path)
+            .filter(|p| !p.is_empty())
+        {
             Some(path) => format!("{kind}:{loc}#{path}"),
             None => format!("{kind}:{loc}"),
         },
     )
+}
+
+/// A catalog path as compared: trimmed, without leading `./`.
+fn normalize_catalog_path(path: &str) -> &str {
+    let mut p = path.trim();
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest.trim_start_matches('/');
+    }
+    p
 }
 
 /// Why the registration of a declared marketplace does not match what the
@@ -536,19 +548,23 @@ fn with_stored_catalog_paths(
         let Some(path) = source
             .get("path")
             .and_then(|p| p.as_str())
-            .map(str::trim)
+            .map(normalize_catalog_path)
             .filter(|p| !p.is_empty())
         else {
             continue;
         };
-        let inside = Path::new(path)
-            .components()
-            .all(|c| matches!(c, std::path::Component::Normal(_)));
+        let inside = Path::new(path).components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
         if !inside {
             continue;
         }
         // The stored record must describe this registration: same source
-        // without the path, and the same checkout when both name one.
+        // without the path, and the same checkout whenever the listing
+        // names one.
         let mut bare = source.clone();
         bare.remove("path");
         if location_key(&serde_json::Value::Object(bare)).as_deref() != Some(listed.as_str()) {
@@ -560,7 +576,7 @@ fn with_stored_catalog_paths(
             .filter(|l| !l.is_empty());
         match (stored_location, entry.install_location.as_deref()) {
             (Some(a), Some(b)) if same_dir(Path::new(a), b) => {}
-            (None, _) | (_, None) => {}
+            (_, None) => {}
             _ => continue,
         }
         entry.location = Some(format!("{listed}#{path}"));
@@ -587,8 +603,15 @@ fn declared_ref<'a>(
 /// (relative sources inside the checkout only), else the catalog entry's
 /// `version`.
 fn catalog_version(location: &Path, catalog_path: Option<&str>, plugin: &str) -> Option<String> {
+    // Read only files that resolve inside the checkout: a symlink in a
+    // remote checkout must not lend a version from elsewhere.
+    let base = std::fs::canonicalize(location).ok()?;
     let read = |path: PathBuf| -> Option<serde_json::Value> {
-        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+        let resolved = std::fs::canonicalize(path).ok()?;
+        if !resolved.starts_with(&base) {
+            return None;
+        }
+        serde_json::from_str(&std::fs::read_to_string(resolved).ok()?).ok()
     };
     // The catalog the registration names: a custom path inside the
     // checkout, else the default one.
@@ -1790,6 +1813,66 @@ mod tests {
     }
 
     #[test]
+    fn test_sync_accepts_a_stored_catalog_path_with_a_leading_dot_slash() {
+        let dir = custom_catalog_checkout("dot-slash-catalog");
+        let cli = custom_catalog_cli(&dir).with_known(stored(
+            "gwnexus/nexus-runtime-plugins",
+            Some("./approved/marketplace.json"),
+            &dir,
+        ));
+        let (report, _) = sync(&cli, &ws(), Some(&custom_catalog_spec()), &BTreeMap::new());
+        assert_eq!(
+            report.plugins[0].state,
+            PluginState::Updated {
+                from: "1.1.1".into(),
+                to: "1.1.3".into()
+            }
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_catalog_version_ignores_files_resolving_outside_the_checkout() {
+        let dir = checkout("symlinked-catalog", "1.1.1");
+        let outside =
+            std::env::temp_dir().join(format!("nexus-plugin-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(outside.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            outside.join("marketplace.json"),
+            r#"{"plugins":[{"name":"nexus-core","version":"6.6.6","source":"./plugins/nexus-core"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            outside.join(".claude-plugin/plugin.json"),
+            r#"{"name":"nexus-core","version":"7.7.7"}"#,
+        )
+        .unwrap();
+        // A catalog directory that points outside.
+        std::os::unix::fs::symlink(&outside, dir.join("approved")).unwrap();
+        assert_eq!(
+            catalog_version(&dir, Some("approved/marketplace.json"), "nexus-core"),
+            None
+        );
+        // A plugin directory that points outside: the manifest is not read,
+        // the catalog entry decides.
+        std::fs::remove_dir_all(dir.join("plugins/nexus-core")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("plugins/nexus-core")).unwrap();
+        std::fs::write(
+            dir.join(".claude-plugin/marketplace.json"),
+            r#"{"plugins":[{"name":"nexus-core","version":"1.1.2","source":"./plugins/nexus-core"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog_version(&dir, None, "nexus-core").as_deref(),
+            Some("1.1.2")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
     fn test_sync_rejects_a_remote_marketplace_with_another_or_unknown_catalog() {
         let dir = custom_catalog_checkout("other-catalog");
         let repo = "gwnexus/nexus-runtime-plugins";
@@ -1812,6 +1895,15 @@ mod tests {
             )),
             // A path leaving the checkout.
             Some(stored(repo, Some("../approved/marketplace.json"), &dir)),
+            // A record without a checkout while the listing names one.
+            Some({
+                let mut record = stored(repo, Some("approved/marketplace.json"), &dir);
+                record["gatewarden-nexus"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("installLocation");
+                record
+            }),
             // No stored registrations at all.
             None,
         ];
