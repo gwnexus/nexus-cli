@@ -121,6 +121,56 @@ fn ensure_payload_complete(
     Ok(())
 }
 
+/// Whether `key` lies outside the paths `nexus push <path>` selected
+/// (never, without a selection).
+fn outside_selection(key: &str, only: Option<&[String]>) -> bool {
+    only.is_some_and(|sel| !sel.iter().any(|p| p == key))
+}
+
+/// The fork files outside the selection, with their fork bodies: the new
+/// fork carries them unchanged. Generated scripts are left to the backend.
+fn kept_fork_files(
+    desired: &HashMap<String, String>,
+    only: Option<&[String]>,
+) -> HashMap<String, String> {
+    desired
+        .iter()
+        .filter(|(key, _)| outside_selection(key, only) && !is_generated_script(key))
+        .map(|(key, body)| (key.clone(), body.clone()))
+        .collect()
+}
+
+/// The push payload with the kept fork files in place of local ones.
+#[allow(clippy::type_complexity)]
+fn with_kept_fork_files(
+    devbox_json: Option<serde_json::Value>,
+    scripts: Option<HashMap<String, String>>,
+    kept: &HashMap<String, String>,
+) -> anyhow::Result<(Option<serde_json::Value>, Option<HashMap<String, String>>)> {
+    let devbox_json = match kept.get("devbox.json") {
+        Some(body) => Some(serde_json::from_str(body).map_err(|e| {
+            anyhow::anyhow!("push stopped: the fork's devbox.json is not valid JSON ({e})")
+        })?),
+        None => devbox_json,
+    };
+    let prefix = format!("{SCRIPTS_DIR}/");
+    let kept_scripts: Vec<(String, String)> = kept
+        .iter()
+        .filter_map(|(key, body)| {
+            key.strip_prefix(&prefix)
+                .map(|rel| (rel.to_string(), body.clone()))
+        })
+        .collect();
+    let scripts = if kept_scripts.is_empty() {
+        scripts
+    } else {
+        let mut files = scripts.unwrap_or_default();
+        files.extend(kept_scripts);
+        Some(files)
+    };
+    Ok((devbox_json, scripts))
+}
+
 /// Read local workspace files for push payload.
 fn read_workspace_files(
     workspace: &Path,
@@ -399,6 +449,10 @@ fn print_push_result(result: &nexus_core::api::WorkspacePushResponse) {
 /// Tracked files the current fork no longer contains, and untracked local
 /// scripts, are skipped unless listed in `include_named` (named explicitly,
 /// e.g. `nexus push <path>`). Generated scripts are never pushed.
+///
+/// With `only` (the workspace paths `nexus push <path>` selected), only
+/// those files are pushed; every other file keeps its version from the
+/// current fork, so local edits outside the selection stay local.
 pub async fn run(
     api_url: &str,
     cli_project_id: Option<&str>,
@@ -406,6 +460,7 @@ pub async fn run(
     dry_run: bool,
     adopt_local: bool,
     include_named: &[String],
+    only: Option<&[String]>,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -467,6 +522,12 @@ pub async fn run(
     // compared with the sync manifest and nothing is treated as dropped.
     let export = client.export_workspace_mcp(&project_id).await.ok();
     let exported = export.as_ref().map(exported_paths);
+    if only.is_some() && export.is_none() {
+        anyhow::bail!(
+            "push stopped: the current workspace fork could not be read, so the files outside the selection cannot keep their fork version; nothing was pushed"
+        );
+    }
+    let outside = |key: &str| outside_selection(key, only);
     let active_fork = export.as_ref().and_then(active_fork_label);
     let desired: HashMap<String, String> = export
         .map(|e| {
@@ -482,6 +543,10 @@ pub async fn run(
     let mut sorted: Vec<_> = all_hashes.into_keys().collect();
     sorted.sort();
     for key in sorted {
+        // Outside the selection: the fork version is kept (below).
+        if outside(&key) {
+            continue;
+        }
         let local = fs::read_to_string(workspace.join(&key)).unwrap_or_default();
         if is_generated_script(&key) {
             // The backend generates these and strips them from a push.
@@ -547,10 +612,14 @@ pub async fn run(
     // files only, so leaving them out removes them from it.
     let mut deleted: Vec<String> = desired
         .iter()
+        .filter(|(key, _)| !outside(key))
         .filter(|(key, body)| is_deleted_fork_file(key, body, &manifest, &workspace))
         .map(|(key, _)| key.clone())
         .collect();
     deleted.sort();
+    // Fork files outside the selection go into the new fork unchanged.
+    let kept = kept_fork_files(&desired, only);
+    tracked.extend(kept.keys().cloned());
     changes.extend(deleted.iter().map(|k| (Change::Deleted, k.clone())));
 
     if tracked.is_empty() && deleted.is_empty() {
@@ -605,7 +674,8 @@ pub async fn run(
     // comparison above used (untracked local scripts were reported as
     // skipped but still uploaded into the fork).
     let (devbox_json, script_files) = read_workspace_files(&workspace);
-    let devbox_json = devbox_json.filter(|_| tracked.contains("devbox.json"));
+    let devbox_json = devbox_json
+        .filter(|_| tracked.contains("devbox.json") && !kept.contains_key("devbox.json"));
     let script_files = script_files
         .map(|files| {
             files
@@ -617,6 +687,7 @@ pub async fn run(
         // deleted; without deletions it would push nothing.
         .filter(|files| !files.is_empty() || !deleted.is_empty())
         .or_else(|| (!deleted.is_empty()).then(HashMap::new));
+    let (devbox_json, script_files) = with_kept_fork_files(devbox_json, script_files, &kept)?;
     let selected: Vec<String> = tracked.iter().cloned().collect();
     ensure_payload_complete(
         &workspace,
@@ -868,6 +939,51 @@ mod tests {
             ws
         ));
         assert!(!is_deleted_fork_file("devbox.json", "{}", &manifest, ws));
+    }
+
+    #[test]
+    fn test_selection_keeps_fork_versions_outside_it() {
+        let desired: HashMap<String, String> = [
+            ("devbox.json", r#"{"packages":["fork"]}"#),
+            ("scripts/devbox/a.sh", "fork a"),
+            ("scripts/devbox/b.sh", "fork b"),
+            ("scripts/devbox/dbx_init.sh", "generated"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        // No selection: nothing is kept.
+        assert!(kept_fork_files(&desired, None).is_empty());
+
+        let only = vec!["scripts/devbox/a.sh".to_string()];
+        let kept = kept_fork_files(&desired, Some(&only));
+        let mut keys: Vec<&str> = kept.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["devbox.json", "scripts/devbox/b.sh"]);
+        assert!(!outside_selection("scripts/devbox/a.sh", Some(&only)));
+        assert!(outside_selection("scripts/devbox/b.sh", Some(&only)));
+
+        // Local edits outside the selection are replaced by the fork bodies.
+        let local_devbox = serde_json::json!({"packages": ["local edit"]});
+        let local_scripts: HashMap<String, String> = [
+            ("a.sh".to_string(), "local a".to_string()),
+            ("b.sh".to_string(), "local b".to_string()),
+        ]
+        .into();
+        let (devbox, scripts) =
+            with_kept_fork_files(Some(local_devbox), Some(local_scripts), &kept).unwrap();
+        assert_eq!(devbox, Some(serde_json::json!({"packages": ["fork"]})));
+        let scripts = scripts.unwrap();
+        assert_eq!(scripts["a.sh"], "local a");
+        assert_eq!(scripts["b.sh"], "fork b");
+
+        // A kept script that is missing locally is carried too.
+        let (_, scripts) = with_kept_fork_files(None, None, &kept).unwrap();
+        assert_eq!(scripts.unwrap()["b.sh"], "fork b");
+
+        // A fork devbox.json that does not parse stops the push.
+        let bad: HashMap<String, String> = [("devbox.json".to_string(), "{".to_string())].into();
+        assert!(with_kept_fork_files(None, None, &bad).is_err());
     }
 
     #[test]
