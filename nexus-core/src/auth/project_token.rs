@@ -116,7 +116,8 @@ impl ProjectTokenStore {
     /// Change the store in one locked step: read the current file, apply
     /// `change` and save, all under an exclusive lock, so a concurrent
     /// `nexus project` command cannot overwrite another project's entry
-    /// with an older snapshot.
+    /// with an older snapshot. The lock is waited for at most a few
+    /// seconds, so an async caller is never blocked indefinitely.
     pub fn update<R>(change: impl FnOnce(&mut Self) -> R) -> Result<R, Error> {
         Self::update_at(&Self::path()?, change)
     }
@@ -183,11 +184,23 @@ impl StoreLock {
                 .truncate(false)
                 .mode(0o600)
                 .open(std::path::PathBuf::from(name))?;
-            // SAFETY: the descriptor belongs to `file`, which the lock owns.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(std::io::Error::last_os_error().into());
+            // Nonblocking with a bounded wait (about 3 s): callers run on
+            // async threads, which must not block on another process.
+            for _ in 0..60 {
+                // SAFETY: the descriptor belongs to `file`, which the lock owns.
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    return Ok(Self { _file: file });
+                }
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::WouldBlock {
+                    return Err(err.into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Ok(Self { _file: file })
+            Err(Error::Other(
+                "the project token store is locked by another nexus project command; try again"
+                    .to_string(),
+            ))
         }
         #[cfg(not(unix))]
         {
