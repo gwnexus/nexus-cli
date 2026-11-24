@@ -1661,7 +1661,7 @@ pub async fn run_with_root_hook(
                     af_export_result
                         .as_ref()
                         .ok()
-                        .and_then(|r| r.claude_settings.as_ref()),
+                        .map(|r| r.claude_settings.as_ref()),
                     af_export_result
                         .as_ref()
                         .ok()

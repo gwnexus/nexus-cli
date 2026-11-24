@@ -60,28 +60,38 @@ pub fn canonical_claude_skill_id(skill_id: &str) -> String {
 /// merely contains a `---` horizontal rule further down).
 pub(crate) fn strip_frontmatter(body: &str) -> &str {
     let trimmed = body.trim_start();
-    let Some(after_open) = trimmed.strip_prefix("---\n") else {
+    // Delimiter lines may end in LF or CRLF.
+    let Some(after_open) = trimmed
+        .strip_prefix("---\n")
+        .or_else(|| trimmed.strip_prefix("---\r\n"))
+    else {
         return body;
     };
-    let Some(close_pos) = after_open.find("\n---") else {
-        return body;
-    };
-    let after_close = &after_open[close_pos + "\n---".len()..];
-    // The closing delimiter must end the line (EOF or a newline) rather
-    // than just happen to prefix a longer line (e.g. "----" or "--- foo").
-    if !(after_close.is_empty() || after_close.starts_with('\n')) {
-        return body;
+    // The closing delimiter is a whole line (not "----" or "--- foo").
+    let mut end = 0;
+    for line in after_open.split_inclusive('\n') {
+        end += line.len();
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        if text.strip_suffix('\r').unwrap_or(text) == "---" {
+            return after_open[end..].trim_start_matches(['\r', '\n']);
+        }
     }
-    after_close.trim_start_matches('\n')
+    body
 }
 
 /// Write a single skill as a native Claude Code project skill:
 /// `.claude/skills/<canonical-id>/SKILL.md` (+ any resource files).
 /// The directory name becomes the `/<canonical-id>` slash-command in
 /// Claude Code (project skill directory names are command names).
-/// Returns `true` if any file was written (unchanged files are left alone).
-pub fn write_claude_skill(target: &Path, skill: &ExportedSkill) -> anyhow::Result<bool> {
+/// Returns whether any file was written (unchanged files are left alone)
+/// and the `(path, content)` pairs now on disk: a path that fails
+/// `safe_target` is neither written nor returned.
+pub fn write_claude_skill(
+    target: &Path,
+    skill: &ExportedSkill,
+) -> anyhow::Result<(bool, Vec<(String, String)>)> {
     let mut written = false;
+    let mut files = Vec::new();
     for (rel, content) in render_claude_skill_files(skill) {
         if !super::pull::safe_target(target, &rel) {
             continue;
@@ -91,8 +101,9 @@ pub fn write_claude_skill(target: &Path, skill: &ExportedSkill) -> anyhow::Resul
             fs::create_dir_all(parent)?;
         }
         written |= write_if_changed(&path, &content)?;
+        files.push((rel, content));
     }
-    Ok(written)
+    Ok((written, files))
 }
 
 /// The files [`write_claude_skill`] writes for `skill`, as
@@ -135,7 +146,9 @@ command_slug: {command_slug}
     for res in &skill.resources {
         // Sanitize filename: prevent directory traversal.
         let filename = res.filename.replace(['/', '\\'], "_");
-        if filename.is_empty() || filename == "SKILL.md" {
+        // Reserved in any case: on a case-insensitive filesystem
+        // `skill.md` would overwrite the generated `SKILL.md`.
+        if filename.is_empty() || filename.eq_ignore_ascii_case("SKILL.md") {
             continue;
         }
         files.push((format!("{skill_dir}/{filename}"), res.body.clone()));
@@ -166,13 +179,39 @@ fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Quote and escape a string for safe use as a YAML flow scalar in the
-/// frontmatter templates in this file. Skill descriptions are free text and
-/// may contain `:` or other characters that break an unquoted YAML scalar;
+/// Quote and escape a string as one YAML double-quoted scalar for the
+/// frontmatter templates in this file: line breaks and control characters
+/// are escaped, so the value stays on one line and parses back unchanged.
+/// Skill descriptions are free text and may contain `:` or other
+/// characters that break an unquoted YAML scalar;
 /// `name`/`version`/`command_slug` are left unquoted to match the existing,
 /// already-shipped template style.
 pub(crate) fn yaml_escape(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // Other control characters, line and paragraph separators and
+            // the BOM are not allowed (or not kept) literally in a YAML
+            // double-quoted scalar.
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{feff}') => {
+                let code = c as u32;
+                if code <= 0xff {
+                    out.push_str(&format!("\\x{code:02X}"));
+                } else {
+                    out.push_str(&format!("\\u{code:04X}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// A server-supplied identifier (e.g. `command_slug`) for the frontmatter:
@@ -294,15 +333,35 @@ fn remove_stale_lane_agents(
     rendered: &[(String, String)],
 ) -> anyhow::Result<()> {
     let recorded = super::pull::load_pull_manifest(target, agentic_root);
+    // The current lane actors, and delegates pull recorded earlier for
+    // actors the export no longer lists (dropped together with a
+    // restriction): those only when the file still is a delegate.
+    let mut candidates: Vec<(String, bool)> = lane_actors
+        .iter()
+        .map(|a| (format!(".claude/agents/{}.md", a.slug), false))
+        .collect();
+    for rel in recorded.keys() {
+        let is_agent = rel
+            .strip_prefix(".claude/agents/")
+            .is_some_and(|f| f.ends_with(".md") && !f.contains('/'));
+        if is_agent && !candidates.iter().any(|(c, _)| c == rel) {
+            candidates.push((rel.clone(), true));
+        }
+    }
     let mut removed = Vec::new();
-    for actor in lane_actors {
-        let rel = format!(".claude/agents/{}.md", actor.slug);
+    for (rel, only_delegate) in candidates {
         if rendered.iter().any(|(p, _)| *p == rel) || !super::pull::safe_target(target, &rel) {
             continue;
         }
         let Ok(local) = fs::read(target.join(&rel)) else {
             continue;
         };
+        if only_delegate {
+            let slug = &rel[".claude/agents/".len()..rel.len() - ".md".len()];
+            if local != lane_delegate(slug).as_bytes() {
+                continue;
+            }
+        }
         if recorded.get(&rel).map(String::as_str)
             == Some(nexus_core::hash::sha256_hex_bytes(&local).as_str())
         {
@@ -532,6 +591,64 @@ pub fn write_claude_hook_adapters(
     Ok(written)
 }
 
+/// `.claude/settings.json` for a merge: `{}` when the file does not exist,
+/// `None` when it exists but is not a JSON object (a trailing comma, say).
+/// Such a file is left untouched: rewriting it would drop the operator's
+/// hooks and permission rules. A read error other than absence is an error.
+pub(crate) fn load_settings_for_merge(path: &Path) -> anyhow::Result<Option<serde_json::Value>> {
+    let raw = match fs::read(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(serde_json::json!({})));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("cannot read {}: {e}", path.display()));
+        }
+    };
+    Ok(serde_json::from_slice::<serde_json::Value>(&raw)
+        .ok()
+        .filter(serde_json::Value::is_object))
+}
+
+/// Write `content` to `path` through a temporary file in the same
+/// directory, so a failed write leaves the existing file intact. The
+/// existing file's permissions are kept.
+pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".nexus-write.")
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
+    tmp.write_all(content)?;
+    tmp.as_file().sync_all()?;
+    if let Ok(meta) = fs::metadata(path) {
+        tmp.as_file().set_permissions(meta.permissions())?;
+    }
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Write a merged `settings.json` value (pretty JSON, trailing newline).
+fn write_settings(path: &Path, settings: &serde_json::Value) -> anyhow::Result<()> {
+    write_atomic(
+        path,
+        (serde_json::to_string_pretty(settings)? + "\n").as_bytes(),
+    )
+}
+
+/// The exact script a hook command runs: a whitespace-separated token,
+/// quotes stripped, that is `script` or ends in `/<script>`.
+fn command_runs_script(command: &str, script: &str) -> bool {
+    command.split_whitespace().any(|token| {
+        let token = token.trim_matches(|c| c == '"' || c == '\'');
+        token == script || token.strip_suffix(script).is_some_and(|p| p.ends_with('/'))
+    })
+}
+
 /// Merge hook registrations for each adapter into `.claude/settings.json`'s
 /// `hooks` block.
 ///
@@ -572,6 +689,32 @@ pub fn merge_claude_hooks(
                 .collect()
         })
         .unwrap_or_default();
+    // Adapters still sent: the registrations of events they no longer
+    // register for.
+    let retired: Vec<ccx::CcxLockHookEntry> = previous_hooks
+        .into_iter()
+        .flat_map(|prev| prev.values())
+        .filter_map(|entry| {
+            let adapter = adapters
+                .iter()
+                .find(|a| a.target_path == entry.target_path)?;
+            let registrations: Vec<_> = entry
+                .registrations
+                .iter()
+                .filter(|reg| {
+                    !adapter.hook_events.iter().any(|e| {
+                        e.event == reg.event
+                            && hook_command(&adapter.target_path, &e.event) == reg.command
+                    })
+                })
+                .cloned()
+                .collect();
+            (!registrations.is_empty()).then(|| ccx::CcxLockHookEntry {
+                registrations,
+                ..entry.clone()
+            })
+        })
+        .collect();
 
     if adapters.is_empty() && removable.is_empty() {
         return Ok((0, Vec::new()));
@@ -579,16 +722,9 @@ pub fn merge_claude_hooks(
 
     let settings_path = target.join(".claude").join("settings.json");
     super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let raw = fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
+    let Some(mut settings) = load_settings_for_merge(&settings_path)? else {
+        return Ok((0, Vec::new()));
     };
-
-    if !settings.is_object() {
-        settings = serde_json::json!({});
-    }
     let settings_obj = settings.as_object_mut().expect("just ensured object");
     let hooks = settings_obj
         .entry("hooks")
@@ -612,6 +748,10 @@ pub fn merge_claude_hooks(
             }
         }
         removed_plugin_names.push(entry.plugin_name.clone());
+    }
+    let mut retired_removed = 0;
+    for entry in &retired {
+        retired_removed += remove_hook_registrations(hooks_obj, entry);
     }
 
     let mut appended = 0;
@@ -637,11 +777,7 @@ pub fn merge_claude_hooks(
             }
             let event_array = event_array.as_array_mut().expect("just ensured array");
 
-            let command = format!(
-                "node \"${{CLAUDE_PROJECT_DIR}}/{}\" {}",
-                adapter.target_path,
-                kebab_case_event(&hook_event.event)
-            );
+            let command = hook_command(&adapter.target_path, &hook_event.event);
             // An entry with this command and this matcher is in place.
             if event_array.iter().any(|entry| {
                 hook_entry_is_only(entry, &command)
@@ -695,7 +831,7 @@ pub fn merge_claude_hooks(
                             hooks.iter().any(|h| {
                                 h.get("command")
                                     .and_then(|c| c.as_str())
-                                    .is_some_and(|c| c.contains(&adapter.target_path))
+                                    .is_some_and(|c| command_runs_script(c, &adapter.target_path))
                             })
                         })
                         .unwrap_or(false)
@@ -729,15 +865,20 @@ pub fn merge_claude_hooks(
         }
     }
 
-    if appended > 0 || !removed_plugin_names.is_empty() {
-        if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(&settings)? + "\n";
-        fs::write(&settings_path, content)?;
+    if appended > 0 || !removed_plugin_names.is_empty() || retired_removed > 0 {
+        write_settings(&settings_path, &settings)?;
     }
 
     Ok((appended, removed_plugin_names))
+}
+
+/// The command Nexus registers for an adapter script and event.
+pub(crate) fn hook_command(target_path: &str, event: &str) -> String {
+    format!(
+        "node \"${{CLAUDE_PROJECT_DIR}}/{}\" {}",
+        target_path,
+        kebab_case_event(event)
+    )
 }
 
 /// Whether a `settings.json` hook entry holds exactly one hook, running
@@ -807,36 +948,65 @@ pub(crate) fn remove_hook_registrations(
 /// Returns `true` if the file was created or its `includeCoAuthoredBy`
 /// value changed; `false` if it already matched (idempotent, avoids
 /// needless rewrites on every pull).
-pub fn merge_claude_co_authored_by(target: &Path, include: Option<bool>) -> anyhow::Result<bool> {
+pub fn merge_claude_co_authored_by(
+    target: &Path,
+    include: Option<bool>,
+    export_manages_attribution: bool,
+) -> anyhow::Result<bool> {
     let resolved = include.unwrap_or(false);
     let settings_path = target.join(".claude").join("settings.json");
     super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let raw = fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    if !settings.is_object() {
-        settings = serde_json::json!({});
-    }
-    let obj = settings.as_object_mut().expect("just ensured object");
-
-    if obj.get("includeCoAuthoredBy").and_then(|v| v.as_bool()) == Some(resolved) {
+    let Some(mut settings) = load_settings_for_merge(&settings_path)? else {
         return Ok(false);
-    }
+    };
+    let obj = settings.as_object_mut().expect("loaded as an object");
 
-    obj.insert(
-        "includeCoAuthoredBy".to_string(),
-        serde_json::Value::Bool(resolved),
-    );
-
-    if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent)?;
+    let mut changed = false;
+    if obj.get("includeCoAuthoredBy").and_then(|v| v.as_bool()) != Some(resolved) {
+        obj.insert(
+            "includeCoAuthoredBy".to_string(),
+            serde_json::Value::Bool(resolved),
+        );
+        changed = true;
     }
-    let content = serde_json::to_string_pretty(&settings)? + "\n";
-    fs::write(&settings_path, content)?;
-    Ok(true)
+    // `attribution.commit` takes precedence over the legacy flag, so it
+    // follows the same policy, unless the export manages `attribution`
+    // itself.
+    if !export_manages_attribution {
+        changed |= enforce_commit_attribution(obj, resolved);
+    }
+    if changed {
+        write_settings(&settings_path, &settings)?;
+    }
+    Ok(changed)
+}
+
+/// Make `attribution.commit` agree with the co-author policy: an empty
+/// string (no trailer) when suppressed; when included, an empty value is
+/// removed so Claude Code's default trailer applies. Any other text and
+/// `attribution.pr` stay. Returns whether anything changed.
+fn enforce_commit_attribution(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    include: bool,
+) -> bool {
+    let Some(attribution) = obj.get_mut("attribution").and_then(|a| a.as_object_mut()) else {
+        return false;
+    };
+    let commit = attribution.get("commit").and_then(|c| c.as_str());
+    match (include, commit) {
+        (false, Some(text)) if !text.is_empty() => {
+            attribution.insert("commit".into(), serde_json::Value::String(String::new()));
+            true
+        }
+        (true, Some("")) => {
+            attribution.remove("commit");
+            if attribution.is_empty() {
+                obj.remove("attribution");
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Merge a generic, forward-compatible set of Nexus-managed keys into
@@ -870,23 +1040,13 @@ pub fn merge_claude_generic_settings(
 
     let settings_path = target.join(".claude").join("settings.json");
     super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let raw = fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
+    let Some(mut settings) = load_settings_for_merge(&settings_path)? else {
+        return Ok(0);
     };
-    if !settings.is_object() {
-        settings = serde_json::json!({});
-    }
 
     let changed = apply_generic_settings(&mut settings, spec, previous);
     if changed > 0 {
-        if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(&settings)? + "\n";
-        fs::write(&settings_path, content)?;
+        write_settings(&settings_path, &settings)?;
     }
 
     Ok(changed)
@@ -1050,6 +1210,14 @@ pub fn merge_claude_md_managed_block(
     };
     let desired = claude_md_desired_block_text(block);
     let desired_sha = nexus_core::hash::sha256_hex(&desired);
+    // A block quoting a marker would not be read back as written.
+    if desired.contains(CLAUDE_MD_MANAGED_BEGIN) || desired.contains(CLAUDE_MD_MANAGED_END) {
+        println!(
+            "   {} CLAUDE.md: the managed block from Nexus contains a nexus-managed marker; not written",
+            style("!").bold().yellow()
+        );
+        return Ok(ClaudeMdOutcome::Skipped);
+    }
 
     let new_content = match (
         existing.find(CLAUDE_MD_MANAGED_BEGIN),
@@ -1075,12 +1243,13 @@ pub fn merge_claude_md_managed_block(
                 &existing[end..]
             )
         }
-        (Some(_), Some(_)) => {
-            // Malformed markers (END before BEGIN): don't attempt to
-            // merge into a file we can't safely parse -- leave it alone.
+        (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => {
+            // Malformed markers (END before BEGIN, or only one of them):
+            // don't attempt to merge into a file we can't safely parse --
+            // leave it alone.
             return Ok(ClaudeMdOutcome::Skipped);
         }
-        _ => {
+        (None, None) => {
             // No markers yet: insert the block at the top, once,
             // preserving any pre-existing content (including other
             // tools' own managed blocks) below it untouched.
@@ -1091,10 +1260,7 @@ pub fn merge_claude_md_managed_block(
         }
     };
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, new_content)?;
+    write_atomic(&path, new_content.as_bytes())?;
     Ok(ClaudeMdOutcome::Written(desired_sha))
 }
 
@@ -1144,15 +1310,9 @@ pub(crate) const BASELINE_MCP_PERMISSIONS: &[&str] = &[
 pub fn merge_claude_baseline_permissions(target: &Path) -> anyhow::Result<usize> {
     let settings_path = target.join(".claude").join("settings.json");
     super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let raw = fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
+    let Some(mut settings) = load_settings_for_merge(&settings_path)? else {
+        return Ok(0);
     };
-    if !settings.is_object() {
-        settings = serde_json::json!({});
-    }
     let settings_obj = settings.as_object_mut().expect("just ensured object");
 
     let permissions = settings_obj
@@ -1182,11 +1342,7 @@ pub fn merge_claude_baseline_permissions(target: &Path) -> anyhow::Result<usize>
     }
 
     if appended > 0 {
-        if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(&settings)? + "\n";
-        fs::write(&settings_path, content)?;
+        write_settings(&settings_path, &settings)?;
     }
 
     Ok(appended)
@@ -1242,8 +1398,7 @@ pub fn write_claude_settings(
         settings.insert("env".to_string(), serde_json::Value::Object(env));
     }
 
-    let content = serde_json::to_string_pretty(&serde_json::Value::Object(settings))? + "\n";
-    fs::write(&path, content)?;
+    write_settings(&path, &serde_json::Value::Object(settings))?;
     Ok(true)
 }
 
@@ -1295,7 +1450,7 @@ pub fn merge_claude_routing_env(
         }
     }
     if changed {
-        fs::write(&path, serde_json::to_string_pretty(&settings)? + "\n")?;
+        write_settings(&path, &settings)?;
     }
     Ok(changed)
 }
@@ -1396,16 +1551,36 @@ pub fn render_claude_projection(
     runtime_spec: Option<&serde_json::Value>,
     hook_adapters: &[ClaudeHookAdapter],
     include_co_authored_by: Option<bool>,
-    claude_settings: Option<&ClaudeSettingsSpec>,
+    claude_settings: Option<Option<&ClaudeSettingsSpec>>,
     claude_md_managed_block: Option<&str>,
     agent_inputs: &ClaudeAgentInputs,
     force: bool,
 ) -> anyhow::Result<ClaudeProjectionReport> {
+    // `None`: the agent-file export failed. The hooks and settings keys
+    // Nexus manages then stay as they are (with their lock record); an
+    // absent spec in a successful export withdraws them.
+    let export_ok = claude_settings.is_some();
+    let claude_settings = claude_settings.flatten();
+    // Every settings merge below leaves an invalid settings.json alone.
+    let settings_rel = ".claude/settings.json";
+    super::pull::validate_agent_file_target_path(target, settings_rel)?;
+    let settings_ok = load_settings_for_merge(&target.join(settings_rel))?.is_some();
+    if !settings_ok {
+        println!(
+            "   {} {settings_rel} is not a valid JSON object; Nexus settings, hooks and \
+             permissions were not merged into it. Fix the file, then run nexus pull again.",
+            style("!").bold().yellow()
+        );
+    }
+
     let mut skills_written = 0;
+    let mut rendered: Vec<(String, String)> = Vec::new();
     for skill in skills {
-        if write_claude_skill(target, skill)? {
+        let (written, files) = write_claude_skill(target, skill)?;
+        if written {
             skills_written += 1;
         }
+        rendered.extend(files);
     }
     if skills_written > 0 {
         println!(
@@ -1442,9 +1617,12 @@ pub fn render_claude_projection(
     // Record what was written in the pull manifest, so a later switch to
     // OpenCode can tell these files (unmodified) apart from local edits
     // and the operator's own skills/agents (v0.28.4 projection cleanup).
-    let mut rendered: Vec<(String, String)> =
-        skills.iter().flat_map(render_claude_skill_files).collect();
-    rendered.extend(claude_agent_files(actors, agent_files, agent_inputs));
+    // Only files on disk: a path `safe_target` rejects was not written.
+    rendered.extend(
+        claude_agent_files(actors, agent_files, agent_inputs)
+            .into_iter()
+            .filter(|(rel, _)| super::pull::safe_target(target, rel)),
+    );
     super::pull::record_generated_many(target, agentic_root, &rendered)?;
 
     // Routing-guard adapter inputs: only written when the backend supplies runtime_spec.
@@ -1497,8 +1675,11 @@ pub fn render_claude_projection(
     let previous_hooks = ccx::load_lock(target, agentic_root)
         .map(|l| l.hooks)
         .unwrap_or_default();
-    let (hooks_appended, removed_hook_plugins) =
-        merge_claude_hooks(target, hook_adapters, Some(&previous_hooks))?;
+    let (hooks_appended, removed_hook_plugins) = if export_ok && settings_ok {
+        merge_claude_hooks(target, hook_adapters, Some(&previous_hooks))?
+    } else {
+        (0, Vec::new())
+    };
     if hooks_appended > 0 {
         println!(
             "   {} .claude/settings.json (+{} hook registration(s))",
@@ -1531,28 +1712,15 @@ pub fn render_claude_projection(
                         .map(|e| ccx::CcxLockHookRegistration {
                             event: e.event.clone(),
                             matcher: e.matcher.clone(),
-                            command: format!(
-                                "node \"${{CLAUDE_PROJECT_DIR}}/{}\" {}",
-                                a.target_path,
-                                kebab_case_event(&e.event)
-                            ),
+                            command: hook_command(&a.target_path, &e.event),
                         })
                         .collect(),
                 },
             )
         })
         .collect();
-    ccx::record_hooks_in_lock(target, agentic_root, new_hooks)?;
-
-    // Co-authored-by trailer suppression:
-    // hard operator requirement, absent-means-suppress, merges alongside
-    // the hooks block above rather than replacing the file.
-    if merge_claude_co_authored_by(target, include_co_authored_by)? {
-        println!(
-            "   {} .claude/settings.json (includeCoAuthoredBy: {})",
-            style("+").bold().green(),
-            include_co_authored_by.unwrap_or(false)
-        );
+    if export_ok && settings_ok {
+        ccx::record_hooks_in_lock(target, agentic_root, new_hooks)?;
     }
 
     // Baseline read-only MCP permission allowlist (follow-up to the run-1
@@ -1576,24 +1744,44 @@ pub fn render_claude_projection(
     // previously-recorded settings state (if any) drives removal of a key
     // Nexus no longer manages; the lock is
     // updated afterward to reflect what is now managed.
-    let previous_settings = super::ccx::load_lock(target, agentic_root).and_then(|l| l.settings);
-    let settings_before = read_claude_settings(target);
-    let generic_settings_changed =
-        merge_claude_generic_settings(target, claude_settings, previous_settings.as_ref())?;
-    let settings_changes = super::ccx::describe_settings_changes(
-        &settings_before,
-        &read_claude_settings(target),
-        claude_settings,
-        previous_settings.as_ref(),
-    );
-    if generic_settings_changed > 0 {
+    let mut settings_changes = Vec::new();
+    if export_ok && settings_ok {
+        let previous_settings =
+            super::ccx::load_lock(target, agentic_root).and_then(|l| l.settings);
+        let settings_before = read_claude_settings(target);
+        let generic_settings_changed =
+            merge_claude_generic_settings(target, claude_settings, previous_settings.as_ref())?;
+        settings_changes = super::ccx::describe_settings_changes(
+            &settings_before,
+            &read_claude_settings(target),
+            claude_settings,
+            previous_settings.as_ref(),
+        );
+        if generic_settings_changed > 0 {
+            println!(
+                "   {} .claude/settings.json (+{} managed key(s))",
+                style("+").bold().green(),
+                generic_settings_changed
+            );
+        }
+        super::ccx::record_settings_in_lock(target, agentic_root, claude_settings)?;
+    }
+
+    // Co-authored-by trailer suppression: hard operator requirement,
+    // absent-means-suppress. After the generic keys, so a commit
+    // attribution text cannot bring the trailer back.
+    let export_manages_attribution = claude_settings.is_some_and(|spec| {
+        spec.managed_keys
+            .iter()
+            .any(|k| k == "attribution" || k.starts_with("attribution."))
+    });
+    if merge_claude_co_authored_by(target, include_co_authored_by, export_manages_attribution)? {
         println!(
-            "   {} .claude/settings.json (+{} managed key(s))",
+            "   {} .claude/settings.json (includeCoAuthoredBy: {})",
             style("+").bold().green(),
-            generic_settings_changed
+            include_co_authored_by.unwrap_or(false)
         );
     }
-    super::ccx::record_settings_in_lock(target, agentic_root, claude_settings)?;
 
     // Root CLAUDE.md managed block: everything outside the markers is user-owned and never
     // rewritten. A block edited locally since the last write is kept unless `force`; its lock hash
@@ -2064,6 +2252,325 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_lane_actor_delegate_is_removed_on_restriction() {
+        let dir = temp_dir("dropped-lane-delegate");
+        let lanes = [lane("spark-coder")];
+        let open = ClaudeAgentInputs {
+            lane_actors: &lanes,
+            ..Default::default()
+        };
+        write_claude_agents(&dir, ".nexus", &[], &[], &open).unwrap();
+        crate::cmd::pull::record_generated_many(
+            &dir,
+            ".nexus",
+            &claude_agent_files(&[], &[], &open),
+        )
+        .unwrap();
+        // An operator's own agent, recorded with its hash but no delegate.
+        fs::write(dir.join(".claude/agents/mine.md"), "mine").unwrap();
+        crate::cmd::pull::record_generated_many(
+            &dir,
+            ".nexus",
+            &[(".claude/agents/mine.md".into(), "mine".into())],
+        )
+        .unwrap();
+        // The same export restricts the project and drops the actor.
+        let restricted = ClaudeAgentInputs {
+            restricted: true,
+            ..Default::default()
+        };
+        write_claude_agents(&dir, ".nexus", &[], &[], &restricted).unwrap();
+        assert!(!dir.join(".claude/agents/spark-coder.md").exists());
+        assert!(dir.join(".claude/agents/mine.md").exists());
+        let recorded = crate::cmd::pull::load_pull_manifest(&dir, ".nexus");
+        assert!(!recorded.contains_key(".claude/agents/spark-coder.md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn event(name: &str, matcher: Option<&str>) -> nexus_core::api::ClaudeHookEvent {
+        nexus_core::api::ClaudeHookEvent {
+            event: name.to_string(),
+            matcher: matcher.map(str::to_string),
+            timeout: None,
+        }
+    }
+
+    fn hook_commands(dir: &Path, event: &str) -> Vec<String> {
+        read_claude_settings(dir)["hooks"][event]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .flat_map(|e| e["hooks"].as_array().cloned().unwrap_or_default())
+                    .filter_map(|h| h["command"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_retired_event_of_a_kept_adapter_is_removed() {
+        let dir = temp_dir("retired-event");
+        let path = ".claude/hooks/guard.mjs";
+        let mut adapter = sample_adapter("guard", path);
+        adapter.hook_events = vec![event("PostToolUse", Some("Bash")), event("Stop", None)];
+        merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
+        let previous: BTreeMap<_, _> = [hook_lock_entry(
+            "guard",
+            path,
+            &adapter.body,
+            &[("PostToolUse", Some("Bash")), ("Stop", None)],
+        )]
+        .into_iter()
+        .collect();
+        // The next export registers the same script for Stop only.
+        adapter.hook_events = vec![event("Stop", None)];
+        merge_claude_hooks(&dir, std::slice::from_ref(&adapter), Some(&previous)).unwrap();
+        assert!(hook_commands(&dir, "PostToolUse").is_empty());
+        assert_eq!(hook_commands(&dir, "Stop"), [hook_command(path, "Stop")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_hook_with_a_longer_script_name_is_not_a_duplicate() {
+        let dir = temp_dir("hook-partial-path");
+        let operator = "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.mjs.bak\" stop";
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": operator}]}]}})
+                .to_string(),
+        )
+        .unwrap();
+        let mut adapter = sample_adapter("guard", ".claude/hooks/guard.mjs");
+        adapter.hook_events = vec![event("Stop", None)];
+        let (appended, _) = merge_claude_hooks(&dir, &[adapter], None).unwrap();
+        assert_eq!(appended, 1);
+        assert_eq!(
+            hook_commands(&dir, "Stop"),
+            [
+                operator.to_string(),
+                hook_command(".claude/hooks/guard.mjs", "Stop")
+            ]
+        );
+        assert!(command_runs_script(
+            "node .claude/hooks/guard.mjs stop",
+            ".claude/hooks/guard.mjs"
+        ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_invalid_settings_file_is_left_untouched() {
+        let dir = temp_dir("invalid-settings");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        let broken = "{\n  \"permissions\": {\"allow\": [\"Bash(ls)\"]},\n}\n";
+        fs::write(dir.join(".claude/settings.json"), broken).unwrap();
+        let mut adapter = sample_adapter("guard", ".claude/hooks/guard.mjs");
+        adapter.hook_events = vec![event("Stop", None)];
+        let spec = sample_ccx_spec(&["model"], &[("model", serde_json::json!("opus"))]);
+        render_claude_projection(
+            &dir,
+            "Test Project",
+            ".nexus",
+            &[],
+            &[],
+            &[],
+            None,
+            &[adapter],
+            None,
+            Some(Some(&spec)),
+            None,
+            &ClaudeAgentInputs::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
+            broken
+        );
+        // Nothing recorded as managed that was not merged.
+        let lock = ccx::load_lock(&dir, ".nexus");
+        assert!(lock
+            .as_ref()
+            .is_none_or(|l| l.hooks.is_empty() && l.settings.is_none()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_failed_export_keeps_managed_settings_and_hooks() {
+        let dir = temp_dir("failed-export");
+        let mut adapter = sample_adapter("guard", ".claude/hooks/guard.mjs");
+        adapter.hook_events = vec![event("Stop", None)];
+        let spec = sample_ccx_spec(
+            &["permissions.deny"],
+            &[("permissions.deny", serde_json::json!(["Bash(rm -rf:*)"]))],
+        );
+        let run = |adapters: &[ClaudeHookAdapter], settings| {
+            render_claude_projection(
+                &dir,
+                "Test Project",
+                ".nexus",
+                &[],
+                &[],
+                &[],
+                None,
+                adapters,
+                None,
+                settings,
+                None,
+                &ClaudeAgentInputs::default(),
+                false,
+            )
+            .unwrap()
+        };
+        run(std::slice::from_ref(&adapter), Some(Some(&spec)));
+        let before = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        let lock_before = ccx::load_lock(&dir, ".nexus").unwrap();
+        // The export failed: no adapters, no settings spec.
+        run(&[], None);
+        assert_eq!(
+            fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
+            before
+        );
+        let lock = ccx::load_lock(&dir, ".nexus").unwrap();
+        assert_eq!(lock.hooks.len(), lock_before.hooks.len());
+        assert_eq!(lock.settings, lock_before.settings);
+        // A successful export without them withdraws them.
+        run(&[], Some(None));
+        assert!(hook_commands(&dir, "Stop").is_empty());
+        assert!(read_claude_settings(&dir)["permissions"]["deny"]
+            .as_array()
+            .is_none_or(|d| d.is_empty()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_co_author_policy_covers_commit_attribution() {
+        let dir = temp_dir("commit-attribution");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{"attribution": {"commit": "Co-Authored-By: someone", "pr": "made with care"}}"#,
+        )
+        .unwrap();
+        assert!(merge_claude_co_authored_by(&dir, Some(false), false).unwrap());
+        let s = read_claude_settings(&dir);
+        assert_eq!(s["includeCoAuthoredBy"], false);
+        assert_eq!(s["attribution"]["commit"], "");
+        assert_eq!(s["attribution"]["pr"], "made with care");
+        assert!(!merge_claude_co_authored_by(&dir, Some(false), false).unwrap());
+        // The explicit opt-in drops the empty text again.
+        assert!(merge_claude_co_authored_by(&dir, Some(true), false).unwrap());
+        let s = read_claude_settings(&dir);
+        assert!(s["attribution"].get("commit").is_none());
+        assert_eq!(s["attribution"]["pr"], "made with care");
+        // An attribution managed by the export is left to the export.
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{"attribution": {"commit": "text"}}"#,
+        )
+        .unwrap();
+        merge_claude_co_authored_by(&dir, Some(false), true).unwrap();
+        assert_eq!(read_claude_settings(&dir)["attribution"]["commit"], "text");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_settings_write_keeps_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("atomic-settings");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        let path = dir.join(".claude/settings.json");
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(merge_claude_baseline_permissions(&dir).unwrap() > 0);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // No temporary file is left behind.
+        let left: Vec<_> = fs::read_dir(dir.join(".claude"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_claude_md_block_markers_are_checked() {
+        let dir = temp_dir("claude-md-markers");
+        // Only one marker: malformed, left alone.
+        let one = format!("{CLAUDE_MD_MANAGED_BEGIN}\nhalf\n");
+        fs::write(dir.join("CLAUDE.md"), &one).unwrap();
+        let out = merge_claude_md_managed_block(&dir, Some("block"), None, false).unwrap();
+        assert_eq!(out, ClaudeMdOutcome::Skipped);
+        assert_eq!(fs::read_to_string(dir.join("CLAUDE.md")).unwrap(), one);
+        // A block quoting a marker is not written.
+        fs::write(dir.join("CLAUDE.md"), "own text\n").unwrap();
+        let quoted = format!("see {CLAUDE_MD_MANAGED_END} and more");
+        let out = merge_claude_md_managed_block(&dir, Some(&quoted), None, false).unwrap();
+        assert_eq!(out, ClaudeMdOutcome::Skipped);
+        assert_eq!(
+            fs::read_to_string(dir.join("CLAUDE.md")).unwrap(),
+            "own text\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_skill_frontmatter_crlf_reserved_name_and_escaping() {
+        let crlf = "---\r\nname: old\r\n---\r\n# Body\r\nline\r\n";
+        assert_eq!(strip_frontmatter(crlf), "# Body\r\nline\r\n");
+        assert_eq!(strip_frontmatter("---\nname: x\n---\nbody"), "body");
+        assert_eq!(
+            strip_frontmatter("---\nname: x\n----\nbody"),
+            "---\nname: x\n----\nbody"
+        );
+
+        let mut skill = sample_skill("nexus-x");
+        skill.resources = vec![
+            SkillResource {
+                filename: "skill.md".into(),
+                body: "resource".into(),
+            },
+            SkillResource {
+                filename: "helper.py".into(),
+                body: "print()".into(),
+            },
+        ];
+        let files: Vec<String> = render_claude_skill_files(&skill)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ".claude/skills/nexus-x/SKILL.md",
+                ".claude/skills/nexus-x/helper.py"
+            ]
+        );
+
+        let escaped = yaml_escape("a\u{8}b\nc\td\u{2028}\"\\");
+        assert_eq!(escaped, r#""a\x08b\nc\td\u2028\"\\""#);
+        assert!(!escaped.chars().any(char::is_control));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_skipped_skill_paths_are_not_recorded() {
+        let outside = tempfile::tempdir().unwrap();
+        let dir = temp_dir("skill-record");
+        std::os::unix::fs::symlink(outside.path(), dir.join(".claude")).unwrap();
+        let (written, files) = write_claude_skill(&dir, &sample_skill("nexus-x")).unwrap();
+        assert!(!written && files.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_is_restricted_classification() {
         assert!(is_restricted_classification(Some("restricted")));
         assert!(is_restricted_classification(Some(" Restricted ")));
@@ -2410,7 +2917,7 @@ mod tests {
             None,
             &[],
             None,
-            None,
+            Some(None),
             None,
             &ClaudeAgentInputs::default(),
             false,
@@ -2449,7 +2956,7 @@ mod tests {
             Some(&runtime_spec),
             &[],
             None,
-            None,
+            Some(None),
             None,
             &ClaudeAgentInputs::default(),
             false,
@@ -2582,7 +3089,7 @@ mod tests {
         // No settings.json yet, no git_config value at all: must still be
         // written as false, not left for Claude Code's own default.
         let dir = temp_dir("coauthor-absent");
-        let changed = merge_claude_co_authored_by(&dir, None).unwrap();
+        let changed = merge_claude_co_authored_by(&dir, None, false).unwrap();
         assert!(changed);
 
         let settings: serde_json::Value =
@@ -2596,7 +3103,7 @@ mod tests {
     #[test]
     fn test_merge_co_authored_by_explicit_false() {
         let dir = temp_dir("coauthor-false");
-        merge_claude_co_authored_by(&dir, Some(false)).unwrap();
+        merge_claude_co_authored_by(&dir, Some(false), false).unwrap();
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
                 .unwrap();
@@ -2607,7 +3114,7 @@ mod tests {
     #[test]
     fn test_merge_co_authored_by_explicit_true() {
         let dir = temp_dir("coauthor-true");
-        merge_claude_co_authored_by(&dir, Some(true)).unwrap();
+        merge_claude_co_authored_by(&dir, Some(true), false).unwrap();
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
                 .unwrap();
@@ -2621,8 +3128,8 @@ mod tests {
         // because the key already exists: this is a correctness flag, not
         // a create-once default.
         let dir = temp_dir("coauthor-update");
-        merge_claude_co_authored_by(&dir, Some(true)).unwrap();
-        let changed = merge_claude_co_authored_by(&dir, Some(false)).unwrap();
+        merge_claude_co_authored_by(&dir, Some(true), false).unwrap();
+        let changed = merge_claude_co_authored_by(&dir, Some(false), false).unwrap();
         assert!(changed);
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
@@ -2634,10 +3141,10 @@ mod tests {
     #[test]
     fn test_merge_co_authored_by_is_idempotent() {
         let dir = temp_dir("coauthor-idempotent");
-        assert!(merge_claude_co_authored_by(&dir, Some(false)).unwrap());
+        assert!(merge_claude_co_authored_by(&dir, Some(false), false).unwrap());
         // Second call with the same resolved value must be a no-op.
-        assert!(!merge_claude_co_authored_by(&dir, Some(false)).unwrap());
-        assert!(!merge_claude_co_authored_by(&dir, None).unwrap());
+        assert!(!merge_claude_co_authored_by(&dir, Some(false), false).unwrap());
+        assert!(!merge_claude_co_authored_by(&dir, None, false).unwrap());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2661,7 +3168,7 @@ mod tests {
         )
         .unwrap();
 
-        merge_claude_co_authored_by(&dir, Some(false)).unwrap();
+        merge_claude_co_authored_by(&dir, Some(false), false).unwrap();
 
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
@@ -2988,7 +3495,7 @@ mod tests {
             None,
             &[],
             None,
-            Some(&first_settings),
+            Some(Some(&first_settings)),
             None,
             &ClaudeAgentInputs::default(),
             false,
@@ -3011,7 +3518,7 @@ mod tests {
             None,
             &[],
             None,
-            None,
+            Some(None),
             None,
             &ClaudeAgentInputs::default(),
             false,
@@ -3822,7 +4329,7 @@ mod tests {
             None,
             &[adapter],
             None,
-            None,
+            Some(None),
             None,
             &ClaudeAgentInputs::default(),
             false,

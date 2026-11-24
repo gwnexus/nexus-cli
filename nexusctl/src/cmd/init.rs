@@ -352,7 +352,7 @@ pub async fn run(
                             af_export_result
                                 .as_ref()
                                 .ok()
-                                .and_then(|r| r.claude_settings.as_ref()),
+                                .map(|r| r.claude_settings.as_ref()),
                             af_export_result
                                 .as_ref()
                                 .ok()

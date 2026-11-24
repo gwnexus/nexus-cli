@@ -2018,7 +2018,7 @@ mod tests {
             Some(&runtime_spec),
             &[adapter()],
             None,
-            Some(&settings_spec()),
+            Some(Some(&settings_spec())),
             Some(BLOCK),
             &claude_render::ClaudeAgentInputs::default(),
             false,
