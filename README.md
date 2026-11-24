@@ -1249,6 +1249,12 @@ A session registers for this summary when it starts, through the
 not registered; reload says so, and a restart with `claude --continue`
 registers it without losing the conversation.
 
+`-y` only answers questions; like `nexus pull`, reload replaces edited
+Claude Code files or removes modified leftovers only with `--force`. When
+`claude plugin list` is unavailable before or after the pull, reload says
+that plugin changes could not be checked instead of reporting every plugin
+as new.
+
 ```bash
 nexus reload                 # pull, update plugins, report, tell running sessions
 nexus reload --trust         # also accept changed hooks, MCP servers and plugins

@@ -164,10 +164,9 @@ fn collect(workspace: &Path, path: &Path, agentic_root: &str, out: &mut BTreeMap
         return;
     }
     if let Ok(bytes) = std::fs::read(path) {
-        out.insert(
-            rel,
-            nexus_core::hash::sha256_hex(&String::from_utf8_lossy(&bytes)),
-        );
+        // The bytes, not lossy text: two invalid byte sequences can decode
+        // to the same replacement text.
+        out.insert(rel, nexus_core::hash::sha256_hex_bytes(&bytes));
     }
 }
 
@@ -211,19 +210,35 @@ pub(crate) fn change_counts(
     }
 }
 
-/// Plugin versions this workspace sees: user scope and this project.
-fn plugin_versions(workspace: &Path) -> BTreeMap<String, String> {
+/// Plugin versions this workspace sees (user scope and this project),
+/// `None` when the inventory is unavailable.
+fn plugin_versions(workspace: &Path) -> Option<BTreeMap<String, String>> {
     let cli = SystemClaude {
         workspace: workspace.to_path_buf(),
     };
+    claude_plugins::list_installed(&cli).map(|installed| plugin_snapshot(&installed, workspace))
+}
+
+/// One entry per installation this workspace sees, keyed by id and scope:
+/// the same plugin at user and project scope are two installations, and
+/// list order must not decide which version is compared.
+pub(crate) fn plugin_snapshot(
+    installed: &[InstalledPlugin],
+    workspace: &Path,
+) -> BTreeMap<String, String> {
     let here = workspace.display().to_string();
-    claude_plugins::list_installed(&cli)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|p: &InstalledPlugin| {
+    installed
+        .iter()
+        .filter(|p| {
             p.scope.as_deref() == Some("user") || p.project_path.as_deref() == Some(here.as_str())
         })
-        .map(|p| (p.id, p.version.unwrap_or_default()))
+        .map(|p| {
+            let key = match p.scope.as_deref() {
+                Some(scope) => format!("{} [{scope}]", p.id),
+                None => p.id.clone(),
+            };
+            (key, p.version.clone().unwrap_or_default())
+        })
         .collect()
 }
 
@@ -346,7 +361,11 @@ fn dirs_home() -> PathBuf {
 
 pub struct ReloadOptions<'a> {
     pub project_id: Option<&'a str>,
+    /// `--force` or `-y`: pull's `force` (overwrite without asking).
     pub force: bool,
+    /// Only `--force`: may replace edited CCX files and remove modified
+    /// orphans. `-y` alone never discards local edits.
+    pub explicit_force: bool,
     pub force_unmanaged: bool,
     pub trust: bool,
     pub notify: bool,
@@ -356,23 +375,31 @@ pub struct ReloadOptions<'a> {
 /// `nexus reload`.
 pub async fn run(api_url: &str, opts: ReloadOptions<'_>) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
-    let agentic_root = super::run::resolve_agentic_root(&workspace);
-    let before = snapshot(&workspace, &agentic_root);
     let plugins_before = plugin_versions(&workspace);
 
-    super::pull::run(
+    // Snapshot the agentic root pull uses (the export may select another
+    // one than `.nexus`), right before pull writes.
+    let mut first: Option<(String, BTreeMap<String, String>)> = None;
+    super::pull::run_with_root_hook(
         api_url,
         opts.project_id,
         opts.force,
         opts.mcp_source,
         &[],
         false,
-        super::ccx::ForceMode::from_flags(opts.force, opts.force_unmanaged),
+        super::ccx::ForceMode::from_flags(opts.explicit_force, opts.force_unmanaged),
         false,
         opts.trust,
         false,
+        &mut |root| first = Some((root.to_string(), snapshot(&workspace, root))),
     )
     .await?;
+    // Pull ended before choosing a root: nothing was written.
+    let (agentic_root, before) = first.unwrap_or_else(|| {
+        let root = super::run::resolve_agentic_root(&workspace);
+        let snap = snapshot(&workspace, &root);
+        (root, snap)
+    });
     // The plugin step `nexus run` does before a launch; pull runs it only
     // with --force.
     if !opts.force {
@@ -382,13 +409,27 @@ pub async fn run(api_url: &str, opts: ReloadOptions<'_>) -> anyhow::Result<()> {
 
     let after = snapshot(&workspace, &agentic_root);
     let mut areas = changed_areas(&before, &after, &agentic_root);
-    let plugins = plugin_changes(&plugins_before, &plugin_versions(&workspace));
-    if !plugins.is_empty() {
-        areas.insert(Area::Plugins, plugins);
-    }
+    // Compare plugins only when both inventories were read: an
+    // unavailable one is not an empty one.
+    let plugins_unchecked = match (plugins_before, plugin_versions(&workspace)) {
+        (Some(before), Some(after)) => {
+            let plugins = plugin_changes(&before, &after);
+            if !plugins.is_empty() {
+                areas.insert(Area::Plugins, plugins);
+            }
+            false
+        }
+        _ => true,
+    };
 
     println!();
     println!("{}", style("Reload").bold());
+    if plugins_unchecked {
+        println!(
+            "  {} plugin changes could not be checked (claude plugin list unavailable); run /reload-plugins if plugins were updated",
+            style("!").yellow().bold()
+        );
+    }
     if areas.is_empty() {
         println!(
             "  {} nothing changed; the running session is up to date.",
@@ -530,6 +571,46 @@ mod tests {
         assert_eq!(
             change_counts(&items(&["b", "c"]), &before, &after),
             "2 removed"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_hashes_bytes_not_lossy_text() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("CLAUDE.md"), [b'a', 0xff, b'b']).unwrap();
+        let before = snapshot(ws, ".nexus");
+        // Another invalid byte decodes to the same replacement text.
+        std::fs::write(ws.join("CLAUDE.md"), [b'a', 0xfe, b'b']).unwrap();
+        let after = snapshot(ws, ".nexus");
+        assert_ne!(before.get("CLAUDE.md"), after.get("CLAUDE.md"));
+        assert!(changed_areas(&before, &after, ".nexus").contains_key(&Area::Memory));
+    }
+
+    #[test]
+    fn test_plugin_snapshot_keeps_scopes_apart() {
+        let ws = std::path::Path::new("/work/repo");
+        let install = |scope: &str, project: Option<&str>, version: &str| InstalledPlugin {
+            id: "core@nexus".into(),
+            scope: Some(scope.into()),
+            project_path: project.map(str::to_string),
+            version: Some(version.into()),
+        };
+        let user = install("user", None, "1.0.0");
+        let project_old = install("project", Some("/work/repo"), "1.1.0");
+        let project_new = install("project", Some("/work/repo"), "1.2.0");
+        let elsewhere = install("project", Some("/work/other"), "9.9.9");
+        // List order does not decide which version counts.
+        let before = plugin_snapshot(&[project_old.clone(), user.clone()], ws);
+        let after = plugin_snapshot(&[project_new, user.clone(), elsewhere], ws);
+        assert_eq!(before.len(), 2);
+        assert_eq!(
+            plugin_changes(&before, &after),
+            vec!["core@nexus [project] 1.1.0 -> 1.2.0".to_string()]
+        );
+        assert_eq!(
+            plugin_snapshot(&[user.clone(), project_old.clone()], ws),
+            before
         );
     }
 

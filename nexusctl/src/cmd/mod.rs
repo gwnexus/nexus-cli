@@ -399,6 +399,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 reload::ReloadOptions {
                     project_id: project_id.as_deref(),
                     force: force || cli.yes,
+                    explicit_force: force,
                     force_unmanaged,
                     trust,
                     notify: !no_notify,
