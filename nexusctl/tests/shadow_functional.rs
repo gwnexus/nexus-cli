@@ -121,3 +121,73 @@ fn shadow_workspace_target_and_status() {
         .assert_contains("Workspace shadow is enabled");
     assert_eq!(snapshot(&ws), before, "status changed the workspace");
 }
+
+/// The commit-msg hook with the real binary and a real `git commit` in the
+/// editor flow: a comment line is checked when `--cleanup=whitespace` keeps
+/// it, and skipped when the default cleanup strips it.
+#[cfg(unix)]
+#[test]
+fn commit_msg_hook_follows_the_cleanup_option() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_api, ws) = setup(&full_backend());
+    let reference = concat!("AD", "R-0042");
+    ws.write(
+        ".nexus/generated/shadow-guard.json",
+        &serde_json::json!({
+            "level": "nexus",
+            "patterns": [{"id": "nexus-adr", "regex": r"\bADR-\d{3,4}\b", "flags": "i",
+                          "scopes": ["commit_message"], "message": "nexus-adr found"}]
+        })
+        .to_string(),
+    );
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_nexus"));
+    ws.write(
+        ".git/hooks/commit-msg",
+        &format!(
+            "#!/bin/sh\nexec '{}' shadow check-msg --guard .nexus/generated/shadow-guard.json \"$1\"\n",
+            bin.display()
+        ),
+    );
+    let editor = ws.path(".git/editor.sh");
+    std::fs::write(
+        &editor,
+        format!("#!/bin/sh\nprintf 'fix: x\\n# see {reference}\\n' > \"$1\"\n"),
+    )
+    .unwrap();
+    for p in [ws.path(".git/hooks/commit-msg"), editor.clone()] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let commit = |extra: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+            ])
+            .args(extra)
+            .current_dir(ws.path(""))
+            .env("GIT_EDITOR", &editor)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", ws.path(".git"))
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap()
+    };
+    let kept = commit(&["--cleanup=whitespace"]);
+    assert!(
+        !kept.status.success(),
+        "a kept comment line was not checked"
+    );
+    assert!(String::from_utf8_lossy(&kept.stderr).contains("nexus-adr found"));
+    let stripped = commit(&[]);
+    assert!(
+        stripped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stripped.stderr)
+    );
+}

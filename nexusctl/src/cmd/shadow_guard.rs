@@ -580,14 +580,17 @@ pub enum Cleanup {
 
 /// The cleanup git applies to this commit, as far as the hook can tell.
 ///
-/// The hook sees neither `git commit --cleanup=<mode>` nor the comment
-/// string git picks for `auto`. Policy: comment lines are skipped only in
+/// Git does not pass `git commit --cleanup=<mode>` to the hook, nor the
+/// comment string it picks for `auto`. The hook runs as a direct child of
+/// `git commit` (its script `exec`s `nexus`), so the mode is read from the
+/// parent's arguments where the platform shows them, and from
+/// `commit.cleanup` otherwise. Policy: comment lines are skipped only in
 /// the editor flow (git runs the hook with `GIT_EDITOR=:` for `-m` and
 /// `-F`), where git's own template comments would otherwise be scanned,
-/// and only when the configured mode strips them. Without an editor every
-/// line is checked, also when the configuration would strip comments: a
-/// `--cleanup=whitespace -m` commit keeps them. The remaining blind spot
-/// is `--cleanup=whitespace` together with an editor.
+/// and only when the mode strips them. Without an editor every line is
+/// checked, also when the mode would strip comments. If the parent's
+/// arguments cannot be read, a `--cleanup=whitespace` given with an
+/// editor stays unseen and its comment lines are not checked.
 fn message_cleanup() -> Cleanup {
     // Read as git sees it in the hook, so the hook's environment applies.
     let config = |key: &str| -> Result<Option<String>, ()> {
@@ -608,8 +611,12 @@ fn message_cleanup() -> Cleanup {
         }
     };
     let edited = std::env::var_os("GIT_EDITOR").is_none_or(|v| v != ":");
-    let Ok(mode) = config("commit.cleanup") else {
-        return Cleanup::Keep;
+    let mode = match parent_args().and_then(|args| cleanup_arg(&args)) {
+        Some(mode) => Some(mode),
+        None => match config("commit.cleanup") {
+            Ok(mode) => mode,
+            Err(()) => return Cleanup::Keep,
+        },
     };
     let comment = match (config("core.commentString"), config("core.commentChar")) {
         (Ok(Some(c)), _) | (Ok(None), Ok(Some(c))) if c != "auto" && !c.is_empty() => Some(c),
@@ -617,6 +624,61 @@ fn message_cleanup() -> Cleanup {
         _ => None,
     };
     cleanup_for(mode.as_deref(), edited, comment)
+}
+
+/// The arguments of the process that runs this one (`git commit` for the
+/// hook): exact on Linux, split at whitespace from `ps` elsewhere.
+fn parent_args() -> Option<Vec<String>> {
+    #[cfg(unix)]
+    {
+        let pid = std::os::unix::process::parent_id();
+        if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) {
+            return Some(
+                raw.split(|b| *b == 0)
+                    .filter(|a| !a.is_empty())
+                    .map(|a| String::from_utf8_lossy(a).into_owned())
+                    .collect(),
+            );
+        }
+        let out = Command::new("ps")
+            .args(["-o", "args=", "-p", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(String::from)
+                .collect(),
+        )
+    }
+    #[cfg(not(unix))]
+    None
+}
+
+/// The `--cleanup` mode of a `git commit` command line; the last one wins,
+/// as in git. `None` for another command or without the option.
+fn cleanup_arg(args: &[String]) -> Option<String> {
+    if !args.iter().any(|a| a == "commit") {
+        return None;
+    }
+    let mut mode = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            break;
+        }
+        if let Some(m) = a.strip_prefix("--cleanup=") {
+            mode = Some(m.to_string());
+        } else if a == "--cleanup" {
+            mode = it.next().cloned();
+        }
+    }
+    mode
 }
 
 fn cleanup_for(mode: Option<&str>, edited: bool, comment: Option<String>) -> Cleanup {
@@ -1400,6 +1462,29 @@ mod tests {
         let raw = format!("fix: x\n; see {REF}\n");
         assert!(check_message(&g, &raw, &Cleanup::Strip(";".into())).is_empty());
         assert_eq!(check_message(&g, &raw, &strip).len(), 1);
+    }
+
+    #[test]
+    fn test_cleanup_arg_reads_the_commit_command_line() {
+        let args = |s: &str| -> Vec<String> { s.split(' ').map(String::from).collect() };
+        assert_eq!(
+            cleanup_arg(&args("git commit --cleanup=whitespace")).as_deref(),
+            Some("whitespace")
+        );
+        assert_eq!(
+            cleanup_arg(&args("git -c a=b commit --cleanup verbatim -q")).as_deref(),
+            Some("verbatim")
+        );
+        // The last one wins; nothing after `--`.
+        assert_eq!(
+            cleanup_arg(&args(
+                "git commit --cleanup=strip --cleanup=scissors -- --cleanup=x"
+            ))
+            .as_deref(),
+            Some("scissors")
+        );
+        assert_eq!(cleanup_arg(&args("git commit -q")), None);
+        assert_eq!(cleanup_arg(&args("git merge --cleanup=strip")), None);
     }
 
     #[test]
