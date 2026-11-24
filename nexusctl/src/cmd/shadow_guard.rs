@@ -591,33 +591,29 @@ fn hooks_dir(root: &Path) -> Option<PathBuf> {
     }))
 }
 
-/// `path` with `.`/`..` removed and its longest existing ancestor
-/// canonicalized (the rest may not exist yet).
+/// `path` resolved as the operating system resolves it: each existing
+/// prefix is replaced by its real path (symlinks followed) before a later
+/// `..` applies, so `link/../hooks` ends next to the link's target, as git
+/// sees it. Components that do not exist yet are applied lexically.
 fn resolve_path(path: &Path) -> PathBuf {
-    let mut lexical = PathBuf::new();
-    for c in path.components() {
-        match c {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                lexical.pop();
+                current.pop();
             }
-            other => lexical.push(other),
+            other => {
+                current.push(other);
+                if fs::symlink_metadata(&current).is_ok() {
+                    if let Ok(real) = fs::canonicalize(&current) {
+                        current = real;
+                    }
+                }
+            }
         }
     }
-    let mut existing = lexical.as_path();
-    let mut rest = Vec::new();
-    while fs::symlink_metadata(existing).is_err() {
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name.to_os_string());
-                existing = parent;
-            }
-            _ => return lexical,
-        }
-    }
-    let mut out = fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
-    out.extend(rest.iter().rev());
-    out
+    current
 }
 
 /// A path as a single-quoted shell word.
@@ -745,9 +741,12 @@ pub fn install_hook(root: &Path, guard_rel: &str) -> anyhow::Result<HookAction> 
     // generated hook and a chained local hook out of the repository, only
     // for a hook Nexus writes and before it moves or writes anything.
     if in_tree.is_some() {
+        // Literal paths: escaped, so a glob character in the hooks path
+        // (`.githooks[local]`) does not turn them into patterns.
         let rels: Vec<String> = [&hook, &chained_path]
             .iter()
             .filter_map(|p| work_tree_rel(root, p))
+            .map(|rel| literal_exclude_pattern(&rel))
             .collect();
         let rels: Vec<&str> = rels.iter().map(String::as_str).collect();
         super::shadow::try_ensure_git_excluded_in(root, &rels, "shadow guard hook")
@@ -780,6 +779,22 @@ fn work_tree_rel(root: &Path, path: &Path) -> Option<String> {
         return None;
     }
     Some(rel.to_string_lossy().into_owned())
+}
+
+/// A gitignore pattern that matches exactly the work-tree path `rel`: glob
+/// characters and a leading `#` or `!` are escaped.
+fn literal_exclude_pattern(rel: &str) -> String {
+    let mut out = String::with_capacity(rel.len() + 2);
+    if rel.starts_with(['#', '!']) {
+        out.push('\\');
+    }
+    for c in rel.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Whether git can run `path` as a hook.
@@ -1558,6 +1573,64 @@ mod tests {
             fs::read_to_string(dir.join(".githooks/commit-msg")).unwrap(),
             "#!/bin/sh\nexit 0\n"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_literal_exclude_pattern_escapes_globs() {
+        assert_eq!(
+            literal_exclude_pattern(".githooks/commit-msg"),
+            ".githooks/commit-msg"
+        );
+        assert_eq!(
+            literal_exclude_pattern(".githooks[local]/commit-msg"),
+            ".githooks\\[local\\]/commit-msg"
+        );
+        assert_eq!(literal_exclude_pattern("#h/a*?"), "\\#h/a\\*\\?");
+        assert_eq!(literal_exclude_pattern("!h"), "\\!h");
+    }
+
+    #[test]
+    fn test_hook_in_a_glob_named_hooks_dir_is_ignored() {
+        let dir = repo("hook-glob");
+        git(&dir, &["config", "core.hooksPath", ".githooks[local]"]);
+        let a = install_hook(&dir, "g.json").unwrap();
+        assert!(matches!(a, HookAction::Installed { .. }));
+        assert!(dir.join(".githooks[local]/commit-msg").exists());
+        let ignored = git_in(&dir)
+            .args([
+                "check-ignore",
+                "-q",
+                "--no-index",
+                "--",
+                ".githooks[local]/commit-msg",
+            ])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ignored);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_hooks_path_follows_symlinks_before_dotdot() {
+        let dir = repo("hook-link-dotdot");
+        fs::create_dir_all(dir.join("real/sub")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real/sub"), dir.join("link")).unwrap();
+        assert_eq!(
+            resolve_path(&dir.join("link/../hooks")),
+            dir.join("real/hooks")
+        );
+        assert_eq!(
+            resolve_path(&dir.join(".git/../.githooks")),
+            dir.join(".githooks")
+        );
+        git(&dir, &["config", "core.hooksPath", "link/../hooks"]);
+        let a = install_hook(&dir, "g.json").unwrap();
+        assert!(matches!(a, HookAction::Installed { .. }));
+        assert!(dir.join("real/hooks/commit-msg").exists());
+        assert!(!dir.join("hooks/commit-msg").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
