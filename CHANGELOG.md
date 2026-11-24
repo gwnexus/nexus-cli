@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+
+- **`nexus shadow check` no longer reports clean when git cannot read the index or history.** An unreadable index or commit history makes the check fail with a non-zero exit instead of passing with nothing scanned.
+- **The shadow guard commit-msg hook checks the message git will store.** Comment lines are skipped only when git strips them (`commit.cleanup`, an editor, `core.commentChar`); a `#` line kept by `git commit -m` or `commit.cleanup=whitespace` is checked.
+- **The shadow guard hook leaves tracked hooks alone, also when deleted locally.** Tracking is checked before the file is read; an existing hook moved aside for chaining is excluded from git before it is moved, and a hook without its executable bit is repaired and no longer reported as installed.
+- **Shadow guard git calls ignore repository overrides in the environment.** `GIT_DIR`, `GIT_INDEX_FILE` and similar variables from a hook or shell no longer redirect the checks to another repository or index.
 - **`nexus stash` keeps local edits recoverable.** Each save gets its own directory (two saves in one second no longer share one), the saved files live under `files/` apart from the metadata (an agent file named `stash.json` is no longer replaced by it), and executable workspace scripts are restored executable. `pop` checks every file first and keeps the stash, changing nothing, when one cannot be restored; a failed write keeps it too and names what was and was not restored. A final newline that pull added is no longer stashed as an edit. Stashes of older versions still restore.
 - **Remote marketplaces with a custom catalog path are usable.** A `github` or `git` marketplace declared with a catalog `path` is now matched against the stored registration of the agent CLI, which keeps that path; plugins from it are installed and updated again. A registration of another catalog, repository or checkout, a path leaving the checkout, or a missing record still fails closed.
 - **`nexus reload -y` keeps edited Claude Code files.** `-y` no longer counts as `--force` for edited locked Claude Code files and modified leftovers; only `--force` or `--force-unmanaged` replaces or removes them, as in `nexus pull`. Other files follow pull's `-y` handling.

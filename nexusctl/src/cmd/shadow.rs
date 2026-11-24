@@ -1229,7 +1229,7 @@ pub async fn check(api_url: &str, commits: usize, json: bool) -> anyhow::Result<
         }
         return Ok(0);
     };
-    let report = super::shadow_guard::run_check(&root, &guard, commits);
+    let report = super::shadow_guard::run_check(&root, &guard, commits)?;
     if json {
         let mut value = serde_json::to_value(&report)?;
         value["clean"] = serde_json::Value::Bool(report.is_clean());
