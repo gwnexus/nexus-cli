@@ -5384,6 +5384,12 @@ pub(crate) fn remove_generated_records_with(
     agentic_root: &str,
     remove: impl Fn(&str, Option<&str>) -> bool,
 ) -> anyhow::Result<usize> {
+    // A missing manifest has nothing to drop and is not created.
+    if fs::symlink_metadata(pull_manifest_path(workspace, agentic_root))
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(0);
+    }
     update_pull_manifest(workspace, agentic_root, |m| {
         let before = m.len();
         m.retain(|path, hash| !remove(path, Some(hash.as_str())));

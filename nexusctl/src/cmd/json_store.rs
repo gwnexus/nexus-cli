@@ -28,6 +28,19 @@ pub(crate) fn update_object<T>(
     Ok(result)
 }
 
+/// [`update_object`] for changes that only remove: a missing file stays
+/// missing (no empty file and no lock file are created), and `T::default()`
+/// is returned.
+pub(crate) fn update_existing<T: Default>(
+    path: &Path,
+    change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> T,
+) -> anyhow::Result<T> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        _ => update_object(path, change),
+    }
+}
+
 /// The JSON object at `path`: `None` when the file does not exist, an
 /// error when it cannot be read or is not a JSON object.
 pub(crate) fn read_object(
@@ -155,6 +168,18 @@ mod tests {
     }
 
     #[test]
+    fn test_update_existing_leaves_a_missing_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub/m.json");
+        let n: usize = update_existing(&path, |m| m.len()).unwrap();
+        assert_eq!(n, 0);
+        assert!(!dir.path().join("sub").exists());
+        update_object(&path, |m| m.insert("a".into(), 1.into())).unwrap();
+        let n: usize = update_existing(&path, |m| m.remove("a").map_or(0, |_| 1)).unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
     fn test_corrupt_file_is_an_error_and_stays() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("m.json");
@@ -186,8 +211,22 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for j in 0..10 {
-                        update_object(&path, |m| m.insert(format!("{i}-{j}"), true.into()))
-                            .unwrap();
+                        // The property is "no update is lost", not the
+                        // wait: on a loaded machine the bounded wait can
+                        // run out, and that answer is retried; any other
+                        // error fails the test.
+                        let mut tries = 0;
+                        loop {
+                            match update_object(&path, |m| {
+                                m.insert(format!("{i}-{j}"), true.into())
+                            }) {
+                                Ok(_) => break,
+                                Err(e) if e.to_string().contains("is locked") && tries < 20 => {
+                                    tries += 1;
+                                }
+                                Err(e) => panic!("update failed: {e}"),
+                            }
+                        }
                     }
                 })
             })

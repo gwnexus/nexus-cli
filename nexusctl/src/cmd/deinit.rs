@@ -17,7 +17,7 @@ use console::style;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::projection_cleanup::{self, Action, CleanupContext, Projection};
+use super::projection_cleanup::{self, Action, CleanupContext, Origin, Projection};
 
 /// Entries of `.nexus/` that deinit keeps.
 const NEXUS_KEPT_ENTRIES: &[&str] = &["config.toml", "stash"];
@@ -55,8 +55,9 @@ fn scaffold_entries(
     agentic_root: &str,
     planned: &[String],
     kept: &[String],
-    is_pristine: impl Fn(&str) -> bool,
+    origin: impl Fn(&str) -> Option<Origin>,
 ) -> (Vec<(PathBuf, RemovalKind)>, Vec<String>) {
+    let is_pristine = |rel: &str| origin(rel) == Some(Origin::Pristine);
     let mut out = Vec::new();
     let mut unrecorded = Vec::new();
     let rel_of = |p: &Path| {
@@ -68,20 +69,31 @@ fn scaffold_entries(
     if is_symlink(&nexus_dir) {
         // Its entries live elsewhere: only the link goes.
         out.push((nexus_dir, RemovalKind::Full));
-    } else if let Ok(entries) = fs::read_dir(&nexus_dir) {
-        let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-        entries.sort();
-        for path in entries {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-            if !name.is_some_and(|n| NEXUS_KEPT_ENTRIES.contains(&n.as_str())) {
-                push_unless_kept(cwd, &path, kept, &mut out);
-            }
-        }
+    } else if nexus_dir.is_dir() {
+        root_entries(
+            cwd,
+            &nexus_dir,
+            true,
+            kept,
+            &origin,
+            &mut out,
+            &mut unrecorded,
+        );
     }
     if agentic_root != ".nexus" && agentic_root != ".claude" {
         let alt_dir = cwd.join(agentic_root);
-        if alt_dir.exists() {
-            push_unless_kept(cwd, &alt_dir, kept, &mut out);
+        if is_symlink(&alt_dir) {
+            out.push((alt_dir, RemovalKind::Full));
+        } else if alt_dir.is_dir() {
+            root_entries(
+                cwd,
+                &alt_dir,
+                true,
+                kept,
+                &origin,
+                &mut out,
+                &mut unrecorded,
+            );
         }
     }
     // Marker files outside the projection plans: removed only when their
@@ -109,6 +121,65 @@ fn scaffold_entries(
         marker_file(agents_md);
     }
     (out, unrecorded)
+}
+
+/// Entries of Nexus-internal state, removed whole at the top of an agentic
+/// root: records, locks and generated output nobody edits.
+const NEXUS_STATE_ENTRIES: &[&str] =
+    &["generated", "sync-manifest.json", "sync-manifest.json.lock"];
+
+/// Plan the entries below an agentic root (`.nexus/` or an alternate one):
+/// Nexus state goes whole; a file goes when it is what Nexus recorded, or
+/// a Nexus-marked task snapshot (never recorded, rewritten on every pull).
+/// Edited files and files Nexus did not write stay and are reported.
+#[allow(clippy::too_many_arguments)]
+fn root_entries(
+    cwd: &Path,
+    dir: &Path,
+    top: bool,
+    kept: &[String],
+    origin: &impl Fn(&str) -> Option<Origin>,
+    out: &mut Vec<(PathBuf, RemovalKind)>,
+    unrecorded: &mut Vec<String>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let rel = path
+            .strip_prefix(cwd)
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if top && NEXUS_KEPT_ENTRIES.contains(&name.as_str()) {
+            continue;
+        }
+        if top && NEXUS_STATE_ENTRIES.contains(&name.as_str()) {
+            push_unless_kept(cwd, &path, kept, out);
+        } else if is_symlink(&path) {
+            // Only the link goes; what it points to stays.
+            if !kept.iter().any(|k| k.trim_end_matches('/') == rel) {
+                out.push((path, RemovalKind::Full));
+            }
+        } else if path.is_dir() {
+            root_entries(cwd, &path, false, kept, origin, out, unrecorded);
+        } else if kept.iter().any(|k| k == &rel) {
+            continue;
+        } else {
+            match origin(&rel) {
+                Some(Origin::Pristine) => out.push((path, RemovalKind::ManagedFile)),
+                Some(Origin::Owned) if name == "TASKS.md" => {
+                    out.push((path, RemovalKind::ManagedFile))
+                }
+                _ => unrecorded.push(rel),
+            }
+        }
+    }
 }
 
 /// Add `path` for full removal, unless a kept path lies at or below it:
@@ -180,7 +251,7 @@ pub fn run(force: bool) -> anyhow::Result<()> {
         .collect();
     let (to_remove, unrecorded) =
         scaffold_entries(&cwd, &agentic_root, &planned, &kept_paths, |rel| {
-            projection_cleanup::is_pristine(&cwd, &ctx, rel)
+            projection_cleanup::file_origin(&cwd, &ctx, rel)
         });
 
     if to_remove.is_empty() && unrecorded.is_empty() && plans.iter().all(|p| !p.has_leftovers()) {
@@ -282,7 +353,11 @@ pub fn run(force: bool) -> anyhow::Result<()> {
         remove_entry(path)?;
     }
     // Directories left empty; never one that still holds anything.
-    for dir in [".claude", ".opencode"] {
+    let mut dirs = vec![".claude", ".opencode", ".nexus"];
+    if agentic_root != ".nexus" && agentic_root != ".claude" {
+        dirs.push(agentic_root.as_str());
+    }
+    for dir in dirs {
         let path = cwd.join(dir);
         if path.is_dir() && !is_symlink(&path) && prune_empty_dirs(&path) {
             println!(
@@ -703,7 +778,7 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join(".claude/notes.md"), "source: nexus-platform\n").unwrap();
-        let pristine = |_: &str| true;
+        let pristine = |_: &str| Some(Origin::Pristine);
         let entries: Vec<PathBuf> = scaffold_entries(&dir, ".nexus", &[], &[], pristine)
             .0
             .into_iter()
@@ -736,7 +811,7 @@ mod tests {
         fs::write(dir.join(".nexus/generated/agent-routing.json"), "edited").unwrap();
         fs::write(dir.join(".nexus/generated/other.json"), "x").unwrap();
         let kept = vec![".nexus/generated/agent-routing.json".to_string()];
-        let (entries, _) = scaffold_entries(&dir, ".nexus", &[], &kept, |_| true);
+        let (entries, _) = scaffold_entries(&dir, ".nexus", &[], &kept, |_| Some(Origin::Pristine));
         let entries: Vec<PathBuf> = entries.into_iter().map(|(p, _)| p).collect();
         assert_eq!(entries, vec![dir.join(".nexus/generated/other.json")]);
         let _ = fs::remove_dir_all(&dir);
@@ -754,11 +829,55 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("AGENTS.md"), "---\nsource: nexus-platform\n---\n").unwrap();
-        let (entries, unrecorded) =
-            scaffold_entries(&dir, ".claude", &[], &[], |rel| rel == "AGENTS.md");
+        let (entries, unrecorded) = scaffold_entries(&dir, ".claude", &[], &[], |rel| {
+            (rel == "AGENTS.md").then_some(Origin::Pristine)
+        });
         let entries: Vec<PathBuf> = entries.into_iter().map(|(p, _)| p).collect();
         assert_eq!(entries, vec![dir.join("AGENTS.md")]);
         assert_eq!(unrecorded, vec![".claude/skills/nx/SKILL.md".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Below `.nexus/`, only what Nexus recorded unchanged (and the task
+    /// snapshot) goes; edited files and the operator's own files stay.
+    #[test]
+    fn test_agentic_root_keeps_edited_and_foreign_files() {
+        let dir = temp_dir("scaffold-root");
+        fs::create_dir_all(dir.join(".nexus/skills/a")).unwrap();
+        fs::create_dir_all(dir.join(".nexus/generated")).unwrap();
+        for f in [
+            ".nexus/AGENTS.md",
+            ".nexus/directives.md",
+            ".nexus/TASKS.md",
+            ".nexus/notes.md",
+            ".nexus/skills/a/SKILL.md",
+            ".nexus/sync-manifest.json",
+        ] {
+            fs::write(dir.join(f), "x").unwrap();
+        }
+        let origin = |rel: &str| match rel {
+            ".nexus/AGENTS.md" => Some(Origin::Modified),
+            ".nexus/directives.md" | ".nexus/skills/a/SKILL.md" => Some(Origin::Pristine),
+            ".nexus/TASKS.md" => Some(Origin::Owned),
+            _ => Some(Origin::Unknown),
+        };
+        let (entries, unrecorded) = scaffold_entries(&dir, ".nexus", &[], &[], origin);
+        let mut entries: Vec<String> = entries
+            .into_iter()
+            .map(|(p, _)| p.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![
+                ".nexus/TASKS.md",
+                ".nexus/directives.md",
+                ".nexus/generated",
+                ".nexus/skills/a/SKILL.md",
+                ".nexus/sync-manifest.json",
+            ]
+        );
+        assert_eq!(unrecorded, vec![".nexus/AGENTS.md", ".nexus/notes.md"]);
         let _ = fs::remove_dir_all(&dir);
     }
 

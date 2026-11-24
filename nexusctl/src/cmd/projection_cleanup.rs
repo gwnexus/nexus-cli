@@ -227,13 +227,12 @@ impl CleanupReport {
 // Planning
 // ---------------------------------------------------------------------------
 
-/// Plan the removal of `projection` from `workspace`. Reads only.
-/// Whether the file at `rel` is exactly what Nexus recorded (or `ctx`
-/// renders) for it: the only evidence on which a file outside a projection
-/// plan is deleted without `--force`.
-pub(crate) fn is_pristine(workspace: &Path, ctx: &CleanupContext, rel: &str) -> bool {
+/// Where the file at `rel` comes from by the Nexus records (or what `ctx`
+/// renders); `None` when it cannot be read. Only `Pristine` is evidence on
+/// which a file outside a projection plan is deleted without `--force`.
+pub(crate) fn file_origin(workspace: &Path, ctx: &CleanupContext, rel: &str) -> Option<Origin> {
     let Ok(bytes) = fs::read(workspace.join(rel)) else {
-        return false;
+        return None;
     };
     let sync_manifest = super::sync::load_manifest_pub(workspace);
     let pull_manifest = super::pull::load_pull_manifest(workspace, &ctx.agentic_root);
@@ -242,9 +241,10 @@ pub(crate) fn is_pristine(workspace: &Path, ctx: &CleanupContext, rel: &str) -> 
         sync_manifest: &sync_manifest,
         pull_manifest: &pull_manifest,
     };
-    records.origin(rel, &bytes, false) == Origin::Pristine
+    Some(records.origin(rel, &bytes, false))
 }
 
+/// Plan the removal of `projection` from `workspace`. Reads only.
 pub fn plan(workspace: &Path, projection: Projection, ctx: &CleanupContext) -> Plan {
     let sync_manifest = super::sync::load_manifest_pub(workspace);
     let pull_manifest = super::pull::load_pull_manifest(workspace, &ctx.agentic_root);
@@ -279,7 +279,7 @@ struct Records<'a> {
 
 /// Origin of one file on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Origin {
+pub(crate) enum Origin {
     /// Recorded (or rendered) by Nexus and unchanged.
     Pristine,
     /// Recorded (or rendered) by Nexus, content differs.
