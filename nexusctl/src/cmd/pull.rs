@@ -5072,6 +5072,30 @@ mod tests {
         assert!(super::super::sync::local_script_manifest_entries(&manifest).is_empty());
     }
 
+    /// An exclude file that cannot be updated stops the local-script sync:
+    /// nothing is written and nothing dropped is removed.
+    #[test]
+    fn test_local_scripts_skip_when_the_exclude_cannot_be_updated() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path();
+        init_git_repo(dir, &[]);
+        assert_eq!(sync_local(dir, &local_map(&[(LOCAL_SH, "v1\n")])), 1);
+        let mut bytes = fs::read(dir.join(".git/info/exclude")).unwrap();
+        bytes.extend_from_slice(b"# \xff\n");
+        fs::write(dir.join(".git/info/exclude"), &bytes).unwrap();
+        let new = "scripts/devbox/local/new.sh";
+        // LOCAL_SH is no longer delivered (unchanged: would be removed).
+        assert_eq!(sync_local(dir, &local_map(&[(new, "n\n")])), 0);
+        assert!(!dir.join(new).exists());
+        assert!(dir.join(LOCAL_SH).exists());
+        let manifest = super::super::sync::load_manifest_pub(dir);
+        assert_eq!(
+            super::super::sync::local_script_manifest_entries(&manifest).len(),
+            1
+        );
+        assert_eq!(fs::read(dir.join(".git/info/exclude")).unwrap(), bytes);
+    }
+
     #[test]
     fn test_local_scripts_reject_paths_outside_scripts_dir() {
         let dir = tempfile::TempDir::new().unwrap();

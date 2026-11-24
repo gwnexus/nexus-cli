@@ -973,6 +973,13 @@ pub async fn switch(
                 }
             } else {
                 let report = set_level(api_url, level, assume_yes).await?;
+                // The server level is set; a local exclude that could not be
+                // written is reported as a failure after the other targets.
+                if let Some(e) = report.as_ref().and_then(|(r, _)| r.error.clone()) {
+                    refused = Some(anyhow::anyhow!(
+                        "policy.shadow is {level} on the server, but .git/info/exclude was not updated: {e}; fix the file and run the command again"
+                    ));
+                }
                 if let Some((report, root)) =
                     report.filter(|(r, _)| on && untrack && r.error.is_none())
                 {
@@ -1053,6 +1060,11 @@ pub async fn switch(
             let export = client.export_agent_files(&project_id).await?;
             let report = apply_server_excludes(&workspace, &export.git_exclude);
             print_server_exclude_report(&report, export.shadow.as_deref());
+            if let Some(ref e) = report.error {
+                refused = Some(anyhow::anyhow!(
+                    "{WORKSPACE_SETTING} is {on} on the server, but .git/info/exclude was not updated: {e}; fix the file and run the command again"
+                ));
+            }
             if on && untrack && report.error.is_none() {
                 // Only the workspace paths of the list, also when they
                 // were excluded before (an explicit repeat).
@@ -1544,10 +1556,17 @@ fn effectively_ignored(work_tree: &Path, paths: &[Vec<u8>]) -> anyhow::Result<Ve
         input.extend_from_slice(p);
         input.push(0);
     }
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&input)?;
-    }
+    // Written from a thread: git prints matches while it reads, so a full
+    // stdout pipe must not block the writer.
+    let writer = child
+        .stdin
+        .take()
+        .map(|mut stdin| std::thread::spawn(move || stdin.write_all(&input)));
     let out = child.wait_with_output()?;
+    if let Some(w) = writer {
+        w.join()
+            .map_err(|_| anyhow::anyhow!("git check-ignore input failed"))??;
+    }
     // 0: some ignored, 1: none ignored, anything else: git failed.
     match out.status.code() {
         Some(0) | Some(1) => {}
@@ -1590,7 +1609,10 @@ fn staged_only_missing(work_tree: &Path, paths: &[Vec<u8>]) -> anyhow::Result<Ve
     Ok(paths
         .iter()
         .filter(|p| staged.contains(&p.as_slice()))
-        .filter(|p| fs::symlink_metadata(work_tree.join(path_from_bytes(p))).is_err())
+        // A directory in place of the file does not hold its content either.
+        .filter(|p| {
+            fs::symlink_metadata(work_tree.join(path_from_bytes(p))).map_or(true, |m| m.is_dir())
+        })
         .cloned()
         .collect())
 }
@@ -1695,8 +1717,9 @@ fn finish_untrack(report: &UntrackReport) -> anyhow::Result<()> {
     anyhow::bail!("some files were not untracked (see above); fix them, then run the command again")
 }
 
-/// An exclude entry without the spellings that select the same paths: a
-/// trailing `/`, `/*` or `/**` and a leading `**/`.
+/// An exclude entry without the trailing spellings that select the same
+/// paths (`/`, `/*`, `/**`). A leading `**/` matches at any depth, so it is
+/// kept: such an entry is not one of the root paths.
 fn normalized_entry(entry: &str) -> &str {
     let mut e = entry.trim();
     loop {
@@ -1710,7 +1733,7 @@ fn normalized_entry(entry: &str) -> &str {
         }
         e = next;
     }
-    e.strip_prefix("**/").unwrap_or(e)
+    e
 }
 
 /// Whether `entry` is one of the workspace target's paths (or a path below
@@ -1784,14 +1807,7 @@ fn print_tracked_hint(report: &UntrackReport, target: &str) {
     if !at_root {
         return;
     }
-    println!(
-        "      {}",
-        style(format!(
-            "(same as: git rm -r --cached -- {})",
-            roots.join(" ")
-        ))
-        .dim()
-    );
+
     println!("    Or hide their changes in this clone only:");
     println!(
         "      {}",
@@ -2048,6 +2064,26 @@ mod tests {
         assert_eq!(report.removed, 1);
         assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
         assert_eq!(index(path), vec![".claude/settings.json", "readme.txt"]);
+        // A directory in place of the staged file does not hold it either.
+        fs::create_dir_all(path.join(".claude/settings.json")).unwrap();
+        let report = untrack_patterns(path, &[".claude/"], true).unwrap();
+        assert_eq!(report.removed, 0);
+        assert_eq!(index(path), vec![".claude/settings.json", "readme.txt"]);
+    }
+
+    /// Many matches: git's output must not block the paths sent to it.
+    #[test]
+    fn test_effectively_ignored_handles_many_paths() {
+        let dir = make_temp_repo_with_commit("readme.txt", "root");
+        let path = dir.path();
+        exclude_rules(path, &[".claude/"]);
+        let paths: Vec<Vec<u8>> = (0..20000)
+            .map(|i| format!(".claude/some/long/directory/name/file-{i:05}.md").into_bytes())
+            .collect();
+        assert_eq!(
+            effectively_ignored(path, &paths).unwrap().len(),
+            paths.len()
+        );
     }
 
     #[test]
@@ -2065,6 +2101,8 @@ mod tests {
         assert!(is_workspace_entry("scripts/devbox/local.sh"));
         assert!(is_workspace_entry(".devbox/**"));
         assert!(!is_workspace_entry("scripts/other/**"));
+        // Any depth: not the root workspace paths.
+        assert!(!is_workspace_entry("**/scripts/devbox/**"));
         assert!(is_agentic_entry(".claude/**", ".nexus"));
         assert!(is_agentic_entry(".nexus/claude/zellij.local.kdl", ".nexus"));
         assert!(is_agentic_entry(".agent/", ".agent"));

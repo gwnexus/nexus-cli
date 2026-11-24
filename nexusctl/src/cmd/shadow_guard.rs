@@ -980,10 +980,21 @@ pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>, a
         Some(g) => {
             let json = serde_json::to_string_pretty(g).unwrap_or_default() + "\n";
             if fs::read_to_string(&cache).ok().as_deref() != Some(json.as_str()) {
-                if let Some(parent) = cache.parent() {
-                    let _ = fs::create_dir_all(parent);
+                let written = match cache.parent() {
+                    Some(parent) => fs::create_dir_all(parent),
+                    None => Ok(()),
                 }
-                let _ = fs::write(&cache, json);
+                .and_then(|()| fs::write(&cache, json));
+                // Without the cache a hook pointed at it would pass every
+                // message: the hook and an older cache stay as they are.
+                if let Err(e) = written {
+                    println!(
+                        "   {} shadow guard not cached ({}): {e}; the commit-msg hook was not changed",
+                        style("!").bold().yellow(),
+                        cache.display()
+                    );
+                    return;
+                }
             }
             if g.commit_msg_hook && !allow_hook {
                 println!(
@@ -1006,8 +1017,17 @@ pub fn sync(workspace: &Path, agentic_root: &str, guard: Option<&ShadowGuard>, a
     match result {
         Ok(action) => {
             print_hook_action(&root, &action);
-            // The hook no longer reads an older cache location now.
-            remove_legacy_cache(workspace, agentic_root);
+            // Only a hook Nexus just wrote, kept or removed no longer reads
+            // an older cache location; a hook left alone may still.
+            if matches!(
+                action,
+                HookAction::Installed { .. }
+                    | HookAction::Unchanged { .. }
+                    | HookAction::Removed { .. }
+                    | HookAction::None
+            ) {
+                remove_legacy_cache(workspace, agentic_root);
+            }
         }
         Err(e) => println!(
             "   {} shadow guard commit-msg hook: {}",
@@ -1028,6 +1048,12 @@ fn remove_legacy_cache(workspace: &Path, agentic_root: &str) {
     }
     let path = workspace.join(&legacy);
     if fs::symlink_metadata(&path).is_err() {
+        return;
+    }
+    // The same file under another name (a linked agentic root): it is the
+    // current cache.
+    let current = fs::canonicalize(workspace.join(cache_rel_path())).ok();
+    if current.is_some() && fs::canonicalize(&path).ok() == current {
         return;
     }
     if nexus_core::config::trust::git_tracking(&path) != Some(false) {
@@ -1466,6 +1492,14 @@ mod tests {
         assert!(!legacy.exists());
         assert!(dir.join(".nexus/generated/shadow-guard.json").exists());
         assert_eq!(cached_guard(&dir).unwrap().level, g.level);
+        // A linked agentic root names the current cache: kept.
+        #[cfg(unix)]
+        {
+            fs::remove_dir_all(dir.join(".agent")).unwrap();
+            std::os::unix::fs::symlink(dir.join(".nexus"), dir.join(".agent")).unwrap();
+            sync(&dir, ".agent", Some(&g), false);
+            assert!(dir.join(".nexus/generated/shadow-guard.json").exists());
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
