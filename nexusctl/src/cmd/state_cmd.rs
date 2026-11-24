@@ -661,6 +661,7 @@ mod tests {
 
     fn entry(path: &str, class: FileClass, state: State, kind: Kind) -> Entry {
         Entry {
+            error: None,
             path: path.into(),
             class,
             state,
@@ -674,6 +675,7 @@ mod tests {
     fn test_entry_diff_direction() {
         // Content: local additions appear as `+` against the backend base.
         let e = Entry {
+            error: None,
             path: "devbox.json".into(),
             class: FileClass::Content,
             state: State::Modified,
@@ -700,6 +702,7 @@ mod tests {
     fn test_entry_diff_without_backend_version() {
         // Compared with the record only: no diff against an empty body.
         let e = Entry {
+            error: None,
             path: "scripts/devbox/setup.sh".into(),
             class: FileClass::Content,
             state: State::Modified,

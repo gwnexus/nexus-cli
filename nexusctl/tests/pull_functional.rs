@@ -80,6 +80,47 @@ fn dry_run_changes_nothing() {
     assert_eq!(snapshot(&ws), before, "pulled workspace changed");
 }
 
+/// On the legacy workspace export, `--dry-run` previews what a pull would
+/// do there too: the consent it would ask for and the files it would
+/// remove, still without writing.
+#[test]
+fn dry_run_on_legacy_export_previews_consent_and_removals() {
+    let (api, ws) = setup(&full_backend());
+    ws.nexus(&api, &["pull", "--trust"]).assert_ok();
+    api.route(
+        "POST",
+        "/api/mcp/agent-files#ws_export",
+        500,
+        serde_json::json!({"error": "boom"}),
+    );
+    api.route(
+        "POST",
+        "/api/mcp/workspace-files#wf_export",
+        200,
+        serde_json::json!({"action": "wf_export", "project_id": PROJECT_ID,
+               "workspace": {"target_path": "devbox.json",
+                             "body": "{\"packages\": [\"v1\"]}\n", "provider": "devbox"},
+               "scripts": []}),
+    );
+    let before = snapshot(&ws);
+    let run = ws.nexus(&api, &["pull", "--dry-run"]);
+    run.assert_ok();
+    let out = run.all();
+    assert!(
+        out.lines()
+            .any(|l| l.contains("would ask") && l.contains("devbox.json")),
+        "no consent preview:\n{out}"
+    );
+    for script in [SETUP, CHECK] {
+        assert!(
+            out.lines()
+                .any(|l| l.contains("REMOVE") && l.contains(script)),
+            "{script} not previewed as removed:\n{out}"
+        );
+    }
+    assert_eq!(snapshot(&ws), before, "dry run wrote");
+}
+
 /// A local edit survives a pull without --force; --force replaces it.
 #[test]
 fn local_edits_are_kept_until_forced() {
