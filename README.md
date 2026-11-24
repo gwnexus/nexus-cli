@@ -308,8 +308,14 @@ nexus stash pop     # restore the most recent stash
 nexus stash list    # show all available stashes
 ```
 
-Stashes are stored locally in `.nexus/stash/<timestamp>/` with metadata.
-Multiple stashes can coexist; `pop` always restores the most recent one.
+Stashes are stored locally in `.nexus/stash/<timestamp>/`: the saved files
+under `files/`, the metadata in `stash.json` next to them. Two saves in the
+same second get separate directories (`<timestamp>-001`, ...). Multiple
+stashes can coexist; `pop` always restores the most recent one, makes a
+saved executable script executable again, and removes the stash only once
+every file is back. When a file cannot be restored (it is missing from the
+stash or its path is unsafe), `pop` changes nothing, keeps the stash and
+names the files.
 
 ### Generated `opencode.json`
 
