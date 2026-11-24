@@ -269,6 +269,9 @@ pub struct ClaudeAgentInputs<'a> {
     pub lane_actors: &'a [ClaudeLaneActor],
     /// Gateway classification is restricted: no delegates.
     pub restricted: bool,
+    /// The inputs come from a successful export. Only then are recorded
+    /// delegates of actors it no longer lists withdrawn.
+    pub export_ok: bool,
 }
 
 impl<'a> ClaudeAgentInputs<'a> {
@@ -281,6 +284,7 @@ impl<'a> ClaudeAgentInputs<'a> {
             claude_agents: e.claude_agents.as_deref(),
             lane_actors: e.claude_lane_actors.as_deref().unwrap_or_default(),
             restricted: is_restricted_classification(e.effective_gateway_classification.as_deref()),
+            export_ok: true,
         }
     }
 }
@@ -295,31 +299,37 @@ pub fn is_restricted_classification(classification: Option<&str>) -> bool {
 /// `.claude/agents/<slug>.md` (see [`claude_agent_files`]). A
 /// gateway-lane actor's file that pull wrote earlier and that is not
 /// rendered anymore (restricted project) is removed when unmodified.
-/// Returns the number of files written.
+/// Returns the `(path, content)` pairs written.
 pub fn write_claude_agents(
     target: &Path,
     agentic_root: &str,
     actors: &[ExportedActorFile],
     agent_files: &[ExportedAgentFile],
     inputs: &ClaudeAgentInputs,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<Vec<(String, String)>> {
     let files = claude_agent_files(actors, agent_files, inputs);
-    remove_stale_lane_agents(target, agentic_root, inputs.lane_actors, &files)?;
+    remove_stale_lane_agents(
+        target,
+        agentic_root,
+        inputs.lane_actors,
+        inputs.export_ok,
+        &files,
+    )?;
     if files.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     super::pull::validate_agent_file_target_path(target, ".claude/agents")?;
     let agents_dir = target.join(".claude").join("agents");
     fs::create_dir_all(&agents_dir)?;
 
-    let mut written = 0;
-    for (rel, body) in &files {
-        if !super::pull::safe_target(target, rel) {
+    let mut written = Vec::new();
+    for (rel, body) in files {
+        if !super::pull::safe_target(target, &rel) {
             continue;
         }
-        fs::write(target.join(rel), body)?;
-        written += 1;
+        fs::write(target.join(&rel), &body)?;
+        written.push((rel, body));
     }
     Ok(written)
 }
@@ -330,6 +340,7 @@ fn remove_stale_lane_agents(
     target: &Path,
     agentic_root: &str,
     lane_actors: &[ClaudeLaneActor],
+    export_ok: bool,
     rendered: &[(String, String)],
 ) -> anyhow::Result<()> {
     let recorded = super::pull::load_pull_manifest(target, agentic_root);
@@ -340,7 +351,7 @@ fn remove_stale_lane_agents(
         .iter()
         .map(|a| (format!(".claude/agents/{}.md", a.slug), false))
         .collect();
-    for rel in recorded.keys() {
+    for rel in recorded.keys().filter(|_| export_ok) {
         let is_agent = rel
             .strip_prefix(".claude/agents/")
             .is_some_and(|f| f.ends_with(".md") && !f.contains('/'));
@@ -591,6 +602,13 @@ pub fn write_claude_hook_adapters(
     Ok(written)
 }
 
+/// Whether `rel` is `.claude/settings.json`, which only the projection
+/// merge writes: an agent file or CCX file for it is never written over it.
+pub(crate) fn is_merged_settings_target(rel: &str) -> bool {
+    let rel = rel.trim_start_matches("./");
+    rel.eq_ignore_ascii_case(".claude/settings.json")
+}
+
 /// `.claude/settings.json` for a merge: `{}` when the file does not exist,
 /// `None` when it exists but is not a JSON object (a trailing comma, say).
 /// Such a file is left untouched: rewriting it would drop the operator's
@@ -640,13 +658,16 @@ fn write_settings(path: &Path, settings: &serde_json::Value) -> anyhow::Result<(
     )
 }
 
-/// The exact script a hook command runs: a whitespace-separated token,
-/// quotes stripped, that is `script` or ends in `/<script>`.
+/// The exact script a hook command runs: a shell word (split at
+/// whitespace and `; & | ( ) < >`), quotes stripped, that is `script` or
+/// ends in `/<script>`.
 fn command_runs_script(command: &str, script: &str) -> bool {
-    command.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c| c == '"' || c == '\'');
-        token == script || token.strip_suffix(script).is_some_and(|p| p.ends_with('/'))
-    })
+    command
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>'))
+        .any(|token| {
+            let token = token.trim_matches(|c| c == '"' || c == '\'');
+            token == script || token.strip_suffix(script).is_some_and(|p| p.ends_with('/'))
+        })
 }
 
 /// Merge hook registrations for each adapter into `.claude/settings.json`'s
@@ -675,11 +696,37 @@ fn command_runs_script(command: &str, script: &str) -> bool {
 ///
 /// The file is only rewritten when `appended > 0` or something was
 /// actually removed.
+#[cfg(test)]
 pub fn merge_claude_hooks(
     target: &Path,
     adapters: &[ClaudeHookAdapter],
     previous_hooks: Option<&std::collections::BTreeMap<String, ccx::CcxLockHookEntry>>,
 ) -> anyhow::Result<(usize, Vec<String>)> {
+    Ok(
+        merge_claude_hooks_checked(target, adapters, previous_hooks)?
+            .map(|m| (m.appended, m.removed_plugins))
+            .unwrap_or_default(),
+    )
+}
+
+/// What [`merge_claude_hooks_checked`] did.
+#[derive(Debug, Default)]
+pub(crate) struct HookMerge {
+    pub appended: usize,
+    pub removed_plugins: Vec<String>,
+    /// Withdrawn adapters whose script could not be deleted: kept in the
+    /// lock (without registrations), so the next pull retries.
+    pub retained: Vec<ccx::CcxLockHookEntry>,
+}
+
+/// `merge_claude_hooks`, or `None` when `settings.json` is not a valid
+/// JSON object and nothing was merged (the hook lock record must then stay
+/// as it is).
+pub(crate) fn merge_claude_hooks_checked(
+    target: &Path,
+    adapters: &[ClaudeHookAdapter],
+    previous_hooks: Option<&std::collections::BTreeMap<String, ccx::CcxLockHookEntry>>,
+) -> anyhow::Result<Option<HookMerge>> {
     let removable: Vec<&ccx::CcxLockHookEntry> = previous_hooks
         .map(|prev| {
             let current_paths: std::collections::HashSet<&str> =
@@ -689,8 +736,8 @@ pub fn merge_claude_hooks(
                 .collect()
         })
         .unwrap_or_default();
-    // Adapters still sent: the registrations of events they no longer
-    // register for.
+    // Adapters still sent: the registrations (event and matcher) they no
+    // longer send.
     let retired: Vec<ccx::CcxLockHookEntry> = previous_hooks
         .into_iter()
         .flat_map(|prev| prev.values())
@@ -704,6 +751,7 @@ pub fn merge_claude_hooks(
                 .filter(|reg| {
                     !adapter.hook_events.iter().any(|e| {
                         e.event == reg.event
+                            && e.matcher == reg.matcher
                             && hook_command(&adapter.target_path, &e.event) == reg.command
                     })
                 })
@@ -717,13 +765,13 @@ pub fn merge_claude_hooks(
         .collect();
 
     if adapters.is_empty() && removable.is_empty() {
-        return Ok((0, Vec::new()));
+        return Ok(Some(HookMerge::default()));
     }
 
     let settings_path = target.join(".claude").join("settings.json");
     super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
     let Some(mut settings) = load_settings_for_merge(&settings_path)? else {
-        return Ok((0, Vec::new()));
+        return Ok(None);
     };
     let settings_obj = settings.as_object_mut().expect("just ensured object");
     let hooks = settings_obj
@@ -737,21 +785,13 @@ pub fn merge_claude_hooks(
     let mut removed_plugin_names = Vec::new();
     for entry in &removable {
         remove_hook_registrations(hooks_obj, entry);
-        let script_path = target.join(&entry.target_path);
-        if super::pull::validate_agent_file_target_path(target, &entry.target_path).is_err() {
-            removed_plugin_names.push(entry.plugin_name.clone());
-            continue;
-        }
-        if let Ok(content) = fs::read_to_string(&script_path) {
-            if nexus_core::hash::sha256_hex(&content) == entry.file_sha256 {
-                let _ = fs::remove_file(&script_path);
-            }
-        }
         removed_plugin_names.push(entry.plugin_name.clone());
     }
     let mut retired_removed = 0;
     for entry in &retired {
-        retired_removed += remove_hook_registrations(hooks_obj, entry);
+        for reg in &entry.registrations {
+            retired_removed += remove_exact_registration(hooks_obj, reg);
+        }
     }
 
     let mut appended = 0;
@@ -869,7 +909,64 @@ pub fn merge_claude_hooks(
         write_settings(&settings_path, &settings)?;
     }
 
-    Ok((appended, removed_plugin_names))
+    // Scripts only after the registrations are gone from settings.json, so
+    // no hook is left pointing at a deleted script.
+    let mut retained = Vec::new();
+    for entry in &removable {
+        if super::pull::validate_agent_file_target_path(target, &entry.target_path).is_err() {
+            continue;
+        }
+        let script_path = target.join(&entry.target_path);
+        let Ok(content) = fs::read_to_string(&script_path) else {
+            continue;
+        };
+        if nexus_core::hash::sha256_hex(&content) == entry.file_sha256
+            && fs::remove_file(&script_path).is_err()
+        {
+            retained.push(ccx::CcxLockHookEntry {
+                registrations: Vec::new(),
+                ..(*entry).clone()
+            });
+        }
+    }
+
+    Ok(Some(HookMerge {
+        appended,
+        removed_plugins: removed_plugin_names,
+        retained,
+    }))
+}
+
+/// Remove the hooks running `reg.command` from the entries of its event
+/// whose matcher is exactly `reg.matcher`; an entry left without hooks is
+/// dropped. Returns the number of hooks removed.
+fn remove_exact_registration(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    reg: &ccx::CcxLockHookRegistration,
+) -> usize {
+    let Some(event_array) = hooks_obj.get_mut(&reg.event).and_then(|v| v.as_array_mut()) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for item in event_array.iter_mut() {
+        if item.get("matcher").and_then(|m| m.as_str()) != reg.matcher.as_deref() {
+            continue;
+        }
+        if let Some(hooks) = item.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            let before = hooks.len();
+            hooks.retain(|h| {
+                h.get("command").and_then(|c| c.as_str()) != Some(reg.command.as_str())
+            });
+            removed += before - hooks.len();
+        }
+    }
+    event_array.retain(|item| {
+        !item
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|h| h.is_empty())
+    });
+    removed
 }
 
 /// The command Nexus registers for an adapter script and event.
@@ -933,7 +1030,7 @@ pub(crate) fn remove_hook_registrations(
 /// A hard operator requirement ("must never appear"), not a cosmetic
 /// preference, so this runs on every init/pull and merges into an
 /// already-existing, operator-customized `settings.json` exactly like
-/// [`merge_claude_hooks`]: unlike the `env` block in
+/// `merge_claude_hooks`: unlike the `env` block in
 /// [`write_claude_settings`], which is create-once-only. Every other key,
 /// including the `hooks` block, is preserved verbatim; only
 /// `includeCoAuthoredBy` is touched.
@@ -1013,7 +1110,7 @@ fn enforce_commit_attribution(
 /// `.claude/settings.json`.
 ///
 /// Runs on every init/pull, not create-once (same pattern as
-/// [`merge_claude_hooks`]/[`merge_claude_co_authored_by`]): for each dot
+/// `merge_claude_hooks`/[`merge_claude_co_authored_by`]): for each dot
 /// path in `spec.managed_keys`, the corresponding value from
 /// `spec.values` is set/replaced at that path. If both the existing value
 /// and the new value at a path are JSON arrays (e.g.
@@ -1027,21 +1124,32 @@ fn enforce_commit_attribution(
 /// Returns the number of managed keys whose value actually changed (0 if
 /// nothing changed or `spec` is `None`; the file is only rewritten when
 /// this is non-zero).
+#[cfg(test)]
 pub fn merge_claude_generic_settings(
     target: &Path,
     spec: Option<&ClaudeSettingsSpec>,
     previous: Option<&ClaudeSettingsSpec>,
 ) -> anyhow::Result<usize> {
+    Ok(merge_claude_generic_settings_checked(target, spec, previous)?.unwrap_or(0))
+}
+
+/// `merge_claude_generic_settings`, or `None` when `settings.json` is
+/// not a valid JSON object and nothing was merged.
+pub(crate) fn merge_claude_generic_settings_checked(
+    target: &Path,
+    spec: Option<&ClaudeSettingsSpec>,
+    previous: Option<&ClaudeSettingsSpec>,
+) -> anyhow::Result<Option<usize>> {
     let spec_has_keys = spec.is_some_and(|s| !s.managed_keys.is_empty());
     let previous_has_keys = previous.is_some_and(|p| !p.managed_keys.is_empty());
     if !spec_has_keys && !previous_has_keys {
-        return Ok(0);
+        return Ok(Some(0));
     }
 
     let settings_path = target.join(".claude").join("settings.json");
     super::pull::validate_agent_file_target_path(target, ".claude/settings.json")?;
     let Some(mut settings) = load_settings_for_merge(&settings_path)? else {
-        return Ok(0);
+        return Ok(None);
     };
 
     let changed = apply_generic_settings(&mut settings, spec, previous);
@@ -1049,10 +1157,10 @@ pub fn merge_claude_generic_settings(
         write_settings(&settings_path, &settings)?;
     }
 
-    Ok(changed)
+    Ok(Some(changed))
 }
 
-/// The pure part of [`merge_claude_generic_settings`]: apply `spec` (and
+/// The pure part of `merge_claude_generic_settings`: apply `spec` (and
 /// the removal rules against `previous`) to an in-memory `settings.json`
 /// value. Returns the number of keys/paths changed. Also used read-only on
 /// a copy by `nexus claude status`/`diff`.
@@ -1219,6 +1327,15 @@ pub fn merge_claude_md_managed_block(
         return Ok(ClaudeMdOutcome::Skipped);
     }
 
+    // Exactly one ordered BEGIN/END pair is replaced; any other count of
+    // markers is malformed and left alone.
+    let markers = (
+        existing.matches(CLAUDE_MD_MANAGED_BEGIN).count(),
+        existing.matches(CLAUDE_MD_MANAGED_END).count(),
+    );
+    if markers != (1, 1) && markers != (0, 0) {
+        return Ok(ClaudeMdOutcome::Skipped);
+    }
     let new_content = match (
         existing.find(CLAUDE_MD_MANAGED_BEGIN),
         existing.find(CLAUDE_MD_MANAGED_END),
@@ -1297,7 +1414,7 @@ pub(crate) const BASELINE_MCP_PERMISSIONS: &[&str] = &[
 /// `.claude/settings.json`'s `permissions.allow` array.
 ///
 /// Safe to run against an already-existing, operator-customized
-/// `settings.json`, exactly like [`merge_claude_hooks`] and
+/// `settings.json`, exactly like `merge_claude_hooks` and
 /// [`merge_claude_co_authored_by`]: only appends entries from
 /// [`BASELINE_MCP_PERMISSIONS`] that aren't already present (by exact
 /// string match) in `permissions.allow`. Never removes or reorders any
@@ -1592,11 +1709,11 @@ pub fn render_claude_projection(
 
     let agents_written =
         write_claude_agents(target, agentic_root, actors, agent_files, agent_inputs)?;
-    if agents_written > 0 {
+    if !agents_written.is_empty() {
         println!(
             "   {} .claude/agents/ ({} agent(s))",
             style("+").bold().green(),
-            agents_written
+            agents_written.len()
         );
     }
     if agent_inputs.restricted && !agent_inputs.lane_actors.is_empty() {
@@ -1617,12 +1734,8 @@ pub fn render_claude_projection(
     // Record what was written in the pull manifest, so a later switch to
     // OpenCode can tell these files (unmodified) apart from local edits
     // and the operator's own skills/agents (v0.28.4 projection cleanup).
-    // Only files on disk: a path `safe_target` rejects was not written.
-    rendered.extend(
-        claude_agent_files(actors, agent_files, agent_inputs)
-            .into_iter()
-            .filter(|(rel, _)| super::pull::safe_target(target, rel)),
-    );
+    // Only the files the writers put on disk.
+    rendered.extend(agents_written);
     super::pull::record_generated_many(target, agentic_root, &rendered)?;
 
     // Routing-guard adapter inputs: only written when the backend supplies runtime_spec.
@@ -1675,11 +1788,18 @@ pub fn render_claude_projection(
     let previous_hooks = ccx::load_lock(target, agentic_root)
         .map(|l| l.hooks)
         .unwrap_or_default();
-    let (hooks_appended, removed_hook_plugins) = if export_ok && settings_ok {
-        merge_claude_hooks(target, hook_adapters, Some(&previous_hooks))?
+    // `None`: not merged (export failed, or settings.json not valid, also
+    // when it became invalid since the check above); the lock keeps its
+    // hook record.
+    let hook_merge = if export_ok && settings_ok {
+        merge_claude_hooks_checked(target, hook_adapters, Some(&previous_hooks))?
     } else {
-        (0, Vec::new())
+        None
     };
+    let (hooks_appended, removed_hook_plugins) = hook_merge
+        .as_ref()
+        .map(|m| (m.appended, m.removed_plugins.clone()))
+        .unwrap_or_default();
     if hooks_appended > 0 {
         println!(
             "   {} .claude/settings.json (+{} hook registration(s))",
@@ -1719,7 +1839,11 @@ pub fn render_claude_projection(
             )
         })
         .collect();
-    if export_ok && settings_ok {
+    if let Some(merge) = hook_merge {
+        let mut new_hooks = new_hooks;
+        for entry in merge.retained {
+            new_hooks.entry(entry.target_path.clone()).or_insert(entry);
+        }
         ccx::record_hooks_in_lock(target, agentic_root, new_hooks)?;
     }
 
@@ -1749,8 +1873,12 @@ pub fn render_claude_projection(
         let previous_settings =
             super::ccx::load_lock(target, agentic_root).and_then(|l| l.settings);
         let settings_before = read_claude_settings(target);
-        let generic_settings_changed =
-            merge_claude_generic_settings(target, claude_settings, previous_settings.as_ref())?;
+        let merged = merge_claude_generic_settings_checked(
+            target,
+            claude_settings,
+            previous_settings.as_ref(),
+        )?;
+        let generic_settings_changed = merged.unwrap_or(0);
         settings_changes = super::ccx::describe_settings_changes(
             &settings_before,
             &read_claude_settings(target),
@@ -1764,17 +1892,28 @@ pub fn render_claude_projection(
                 generic_settings_changed
             );
         }
-        super::ccx::record_settings_in_lock(target, agentic_root, claude_settings)?;
+        if merged.is_some() {
+            super::ccx::record_settings_in_lock(target, agentic_root, claude_settings)?;
+        }
     }
 
     // Co-authored-by trailer suppression: hard operator requirement,
     // absent-means-suppress. After the generic keys, so a commit
     // attribution text cannot bring the trailer back.
-    let export_manages_attribution = claude_settings.is_some_and(|spec| {
+    // On a failed export the lock tells: a managed `attribution` keeps its
+    // value until the next successful export.
+    let manages_attribution = |spec: &ClaudeSettingsSpec| {
         spec.managed_keys
             .iter()
             .any(|k| k == "attribution" || k.starts_with("attribution."))
-    });
+    };
+    let export_manages_attribution = if export_ok {
+        claude_settings.is_some_and(manages_attribution)
+    } else {
+        super::ccx::load_lock(target, agentic_root)
+            .and_then(|l| l.settings)
+            .is_some_and(|spec| manages_attribution(&spec))
+    };
     if merge_claude_co_authored_by(target, include_co_authored_by, export_manages_attribution)? {
         println!(
             "   {} .claude/settings.json (includeCoAuthoredBy: {})",
@@ -2139,7 +2278,7 @@ mod tests {
         let written =
             write_claude_agents(&dir, ".nexus", &actors, &[], &ClaudeAgentInputs::default())
                 .unwrap();
-        assert_eq!(written, 2);
+        assert_eq!(written.len(), 2);
         assert!(dir.join(".claude/agents/planner.md").exists());
         assert!(dir.join(".claude/agents/reviewer.md").exists());
         assert_eq!(
@@ -2274,9 +2413,13 @@ mod tests {
             &[(".claude/agents/mine.md".into(), "mine".into())],
         )
         .unwrap();
+        // A failed export (no inputs) withdraws nothing.
+        write_claude_agents(&dir, ".nexus", &[], &[], &ClaudeAgentInputs::default()).unwrap();
+        assert!(dir.join(".claude/agents/spark-coder.md").exists());
         // The same export restricts the project and drops the actor.
         let restricted = ClaudeAgentInputs {
             restricted: true,
+            export_ok: true,
             ..Default::default()
         };
         write_claude_agents(&dir, ".nexus", &[], &[], &restricted).unwrap();
@@ -2332,6 +2475,37 @@ mod tests {
     }
 
     #[test]
+    fn test_retired_matcher_of_a_kept_event_is_removed() {
+        let dir = temp_dir("retired-matcher");
+        let path = ".claude/hooks/guard.mjs";
+        let mut adapter = sample_adapter("guard", path);
+        adapter.hook_events = vec![
+            event("PreToolUse", Some("Bash")),
+            event("PreToolUse", Some("Edit")),
+        ];
+        merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
+        let previous: BTreeMap<_, _> = [hook_lock_entry(
+            "guard",
+            path,
+            &adapter.body,
+            &[("PreToolUse", Some("Bash")), ("PreToolUse", Some("Edit"))],
+        )]
+        .into_iter()
+        .collect();
+        adapter.hook_events = vec![event("PreToolUse", Some("Edit"))];
+        merge_claude_hooks(&dir, std::slice::from_ref(&adapter), Some(&previous)).unwrap();
+        let entries = read_claude_settings(&dir)["hooks"]["PreToolUse"].clone();
+        let matchers: Vec<_> = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["matcher"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(matchers, ["Edit"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_hook_with_a_longer_script_name_is_not_a_duplicate() {
         let dir = temp_dir("hook-partial-path");
         let operator = "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.mjs.bak\" stop";
@@ -2355,6 +2529,14 @@ mod tests {
         );
         assert!(command_runs_script(
             "node .claude/hooks/guard.mjs stop",
+            ".claude/hooks/guard.mjs"
+        ));
+        assert!(command_runs_script(
+            "node .claude/hooks/guard.mjs; echo done",
+            ".claude/hooks/guard.mjs"
+        ));
+        assert!(!command_runs_script(
+            "node .claude/hooks/guard.mjs.bak; echo done",
             ".claude/hooks/guard.mjs"
         ));
         let _ = fs::remove_dir_all(&dir);
@@ -2389,6 +2571,18 @@ mod tests {
             fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
             broken
         );
+        assert!(
+            merge_claude_generic_settings_checked(&dir, Some(&spec), None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(merge_claude_hooks_checked(
+            &dir,
+            &[sample_adapter("guard", ".claude/hooks/guard.mjs")],
+            None
+        )
+        .unwrap()
+        .is_none());
         // Nothing recorded as managed that was not merged.
         let lock = ccx::load_lock(&dir, ".nexus");
         assert!(lock
@@ -2473,6 +2667,34 @@ mod tests {
         .unwrap();
         merge_claude_co_authored_by(&dir, Some(false), true).unwrap();
         assert_eq!(read_claude_settings(&dir)["attribution"]["commit"], "text");
+        // On a failed export, an attribution the lock records as managed
+        // keeps its value.
+        ccx::record_settings_in_lock(
+            &dir,
+            ".nexus",
+            Some(&sample_ccx_spec(
+                &["attribution"],
+                &[("attribution", serde_json::json!({"commit": "text"}))],
+            )),
+        )
+        .unwrap();
+        render_claude_projection(
+            &dir,
+            "Test Project",
+            ".nexus",
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            Some(false),
+            None,
+            None,
+            &ClaudeAgentInputs::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(read_claude_settings(&dir)["attribution"]["commit"], "text");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2509,6 +2731,14 @@ mod tests {
         let out = merge_claude_md_managed_block(&dir, Some("block"), None, false).unwrap();
         assert_eq!(out, ClaudeMdOutcome::Skipped);
         assert_eq!(fs::read_to_string(dir.join("CLAUDE.md")).unwrap(), one);
+        // Two BEGIN markers and one END: operator text between them stays.
+        let two = format!(
+            "{CLAUDE_MD_MANAGED_BEGIN}\nmine\n{CLAUDE_MD_MANAGED_BEGIN}\nold\n{CLAUDE_MD_MANAGED_END}\n"
+        );
+        fs::write(dir.join("CLAUDE.md"), &two).unwrap();
+        let out = merge_claude_md_managed_block(&dir, Some("block"), None, false).unwrap();
+        assert_eq!(out, ClaudeMdOutcome::Skipped);
+        assert_eq!(fs::read_to_string(dir.join("CLAUDE.md")).unwrap(), two);
         // A block quoting a marker is not written.
         fs::write(dir.join("CLAUDE.md"), "own text\n").unwrap();
         let quoted = format!("see {CLAUDE_MD_MANAGED_END} and more");
@@ -2613,7 +2843,7 @@ mod tests {
         let dir = temp_dir("agents-empty");
         let written =
             write_claude_agents(&dir, ".nexus", &[], &[], &ClaudeAgentInputs::default()).unwrap();
-        assert_eq!(written, 0);
+        assert_eq!(written.len(), 0);
         assert!(!dir.join(".claude/agents").exists());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2683,7 +2913,7 @@ mod tests {
             &ClaudeAgentInputs::default(),
         )
         .unwrap();
-        assert_eq!(written, 1);
+        assert_eq!(written.len(), 1);
         assert!(dir
             .join(".claude/agents/technical-project-manager.md")
             .exists());
@@ -2724,7 +2954,7 @@ mod tests {
             &ClaudeAgentInputs::default(),
         )
         .unwrap();
-        assert_eq!(written, 2);
+        assert_eq!(written.len(), 2);
         assert!(dir.join(".claude/agents/planner.md").exists());
         assert!(dir.join(".claude/agents/reviewer.md").exists());
 

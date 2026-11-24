@@ -473,6 +473,8 @@ pub fn ccx_files(agent_files: &[ExportedAgentFile]) -> Vec<&ExportedAgentFile> {
     agent_files
         .iter()
         .filter(|af| af.category == CCX_CATEGORY)
+        // settings.json is merged by the projection, never written whole.
+        .filter(|af| !super::claude_render::is_merged_settings_target(&af.target_path))
         .filter(|af| seen.insert(af.target_path.as_str()))
         .collect()
 }

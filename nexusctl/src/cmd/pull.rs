@@ -4143,6 +4143,16 @@ pub fn write_agent_file(
     // touches it.
     validate_agent_file_target_path(workspace, &af.target_path)?;
 
+    // Only the projection merges into settings.json; never replaced whole.
+    if super::claude_render::is_merged_settings_target(&af.target_path) {
+        println!(
+            "   {} {} is merged by the Claude Code projection; agent file not written",
+            style("!").bold().yellow(),
+            af.target_path
+        );
+        return Ok(());
+    }
+
     // Protected file guard: never overwrite secrets/env files
     if is_protected_target(workspace, &af.target_path) {
         let target = workspace.join(&af.target_path);
@@ -4903,7 +4913,8 @@ command_slug: {command_slug}
     for res in &skill.resources {
         // Sanitise filename: prevent directory traversal
         let filename = res.filename.replace(['/', '\\'], "_");
-        if filename.is_empty() || filename == "SKILL.md" {
+        // Reserved in any case (case-insensitive filesystems).
+        if filename.is_empty() || filename.eq_ignore_ascii_case("SKILL.md") {
             continue;
         }
         files.push((format!("{skill_dir}/{filename}"), res.body.clone()));
@@ -7839,6 +7850,27 @@ mod tests {
         );
         assert!(is_protected_target(ws, "docs/id_rsa"));
         assert!(!is_protected_target(ws, "docs/readme.md"));
+    }
+
+    #[test]
+    fn test_agent_file_never_replaces_claude_settings() {
+        let ws = tempfile::tempdir().unwrap();
+        let path = ws.path().join(".claude/settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ invalid,").unwrap();
+        let af = nexus_core::api::ExportedAgentFile {
+            file_key: "x".into(),
+            target_path: ".claude/settings.json".into(),
+            name: "x".into(),
+            description: None,
+            category: "config".into(),
+            version: 1,
+            body: "{}".into(),
+            content_hash: None,
+            agent_file_id: None,
+        };
+        write_agent_file(ws.path(), &af).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ invalid,");
     }
 
     #[cfg(unix)]
