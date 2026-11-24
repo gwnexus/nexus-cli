@@ -578,29 +578,43 @@ pub fn check_message(guard: &ShadowGuard, raw: &str, cleanup: &Cleanup) -> Vec<H
     scan_text(&message, &rules, |n| format!("line {n}"))
 }
 
-/// The directory git runs hooks from (honours `core.hooksPath`).
-/// Resolved like a real path (`..` and symlinks), so `.git/../.githooks`
-/// is classified as the work-tree directory it is.
-fn hooks_dir(root: &Path) -> Option<PathBuf> {
-    let out = git_bytes(root, &["rev-parse", "--git-path", "hooks"])?;
+/// The directory git runs hooks from (honours `core.hooksPath`), `None`
+/// outside a repository. Resolved like a real path (`..` and symlinks), so
+/// `.git/../.githooks` is classified as the work-tree directory it is. A
+/// path whose `..` follows a directory that does not exist is an error:
+/// git cannot traverse it, so a hook installed at the shortened path would
+/// never run.
+fn hooks_dir(root: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let Some(out) = git_bytes(root, &["rev-parse", "--git-path", "hooks"]) else {
+        return Ok(None);
+    };
     let p = PathBuf::from(String::from_utf8_lossy(&out).trim());
-    Some(resolve_path(&if p.is_absolute() {
-        p
-    } else {
-        root.join(p)
-    }))
+    let full = if p.is_absolute() { p } else { root.join(p) };
+    match resolve_path(&full) {
+        Some(dir) => Ok(Some(dir)),
+        None => anyhow::bail!(
+            "the hooks directory {} goes through a directory that does not exist before '..'; \
+             create it or fix core.hooksPath",
+            full.display()
+        ),
+    }
 }
 
 /// `path` resolved as the operating system resolves it: each existing
 /// prefix is replaced by its real path (symlinks followed) before a later
 /// `..` applies, so `link/../hooks` ends next to the link's target, as git
-/// sees it. Components that do not exist yet are applied lexically.
-fn resolve_path(path: &Path) -> PathBuf {
+/// sees it. Components that do not exist yet are applied lexically, but
+/// `None` when a `..` follows one: the operating system cannot go through
+/// a missing directory, so the path does not resolve at all.
+fn resolve_path(path: &Path) -> Option<PathBuf> {
     let mut current = PathBuf::new();
     for component in path.components() {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
+                if fs::symlink_metadata(&current).is_err() {
+                    return None;
+                }
                 current.pop();
             }
             other => {
@@ -613,7 +627,7 @@ fn resolve_path(path: &Path) -> PathBuf {
             }
         }
     }
-    current
+    Some(current)
 }
 
 /// A path as a single-quoted shell word.
@@ -687,7 +701,7 @@ pub enum HookAction {
 /// chained (moved aside and run first); a tracked one or one owned by a hook
 /// manager is left alone and reported.
 pub fn install_hook(root: &Path, guard_rel: &str) -> anyhow::Result<HookAction> {
-    let Some(dir) = hooks_dir(root) else {
+    let Some(dir) = hooks_dir(root)? else {
         return Ok(HookAction::NoRepo);
     };
     let hook = dir.join("commit-msg");
@@ -772,8 +786,8 @@ pub fn install_hook(root: &Path, guard_rel: &str) -> anyhow::Result<HookAction> 
 /// `path` relative to the work tree `root`, when it lies inside it and
 /// outside the git directory.
 fn work_tree_rel(root: &Path, path: &Path) -> Option<String> {
-    let root = resolve_path(root);
-    let path = resolve_path(path);
+    let root = resolve_path(root)?;
+    let path = resolve_path(path)?;
     let rel = path.strip_prefix(&root).ok()?;
     if rel.components().next()? == std::path::Component::Normal(".git".as_ref()) {
         return None;
@@ -813,8 +827,11 @@ fn is_executable(path: &Path) -> bool {
 /// Remove the hook Nexus installed (a foreign hook is never removed) and
 /// restore a chained foreign hook.
 pub fn remove_hook(root: &Path) -> anyhow::Result<HookAction> {
-    let Some(dir) = hooks_dir(root) else {
-        return Ok(HookAction::NoRepo);
+    let dir = match hooks_dir(root) {
+        Ok(Some(dir)) => dir,
+        Ok(None) => return Ok(HookAction::NoRepo),
+        // Git cannot reach that directory: no hook there runs or was installed.
+        Err(_) => return Ok(HookAction::None),
     };
     let hook = dir.join("commit-msg");
     let ours = fs::read_to_string(&hook).is_ok_and(|c| c.contains(HOOK_MARKER));
@@ -836,7 +853,7 @@ pub fn remove_hook(root: &Path) -> anyhow::Result<HookAction> {
 /// Whether the Nexus hook is the active commit-msg hook (present and
 /// executable, so git runs it).
 pub fn hook_installed(root: &Path) -> bool {
-    hooks_dir(root).is_some_and(|d| {
+    hooks_dir(root).ok().flatten().is_some_and(|d| {
         let hook = d.join("commit-msg");
         is_executable(&hook) && fs::read_to_string(&hook).is_ok_and(|c| c.contains(HOOK_MARKER))
     })
@@ -899,7 +916,7 @@ fn print_hook_action(root: &Path, action: &HookAction) {
 /// `None` outside a repository.
 pub fn hook_consent_item(workspace: &Path, agentic_root: &str) -> Option<super::consent::Item> {
     let root = repo_root(workspace)?;
-    let hook = hooks_dir(&root)?.join("commit-msg");
+    let hook = hooks_dir(&root).ok().flatten()?.join("commit-msg");
     let script = hook_script(&guard_rel_for(workspace, &root, agentic_root));
     let shown = hook
         .strip_prefix(&root)
@@ -1620,12 +1637,21 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("real/sub"), dir.join("link")).unwrap();
         assert_eq!(
             resolve_path(&dir.join("link/../hooks")),
-            dir.join("real/hooks")
+            Some(dir.join("real/hooks"))
         );
         assert_eq!(
             resolve_path(&dir.join(".git/../.githooks")),
-            dir.join(".githooks")
+            Some(dir.join(".githooks"))
         );
+        // Git cannot go through a missing directory: not shortened to
+        // `hooks`, the install refuses instead.
+        assert_eq!(resolve_path(&dir.join("missing/../hooks")), None);
+        git(&dir, &["config", "core.hooksPath", "missing/../hooks"]);
+        let err = install_hook(&dir, "g.json").unwrap_err().to_string();
+        assert!(err.contains("core.hooksPath"), "{err}");
+        assert!(!dir.join("hooks").exists() && !dir.join("missing").exists());
+        assert!(!hook_installed(&dir));
+        assert!(matches!(remove_hook(&dir).unwrap(), HookAction::None));
         git(&dir, &["config", "core.hooksPath", "link/../hooks"]);
         let a = install_hook(&dir, "g.json").unwrap();
         assert!(matches!(a, HookAction::Installed { .. }));
