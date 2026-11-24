@@ -63,6 +63,13 @@ pub struct CliOutput {
 pub trait ClaudeCli {
     /// `Err` when `claude` could not be started or timed out.
     fn run(&self, args: &[&str]) -> Result<CliOutput, String>;
+
+    /// The stored marketplace registrations (`plugins/known_marketplaces.json`
+    /// in the config directory), `None` when unavailable. Not a documented
+    /// interface: read only to learn the catalog path of remote sources.
+    fn known_marketplaces(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// The real `claude` binary, run in `workspace` with stdin closed (so a
@@ -72,6 +79,19 @@ pub struct SystemClaude {
 }
 
 impl ClaudeCli for SystemClaude {
+    fn known_marketplaces(&self) -> Option<serde_json::Value> {
+        let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|h| !h.is_empty())
+                    .map(|h| PathBuf::from(h).join(".claude"))
+            })?;
+        let text = std::fs::read_to_string(config.join("plugins/known_marketplaces.json")).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
     fn run(&self, args: &[&str]) -> Result<CliOutput, String> {
         let mut child = Command::new("claude")
             .args(args)
@@ -480,8 +500,73 @@ fn list_marketplace_entries(cli: &dyn ClaudeCli) -> Option<Vec<RegisteredMarketp
                     }),
                 })
             })
-            .collect(),
+            .collect::<Vec<_>>(),
     )
+    .map(|entries| with_stored_catalog_paths(entries, cli.known_marketplaces().as_ref()))
+}
+
+/// Completes remote registrations with the catalog path the listing does
+/// not report, from the stored registrations. A stored entry counts only
+/// when it names the same source and checkout as the listing; anything
+/// else leaves the entry as listed (and a declared custom catalog then
+/// fails closed in [`registration_mismatch`]).
+fn with_stored_catalog_paths(
+    mut entries: Vec<RegisteredMarketplace>,
+    stored: Option<&serde_json::Value>,
+) -> Vec<RegisteredMarketplace> {
+    let Some(stored) = stored.and_then(|s| s.as_object()) else {
+        return entries;
+    };
+    for entry in &mut entries {
+        if entry.catalog_path.is_some() {
+            continue;
+        }
+        let Some(listed) = entry.location.clone() else {
+            continue;
+        };
+        if !(listed.starts_with("github:") || listed.starts_with("git:")) || listed.contains('#') {
+            continue;
+        }
+        let Some(record) = stored.get(&entry.name) else {
+            continue;
+        };
+        let Some(source) = record.get("source").and_then(|s| s.as_object()) else {
+            continue;
+        };
+        let Some(path) = source
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        else {
+            continue;
+        };
+        let inside = Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !inside {
+            continue;
+        }
+        // The stored record must describe this registration: same source
+        // without the path, and the same checkout when both name one.
+        let mut bare = source.clone();
+        bare.remove("path");
+        if location_key(&serde_json::Value::Object(bare)).as_deref() != Some(listed.as_str()) {
+            continue;
+        }
+        let stored_location = record
+            .get("installLocation")
+            .and_then(|l| l.as_str())
+            .filter(|l| !l.is_empty());
+        match (stored_location, entry.install_location.as_deref()) {
+            (Some(a), Some(b)) if same_dir(Path::new(a), b) => {}
+            (None, _) | (_, None) => {}
+            _ => continue,
+        }
+        entry.location = Some(format!("{listed}#{path}"));
+        entry.catalog_path = Some(path.to_string());
+    }
+    entries
 }
 
 /// The ref a project declares for a marketplace in `extraKnownMarketplaces`.
@@ -1129,6 +1214,7 @@ mod tests {
     struct FakeClaude {
         calls: RefCell<Vec<String>>,
         answers: Vec<(&'static str, Result<CliOutput, String>)>,
+        known: Option<serde_json::Value>,
     }
 
     impl FakeClaude {
@@ -1136,7 +1222,12 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 answers,
+                known: None,
             }
+        }
+        fn with_known(mut self, known: serde_json::Value) -> Self {
+            self.known = Some(known);
+            self
         }
         fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
@@ -1144,6 +1235,9 @@ mod tests {
     }
 
     impl ClaudeCli for FakeClaude {
+        fn known_marketplaces(&self) -> Option<serde_json::Value> {
+            self.known.clone()
+        }
         fn run(&self, args: &[&str]) -> Result<CliOutput, String> {
             let joined = args.join(" ");
             self.calls.borrow_mut().push(joined.clone());
@@ -1610,6 +1704,128 @@ mod tests {
             v(Some("approved/marketplace.json")).as_deref(),
             Some("1.1.3")
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A checkout whose default catalog offers 1.1.2 and whose custom
+    /// catalog `approved/marketplace.json` offers 1.1.3.
+    fn custom_catalog_checkout(name: &str) -> PathBuf {
+        let dir = checkout(name, "1.1.1");
+        std::fs::write(
+            dir.join("plugins/nexus-core/.claude-plugin/plugin.json"),
+            r#"{"name":"nexus-core"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".claude-plugin/marketplace.json"),
+            r#"{"plugins":[{"name":"nexus-core","version":"1.1.2","source":"./plugins/nexus-core"}]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("approved")).unwrap();
+        std::fs::write(
+            dir.join("approved/marketplace.json"),
+            r#"{"plugins":[{"name":"nexus-core","version":"1.1.3","source":"./plugins/nexus-core"}]}"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    fn custom_catalog_spec() -> ClaudeSettingsSpec {
+        spec(
+            serde_json::json!({"nexus-core@gatewarden-nexus": true}),
+            Some(serde_json::json!({"gatewarden-nexus": {"source": {
+                "source": "github", "repo": "gwnexus/nexus-runtime-plugins",
+                "ref": "nexus-core--v1.1.1", "path": "approved/marketplace.json"
+            }}})),
+        )
+    }
+
+    /// The stored registration as the agent CLI keeps it.
+    fn stored(repo: &str, path: Option<&str>, location: &Path) -> serde_json::Value {
+        let mut source = serde_json::json!({
+            "source": "github", "repo": repo, "ref": "nexus-core--v1.1.1"
+        });
+        if let Some(path) = path {
+            source["path"] = serde_json::json!(path);
+        }
+        serde_json::json!({"gatewarden-nexus": {
+            "source": source,
+            "installLocation": location.display().to_string(),
+            "lastUpdated": "2026-11-24T00:00:00.000Z"
+        }})
+    }
+
+    fn custom_catalog_cli(dir: &Path) -> FakeClaude {
+        FakeClaude::new(vec![
+            ("plugin list --json", ok(&installed_here("1.1.1"))),
+            (
+                "plugin marketplace list --json",
+                ok(&registered("nexus-core--v1.1.1", dir)),
+            ),
+            (
+                "plugin update nexus-core@gatewarden-nexus --scope project --json",
+                ok(r#"{"command":"update","outcome":"ok"}"#),
+            ),
+        ])
+    }
+
+    #[test]
+    fn test_sync_accepts_a_remote_marketplace_with_its_stored_catalog_path() {
+        let dir = custom_catalog_checkout("stored-catalog");
+        let cli = custom_catalog_cli(&dir).with_known(stored(
+            "gwnexus/nexus-runtime-plugins",
+            Some("approved/marketplace.json"),
+            &dir,
+        ));
+        let (report, _) = sync(&cli, &ws(), Some(&custom_catalog_spec()), &BTreeMap::new());
+        // The registered (custom) catalog decides the version.
+        assert_eq!(
+            report.plugins[0].state,
+            PluginState::Updated {
+                from: "1.1.1".into(),
+                to: "1.1.3".into()
+            }
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_sync_rejects_a_remote_marketplace_with_another_or_unknown_catalog() {
+        let dir = custom_catalog_checkout("other-catalog");
+        let repo = "gwnexus/nexus-runtime-plugins";
+        let cases = [
+            // Another catalog in the same repository.
+            Some(stored(repo, Some("other/marketplace.json"), &dir)),
+            // The default catalog.
+            Some(stored(repo, None, &dir)),
+            // A record of another repository.
+            Some(stored(
+                "someone/else",
+                Some("approved/marketplace.json"),
+                &dir,
+            )),
+            // A record of another checkout.
+            Some(stored(
+                repo,
+                Some("approved/marketplace.json"),
+                &ws().join("elsewhere"),
+            )),
+            // A path leaving the checkout.
+            Some(stored(repo, Some("../approved/marketplace.json"), &dir)),
+            // No stored registrations at all.
+            None,
+        ];
+        for known in cases {
+            let mut cli = custom_catalog_cli(&dir);
+            cli.known = known.clone();
+            let (report, _) = sync(&cli, &ws(), Some(&custom_catalog_spec()), &BTreeMap::new());
+            assert!(
+                matches!(report.plugins[0].state, PluginState::Deferred(_)),
+                "{known:?}: {:?}",
+                report.plugins[0].state
+            );
+            assert!(!cli.calls().iter().any(|c| c.starts_with("plugin update")));
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
