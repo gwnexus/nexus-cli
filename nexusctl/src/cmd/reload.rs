@@ -431,10 +431,17 @@ pub async fn run(api_url: &str, opts: ReloadOptions<'_>) -> anyhow::Result<()> {
         );
     }
     if areas.is_empty() {
-        println!(
-            "  {} nothing changed; the running session is up to date.",
-            style("OK").green().bold()
-        );
+        if plugins_unchecked {
+            println!(
+                "  {} no watched file changed; plugins unknown (see above).",
+                style("--").yellow()
+            );
+        } else {
+            println!(
+                "  {} nothing changed; the running session is up to date.",
+                style("OK").green().bold()
+            );
+        }
         return Ok(());
     }
     for (area, items) in &areas {
