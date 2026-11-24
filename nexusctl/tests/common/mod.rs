@@ -300,6 +300,8 @@ pub struct Backend {
     pub devbox_json: Option<String>,
     /// (path, body, executable)
     pub scripts: Vec<(String, String, bool)>,
+    /// Project shadow level (`policy.shadow`); `None` leaves it out.
+    pub shadow: Option<&'static str>,
 }
 
 impl Default for Backend {
@@ -312,6 +314,7 @@ impl Default for Backend {
             tasks: vec![],
             devbox_json: None,
             scripts: vec![],
+            shadow: None,
         }
     }
 }
@@ -336,13 +339,13 @@ impl Backend {
                        "description": null, "category": "agent", "version": 1, "body": body})
             })
             .collect();
-        api.route(
-            "POST",
-            "/api/mcp/agent-files#af_export",
-            200,
-            json!({"project_id": PROJECT_ID, "project_name": "demo", "agent_files": files,
-                   "count": files.len(), "agentic_root": ".nexus", "agent_owner": self.owner}),
-        );
+        let mut af_export = json!({"project_id": PROJECT_ID, "project_name": "demo",
+                                   "agent_files": files, "count": files.len(),
+                                   "agentic_root": ".nexus", "agent_owner": self.owner});
+        if let Some(level) = self.shadow {
+            af_export["shadow"] = json!(level);
+        }
+        api.route("POST", "/api/mcp/agent-files#af_export", 200, af_export);
         let skills: Vec<_> = self
             .skills
             .iter()
