@@ -5588,13 +5588,19 @@ pub fn write_directives(
     directives: &[nexus_core::api::ExportedDirective],
     agentic_root: &str,
 ) -> anyhow::Result<()> {
+    let rel = format!("{}/directives.md", agentic_root);
+    // The whole target, not only the root: a directives.md linked out of
+    // the workspace or into .git is never followed.
+    if let Err(e) = validate_agent_file_target_path(target, &rel) {
+        println!("   {} {rel} not written: {e}", style("!").bold().yellow());
+        return Ok(());
+    }
     let dir = target.join(agentic_root);
     fs::create_dir_all(&dir)?;
 
     let content = render_directives_markdown(directives);
 
     let path = dir.join("directives.md");
-    let rel = format!("{}/directives.md", agentic_root);
     if !content_matches(&path, &content) {
         fs::write(&path, &content)?;
         print_synced(&rel);
@@ -5808,6 +5814,29 @@ pub fn write_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_directives_refuses_a_linked_target() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("victim"), "keep\n").unwrap();
+        std::fs::create_dir_all(ws.path().join(".nexus")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("victim"),
+            ws.path().join(".nexus/directives.md"),
+        )
+        .unwrap();
+        let d: nexus_core::api::ExportedDirective = serde_json::from_value(serde_json::json!({
+            "id": "d1", "title": "Be precise", "category": "general", "priority": "high"
+        }))
+        .unwrap();
+        write_directives(ws.path(), &[d], ".nexus").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim")).unwrap(),
+            "keep\n"
+        );
+    }
 
     #[test]
     fn test_pick_agent_owner() {

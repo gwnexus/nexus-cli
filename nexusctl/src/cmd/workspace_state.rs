@@ -753,7 +753,12 @@ async fn workspace_entries(
         }
         Err(e) if e.to_string().contains("No active workspace fork") => false,
         Err(_) => match client.export_workspace(project_id).await {
-            Ok(v1) if v1.workspace_provisioning_enabled != Some(false) => {
+            // Same rule as pull: an export without files delivers (and
+            // removes) nothing.
+            Ok(v1)
+                if v1.workspace_provisioning_enabled != Some(false)
+                    && (v1.workspace.is_some() || !v1.scripts.is_empty()) =>
+            {
                 executable.extend(
                     v1.scripts
                         .iter()
