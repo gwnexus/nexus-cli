@@ -363,7 +363,7 @@ pub struct AgentFileExportResponse {
     pub agent_files: Vec<ExportedAgentFile>,
     pub count: usize,
     /// The agentic root directory for this project (e.g. ".claude" or ".nexus").
-    /// Defaults to ".claude" if not present in the server response.
+    /// Defaults to ".nexus" if not present in the server response.
     #[serde(default = "default_agentic_root")]
     pub agentic_root: String,
     /// Tool flavor: "opencode", "claude-cli", or "both".
@@ -1399,7 +1399,8 @@ pub struct DispatchEventsResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerRuntime {
     pub runtime: String,
-    #[serde(default)]
+    /// Omitted from the request when the probe could not determine it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -1888,20 +1889,20 @@ pub struct ActorImportEntry {
     pub slug: String,
     pub name: String,
     pub role: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_routing: Option<String>,
     /// Legacy routing key. The hub no longer stores it; it binds the actor to
     /// the Model Profile with the same slug instead.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_alias: Option<String>,
     /// Model Profile slug the actor routes through (preferred over
     /// `route_alias`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_profile: Option<String>,
     /// Full Markdown profile body.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_body: Option<String>,
 }
 
@@ -2146,10 +2147,12 @@ pub struct InferenceTokenInfo {
     pub expires_at: Option<String>,
 }
 
-/// Response from `GET /api/projects/:projectId/inference-tokens`.
+/// The object form of `GET /api/projects/:projectId/inference-tokens`
+/// (`{"tokens": [...]}`).
 ///
-/// The server may return either a bare array or an object with a `tokens`
-/// field; `#[serde(default)]` keeps deserialization tolerant.
+/// The server may also answer with a bare array, which this struct does
+/// not decode; use [`NexusClient::list_inference_tokens`](crate::api::NexusClient::list_inference_tokens),
+/// which accepts both forms.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InferenceTokenListResponse {
     #[serde(default)]

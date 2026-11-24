@@ -241,9 +241,10 @@ mod tests {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "[config]\n").unwrap();
         assert!(!is_git_tracked(&file), "outside a repository");
-        git(&["init", "-q"]);
+        assert!(git(&["init", "-q"]).status.success());
         assert!(!is_git_tracked(&file), "untracked");
-        git(&["add", ".nexus/config.toml"]);
+        // Forced: the operator's global excludes may match `.nexus/`.
+        assert!(git(&["add", "-f", ".nexus/config.toml"]).status.success());
         assert!(is_git_tracked(&file), "tracked");
         // A relative path to the same file (resolved against the current
         // directory, which the test does not change) is detected too.
@@ -272,10 +273,12 @@ mod tests {
             }
             cmd.arg("-C").arg(repo.path()).args(args).output().unwrap()
         };
-        git(&["init", "-q"]);
+        assert!(git(&["init", "-q"]).status.success());
         std::fs::create_dir_all(repo.path().join("sub/.nexus")).unwrap();
         std::fs::write(repo.path().join("sub/.nexus/config.toml"), "x").unwrap();
-        git(&["add", "sub/.nexus/config.toml"]);
+        assert!(git(&["add", "-f", "sub/.nexus/config.toml"])
+            .status
+            .success());
         let aliases = tempfile::tempdir().unwrap();
         let alias = aliases.path().join("alias");
         std::os::unix::fs::symlink(repo.path().join("sub"), &alias).unwrap();

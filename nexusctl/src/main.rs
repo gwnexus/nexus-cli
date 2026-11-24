@@ -1937,6 +1937,7 @@ mod tests {
             no_color_source: nexus_core::config::ConfigSource::Default,
             local_path: None,
             global_path: nexus_core::config::Config::path().unwrap(),
+            global_keys: Default::default(),
         };
         assert_eq!(cli_flag.resolve_api_url_source(&effective), "flag");
 

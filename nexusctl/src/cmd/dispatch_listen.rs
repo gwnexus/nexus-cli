@@ -1370,11 +1370,16 @@ async fn poll(
             if !dispatches.contains_key(&c.event.dispatch_id) {
                 let d = match client.dispatch_get(&c.event.dispatch_id).await {
                     Ok(d) => Some(d),
-                    Err(e) if e.is_transport() => {
-                        return Err(super::dispatch_status::error_text(&e));
-                    }
-                    // Gone or not readable: a notice without the title.
-                    Err(_) => None,
+                    // Gone or not readable for this token: a notice without
+                    // the title.
+                    Err(
+                        nexus_core::error::Error::NotFound(_)
+                        | nexus_core::error::Error::Forbidden(_),
+                    ) => None,
+                    // Anything else (transport, a body that failed to
+                    // arrive or decode, a server error) may pass: stop
+                    // before the cursor moves, so the next poll retries.
+                    Err(e) => return Err(super::dispatch_status::error_text(&e)),
                 };
                 dispatches.insert(c.event.dispatch_id.clone(), d);
             }
