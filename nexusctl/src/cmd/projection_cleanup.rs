@@ -642,6 +642,7 @@ fn plan_claude(
         l.hooks.clear();
         l.settings = None;
         l.settings_owned = None;
+        l.settings_legacy = None;
         l.claude_md_block_sha256 = None;
         l
     });
@@ -855,6 +856,7 @@ fn plan_claude(
             if l.settings.is_some() {
                 kl.settings = l.settings.clone();
                 kl.settings_owned = l.settings_owned.clone();
+                kl.settings_legacy = l.settings_legacy.clone();
                 keep_any_lock_entry = true;
             }
         }
@@ -864,16 +866,21 @@ fn plan_claude(
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
         // Everything the lock records, also what an older lock records and
         // this cleanup keeps.
-        let previous = lock.as_ref().and_then(|l| l.removable_settings(true));
+        let previous: Vec<&nexus_core::api::ClaudeSettingsSpec> = lock
+            .as_ref()
+            .map(|l| l.removable_settings(true))
+            .unwrap_or_default();
         // Managed values the operator edited stay without --force; the lock
         // keeps their provenance, so a later --force still knows them. An
         // unreadable file keeps it too.
-        if let (Some(kl), Some(previous)) = (kept_lock.as_mut(), previous) {
+        if let (Some(kl), false) = (kept_lock.as_mut(), previous.is_empty()) {
             let still_there = match &parsed {
                 Some(settings) if !ctx.force => {
                     let mut cleaned = settings.clone();
                     strip_nexus_settings(&mut cleaned, lock.as_ref(), false, ctx.legacy_removal());
-                    managed_settings_remain(&cleaned, previous)
+                    previous
+                        .iter()
+                        .any(|spec| managed_settings_remain(&cleaned, spec))
                 }
                 Some(_) => false,
                 None => workspace.join(settings_rel).exists(),
@@ -881,6 +888,7 @@ fn plan_claude(
             if still_there {
                 kl.settings = lock.as_ref().and_then(|l| l.settings.clone());
                 kl.settings_owned = lock.as_ref().and_then(|l| l.settings_owned.clone());
+                kl.settings_legacy = lock.as_ref().and_then(|l| l.settings_legacy.clone());
                 keep_any_lock_entry = true;
             }
         }
@@ -1004,7 +1012,10 @@ pub(crate) fn strip_nexus_settings(
     };
 
     let mut nexus_evidence = lock.is_some();
-    if let Some(previous) = lock.and_then(|l| l.removable_settings(legacy)) {
+    for previous in lock
+        .map(|l| l.removable_settings(legacy))
+        .unwrap_or_default()
+    {
         ccx::reconcile_settings_removed_keys(settings, None, Some(previous));
         if force {
             for key in &previous.managed_keys {
@@ -2714,6 +2725,7 @@ mod tests {
                 .unwrap(),
             ),
             settings_owned: None,
+            settings_legacy: None,
             claude_md_block_sha256: None,
             hooks: Default::default(),
             plugins: Default::default(),
@@ -2774,6 +2786,7 @@ mod tests {
                 .unwrap(),
             ),
             settings_owned: None,
+            settings_legacy: None,
             claude_md_block_sha256: None,
             hooks: Default::default(),
             plugins: Default::default(),
@@ -2965,6 +2978,7 @@ mod tests {
                 .unwrap(),
             ),
             settings_owned: None,
+            settings_legacy: None,
             claude_md_block_sha256: None,
             hooks: Default::default(),
             plugins: Default::default(),

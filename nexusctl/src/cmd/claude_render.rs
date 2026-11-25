@@ -732,8 +732,10 @@ pub(crate) struct HookMerge {
     /// Withdrawn adapters whose script stays (not deletable, or a hook
     /// still runs it): kept in the lock, so a later pull retries.
     pub retained: Vec<ccx::CcxLockHookEntry>,
-    /// Per adapter `target_path`: the registrations Nexus owns after the
-    /// merge (inserted now, or recorded as inserted and still unchanged).
+    /// Per adapter `target_path`: the registrations to record. Those Nexus
+    /// owns after the merge (inserted now, or recorded as inserted and
+    /// still unchanged), plus unowned records of an older lock that were
+    /// not taken over.
     pub owned: std::collections::BTreeMap<String, Vec<ccx::CcxLockHookRegistration>>,
 }
 
@@ -960,6 +962,17 @@ pub(crate) fn merge_claude_hooks_checked(
             appended += 1;
             owned_regs.push(reg);
         }
+        // Registrations an older lock recorded and that were not taken
+        // over: never removed by a pull, but kept as unowned records so
+        // `nexus deinit` or a forced cleanup can still find them.
+        for old in recorded.into_iter().flat_map(|r| &r.registrations) {
+            let taken_over = owned_regs.iter().any(|r| {
+                r.event == old.event && r.matcher == old.matcher && r.command == old.command
+            });
+            if !old.owned && !taken_over && !owned_regs.contains(old) {
+                owned_regs.push(old.clone());
+            }
+        }
     }
 
     if appended > 0 || removed > 0 {
@@ -979,10 +992,11 @@ pub(crate) fn merge_claude_hooks_checked(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             // Unreadable: keep the record so a later pull retries the cleanup.
             Err(_) => true,
+            // A hook still runs it (edited or not): kept, with its record.
+            Ok(_) if any_hook_runs_script(&settings, &entry.target_path) => true,
             Ok(bytes) => {
                 nexus_core::hash::sha256_hex_bytes(&bytes) == entry.file_sha256
-                    && (any_hook_runs_script(&settings, &entry.target_path)
-                        || fs::remove_file(&script_path).is_err())
+                    && fs::remove_file(&script_path).is_err()
             }
         };
         if keep {
@@ -1888,7 +1902,9 @@ pub fn render_claude_projection(
     if export_ok && settings_ok {
         let lock = super::ccx::load_lock(target, agentic_root);
         let previous_settings = lock.as_ref().and_then(|l| l.settings.clone());
-        // Removal only touches what Nexus wrote (see `CcxLock::settings_owned`).
+        // Removal only touches what Nexus wrote (see `CcxLock::settings_owned`);
+        // what an older CLI recorded is carried over for explicit cleanup.
+        let legacy_settings = lock.as_ref().and_then(|l| l.legacy_settings().cloned());
         let previous_owned = lock.and_then(|l| l.settings_owned);
         let settings_before = read_claude_settings(target);
         let merged = merge_claude_generic_settings_checked(
@@ -1918,6 +1934,7 @@ pub fn render_claude_projection(
                 agentic_root,
                 claude_settings,
                 owned.as_ref(),
+                legacy_settings.as_ref(),
             )?;
         }
     }
@@ -2702,6 +2719,7 @@ mod tests {
                 &[("attribution", serde_json::json!({"commit": "text"}))],
             )),
             None,
+            None,
         )
         .unwrap();
         render_claude_projection(
@@ -2867,6 +2885,30 @@ mod tests {
     }
 
     #[test]
+    fn test_withdrawn_script_edited_and_in_use_keeps_its_record() {
+        let dir = temp_dir("hooks-edited-in-use");
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(dir.join(".claude/settings.json"), "{}").unwrap();
+        let adapter = guard_adapter(&[("Stop", None, None)]);
+        fs::write(dir.join(&adapter.target_path), &adapter.body).unwrap();
+        let merge = merge_claude_hooks_checked(&dir, std::slice::from_ref(&adapter), None)
+            .unwrap()
+            .unwrap();
+        let lock = lock_from_merge(&adapter, merge);
+        // The operator edits both the hook (a timeout) and the script.
+        let mut settings = read_claude_settings(&dir);
+        settings["hooks"]["Stop"][0]["hooks"][0]["timeout"] = serde_json::json!(5);
+        fs::write(dir.join(".claude/settings.json"), settings.to_string()).unwrap();
+        fs::write(dir.join(&adapter.target_path), "// mine").unwrap();
+        let merge = merge_claude_hooks_checked(&dir, &[], Some(&lock))
+            .unwrap()
+            .unwrap();
+        assert_eq!(merge.retained.len(), 1);
+        assert_eq!(merge.retained[0].registrations.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_older_lock_record_is_taken_over_only_when_exact_and_sent() {
         let dir = temp_dir("hooks-legacy-record");
         let adapter = guard_adapter(&[("Stop", None, None)]);
@@ -2900,11 +2942,14 @@ mod tests {
                 .unwrap()
                 .unwrap();
         // Stop is still sent and exact: taken over. PreToolUse is retired
-        // but ambiguous: left in place.
+        // but ambiguous: left in place, and kept as an unowned record for
+        // an explicit cleanup.
         let owned = &merge.owned[&adapter.target_path];
-        assert_eq!(owned.len(), 1);
+        assert_eq!(owned.len(), 2);
         assert_eq!(owned[0].event, "Stop");
         assert!(owned[0].owned);
+        assert_eq!(owned[1].event, "PreToolUse");
+        assert!(!owned[1].owned);
         let settings = read_claude_settings(&dir);
         assert_eq!(settings["hooks"]["PreToolUse"], serde_json::json!([pre]));
         assert_eq!(settings["hooks"]["Stop"], serde_json::json!([stop]));
@@ -3020,7 +3065,7 @@ mod tests {
             &["enabledPlugins"],
             &[("enabledPlugins", serde_json::json!({"p@m": true}))],
         );
-        ccx::record_settings_in_lock(&dir, ".nexus", Some(&spec), None).unwrap();
+        ccx::record_settings_in_lock(&dir, ".nexus", Some(&spec), None, None).unwrap();
         let empty = sample_ccx_spec(&[], &[]);
         render_claude_projection(
             &dir,
@@ -3042,6 +3087,55 @@ mod tests {
             read_claude_settings(&dir)["enabledPlugins"],
             serde_json::json!({"p@m": true})
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_settings_from_an_older_lock_are_carried_over() {
+        let dir = temp_dir("settings-legacy-carry");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"enabledPlugins": {"p@m": true}}).to_string(),
+        )
+        .unwrap();
+        let spec = sample_ccx_spec(
+            &["enabledPlugins"],
+            &[("enabledPlugins", serde_json::json!({"p@m": true}))],
+        );
+        ccx::record_settings_in_lock(&dir, ".nexus", Some(&spec), None, None).unwrap();
+        let empty = sample_ccx_spec(&[], &[]);
+        for _ in 0..2 {
+            render_claude_projection(
+                &dir,
+                "Test Project",
+                ".nexus",
+                &[],
+                &[],
+                &[],
+                None,
+                &[],
+                Some(false),
+                Some(Some(&empty)),
+                None,
+                &ClaudeAgentInputs::default(),
+                false,
+            )
+            .unwrap();
+        }
+        // Kept on disk, and still recorded for `nexus deinit`.
+        let lock = ccx::load_lock(&dir, ".nexus").unwrap();
+        assert_eq!(lock.settings_legacy.as_ref(), Some(&spec));
+        assert_eq!(lock.removable_settings(true).len(), 2);
+        assert_eq!(lock.removable_settings(false).len(), 1);
+        let mut settings = read_claude_settings(&dir);
+        super::super::projection_cleanup::strip_nexus_settings(
+            &mut settings,
+            Some(&lock),
+            false,
+            true,
+        );
+        assert!(settings.get("enabledPlugins").is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 

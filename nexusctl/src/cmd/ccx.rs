@@ -60,6 +60,11 @@ pub struct CcxLock {
     /// operator's identical values apart, so nothing is removed for them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_owned: Option<ClaudeSettingsSpec>,
+    /// The managed settings an older CLI recorded (without ownership),
+    /// carried over from the first pull with ownership tracking. A pull
+    /// never removes them; `nexus deinit` and `--force` cleanup do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_legacy: Option<ClaudeSettingsSpec>,
     #[serde(default)]
     pub claude_md_block_sha256: Option<String>,
     /// Nexus-managed Claude Code hook adapters recorded on the last pull
@@ -77,13 +82,29 @@ pub struct CcxLock {
 }
 
 impl CcxLock {
-    /// The settings a projection cleanup removes: what Nexus wrote. A lock
-    /// from an older CLI has no ownership record; its recorded managed
-    /// settings are removed only with `legacy` (`nexus deinit`, `--force`).
-    pub fn removable_settings(&self, legacy: bool) -> Option<&ClaudeSettingsSpec> {
-        self.settings_owned
-            .as_ref()
-            .or(self.settings.as_ref().filter(|_| legacy))
+    /// The settings records a projection cleanup removes: what Nexus
+    /// wrote, and with `legacy` (`nexus deinit`, `--force`) also what an
+    /// older CLI recorded without ownership.
+    pub fn removable_settings(&self, legacy: bool) -> Vec<&ClaudeSettingsSpec> {
+        let mut specs: Vec<&ClaudeSettingsSpec> = Vec::new();
+        match (&self.settings_owned, &self.settings) {
+            (Some(owned), _) => specs.push(owned),
+            (None, Some(recorded)) if legacy => specs.push(recorded),
+            _ => {}
+        }
+        if legacy {
+            specs.extend(self.settings_legacy.as_ref());
+        }
+        specs
+    }
+
+    /// The older records a pull carries over: the recorded spec of a lock
+    /// without ownership tracking, or the legacy record already kept.
+    pub fn legacy_settings(&self) -> Option<&ClaudeSettingsSpec> {
+        match (&self.settings_owned, &self.settings) {
+            (None, Some(recorded)) => Some(recorded),
+            _ => self.settings_legacy.as_ref(),
+        }
     }
 }
 
@@ -232,15 +253,20 @@ pub fn record_settings_in_lock(
     agentic_root: &str,
     settings: Option<&ClaudeSettingsSpec>,
     owned: Option<&ClaudeSettingsSpec>,
+    legacy: Option<&ClaudeSettingsSpec>,
 ) -> anyhow::Result<()> {
     let mut lock = load_lock_for_update(workspace, agentic_root)?.unwrap_or_else(empty_lock);
 
-    if lock.settings.as_ref() == settings && lock.settings_owned.as_ref() == owned {
+    if lock.settings.as_ref() == settings
+        && lock.settings_owned.as_ref() == owned
+        && lock.settings_legacy.as_ref() == legacy
+    {
         return Ok(());
     }
 
     lock.settings = settings.cloned();
     lock.settings_owned = owned.cloned();
+    lock.settings_legacy = legacy.cloned();
     lock.applied_at = chrono_like_now();
     save_lock(workspace, agentic_root, &lock)
 }
@@ -278,6 +304,7 @@ fn empty_lock() -> CcxLock {
         files: std::collections::BTreeMap::new(),
         settings: None,
         settings_owned: None,
+        settings_legacy: None,
         claude_md_block_sha256: None,
         hooks: std::collections::BTreeMap::new(),
         plugins: std::collections::BTreeMap::new(),
@@ -1205,6 +1232,7 @@ mod tests {
             )]),
             settings: None,
             settings_owned: None,
+            settings_legacy: None,
             claude_md_block_sha256: None,
             hooks: std::collections::BTreeMap::new(),
             plugins: std::collections::BTreeMap::new(),
@@ -1649,6 +1677,7 @@ mod tests {
             ".nexus",
             Some(&spec(&["x"], &[("x", serde_json::json!(1))])),
             None,
+            None,
         )
         .unwrap();
         fs_write(&dir, RULE, "my edit\n");
@@ -1733,7 +1762,7 @@ mod tests {
         let lock = lock_path(&dir, ".nexus");
         let before = std::fs::read(&lock).unwrap();
         std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o200)).unwrap();
-        let err = record_settings_in_lock(&dir, ".nexus", None, None).unwrap_err();
+        let err = record_settings_in_lock(&dir, ".nexus", None, None, None).unwrap_err();
         assert!(err
             .to_string()
             .contains("cannot read .nexus/claude/manifest.lock.json"));
@@ -2082,6 +2111,7 @@ mod tests {
             &dir,
             ".nexus",
             Some(&spec(&["x"], &[("x", serde_json::json!(1))])),
+            None,
             None,
         )
         .unwrap();
