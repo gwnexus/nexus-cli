@@ -730,8 +730,7 @@ pub(crate) struct HookMerge {
     pub appended: usize,
     pub removed_plugins: Vec<String>,
     /// Withdrawn adapters whose script stays (not deletable, or a hook
-    /// still runs it): kept in the lock (without registrations), so a
-    /// later pull retries.
+    /// still runs it): kept in the lock, so a later pull retries.
     pub retained: Vec<ccx::CcxLockHookEntry>,
     /// Per adapter `target_path`: the registrations Nexus owns after the
     /// merge (inserted now, or recorded as inserted and still unchanged).
@@ -782,8 +781,12 @@ pub(crate) fn remove_owned_registration(
     before - event_array.len()
 }
 
-/// Whether any hook in a `settings.json` `hooks` block runs `script`.
+/// Whether any hook in a `settings.json` `hooks` block may run `script`,
+/// decided before deleting it. Conservative: a command that names the
+/// script's file name anywhere counts (`cd .claude/hooks && node x.mjs`
+/// has no token with the full path).
 pub(crate) fn any_hook_runs_script(settings: &serde_json::Value, script: &str) -> bool {
+    let file_name = script.rsplit('/').next().unwrap_or(script);
     settings
         .get("hooks")
         .and_then(|h| h.as_object())
@@ -794,7 +797,7 @@ pub(crate) fn any_hook_runs_script(settings: &serde_json::Value, script: &str) -
         .filter_map(|entry| entry.get("hooks").and_then(|h| h.as_array()))
         .flatten()
         .filter_map(|hook| hook.get("command").and_then(|c| c.as_str()))
-        .any(|command| command_runs_script(command, script))
+        .any(|command| command_runs_script(command, script) || command.contains(file_name))
 }
 
 /// `merge_claude_hooks`, or `None` when `settings.json` is not a valid
@@ -983,10 +986,9 @@ pub(crate) fn merge_claude_hooks_checked(
             }
         };
         if keep {
-            retained.push(ccx::CcxLockHookEntry {
-                registrations: Vec::new(),
-                ..(*entry).clone()
-            });
+            // With its registrations: an entry the operator kept can
+            // still be removed by a later forced cleanup.
+            retained.push((*entry).clone());
         }
     }
 
@@ -2828,6 +2830,39 @@ mod tests {
         );
         assert!(dir.join(&adapter.target_path).exists());
         assert_eq!(merge.retained.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_withdrawn_script_named_by_a_rewritten_hook_is_kept() {
+        let dir = temp_dir("hooks-cd-command");
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(dir.join(".claude/settings.json"), "{}").unwrap();
+        let adapter = guard_adapter(&[("Stop", None, None)]);
+        fs::write(dir.join(&adapter.target_path), &adapter.body).unwrap();
+        let merge = merge_claude_hooks_checked(&dir, std::slice::from_ref(&adapter), None)
+            .unwrap()
+            .unwrap();
+        let lock = lock_from_merge(&adapter, merge);
+        // The operator rewrites the command: no token holds the full path.
+        let mine = "cd \"$CLAUDE_PROJECT_DIR/.claude/hooks\" && node nexus-guard.mjs stop";
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"Stop": [
+                {"hooks": [{"type": "command", "command": mine}]}
+            ]}})
+            .to_string(),
+        )
+        .unwrap();
+        let merge = merge_claude_hooks_checked(&dir, &[], Some(&lock))
+            .unwrap()
+            .unwrap();
+        assert!(dir.join(&adapter.target_path).exists());
+        assert_eq!(merge.retained.len(), 1);
+        assert_eq!(
+            read_claude_settings(&dir)["hooks"]["Stop"][0]["hooks"][0]["command"],
+            mine
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -4694,13 +4729,13 @@ mod tests {
         let merge = merge_claude_hooks_checked(&dir, &[], Some(&previous))
             .unwrap()
             .unwrap();
-        // The record stays, without registrations, so a later pull retries.
+        // The record stays, so a later pull retries.
         assert_eq!(merge.retained.len(), 1);
         assert_eq!(
             merge.retained[0].target_path,
             ".claude/hooks/nexus-gone.mjs"
         );
-        assert!(merge.retained[0].registrations.is_empty());
+        assert_eq!(merge.retained[0].registrations.len(), 1);
 
         fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
         let _ = fs::remove_dir_all(&dir);

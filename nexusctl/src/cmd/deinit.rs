@@ -248,6 +248,7 @@ pub fn run(force: bool) -> anyhow::Result<()> {
             .flatten()
             .map(|p| p.name)
             .unwrap_or_default(),
+        deinit: true,
         ..Default::default()
     };
     let plans =

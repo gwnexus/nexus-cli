@@ -115,9 +115,18 @@ pub struct CleanupContext {
     pub mcp_server_entries: BTreeMap<String, serde_json::Value>,
     /// `--force` / `--force-unmanaged` (never `-y` alone).
     pub force: bool,
+    /// `nexus deinit`: also removes what a lock from an older CLI records
+    /// (it cannot tell Nexus's entries from identical operator entries). A
+    /// runtime switch keeps those unless `force`.
+    pub deinit: bool,
 }
 
 impl CleanupContext {
+    /// Whether records without ownership (older lock) are removed.
+    fn legacy_removal(&self) -> bool {
+        self.deinit || self.force
+    }
+
     /// Record `content` as what Nexus writes at `path`.
     pub fn add_known(&mut self, path: &str, content: &str) {
         let hashes = self.known.entry(path.to_string()).or_default();
@@ -696,7 +705,12 @@ fn plan_claude(
                         .ok()
                         .map(|mut settings| {
                             if !ctx.keep.contains(settings_rel) {
-                                strip_nexus_settings(&mut settings, Some(lock), ctx.force);
+                                strip_nexus_settings(
+                                    &mut settings,
+                                    Some(lock),
+                                    ctx.force,
+                                    ctx.legacy_removal(),
+                                );
                             }
                             settings
                         })
@@ -740,7 +754,11 @@ fn plan_claude(
             if matches!(action, Action::Keep { .. }) {
                 if let Some(kl) = kept_lock.as_mut() {
                     let mut kept = entry.clone();
-                    kept.registrations.clear();
+                    // A kept hook still runs it: its registrations stay
+                    // recorded for a later forced cleanup.
+                    if !in_use {
+                        kept.registrations.clear();
+                    }
                     kl.hooks.insert(entry.target_path.clone(), kept);
                     keep_any_lock_entry = true;
                 }
@@ -844,7 +862,9 @@ fn plan_claude(
         let parsed = fs::read_to_string(workspace.join(settings_rel))
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-        let previous = lock.as_ref().and_then(ccx::CcxLock::removable_settings);
+        // Everything the lock records, also what an older lock records and
+        // this cleanup keeps.
+        let previous = lock.as_ref().and_then(|l| l.removable_settings(true));
         // Managed values the operator edited stay without --force; the lock
         // keeps their provenance, so a later --force still knows them. An
         // unreadable file keeps it too.
@@ -852,7 +872,7 @@ fn plan_claude(
             let still_there = match &parsed {
                 Some(settings) if !ctx.force => {
                     let mut cleaned = settings.clone();
-                    strip_nexus_settings(&mut cleaned, lock.as_ref(), false);
+                    strip_nexus_settings(&mut cleaned, lock.as_ref(), false, ctx.legacy_removal());
                     managed_settings_remain(&cleaned, previous)
                 }
                 Some(_) => false,
@@ -866,7 +886,7 @@ fn plan_claude(
         }
         if let Some(settings) = parsed {
             let mut cleaned = settings.clone();
-            if strip_nexus_settings(&mut cleaned, lock.as_ref(), ctx.force) {
+            if strip_nexus_settings(&mut cleaned, lock.as_ref(), ctx.force, ctx.legacy_removal()) {
                 actions.push(if settings_only_schema(&cleaned) {
                     Action::RemoveFile {
                         path: settings_rel.into(),
@@ -976,6 +996,7 @@ pub(crate) fn strip_nexus_settings(
     settings: &mut serde_json::Value,
     lock: Option<&ccx::CcxLock>,
     force: bool,
+    legacy: bool,
 ) -> bool {
     let before = settings.clone();
     let Some(_) = settings.as_object() else {
@@ -983,7 +1004,7 @@ pub(crate) fn strip_nexus_settings(
     };
 
     let mut nexus_evidence = lock.is_some();
-    if let Some(previous) = lock.and_then(ccx::CcxLock::removable_settings) {
+    if let Some(previous) = lock.and_then(|l| l.removable_settings(legacy)) {
         ccx::reconcile_settings_removed_keys(settings, None, Some(previous));
         if force {
             for key in &previous.managed_keys {
@@ -1014,6 +1035,9 @@ pub(crate) fn strip_nexus_settings(
                     if reg.owned && !force {
                         // Only while exactly as Nexus inserted it.
                         claude_render::remove_owned_registration(hooks, reg);
+                    } else if !reg.owned && !legacy {
+                        // An older lock on a runtime switch: may be the
+                        // operator's own identical hook, kept.
                     } else {
                         // An older lock (no ownership record), or --force:
                         // every hook running the recorded command.
@@ -1958,6 +1982,77 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_cleanup_then_forced_cleanup_removes_an_edited_hook() {
+        let dir = temp_dir("cc-edited-hook-later-force");
+        claude_projection(&dir);
+        edit_guard_hooks(&dir);
+        run(&dir, Projection::Claude, &ctx(false));
+        assert!(dir.join(".claude/hooks/nexus-session-guard.mjs").exists());
+        // The kept record still names the registration for --force.
+        let lock = ccx::load_lock(&dir, ".nexus").unwrap();
+        assert!(!lock.hooks.values().next().unwrap().registrations.is_empty());
+        run(&dir, Projection::Claude, &ctx(true));
+        assert!(!dir.join(".claude/hooks/nexus-session-guard.mjs").exists());
+        if dir.join(".claude/settings.json").exists() {
+            assert!(!read(&dir, ".claude/settings.json").contains("nexus-session-guard.mjs"));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Turn the workspace's lock into one an older CLI wrote: no settings
+    /// ownership, no ownership marker on hook registrations.
+    fn make_lock_legacy(dir: &Path) {
+        let mut lock = ccx::load_lock(dir, ".nexus").unwrap();
+        lock.settings_owned = None;
+        for entry in lock.hooks.values_mut() {
+            for reg in &mut entry.registrations {
+                reg.owned = false;
+            }
+        }
+        ccx::save_lock(dir, ".nexus", &lock).unwrap();
+    }
+
+    #[test]
+    fn test_runtime_switch_keeps_what_an_older_lock_records() {
+        let dir = temp_dir("cc-legacy-switch");
+        claude_projection(&dir);
+        make_lock_legacy(&dir);
+        let before: serde_json::Value =
+            serde_json::from_str(&read(&dir, ".claude/settings.json")).unwrap();
+        run(&dir, Projection::Claude, &ctx(false));
+        let after: serde_json::Value =
+            serde_json::from_str(&read(&dir, ".claude/settings.json")).unwrap();
+        // Hooks and managed settings recorded by the older lock stay.
+        assert_eq!(after["hooks"], before["hooks"]);
+        for key in &settings_spec().managed_keys {
+            assert_eq!(
+                ccx::json_get_path(&after, key),
+                ccx::json_get_path(&before, key),
+                "{key}"
+            );
+        }
+        assert!(dir.join(".claude/hooks/nexus-session-guard.mjs").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_deinit_removes_what_an_older_lock_records() {
+        let dir = temp_dir("cc-legacy-deinit");
+        claude_projection(&dir);
+        make_lock_legacy(&dir);
+        let deinit = CleanupContext {
+            deinit: true,
+            ..ctx(false)
+        };
+        run(&dir, Projection::Claude, &deinit);
+        if dir.join(".claude/settings.json").exists() {
+            assert!(!read(&dir, ".claude/settings.json").contains("nexus-session-guard.mjs"));
+        }
+        assert!(!dir.join(".claude/hooks/nexus-session-guard.mjs").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_opencode_cleanup_all_pristine_removes_empty_directory() {
         let dir = temp_dir("oc-pristine");
         put(&dir, ".opencode/commands/a.md", CMD_A);
@@ -2591,12 +2686,12 @@ mod tests {
             "includeCoAuthoredBy": false,
             "env": { "NEXUS_ROUTING_GUARD_AGENTS_PATH": "x" }
         });
-        assert!(strip_nexus_settings(&mut settings, None, false));
+        assert!(strip_nexus_settings(&mut settings, None, false, true));
         assert!(settings_only_schema(&settings));
         // Nothing of Nexus in it: untouched (includeCoAuthoredBy is the
         // operator's without other Nexus evidence).
         let mut user = serde_json::json!({ "includeCoAuthoredBy": true, "model": "x" });
-        assert!(!strip_nexus_settings(&mut user, None, true));
+        assert!(!strip_nexus_settings(&mut user, None, true, true));
     }
 
     #[test]
@@ -2629,20 +2724,30 @@ mod tests {
             }})
         };
         let mut settings = fresh();
-        assert!(strip_nexus_settings(&mut settings, Some(&lock), false));
+        assert!(strip_nexus_settings(
+            &mut settings,
+            Some(&lock),
+            false,
+            true
+        ));
         assert_eq!(
             settings["enabledPlugins"],
             serde_json::json!({ "edited@m": false, "mine@m": true })
         );
         let mut settings = fresh();
-        assert!(strip_nexus_settings(&mut settings, Some(&lock), true));
+        assert!(strip_nexus_settings(&mut settings, Some(&lock), true, true));
         assert_eq!(
             settings["enabledPlugins"],
             serde_json::json!({ "mine@m": true })
         );
         // Only Nexus entries: the emptied map is removed.
         let mut settings = serde_json::json!({ "enabledPlugins": { "nexus@m": true } });
-        assert!(strip_nexus_settings(&mut settings, Some(&lock), false));
+        assert!(strip_nexus_settings(
+            &mut settings,
+            Some(&lock),
+            false,
+            true
+        ));
         assert!(settings.get("enabledPlugins").is_none());
     }
 
@@ -2678,7 +2783,12 @@ mod tests {
             "statusLine": { "type": "command" },
             "model": "x"
         });
-        assert!(strip_nexus_settings(&mut settings, Some(&lock), false));
+        assert!(strip_nexus_settings(
+            &mut settings,
+            Some(&lock),
+            false,
+            true
+        ));
         assert_eq!(
             settings,
             serde_json::json!({ "permissions": { "deny": ["Read(./mine)"] }, "model": "x" })
@@ -2819,7 +2929,7 @@ mod tests {
     #[test]
     fn test_settings_containers_empty_before_stay() {
         let mut settings = serde_json::json!({ "permissions": { "allow": [] }, "hooks": {} });
-        assert!(!strip_nexus_settings(&mut settings, None, false));
+        assert!(!strip_nexus_settings(&mut settings, None, false, true));
         assert_eq!(
             settings,
             serde_json::json!({ "permissions": { "allow": [] }, "hooks": {} })
@@ -2828,7 +2938,7 @@ mod tests {
         let mut settings = serde_json::json!({
             "permissions": { "allow": [nexus], "deny": [] }
         });
-        assert!(strip_nexus_settings(&mut settings, None, false));
+        assert!(strip_nexus_settings(&mut settings, None, false, true));
         // `allow` was emptied by the removal, `deny` was empty already.
         assert_eq!(
             settings,

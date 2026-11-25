@@ -77,10 +77,13 @@ pub struct CcxLock {
 }
 
 impl CcxLock {
-    /// The settings `deinit` removes: what Nexus wrote, or for a lock from
-    /// an older CLI (no ownership record) the recorded managed settings.
-    pub fn removable_settings(&self) -> Option<&ClaudeSettingsSpec> {
-        self.settings_owned.as_ref().or(self.settings.as_ref())
+    /// The settings a projection cleanup removes: what Nexus wrote. A lock
+    /// from an older CLI has no ownership record; its recorded managed
+    /// settings are removed only with `legacy` (`nexus deinit`, `--force`).
+    pub fn removable_settings(&self, legacy: bool) -> Option<&ClaudeSettingsSpec> {
+        self.settings_owned
+            .as_ref()
+            .or(self.settings.as_ref().filter(|_| legacy))
     }
 }
 

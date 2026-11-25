@@ -247,8 +247,10 @@ One command per activity; each classifies every file itself:
   runs it any more; the projection cleanup (runtime switch, `nexus
   deinit`) follows the same rules unless `--force` is given. Records from an older CLI cannot tell the two apart:
   their hooks and settings are kept rather than removed (a hook the
-  adapter still sends in its exact generated form is taken over), and
-  `nexus deinit` still removes what such a lock records.
+  adapter still sends in its exact generated form is taken over). A
+  runtime switch keeps them too; `nexus deinit` and `--force` remove what
+  such a lock records. A hook script stays while any hook command names
+  its file.
 - Leftovers of the runtime the project does not use are reported as STALE
   with "run nexus pull to remove it" (see below); unmanaged files are never
   touched.
