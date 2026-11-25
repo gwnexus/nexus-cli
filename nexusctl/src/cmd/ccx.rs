@@ -49,8 +49,22 @@ pub struct CcxLock {
     pub applied_at: String,
     #[serde(default)]
     pub files: std::collections::BTreeMap<String, CcxLockFileEntry>,
+    /// The managed settings the last export requested (the desired spec,
+    /// also used by plugin sync and status).
     #[serde(default)]
     pub settings: Option<ClaudeSettingsSpec>,
+    /// The part of [`Self::settings`] Nexus actually wrote to
+    /// `.claude/settings.json`: a value, array entry or keyed-map entry the
+    /// operator already had is not in here. Removal only touches these.
+    /// `None` in a lock from an older CLI: its records cannot tell the
+    /// operator's identical values apart, so nothing is removed for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_owned: Option<ClaudeSettingsSpec>,
+    /// The managed settings an older CLI recorded (without ownership),
+    /// carried over from the first pull with ownership tracking. A pull
+    /// never removes them; `nexus deinit` and `--force` cleanup do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_legacy: Option<ClaudeSettingsSpec>,
     #[serde(default)]
     pub claude_md_block_sha256: Option<String>,
     /// Nexus-managed Claude Code hook adapters recorded on the last pull
@@ -65,6 +79,33 @@ pub struct CcxLock {
     /// present (user scope, or installed by hand) is never recorded here.
     #[serde(default)]
     pub plugins: std::collections::BTreeMap<String, CcxLockPluginEntry>,
+}
+
+impl CcxLock {
+    /// The settings records a projection cleanup removes: what Nexus
+    /// wrote, and with `legacy` (`nexus deinit`, `--force`) also what an
+    /// older CLI recorded without ownership.
+    pub fn removable_settings(&self, legacy: bool) -> Vec<&ClaudeSettingsSpec> {
+        let mut specs: Vec<&ClaudeSettingsSpec> = Vec::new();
+        match (&self.settings_owned, &self.settings) {
+            (Some(owned), _) => specs.push(owned),
+            (None, Some(recorded)) if legacy => specs.push(recorded),
+            _ => {}
+        }
+        if legacy {
+            specs.extend(self.settings_legacy.as_ref());
+        }
+        specs
+    }
+
+    /// The older records a pull carries over: the recorded spec of a lock
+    /// without ownership tracking, or the legacy record already kept.
+    pub fn legacy_settings(&self) -> Option<&ClaudeSettingsSpec> {
+        match (&self.settings_owned, &self.settings) {
+            (None, Some(recorded)) => Some(recorded),
+            _ => self.settings_legacy.as_ref(),
+        }
+    }
 }
 
 /// A Claude Code plugin installed by Nexus, as recorded in the CCX lock.
@@ -93,6 +134,14 @@ pub struct CcxLockHookRegistration {
     #[serde(default)]
     pub matcher: Option<String>,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Nexus inserted this exact entry (`{matcher, hooks: [{type, command,
+    /// timeout}]}`). `false` in a lock from an older CLI, which recorded
+    /// every requested registration, also one the operator already had:
+    /// such a record is never used to remove an entry.
+    #[serde(default)]
+    pub owned: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -203,14 +252,21 @@ pub fn record_settings_in_lock(
     workspace: &Path,
     agentic_root: &str,
     settings: Option<&ClaudeSettingsSpec>,
+    owned: Option<&ClaudeSettingsSpec>,
+    legacy: Option<&ClaudeSettingsSpec>,
 ) -> anyhow::Result<()> {
     let mut lock = load_lock_for_update(workspace, agentic_root)?.unwrap_or_else(empty_lock);
 
-    if lock.settings.as_ref() == settings {
+    if lock.settings.as_ref() == settings
+        && lock.settings_owned.as_ref() == owned
+        && lock.settings_legacy.as_ref() == legacy
+    {
         return Ok(());
     }
 
     lock.settings = settings.cloned();
+    lock.settings_owned = owned.cloned();
+    lock.settings_legacy = legacy.cloned();
     lock.applied_at = chrono_like_now();
     save_lock(workspace, agentic_root, &lock)
 }
@@ -247,6 +303,8 @@ fn empty_lock() -> CcxLock {
         applied_at: String::new(),
         files: std::collections::BTreeMap::new(),
         settings: None,
+        settings_owned: None,
+        settings_legacy: None,
         claude_md_block_sha256: None,
         hooks: std::collections::BTreeMap::new(),
         plugins: std::collections::BTreeMap::new(),
@@ -900,8 +958,9 @@ pub fn describe_settings_changes(
 }
 
 /// Remove a `.claude/settings.json` key (or array entries) that Nexus
-/// used to manage (per `previous`, the CCX lock's recorded settings
-/// state) but no longer sends (per `current`, this run's `af_export`
+/// used to manage (per `previous`: on a pull the part the CCX lock
+/// records as written by Nexus, see [`CcxLock::settings_owned`]) but no
+/// longer sends (per `current`, this run's `af_export`
 /// spec) -- the "removed-key cleanup" flagged as missing in v0.24.0.
 ///
 /// For an array key that is still managed, entries present in the lock's
@@ -1015,6 +1074,69 @@ pub fn reconcile_settings_removed_keys(
     changed
 }
 
+/// The part of `spec` Nexus owns after merging it into `before` (the
+/// settings as they were before the merge): what the merge writes (a
+/// value, array entry or keyed-map entry that differs from `before`), plus
+/// what `previous_owned` records and is still in place unchanged. A value
+/// the operator already had, identical to the requested one, is not
+/// Nexus's and is never removed later.
+pub fn owned_settings(
+    before: &serde_json::Value,
+    spec: Option<&ClaudeSettingsSpec>,
+    previous_owned: Option<&ClaudeSettingsSpec>,
+) -> Option<ClaudeSettingsSpec> {
+    let spec = spec?;
+    let mut owned = ClaudeSettingsSpec {
+        managed_keys: Vec::new(),
+        values: serde_json::Map::new(),
+    };
+    for key in &spec.managed_keys {
+        let Some(desired) = spec.value(key) else {
+            continue;
+        };
+        let existing = json_get_path(before, key);
+        let prev = previous_owned
+            .filter(|p| p.managed_keys.contains(key))
+            .and_then(|p| p.value(key));
+        let value = match desired {
+            serde_json::Value::Array(items) => {
+                let existing = existing.and_then(|v| v.as_array());
+                let prev = prev.and_then(|v| v.as_array());
+                let kept: Vec<serde_json::Value> = items
+                    .iter()
+                    .filter(|item| {
+                        !existing.is_some_and(|e| e.contains(item))
+                            || prev.is_some_and(|p| p.contains(item))
+                    })
+                    .cloned()
+                    .collect();
+                (!kept.is_empty()).then_some(serde_json::Value::Array(kept))
+            }
+            serde_json::Value::Object(entries) if is_keyed_map(key) => {
+                let existing = existing.and_then(|v| v.as_object());
+                let prev = prev.and_then(|v| v.as_object());
+                let kept: serde_json::Map<String, serde_json::Value> = entries
+                    .iter()
+                    .filter(|(k, v)| {
+                        let current = existing.and_then(|e| e.get(*k));
+                        current != Some(*v)
+                            || (current.is_some() && prev.and_then(|p| p.get(*k)) == current)
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                (!kept.is_empty()).then_some(serde_json::Value::Object(kept))
+            }
+            _ => (existing != Some(desired) || (existing.is_some() && prev == existing))
+                .then(|| desired.clone()),
+        };
+        if let Some(value) = value {
+            owned.managed_keys.push(key.clone());
+            owned.values.insert(key.clone(), value);
+        }
+    }
+    Some(owned)
+}
+
 /// `.claude/settings.json` keys whose value is a map of independent
 /// entries (plugin id -> enabled, marketplace name -> source). Nexus sets
 /// and removes these per entry, so entries the operator added at project
@@ -1109,6 +1231,8 @@ mod tests {
                 },
             )]),
             settings: None,
+            settings_owned: None,
+            settings_legacy: None,
             claude_md_block_sha256: None,
             hooks: std::collections::BTreeMap::new(),
             plugins: std::collections::BTreeMap::new(),
@@ -1552,6 +1676,8 @@ mod tests {
             &dir,
             ".nexus",
             Some(&spec(&["x"], &[("x", serde_json::json!(1))])),
+            None,
+            None,
         )
         .unwrap();
         fs_write(&dir, RULE, "my edit\n");
@@ -1636,7 +1762,7 @@ mod tests {
         let lock = lock_path(&dir, ".nexus");
         let before = std::fs::read(&lock).unwrap();
         std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o200)).unwrap();
-        let err = record_settings_in_lock(&dir, ".nexus", None).unwrap_err();
+        let err = record_settings_in_lock(&dir, ".nexus", None, None, None).unwrap_err();
         assert!(err
             .to_string()
             .contains("cannot read .nexus/claude/manifest.lock.json"));
@@ -1985,6 +2111,8 @@ mod tests {
             &dir,
             ".nexus",
             Some(&spec(&["x"], &[("x", serde_json::json!(1))])),
+            None,
+            None,
         )
         .unwrap();
         record_claude_md_block_in_lock(&dir, ".nexus", "blocksha").unwrap();

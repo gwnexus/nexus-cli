@@ -694,31 +694,23 @@ fn command_runs_script(command: &str, script: &str) -> bool {
 }
 
 /// Merge hook registrations for each adapter into `.claude/settings.json`'s
-/// `hooks` block.
+/// `hooks` block (see [`merge_claude_hooks_checked`] for the ownership
+/// rules).
 ///
-/// Idempotent per plugin, and safe to run against an already-existing,
-/// operator-customized `settings.json` (unlike the `env` block, which is
-/// create-once-only): for each `(event, adapter)` pair, only appends a new
-/// `{matcher, hooks: [...]}` entry to that event's array if no existing
-/// entry's command already references the adapter's `target_path`. Never
-/// replaces or removes an existing entry. Multiple plugins may register
-/// against the same event (e.g. `headroom-intercept` and `cost-control`
-/// both on `Stop`) as independent array entries: confirmed live against a
-/// real Claude Code session, per the dispatch's verification notes.
+/// Idempotent, and safe against an operator-customized `settings.json`:
+/// for each `(event, adapter)` pair a `{matcher, hooks: [...]}` entry is
+/// appended unless that exact entry is in place or another entry already
+/// runs the adapter script. Several plugins may register the same event
+/// as independent array entries.
 ///
-/// Returns `(appended, removed_plugin_names)`: the number of new hook
-/// entries appended, and the plugin names of any adapters that were
-/// previously Nexus-managed (per `previous_hooks`, from the CCX lock) but
-/// are no longer in `adapters` -- e.g. because the `nexus-core` Claude
-/// plugin now provides the same hooks. For each such adapter, only the exact settings.json hook
-/// entries Nexus itself wrote (matched on event/matcher/command) are
-/// removed -- anything an operator added is left alone -- and the hook
-/// script file under `.claude/hooks/` is deleted only if its content on
-/// disk still matches what Nexus last wrote there (the "orphaned" rule:
-/// never delete a file the operator modified).
+/// Returns `(appended, removed_plugin_names)`: the number of entries
+/// appended, and the plugin names of adapters recorded in
+/// `previous_hooks` (from the CCX lock) that are no longer in `adapters`.
+/// For those, the entries Nexus inserted are removed while unchanged, and
+/// the script under `.claude/hooks/` is deleted only if its content still
+/// matches what Nexus wrote and no hook runs it any more.
 ///
-/// The file is only rewritten when `appended > 0` or something was
-/// actually removed.
+/// The file is only rewritten when something was appended or removed.
 #[cfg(test)]
 pub fn merge_claude_hooks(
     target: &Path,
@@ -737,14 +729,89 @@ pub fn merge_claude_hooks(
 pub(crate) struct HookMerge {
     pub appended: usize,
     pub removed_plugins: Vec<String>,
-    /// Withdrawn adapters whose script could not be deleted: kept in the
-    /// lock (without registrations), so the next pull retries.
+    /// Withdrawn adapters whose script stays (not deletable, or a hook
+    /// still runs it): kept in the lock, so a later pull retries.
     pub retained: Vec<ccx::CcxLockHookEntry>,
+    /// Per adapter `target_path`: the registrations to record. Those Nexus
+    /// owns after the merge (inserted now, or recorded as inserted and
+    /// still unchanged), plus unowned records of an older lock that were
+    /// not taken over.
+    pub owned: std::collections::BTreeMap<String, Vec<ccx::CcxLockHookRegistration>>,
+}
+
+/// The exact `settings.json` hook entry Nexus inserts for a registration.
+fn generated_hook_entry(
+    command: &str,
+    matcher: Option<&str>,
+    timeout: Option<u64>,
+) -> serde_json::Value {
+    let mut hook = serde_json::json!({
+        "type": "command",
+        "command": command,
+    });
+    if let Some(timeout) = timeout {
+        hook["timeout"] = serde_json::json!(timeout);
+    }
+    let mut entry = serde_json::Map::new();
+    if let Some(matcher) = matcher {
+        entry.insert(
+            "matcher".to_string(),
+            serde_json::Value::String(matcher.to_string()),
+        );
+    }
+    entry.insert("hooks".to_string(), serde_json::Value::Array(vec![hook]));
+    serde_json::Value::Object(entry)
+}
+
+/// Remove the entries of a registration Nexus inserted, only where they
+/// are still exactly as inserted. A record from an older lock (not marked
+/// as inserted) or an entry the operator changed is left alone. Returns
+/// the number of entries removed.
+pub(crate) fn remove_owned_registration(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    reg: &ccx::CcxLockHookRegistration,
+) -> usize {
+    if !reg.owned {
+        return 0;
+    }
+    let Some(event_array) = hooks_obj.get_mut(&reg.event).and_then(|v| v.as_array_mut()) else {
+        return 0;
+    };
+    let entry = generated_hook_entry(&reg.command, reg.matcher.as_deref(), reg.timeout);
+    let before = event_array.len();
+    event_array.retain(|item| *item != entry);
+    before - event_array.len()
+}
+
+/// Whether any hook in a `settings.json` `hooks` block may run `script`,
+/// decided before deleting it. Conservative: a command that names the
+/// script's file name anywhere counts (`cd .claude/hooks && node x.mjs`
+/// has no token with the full path).
+pub(crate) fn any_hook_runs_script(settings: &serde_json::Value, script: &str) -> bool {
+    let file_name = script.rsplit('/').next().unwrap_or(script);
+    settings
+        .get("hooks")
+        .and_then(|h| h.as_object())
+        .into_iter()
+        .flat_map(|events| events.values())
+        .filter_map(|entries| entries.as_array())
+        .flatten()
+        .filter_map(|entry| entry.get("hooks").and_then(|h| h.as_array()))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(|c| c.as_str()))
+        .any(|command| command_runs_script(command, script) || command.contains(file_name))
 }
 
 /// `merge_claude_hooks`, or `None` when `settings.json` is not a valid
 /// JSON object and nothing was merged (the hook lock record must then stay
 /// as it is).
+///
+/// Ownership: the lock records only the registrations Nexus inserted.
+/// Only those are removed later, and only while their entry is exactly as
+/// inserted, so a backend matcher or timeout change replaces an unchanged
+/// Nexus entry, while an entry the operator already had or has edited
+/// stays. A registration recorded by an older CLI is taken over only when
+/// the adapter still sends it and its entry is exactly the generated one.
 pub(crate) fn merge_claude_hooks_checked(
     target: &Path,
     adapters: &[ClaudeHookAdapter],
@@ -759,32 +826,25 @@ pub(crate) fn merge_claude_hooks_checked(
                 .collect()
         })
         .unwrap_or_default();
-    // Adapters still sent: the registrations (event and matcher) they no
-    // longer send.
-    let retired: Vec<ccx::CcxLockHookEntry> = previous_hooks
+    // Adapters still sent: the registrations they no longer send as
+    // recorded (event, matcher, command and timeout).
+    let retired: Vec<&ccx::CcxLockHookRegistration> = previous_hooks
         .into_iter()
         .flat_map(|prev| prev.values())
         .filter_map(|entry| {
             let adapter = adapters
                 .iter()
                 .find(|a| a.target_path == entry.target_path)?;
-            let registrations: Vec<_> = entry
-                .registrations
-                .iter()
-                .filter(|reg| {
-                    !adapter.hook_events.iter().any(|e| {
-                        e.event == reg.event
-                            && e.matcher == reg.matcher
-                            && hook_command(&adapter.target_path, &e.event) == reg.command
-                    })
+            Some(entry.registrations.iter().filter(move |reg| {
+                !adapter.hook_events.iter().any(|e| {
+                    e.event == reg.event
+                        && e.matcher == reg.matcher
+                        && e.timeout == reg.timeout
+                        && hook_command(&adapter.target_path, &e.event) == reg.command
                 })
-                .cloned()
-                .collect();
-            (!registrations.is_empty()).then(|| ccx::CcxLockHookEntry {
-                registrations,
-                ..entry.clone()
-            })
+            }))
         })
+        .flatten()
         .collect();
 
     if adapters.is_empty() && removable.is_empty() {
@@ -806,18 +866,20 @@ pub(crate) fn merge_claude_hooks_checked(
     let hooks_obj = hooks.as_object_mut().expect("just ensured object");
 
     let mut removed_plugin_names = Vec::new();
+    let mut removed = 0;
     for entry in &removable {
-        remove_hook_registrations(hooks_obj, entry);
+        for reg in &entry.registrations {
+            removed += remove_owned_registration(hooks_obj, reg);
+        }
         removed_plugin_names.push(entry.plugin_name.clone());
     }
-    let mut retired_removed = 0;
-    for entry in &retired {
-        for reg in &entry.registrations {
-            retired_removed += remove_exact_registration(hooks_obj, reg);
-        }
+    for reg in &retired {
+        removed += remove_owned_registration(hooks_obj, reg);
     }
 
     let mut appended = 0;
+    let mut owned: std::collections::BTreeMap<String, Vec<ccx::CcxLockHookRegistration>> =
+        std::collections::BTreeMap::new();
     for adapter in adapters {
         // Same rule as the script write; the path ends up in a shell command.
         if !adapter
@@ -828,6 +890,8 @@ pub(crate) fn merge_claude_hooks_checked(
         {
             continue;
         }
+        let recorded = previous_hooks.and_then(|prev| prev.get(&adapter.target_path));
+        let owned_regs = owned.entry(adapter.target_path.clone()).or_default();
         for hook_event in &adapter.hook_events {
             if !super::pull::valid_path_segment(&hook_event.event) {
                 continue;
@@ -841,99 +905,83 @@ pub(crate) fn merge_claude_hooks_checked(
             let event_array = event_array.as_array_mut().expect("just ensured array");
 
             let command = hook_command(&adapter.target_path, &hook_event.event);
-            // An entry with this command and this matcher is in place.
-            if event_array.iter().any(|entry| {
-                hook_entry_is_only(entry, &command)
-                    && entry.get("matcher").and_then(|m| m.as_str())
-                        == hook_event.matcher.as_deref()
-            }) {
+            let reg = ccx::CcxLockHookRegistration {
+                event: hook_event.event.clone(),
+                matcher: hook_event.matcher.clone(),
+                command: command.clone(),
+                timeout: hook_event.timeout,
+                owned: true,
+            };
+            let entry =
+                generated_hook_entry(&command, hook_event.matcher.as_deref(), hook_event.timeout);
+            if event_array.contains(&entry) {
+                // Nexus's own entry if the lock records it; an older lock
+                // (no ownership marker) is taken over for the exact entry.
+                // Otherwise the operator had it already: not recorded.
+                let is_recorded = recorded.is_some_and(|r| {
+                    r.registrations.iter().any(|old| {
+                        old.event == reg.event
+                            && old.matcher == reg.matcher
+                            && old.command == reg.command
+                            && (!old.owned || old.timeout == reg.timeout)
+                    })
+                });
+                if is_recorded && !owned_regs.contains(&reg) {
+                    owned_regs.push(reg);
+                }
                 continue;
             }
-            // Several registrations of one command for this event (each
-            // with its own matcher): the missing one is added, none is
-            // rewritten into another.
+            // The operator registers this script already (another matcher,
+            // a timeout or more hooks in the entry): theirs, left alone.
+            // With several matchers for one event, only an entry for this
+            // matcher counts.
             let same_event = adapter
                 .hook_events
                 .iter()
                 .filter(|e| e.event == hook_event.event)
                 .count();
-            // Nexus's own entry (exactly its command, nothing else): keep
-            // its matcher in sync, since the backend widens matchers over
-            // time (e.g. `mcp__nexus__.*`). An entry the operator changed
-            // or extended is left alone.
-            if same_event > 1 {
-                // fall through to the append below
-            } else if let Some(own) = event_array
-                .iter_mut()
-                .find(|entry| hook_entry_is_only(entry, &command))
-            {
-                let current = own.get("matcher").and_then(|m| m.as_str());
-                if current != hook_event.matcher.as_deref() {
-                    let obj = own.as_object_mut().expect("entry is an object");
-                    match hook_event.matcher {
-                        Some(ref m) => {
-                            obj.insert("matcher".into(), serde_json::Value::String(m.clone()));
-                        }
-                        None => {
-                            obj.remove("matcher");
-                        }
-                    }
-                    appended += 1;
-                }
-                continue;
-            }
-            let already_registered = event_array.iter().any(|entry| {
-                // With several matchers, only an entry for this matcher.
+            let already_registered = event_array.iter().any(|item| {
                 (same_event == 1
-                    || entry.get("matcher").and_then(|m| m.as_str())
+                    || item.get("matcher").and_then(|m| m.as_str())
                         == hook_event.matcher.as_deref())
-                    && entry
+                    && item
                         .get("hooks")
                         .and_then(|h| h.as_array())
-                        .map(|hooks| {
+                        .is_some_and(|hooks| {
                             hooks.iter().any(|h| {
                                 h.get("command")
                                     .and_then(|c| c.as_str())
                                     .is_some_and(|c| command_runs_script(c, &adapter.target_path))
                             })
                         })
-                        .unwrap_or(false)
             });
             if already_registered {
                 continue;
             }
-
-            let mut hook_command = serde_json::json!({
-                "type": "command",
-                "command": command,
-            });
-            if let Some(timeout) = hook_event.timeout {
-                hook_command["timeout"] = serde_json::json!(timeout);
-            }
-
-            let mut new_entry = serde_json::Map::new();
-            if let Some(ref matcher) = hook_event.matcher {
-                new_entry.insert(
-                    "matcher".to_string(),
-                    serde_json::Value::String(matcher.clone()),
-                );
-            }
-            new_entry.insert(
-                "hooks".to_string(),
-                serde_json::Value::Array(vec![hook_command]),
-            );
-
-            event_array.push(serde_json::Value::Object(new_entry));
+            event_array.push(entry);
             appended += 1;
+            owned_regs.push(reg);
+        }
+        // Registrations an older lock recorded and that were not taken
+        // over: never removed by a pull, but kept as unowned records so
+        // `nexus deinit` or a forced cleanup can still find them.
+        for old in recorded.into_iter().flat_map(|r| &r.registrations) {
+            let taken_over = owned_regs.iter().any(|r| {
+                r.event == old.event && r.matcher == old.matcher && r.command == old.command
+            });
+            if !old.owned && !taken_over && !owned_regs.contains(old) {
+                owned_regs.push(old.clone());
+            }
         }
     }
 
-    if appended > 0 || !removed_plugin_names.is_empty() || retired_removed > 0 {
+    if appended > 0 || removed > 0 {
         write_settings(&settings_path, &settings)?;
     }
 
     // Scripts only after the registrations are gone from settings.json, so
-    // no hook is left pointing at a deleted script.
+    // no hook is left pointing at a deleted script. A script that a hook
+    // still runs (an entry the operator kept or edited) stays too.
     let mut retained = Vec::new();
     for entry in &removable {
         if super::pull::validate_agent_file_target_path(target, &entry.target_path).is_err() {
@@ -944,16 +992,17 @@ pub(crate) fn merge_claude_hooks_checked(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             // Unreadable: keep the record so a later pull retries the cleanup.
             Err(_) => true,
+            // A hook still runs it (edited or not): kept, with its record.
+            Ok(_) if any_hook_runs_script(&settings, &entry.target_path) => true,
             Ok(bytes) => {
                 nexus_core::hash::sha256_hex_bytes(&bytes) == entry.file_sha256
                     && fs::remove_file(&script_path).is_err()
             }
         };
         if keep {
-            retained.push(ccx::CcxLockHookEntry {
-                registrations: Vec::new(),
-                ..(*entry).clone()
-            });
+            // With its registrations: an entry the operator kept can
+            // still be removed by a later forced cleanup.
+            retained.push((*entry).clone());
         }
     }
 
@@ -961,39 +1010,8 @@ pub(crate) fn merge_claude_hooks_checked(
         appended,
         removed_plugins: removed_plugin_names,
         retained,
+        owned,
     }))
-}
-
-/// Remove the hooks running `reg.command` from the entries of its event
-/// whose matcher is exactly `reg.matcher`; an entry left without hooks is
-/// dropped. Returns the number of hooks removed.
-fn remove_exact_registration(
-    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
-    reg: &ccx::CcxLockHookRegistration,
-) -> usize {
-    let Some(event_array) = hooks_obj.get_mut(&reg.event).and_then(|v| v.as_array_mut()) else {
-        return 0;
-    };
-    let mut removed = 0;
-    for item in event_array.iter_mut() {
-        if item.get("matcher").and_then(|m| m.as_str()) != reg.matcher.as_deref() {
-            continue;
-        }
-        if let Some(hooks) = item.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-            let before = hooks.len();
-            hooks.retain(|h| {
-                h.get("command").and_then(|c| c.as_str()) != Some(reg.command.as_str())
-            });
-            removed += before - hooks.len();
-        }
-    }
-    event_array.retain(|item| {
-        !item
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .is_some_and(|h| h.is_empty())
-    });
-    removed
 }
 
 /// The command Nexus registers for an adapter script and event.
@@ -1003,17 +1021,6 @@ pub(crate) fn hook_command(target_path: &str, event: &str) -> String {
         target_path,
         kebab_case_event(event)
     )
-}
-
-/// Whether a `settings.json` hook entry holds exactly one hook, running
-/// `command`.
-fn hook_entry_is_only(entry: &serde_json::Value, command: &str) -> bool {
-    entry
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .is_some_and(|hooks| {
-            hooks.len() == 1 && hooks[0].get("command").and_then(|c| c.as_str()) == Some(command)
-        })
 }
 
 /// Remove exactly the `.claude/settings.json` hooks Nexus wrote for one
@@ -1157,20 +1164,22 @@ pub fn merge_claude_generic_settings(
     spec: Option<&ClaudeSettingsSpec>,
     previous: Option<&ClaudeSettingsSpec>,
 ) -> anyhow::Result<usize> {
-    Ok(merge_claude_generic_settings_checked(target, spec, previous)?.unwrap_or(0))
+    Ok(merge_claude_generic_settings_checked(target, spec, previous)?.map_or(0, |(n, _)| n))
 }
 
 /// `merge_claude_generic_settings`, or `None` when `settings.json` is
-/// not a valid JSON object and nothing was merged.
+/// not a valid JSON object and nothing was merged. Also returns the
+/// settings as the merge read them, so ownership is decided on the state
+/// the merge saw.
 pub(crate) fn merge_claude_generic_settings_checked(
     target: &Path,
     spec: Option<&ClaudeSettingsSpec>,
     previous: Option<&ClaudeSettingsSpec>,
-) -> anyhow::Result<Option<usize>> {
+) -> anyhow::Result<Option<(usize, serde_json::Value)>> {
     let spec_has_keys = spec.is_some_and(|s| !s.managed_keys.is_empty());
     let previous_has_keys = previous.is_some_and(|p| !p.managed_keys.is_empty());
     if !spec_has_keys && !previous_has_keys {
-        return Ok(Some(0));
+        return Ok(Some((0, serde_json::json!({}))));
     }
 
     let settings_path = target.join(".claude").join("settings.json");
@@ -1179,12 +1188,13 @@ pub(crate) fn merge_claude_generic_settings_checked(
         return Ok(None);
     };
 
+    let observed = settings.clone();
     let changed = apply_generic_settings(&mut settings, spec, previous);
     if changed > 0 {
         write_settings(&settings_path, &settings)?;
     }
 
-    Ok(Some(changed))
+    Ok(Some((changed, observed)))
 }
 
 /// The pure part of `merge_claude_generic_settings`: apply `spec` (and
@@ -1844,30 +1854,23 @@ pub fn render_claude_projection(
             plugin_name
         );
     }
-    let new_hooks: std::collections::BTreeMap<String, ccx::CcxLockHookEntry> = hook_adapters
-        .iter()
-        .map(|a| {
-            (
-                a.target_path.clone(),
-                ccx::CcxLockHookEntry {
-                    plugin_name: a.plugin_name.clone(),
-                    target_path: a.target_path.clone(),
-                    file_sha256: nexus_core::hash::sha256_hex(&a.body),
-                    registrations: a
-                        .hook_events
-                        .iter()
-                        .map(|e| ccx::CcxLockHookRegistration {
-                            event: e.event.clone(),
-                            matcher: e.matcher.clone(),
-                            command: hook_command(&a.target_path, &e.event),
-                        })
-                        .collect(),
-                },
-            )
-        })
-        .collect();
-    if let Some(merge) = hook_merge {
-        let mut new_hooks = new_hooks;
+    if let Some(mut merge) = hook_merge {
+        // Only the registrations Nexus inserted (see `HookMerge::owned`).
+        let mut new_hooks: std::collections::BTreeMap<String, ccx::CcxLockHookEntry> =
+            hook_adapters
+                .iter()
+                .map(|a| {
+                    (
+                        a.target_path.clone(),
+                        ccx::CcxLockHookEntry {
+                            plugin_name: a.plugin_name.clone(),
+                            target_path: a.target_path.clone(),
+                            file_sha256: nexus_core::hash::sha256_hex(&a.body),
+                            registrations: merge.owned.remove(&a.target_path).unwrap_or_default(),
+                        },
+                    )
+                })
+                .collect();
         for entry in merge.retained {
             new_hooks.entry(entry.target_path.clone()).or_insert(entry);
         }
@@ -1897,15 +1900,19 @@ pub fn render_claude_projection(
     // updated afterward to reflect what is now managed.
     let mut settings_changes = Vec::new();
     if export_ok && settings_ok {
-        let previous_settings =
-            super::ccx::load_lock(target, agentic_root).and_then(|l| l.settings);
+        let lock = super::ccx::load_lock(target, agentic_root);
+        let previous_settings = lock.as_ref().and_then(|l| l.settings.clone());
+        // Removal only touches what Nexus wrote (see `CcxLock::settings_owned`);
+        // what an older CLI recorded is carried over for explicit cleanup.
+        let legacy_settings = lock.as_ref().and_then(|l| l.legacy_settings().cloned());
+        let previous_owned = lock.and_then(|l| l.settings_owned);
         let settings_before = read_claude_settings(target);
         let merged = merge_claude_generic_settings_checked(
             target,
             claude_settings,
-            previous_settings.as_ref(),
+            previous_owned.as_ref(),
         )?;
-        let generic_settings_changed = merged.unwrap_or(0);
+        let generic_settings_changed = merged.as_ref().map_or(0, |(n, _)| *n);
         settings_changes = super::ccx::describe_settings_changes(
             &settings_before,
             &read_claude_settings(target),
@@ -1919,8 +1926,16 @@ pub fn render_claude_projection(
                 generic_settings_changed
             );
         }
-        if merged.is_some() {
-            super::ccx::record_settings_in_lock(target, agentic_root, claude_settings)?;
+        if let Some((_, observed)) = merged {
+            let owned =
+                super::ccx::owned_settings(&observed, claude_settings, previous_owned.as_ref());
+            super::ccx::record_settings_in_lock(
+                target,
+                agentic_root,
+                claude_settings,
+                owned.as_ref(),
+                legacy_settings.as_ref(),
+            )?;
         }
     }
 
@@ -2703,6 +2718,8 @@ mod tests {
                 &["attribution"],
                 &[("attribution", serde_json::json!({"commit": "text"}))],
             )),
+            None,
+            None,
         )
         .unwrap();
         render_claude_projection(
@@ -2722,6 +2739,403 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_claude_settings(&dir)["attribution"]["commit"], "text");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn guard_adapter(events: &[(&str, Option<&str>, Option<u64>)]) -> ClaudeHookAdapter {
+        ClaudeHookAdapter {
+            plugin_name: "guard".to_string(),
+            target_path: ".claude/hooks/nexus-guard.mjs".to_string(),
+            body: "// guard".to_string(),
+            hook_events: events
+                .iter()
+                .map(
+                    |(event, matcher, timeout)| nexus_core::api::ClaudeHookEvent {
+                        event: (*event).to_string(),
+                        matcher: matcher.map(str::to_string),
+                        timeout: *timeout,
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    /// The lock record a pull writes from a merge.
+    fn lock_from_merge(
+        adapter: &ClaudeHookAdapter,
+        merge: HookMerge,
+    ) -> std::collections::BTreeMap<String, ccx::CcxLockHookEntry> {
+        let mut owned = merge.owned;
+        std::collections::BTreeMap::from([(
+            adapter.target_path.clone(),
+            ccx::CcxLockHookEntry {
+                plugin_name: adapter.plugin_name.clone(),
+                target_path: adapter.target_path.clone(),
+                file_sha256: nexus_core::hash::sha256_hex(&adapter.body),
+                registrations: owned.remove(&adapter.target_path).unwrap_or_default(),
+            },
+        )])
+    }
+
+    #[test]
+    fn test_operator_hook_with_own_timeout_is_never_owned_or_removed() {
+        let dir = temp_dir("hooks-operator-timeout");
+        let cmd = hook_command(".claude/hooks/nexus-guard.mjs", "PreToolUse");
+        let operator = serde_json::json!({"matcher": "Bash", "hooks": [
+            {"type": "command", "command": cmd, "timeout": 30}
+        ]});
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"PreToolUse": [operator.clone()]}}).to_string(),
+        )
+        .unwrap();
+
+        let both = guard_adapter(&[("PreToolUse", Some("Bash"), None), ("Stop", None, None)]);
+        let merge = merge_claude_hooks_checked(&dir, std::slice::from_ref(&both), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(merge.appended, 1, "only Stop is inserted");
+        let lock = lock_from_merge(&both, merge);
+        let regs = &lock[&both.target_path].registrations;
+        assert_eq!(regs.len(), 1);
+        assert_eq!(regs[0].event, "Stop");
+        assert!(regs[0].owned);
+
+        // The adapter drops PreToolUse: the operator's entry stays.
+        let stop_only = guard_adapter(&[("Stop", None, None)]);
+        merge_claude_hooks_checked(&dir, std::slice::from_ref(&stop_only), Some(&lock))
+            .unwrap()
+            .unwrap();
+        let settings = read_claude_settings(&dir);
+        assert_eq!(
+            settings["hooks"]["PreToolUse"],
+            serde_json::json!([operator])
+        );
+        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_operator_identical_hook_stays_with_its_script() {
+        let dir = temp_dir("hooks-operator-identical");
+        let adapter = guard_adapter(&[("Stop", None, None)]);
+        let entry = generated_hook_entry(&hook_command(&adapter.target_path, "Stop"), None, None);
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(dir.join(&adapter.target_path), &adapter.body).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"Stop": [entry.clone()]}}).to_string(),
+        )
+        .unwrap();
+
+        // Already in place, not recorded: the operator's.
+        let merge = merge_claude_hooks_checked(&dir, std::slice::from_ref(&adapter), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(merge.appended, 0);
+        let lock = lock_from_merge(&adapter, merge);
+        assert!(lock[&adapter.target_path].registrations.is_empty());
+
+        // The adapter is withdrawn: the entry stays, and so does the
+        // script it runs; the record is kept for a later retry.
+        let merge = merge_claude_hooks_checked(&dir, &[], Some(&lock))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read_claude_settings(&dir)["hooks"]["Stop"],
+            serde_json::json!([entry])
+        );
+        assert!(dir.join(&adapter.target_path).exists());
+        assert_eq!(merge.retained.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_withdrawn_script_named_by_a_rewritten_hook_is_kept() {
+        let dir = temp_dir("hooks-cd-command");
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(dir.join(".claude/settings.json"), "{}").unwrap();
+        let adapter = guard_adapter(&[("Stop", None, None)]);
+        fs::write(dir.join(&adapter.target_path), &adapter.body).unwrap();
+        let merge = merge_claude_hooks_checked(&dir, std::slice::from_ref(&adapter), None)
+            .unwrap()
+            .unwrap();
+        let lock = lock_from_merge(&adapter, merge);
+        // The operator rewrites the command: no token holds the full path.
+        let mine = "cd \"$CLAUDE_PROJECT_DIR/.claude/hooks\" && node nexus-guard.mjs stop";
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"Stop": [
+                {"hooks": [{"type": "command", "command": mine}]}
+            ]}})
+            .to_string(),
+        )
+        .unwrap();
+        let merge = merge_claude_hooks_checked(&dir, &[], Some(&lock))
+            .unwrap()
+            .unwrap();
+        assert!(dir.join(&adapter.target_path).exists());
+        assert_eq!(merge.retained.len(), 1);
+        assert_eq!(
+            read_claude_settings(&dir)["hooks"]["Stop"][0]["hooks"][0]["command"],
+            mine
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_withdrawn_script_edited_and_in_use_keeps_its_record() {
+        let dir = temp_dir("hooks-edited-in-use");
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(dir.join(".claude/settings.json"), "{}").unwrap();
+        let adapter = guard_adapter(&[("Stop", None, None)]);
+        fs::write(dir.join(&adapter.target_path), &adapter.body).unwrap();
+        let merge = merge_claude_hooks_checked(&dir, std::slice::from_ref(&adapter), None)
+            .unwrap()
+            .unwrap();
+        let lock = lock_from_merge(&adapter, merge);
+        // The operator edits both the hook (a timeout) and the script.
+        let mut settings = read_claude_settings(&dir);
+        settings["hooks"]["Stop"][0]["hooks"][0]["timeout"] = serde_json::json!(5);
+        fs::write(dir.join(".claude/settings.json"), settings.to_string()).unwrap();
+        fs::write(dir.join(&adapter.target_path), "// mine").unwrap();
+        let merge = merge_claude_hooks_checked(&dir, &[], Some(&lock))
+            .unwrap()
+            .unwrap();
+        assert_eq!(merge.retained.len(), 1);
+        assert_eq!(merge.retained[0].registrations.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_older_lock_record_is_taken_over_only_when_exact_and_sent() {
+        let dir = temp_dir("hooks-legacy-record");
+        let adapter = guard_adapter(&[("Stop", None, None)]);
+        let stop = generated_hook_entry(&hook_command(&adapter.target_path, "Stop"), None, None);
+        let pre = generated_hook_entry(
+            &hook_command(&adapter.target_path, "PreToolUse"),
+            Some("Bash"),
+            None,
+        );
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"Stop": [stop.clone()], "PreToolUse": [pre.clone()]}})
+                .to_string(),
+        )
+        .unwrap();
+        // An older CLI recorded both, without the ownership marker.
+        let (path, mut legacy) = hook_lock_entry(
+            "guard",
+            &adapter.target_path,
+            &adapter.body,
+            &[("Stop", None), ("PreToolUse", Some("Bash"))],
+        );
+        for reg in &mut legacy.registrations {
+            reg.owned = false;
+        }
+        let previous = std::collections::BTreeMap::from([(path, legacy)]);
+
+        let merge =
+            merge_claude_hooks_checked(&dir, std::slice::from_ref(&adapter), Some(&previous))
+                .unwrap()
+                .unwrap();
+        // Stop is still sent and exact: taken over. PreToolUse is retired
+        // but ambiguous: left in place, and kept as an unowned record for
+        // an explicit cleanup.
+        let owned = &merge.owned[&adapter.target_path];
+        assert_eq!(owned.len(), 2);
+        assert_eq!(owned[0].event, "Stop");
+        assert!(owned[0].owned);
+        assert_eq!(owned[1].event, "PreToolUse");
+        assert!(!owned[1].owned);
+        let settings = read_claude_settings(&dir);
+        assert_eq!(settings["hooks"]["PreToolUse"], serde_json::json!([pre]));
+        assert_eq!(settings["hooks"]["Stop"], serde_json::json!([stop]));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_timeout_change_replaces_an_unchanged_nexus_entry() {
+        let dir = temp_dir("hooks-timeout-change");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(dir.join(".claude/settings.json"), "{}").unwrap();
+        let old = guard_adapter(&[("Stop", None, Some(10))]);
+        let merge = merge_claude_hooks_checked(&dir, std::slice::from_ref(&old), None)
+            .unwrap()
+            .unwrap();
+        let lock = lock_from_merge(&old, merge);
+        assert_eq!(lock[&old.target_path].registrations[0].timeout, Some(10));
+
+        let new = guard_adapter(&[("Stop", None, Some(20))]);
+        merge_claude_hooks_checked(&dir, std::slice::from_ref(&new), Some(&lock))
+            .unwrap()
+            .unwrap();
+        let stop = read_claude_settings(&dir)["hooks"]["Stop"].clone();
+        assert_eq!(stop.as_array().unwrap().len(), 1);
+        assert_eq!(stop[0]["hooks"][0]["timeout"], 20);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_settings_lock_records_only_what_nexus_wrote() {
+        let dir = temp_dir("settings-ownership");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        let status = serde_json::json!({"type": "command", "command": "mine"});
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({
+                "enabledPlugins": {"p@m": true},
+                "statusLine": status,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let spec = sample_ccx_spec(
+            &["enabledPlugins", "statusLine", "permissions.deny"],
+            &[
+                (
+                    "enabledPlugins",
+                    serde_json::json!({"p@m": true, "q@m": true}),
+                ),
+                ("statusLine", status.clone()),
+                ("permissions", serde_json::json!({"deny": ["Bash(rm:*)"]})),
+            ],
+        );
+        let render = |settings: Option<&ClaudeSettingsSpec>| {
+            render_claude_projection(
+                &dir,
+                "Test Project",
+                ".nexus",
+                &[],
+                &[],
+                &[],
+                None,
+                &[],
+                Some(false),
+                Some(settings),
+                None,
+                &ClaudeAgentInputs::default(),
+                false,
+            )
+            .unwrap();
+        };
+        render(Some(&spec));
+        let lock = ccx::load_lock(&dir, ".nexus").unwrap();
+        assert_eq!(lock.settings.as_ref(), Some(&spec));
+        let owned = lock.settings_owned.unwrap();
+        assert_eq!(
+            owned.managed_keys,
+            vec!["enabledPlugins".to_string(), "permissions.deny".to_string()]
+        );
+        assert_eq!(
+            owned.value("enabledPlugins"),
+            Some(&serde_json::json!({"q@m": true}))
+        );
+
+        // A second pull keeps what Nexus wrote as its own.
+        render(Some(&spec));
+        let lock = ccx::load_lock(&dir, ".nexus").unwrap();
+        assert_eq!(lock.settings_owned.as_ref(), Some(&owned));
+
+        // The export stops sending them: only Nexus's entries go.
+        let empty = sample_ccx_spec(&[], &[]);
+        render(Some(&empty));
+        let settings = read_claude_settings(&dir);
+        assert_eq!(settings["enabledPlugins"], serde_json::json!({"p@m": true}));
+        assert_eq!(settings["statusLine"], status);
+        assert!(!settings["permissions"]["deny"]
+            .as_array()
+            .is_some_and(|d| d.contains(&serde_json::json!("Bash(rm:*)"))));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_settings_from_an_older_lock_are_kept() {
+        let dir = temp_dir("settings-ownership-legacy");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"enabledPlugins": {"p@m": true}}).to_string(),
+        )
+        .unwrap();
+        // An older CLI recorded the requested entry without ownership.
+        let spec = sample_ccx_spec(
+            &["enabledPlugins"],
+            &[("enabledPlugins", serde_json::json!({"p@m": true}))],
+        );
+        ccx::record_settings_in_lock(&dir, ".nexus", Some(&spec), None, None).unwrap();
+        let empty = sample_ccx_spec(&[], &[]);
+        render_claude_projection(
+            &dir,
+            "Test Project",
+            ".nexus",
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            Some(false),
+            Some(Some(&empty)),
+            None,
+            &ClaudeAgentInputs::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            read_claude_settings(&dir)["enabledPlugins"],
+            serde_json::json!({"p@m": true})
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_settings_from_an_older_lock_are_carried_over() {
+        let dir = temp_dir("settings-legacy-carry");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({"enabledPlugins": {"p@m": true}}).to_string(),
+        )
+        .unwrap();
+        let spec = sample_ccx_spec(
+            &["enabledPlugins"],
+            &[("enabledPlugins", serde_json::json!({"p@m": true}))],
+        );
+        ccx::record_settings_in_lock(&dir, ".nexus", Some(&spec), None, None).unwrap();
+        let empty = sample_ccx_spec(&[], &[]);
+        for _ in 0..2 {
+            render_claude_projection(
+                &dir,
+                "Test Project",
+                ".nexus",
+                &[],
+                &[],
+                &[],
+                None,
+                &[],
+                Some(false),
+                Some(Some(&empty)),
+                None,
+                &ClaudeAgentInputs::default(),
+                false,
+            )
+            .unwrap();
+        }
+        // Kept on disk, and still recorded for `nexus deinit`.
+        let lock = ccx::load_lock(&dir, ".nexus").unwrap();
+        assert_eq!(lock.settings_legacy.as_ref(), Some(&spec));
+        assert_eq!(lock.removable_settings(true).len(), 2);
+        assert_eq!(lock.removable_settings(false).len(), 1);
+        let mut settings = read_claude_settings(&dir);
+        super::super::projection_cleanup::strip_nexus_settings(
+            &mut settings,
+            Some(&lock),
+            false,
+            true,
+        );
+        assert!(settings.get("enabledPlugins").is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -4042,12 +4456,27 @@ mod tests {
                 timeout: None,
             }],
         };
-        let (changed, _) = merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
-        assert_eq!(changed, 1);
         let read = || -> serde_json::Value {
             serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
                 .unwrap()
         };
+        // Without a record of inserting it, the entry is the operator's:
+        // its matcher stays and no second registration is added.
+        let (changed, _) = merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
+        assert_eq!(changed, 0);
+        assert_eq!(read()["hooks"]["PostToolUse"][0]["matcher"], "Edit");
+
+        // Recorded as inserted by Nexus and unchanged: the new matcher
+        // replaces it.
+        let previous = std::collections::BTreeMap::from([hook_lock_entry(
+            "session-guard",
+            ".claude/hooks/nexus-session-guard.mjs",
+            "",
+            &[("PostToolUse", Some("Edit"))],
+        )]);
+        let (changed, _) =
+            merge_claude_hooks(&dir, std::slice::from_ref(&adapter), Some(&previous)).unwrap();
+        assert_eq!(changed, 1);
         let post = read()["hooks"]["PostToolUse"].clone();
         assert_eq!(post.as_array().unwrap().len(), 1);
         assert_eq!(post[0]["matcher"], "Edit|mcp__nexus__.*");
@@ -4066,7 +4495,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let (changed, _) = merge_claude_hooks(&dir, std::slice::from_ref(&adapter), None).unwrap();
+        let (changed, _) =
+            merge_claude_hooks(&dir, std::slice::from_ref(&adapter), Some(&previous)).unwrap();
         assert_eq!(changed, 0);
         assert_eq!(read()["hooks"]["PostToolUse"][0]["matcher"], "Edit");
 
@@ -4079,6 +4509,8 @@ mod tests {
                 event: "PostToolUse".into(),
                 matcher: Some("Edit|mcp__nexus__.*".into()),
                 command: cmd.into(),
+                timeout: None,
+                owned: true,
             }],
         };
         let mut settings = read();
@@ -4303,6 +4735,8 @@ mod tests {
                             target_path,
                             kebab_case_event(event)
                         ),
+                        timeout: None,
+                        owned: true,
                     })
                     .collect(),
             },
@@ -4389,13 +4823,13 @@ mod tests {
         let merge = merge_claude_hooks_checked(&dir, &[], Some(&previous))
             .unwrap()
             .unwrap();
-        // The record stays, without registrations, so a later pull retries.
+        // The record stays, so a later pull retries.
         assert_eq!(merge.retained.len(), 1);
         assert_eq!(
             merge.retained[0].target_path,
             ".claude/hooks/nexus-gone.mjs"
         );
-        assert!(merge.retained[0].registrations.is_empty());
+        assert_eq!(merge.retained[0].registrations.len(), 1);
 
         fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
         let _ = fs::remove_dir_all(&dir);
