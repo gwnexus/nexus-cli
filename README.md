@@ -226,6 +226,17 @@ One command per activity; each classifies every file itself:
   status` lists it as unreadable and compares the rest); when a pull
   stops on a write error, the files it already wrote are recorded, so the
   next pull updates them normally.
+- `.claude/settings.json` is merged, never replaced: a file that is not a
+  valid JSON object (a trailing comma, say) is left as it is, with a hint
+  to fix it, and no hooks or settings keys are merged until it parses.
+  Writes go through a temporary file, so a failed write keeps the old file
+  and its permissions. No agent file or CCX file is written over it, also
+  not with `--force`. When the agent-file export fails, the hooks,
+  settings keys and lane delegates Nexus manages stay as they are. The
+  co-author policy also covers `attribution.commit`, which Claude Code
+  prefers over `includeCoAuthoredBy`, unless `attribution` is managed by
+  the export (or, when the export fails, recorded as managed in the lock):
+  a managed value is kept until the next successful export.
 - Leftovers of the runtime the project does not use are reported as STALE
   with "run nexus pull to remove it" (see below); unmanaged files are never
   touched.

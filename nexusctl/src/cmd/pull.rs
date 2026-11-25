@@ -1302,7 +1302,11 @@ pub async fn run_with_root_hook(
                             }
                         }
 
-                        write_agent_file(&workspace, af)?;
+                        // Skipped (settings.json is merged, not written):
+                        // neither counted nor recorded.
+                        if !write_agent_file(&workspace, af)? {
+                            continue;
+                        }
                         af_written_paths.insert(af.target_path.clone());
 
                         // Record the (generated_at-normalized) hash of what was
@@ -1661,7 +1665,7 @@ pub async fn run_with_root_hook(
                     af_export_result
                         .as_ref()
                         .ok()
-                        .and_then(|r| r.claude_settings.as_ref()),
+                        .map(|r| r.claude_settings.as_ref()),
                     af_export_result
                         .as_ref()
                         .ok()
@@ -3474,7 +3478,9 @@ pub(crate) fn plan_dropped_skill_files(
     load_pull_manifest(workspace, agentic_root)
         .into_iter()
         .filter(|(path, _)| roots.iter().any(|r| path.starts_with(&format!("{r}/"))))
-        .filter(|(path, _)| !desired.contains(&path.as_str()))
+        // Case-insensitive: on a case-insensitive filesystem a stale record
+        // (`skill.md`) can name the desired file (`SKILL.md`).
+        .filter(|(path, _)| !desired.iter().any(|d| d.eq_ignore_ascii_case(path)))
         .filter(|(path, _)| validate_agent_file_target_path(workspace, path).is_ok())
         .map(|(path, hash)| match fs::read(workspace.join(&path)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => DroppedFile::Gone(path),
@@ -4134,14 +4140,26 @@ fn sync_agents_md(
 ///
 /// Creates any intermediate directories as needed.
 /// The file body is already template-substituted by the server.
+/// Returns `false` when the target is skipped (`.claude/settings.json`,
+/// merged by the Claude Code projection), so the caller records nothing.
 pub fn write_agent_file(
     workspace: &Path,
     af: &nexus_core::api::ExportedAgentFile,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     // Path traversal / absolute-path escape protection, checked first so
     // a malformed target_path is rejected before any exists()/join() call
     // touches it.
     validate_agent_file_target_path(workspace, &af.target_path)?;
+
+    // Only the projection merges into settings.json; never replaced whole.
+    if super::claude_render::is_merged_settings_target(workspace, &af.target_path) {
+        println!(
+            "   {} {} is merged by the Claude Code projection; agent file not written",
+            style("!").bold().yellow(),
+            af.target_path
+        );
+        return Ok(false);
+    }
 
     // Protected file guard: never overwrite secrets/env files
     if is_protected_target(workspace, &af.target_path) {
@@ -4163,7 +4181,7 @@ pub fn write_agent_file(
     fs::write(&target, &af.body)?;
     print_synced(&af.target_path);
 
-    Ok(())
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -4903,7 +4921,8 @@ command_slug: {command_slug}
     for res in &skill.resources {
         // Sanitise filename: prevent directory traversal
         let filename = res.filename.replace(['/', '\\'], "_");
-        if filename.is_empty() || filename == "SKILL.md" {
+        // Reserved in any case (case-insensitive filesystems).
+        if filename.is_empty() || filename.eq_ignore_ascii_case("SKILL.md") {
             continue;
         }
         files.push((format!("{skill_dir}/{filename}"), res.body.clone()));
@@ -7841,6 +7860,29 @@ mod tests {
         assert!(!is_protected_target(ws, "docs/readme.md"));
     }
 
+    #[test]
+    fn test_agent_file_never_replaces_claude_settings() {
+        let ws = tempfile::tempdir().unwrap();
+        let path = ws.path().join(".claude/settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ invalid,").unwrap();
+        let af = nexus_core::api::ExportedAgentFile {
+            file_key: "x".into(),
+            target_path: ".claude/settings.json".into(),
+            name: "x".into(),
+            description: None,
+            category: "config".into(),
+            version: 1,
+            body: "{}".into(),
+            content_hash: None,
+            agent_file_id: None,
+        };
+        // Reported as not written, so the caller neither counts nor
+        // records it in the sync manifest.
+        assert!(!write_agent_file(ws.path(), &af).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ invalid,");
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_plugin_env_refuses_a_symlinked_agentic_root() {
@@ -10346,6 +10388,22 @@ mod tests {
         assert!(load_pull_manifest(&dir, ".nexus")
             .keys()
             .all(|k| !k.contains("cr-review")));
+        assert!(plan_dropped_skill_files(&dir, ".nexus", true, &desired).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_record_naming_a_desired_file_in_other_case_is_kept() {
+        let dir = temp_pull_dir("skill-dropped-case");
+        let skill = export_skill("nx-case", "Case", None);
+        pulled_claude_skills(&dir, std::slice::from_ref(&skill));
+        // An older pull recorded the same file under a lowercase name.
+        let lower = ".claude/skills/nexus-case/skill.md".to_string();
+        let body = fs::read_to_string(dir.join(".claude/skills/nexus-case/SKILL.md")).unwrap();
+        record_generated_many(&dir, ".nexus", &[(lower, body)]).unwrap();
+
+        let desired = desired_skill_files(&[skill], ".nexus", true);
+        let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
         assert!(plan_dropped_skill_files(&dir, ".nexus", true, &desired).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
