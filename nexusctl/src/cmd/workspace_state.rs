@@ -587,10 +587,12 @@ pub async fn load(
         }
 
         let previous = lock.as_ref().and_then(|l| l.settings.as_ref());
+        // Removal follows what Nexus wrote, as in pull.
+        let previous_owned = lock.as_ref().and_then(|l| l.settings_owned.as_ref());
         claude_render::apply_generic_settings(
             &mut settings_after,
             export.claude_settings.as_ref(),
-            previous,
+            previous_owned,
         );
         let mut keys: Vec<&String> = Vec::new();
         for spec in [export.claude_settings.as_ref(), previous]

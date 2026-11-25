@@ -629,6 +629,7 @@ fn plan_claude(
         l.files.clear();
         l.hooks.clear();
         l.settings = None;
+        l.settings_owned = None;
         l.claude_md_block_sha256 = None;
         l
     });
@@ -804,6 +805,7 @@ fn plan_claude(
         if let (Some(kl), Some(l)) = (kept_lock.as_mut(), lock.as_ref()) {
             if l.settings.is_some() {
                 kl.settings = l.settings.clone();
+                kl.settings_owned = l.settings_owned.clone();
                 keep_any_lock_entry = true;
             }
         }
@@ -811,7 +813,7 @@ fn plan_claude(
         let parsed = fs::read_to_string(workspace.join(settings_rel))
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-        let previous = lock.as_ref().and_then(|l| l.settings.as_ref());
+        let previous = lock.as_ref().and_then(ccx::CcxLock::removable_settings);
         // Managed values the operator edited stay without --force; the lock
         // keeps their provenance, so a later --force still knows them. An
         // unreadable file keeps it too.
@@ -826,7 +828,8 @@ fn plan_claude(
                 None => workspace.join(settings_rel).exists(),
             };
             if still_there {
-                kl.settings = Some(previous.clone());
+                kl.settings = lock.as_ref().and_then(|l| l.settings.clone());
+                kl.settings_owned = lock.as_ref().and_then(|l| l.settings_owned.clone());
                 keep_any_lock_entry = true;
             }
         }
@@ -949,7 +952,7 @@ pub(crate) fn strip_nexus_settings(
     };
 
     let mut nexus_evidence = lock.is_some();
-    if let Some(previous) = lock.and_then(|l| l.settings.as_ref()) {
+    if let Some(previous) = lock.and_then(ccx::CcxLock::removable_settings) {
         ccx::reconcile_settings_removed_keys(settings, None, Some(previous));
         if force {
             for key in &previous.managed_keys {
@@ -2517,6 +2520,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            settings_owned: None,
             claude_md_block_sha256: None,
             hooks: Default::default(),
             plugins: Default::default(),
@@ -2566,6 +2570,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            settings_owned: None,
             claude_md_block_sha256: None,
             hooks: Default::default(),
             plugins: Default::default(),
@@ -2751,6 +2756,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            settings_owned: None,
             claude_md_block_sha256: None,
             hooks: Default::default(),
             plugins: Default::default(),

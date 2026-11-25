@@ -237,6 +237,17 @@ One command per activity; each classifies every file itself:
   prefers over `includeCoAuthoredBy`, unless `attribution` is managed by
   the export (or, when the export fails, recorded as managed in the lock):
   a managed value is kept until the next successful export.
+- Nexus removes only what it wrote itself. The lock records the hook
+  registrations Nexus inserted (with matcher and timeout) and the settings
+  values, array entries and keyed-map entries it set. A hook or value the
+  operator already had, also an identical one, is never recorded and stays
+  when the export stops sending it; an entry the operator edited since is
+  left alone too. A backend matcher or timeout change replaces an
+  unchanged Nexus hook entry. A hook script is only deleted when no hook
+  runs it any more. Records from an older CLI cannot tell the two apart:
+  their hooks and settings are kept rather than removed (a hook the
+  adapter still sends in its exact generated form is taken over), and
+  `nexus deinit` still removes what such a lock records.
 - Leftovers of the runtime the project does not use are reported as STALE
   with "run nexus pull to remove it" (see below); unmanaged files are never
   touched.
