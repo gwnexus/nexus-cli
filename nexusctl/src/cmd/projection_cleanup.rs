@@ -670,6 +670,10 @@ fn plan_claude(
         }
     };
 
+    // Hook script removals run after the settings.json rewrite, so a
+    // failed rewrite never leaves a registration pointing at a deleted
+    // script.
+    let mut script_actions: Vec<Action> = Vec::new();
     if let Some(ref lock) = lock {
         // CCX files: every locked file is orphaned now (existing orphan
         // rule: pristine -> delete, modified -> kept unless --force).
@@ -731,7 +735,7 @@ fn plan_claude(
                     kl.hooks.insert(entry.target_path.clone(), entry.clone());
                     keep_any_lock_entry = true;
                 }
-                actions.push(Action::Keep {
+                script_actions.push(Action::Keep {
                     path: entry.target_path.clone(),
                     reason: KeepReason::Linked,
                 });
@@ -764,7 +768,7 @@ fn plan_claude(
                     keep_any_lock_entry = true;
                 }
             }
-            actions.push(action);
+            script_actions.push(action);
         }
     }
 
@@ -853,7 +857,7 @@ fn plan_claude(
             });
         }
         if let (Some(kl), Some(l)) = (kept_lock.as_mut(), lock.as_ref()) {
-            if l.settings.is_some() {
+            if l.settings.is_some() || l.settings_owned.is_some() || l.settings_legacy.is_some() {
                 kl.settings = l.settings.clone();
                 kl.settings_owned = l.settings_owned.clone();
                 kl.settings_legacy = l.settings_legacy.clone();
@@ -910,6 +914,8 @@ fn plan_claude(
             }
         }
     }
+
+    actions.append(&mut script_actions);
 
     // .mcp.json: only the Nexus servers.
     if linked(".mcp.json") && workspace.join(".mcp.json").exists() {
@@ -2060,6 +2066,47 @@ mod tests {
             assert!(!read(&dir, ".claude/settings.json").contains("nexus-session-guard.mjs"));
         }
         assert!(!dir.join(".claude/hooks/nexus-session-guard.mjs").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_claude_cleanup_rewrites_settings_before_removing_hook_scripts() {
+        let dir = temp_dir("cc-order");
+        claude_projection(&dir);
+        let p = plan(&dir, Projection::Claude, &ctx(false));
+        let position = |want: &str| {
+            p.actions.iter().position(|a| match a {
+                Action::RemoveFile { path, .. } | Action::Rewrite { path, .. } => path == want,
+                _ => false,
+            })
+        };
+        let settings = position(".claude/settings.json").expect("settings planned");
+        let script = position(".claude/hooks/nexus-session-guard.mjs").expect("script planned");
+        assert!(settings < script, "{:?}", p.actions);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_linked_settings_keep_a_legacy_only_record() {
+        let dir = temp_dir("cc-linked-legacy");
+        claude_projection(&dir);
+        let mut lock = ccx::load_lock(&dir, ".nexus").unwrap();
+        let legacy = lock.settings.take();
+        lock.settings_owned = None;
+        lock.settings_legacy = legacy.clone();
+        ccx::save_lock(&dir, ".nexus", &lock).unwrap();
+        fs::create_dir_all(dir.join("user")).unwrap();
+        fs::rename(
+            dir.join(".claude/settings.json"),
+            dir.join("user/settings.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../user/settings.json", dir.join(".claude/settings.json"))
+            .unwrap();
+        run(&dir, Projection::Claude, &ctx(false));
+        let kept = ccx::load_lock(&dir, ".nexus").unwrap();
+        assert_eq!(kept.settings_legacy, legacy);
         let _ = fs::remove_dir_all(&dir);
     }
 
