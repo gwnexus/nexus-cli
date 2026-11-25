@@ -766,7 +766,7 @@ fn generated_hook_entry(
 /// are still exactly as inserted. A record from an older lock (not marked
 /// as inserted) or an entry the operator changed is left alone. Returns
 /// the number of entries removed.
-fn remove_owned_registration(
+pub(crate) fn remove_owned_registration(
     hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
     reg: &ccx::CcxLockHookRegistration,
 ) -> usize {
@@ -783,7 +783,7 @@ fn remove_owned_registration(
 }
 
 /// Whether any hook in a `settings.json` `hooks` block runs `script`.
-fn any_hook_runs_script(settings: &serde_json::Value, script: &str) -> bool {
+pub(crate) fn any_hook_runs_script(settings: &serde_json::Value, script: &str) -> bool {
     settings
         .get("hooks")
         .and_then(|h| h.as_object())
@@ -1148,20 +1148,22 @@ pub fn merge_claude_generic_settings(
     spec: Option<&ClaudeSettingsSpec>,
     previous: Option<&ClaudeSettingsSpec>,
 ) -> anyhow::Result<usize> {
-    Ok(merge_claude_generic_settings_checked(target, spec, previous)?.unwrap_or(0))
+    Ok(merge_claude_generic_settings_checked(target, spec, previous)?.map_or(0, |(n, _)| n))
 }
 
 /// `merge_claude_generic_settings`, or `None` when `settings.json` is
-/// not a valid JSON object and nothing was merged.
+/// not a valid JSON object and nothing was merged. Also returns the
+/// settings as the merge read them, so ownership is decided on the state
+/// the merge saw.
 pub(crate) fn merge_claude_generic_settings_checked(
     target: &Path,
     spec: Option<&ClaudeSettingsSpec>,
     previous: Option<&ClaudeSettingsSpec>,
-) -> anyhow::Result<Option<usize>> {
+) -> anyhow::Result<Option<(usize, serde_json::Value)>> {
     let spec_has_keys = spec.is_some_and(|s| !s.managed_keys.is_empty());
     let previous_has_keys = previous.is_some_and(|p| !p.managed_keys.is_empty());
     if !spec_has_keys && !previous_has_keys {
-        return Ok(Some(0));
+        return Ok(Some((0, serde_json::json!({}))));
     }
 
     let settings_path = target.join(".claude").join("settings.json");
@@ -1170,12 +1172,13 @@ pub(crate) fn merge_claude_generic_settings_checked(
         return Ok(None);
     };
 
+    let observed = settings.clone();
     let changed = apply_generic_settings(&mut settings, spec, previous);
     if changed > 0 {
         write_settings(&settings_path, &settings)?;
     }
 
-    Ok(Some(changed))
+    Ok(Some((changed, observed)))
 }
 
 /// The pure part of `merge_claude_generic_settings`: apply `spec` (and
@@ -1891,7 +1894,7 @@ pub fn render_claude_projection(
             claude_settings,
             previous_owned.as_ref(),
         )?;
-        let generic_settings_changed = merged.unwrap_or(0);
+        let generic_settings_changed = merged.as_ref().map_or(0, |(n, _)| *n);
         settings_changes = super::ccx::describe_settings_changes(
             &settings_before,
             &read_claude_settings(target),
@@ -1905,12 +1908,9 @@ pub fn render_claude_projection(
                 generic_settings_changed
             );
         }
-        if merged.is_some() {
-            let owned = super::ccx::owned_settings(
-                &settings_before,
-                claude_settings,
-                previous_owned.as_ref(),
-            );
+        if let Some((_, observed)) = merged {
+            let owned =
+                super::ccx::owned_settings(&observed, claude_settings, previous_owned.as_ref());
             super::ccx::record_settings_in_lock(
                 target,
                 agentic_root,

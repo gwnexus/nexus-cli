@@ -244,7 +244,8 @@ One command per activity; each classifies every file itself:
   when the export stops sending it; an entry the operator edited since is
   left alone too. A backend matcher or timeout change replaces an
   unchanged Nexus hook entry. A hook script is only deleted when no hook
-  runs it any more. Records from an older CLI cannot tell the two apart:
+  runs it any more; the projection cleanup (runtime switch, `nexus
+  deinit`) follows the same rules unless `--force` is given. Records from an older CLI cannot tell the two apart:
   their hooks and settings are kept rather than removed (a hook the
   adapter still sends in its exact generated form is taken over), and
   `nexus deinit` still removes what such a lock records.

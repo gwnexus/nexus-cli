@@ -148,6 +148,8 @@ pub enum KeepReason {
     /// Carries the Nexus marker, but no record says what Nexus wrote, so a
     /// local edit cannot be ruled out.
     Unrecorded,
+    /// A hook script that a hook kept in `.claude/settings.json` still runs.
+    InUse,
 }
 
 impl KeepReason {
@@ -159,6 +161,7 @@ impl KeepReason {
             KeepReason::GitMetadata => "contains a nested git repository",
             KeepReason::Linked => "path crosses a symlink",
             KeepReason::Unrecorded => "no record of the Nexus version",
+            KeepReason::InUse => "a hook in .claude/settings.json still runs it",
         }
     }
 }
@@ -680,7 +683,25 @@ fn plan_claude(
             actions.push(action);
         }
         // Hook adapter scripts (their settings.json registrations are
-        // removed with the settings below).
+        // removed with the settings below). The settings as that cleanup
+        // leaves them: a script a kept hook still runs stays. `None`: the
+        // file exists but cannot be parsed, so any hook may run it.
+        let settings_rel = ".claude/settings.json";
+        let settings_after: Option<serde_json::Value> =
+            match fs::read_to_string(workspace.join(settings_rel)) {
+                Err(_) if !workspace.join(settings_rel).exists() => Some(serde_json::json!({})),
+                Err(_) => None,
+                Ok(raw) => {
+                    serde_json::from_str::<serde_json::Value>(&raw)
+                        .ok()
+                        .map(|mut settings| {
+                            if !ctx.keep.contains(settings_rel) {
+                                strip_nexus_settings(&mut settings, Some(lock), ctx.force);
+                            }
+                            settings
+                        })
+                }
+            };
         for entry in lock.hooks.values() {
             if ctx.keep.contains(&entry.target_path)
                 || super::pull::validate_agent_file_target_path(workspace, &entry.target_path)
@@ -705,7 +726,17 @@ fn plan_claude(
                 continue;
             };
             let pristine = sha256_hex_bytes(&bytes) == entry.file_sha256;
-            let action = remove_or_keep(entry.target_path.clone(), pristine);
+            let in_use = settings_after.as_ref().is_none_or(|settings| {
+                claude_render::any_hook_runs_script(settings, &entry.target_path)
+            });
+            let action = if in_use {
+                Action::Keep {
+                    path: entry.target_path.clone(),
+                    reason: KeepReason::InUse,
+                }
+            } else {
+                remove_or_keep(entry.target_path.clone(), pristine)
+            };
             if matches!(action, Action::Keep { .. }) {
                 if let Some(kl) = kept_lock.as_mut() {
                     let mut kept = entry.clone();
@@ -979,7 +1010,22 @@ pub(crate) fn strip_nexus_settings(
     if let Some(lock) = lock {
         if let Some(hooks) = obj.get_mut("hooks").and_then(|h| h.as_object_mut()) {
             for entry in lock.hooks.values() {
-                claude_render::remove_hook_registrations(hooks, entry);
+                for reg in &entry.registrations {
+                    if reg.owned && !force {
+                        // Only while exactly as Nexus inserted it.
+                        claude_render::remove_owned_registration(hooks, reg);
+                    } else {
+                        // An older lock (no ownership record), or --force:
+                        // every hook running the recorded command.
+                        claude_render::remove_hook_registrations(
+                            hooks,
+                            &ccx::CcxLockHookEntry {
+                                registrations: vec![reg.clone()],
+                                ..entry.clone()
+                            },
+                        );
+                    }
+                }
             }
         }
     }
@@ -1856,6 +1902,58 @@ mod tests {
         let lock = ccx::load_lock(&dir, ".nexus").unwrap();
         assert!(lock.settings.is_some());
         assert_eq!(lock.hooks.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Give every Nexus session-guard hook in settings.json a timeout, as an
+    /// operator edit.
+    fn edit_guard_hooks(dir: &Path) {
+        let mut settings: serde_json::Value =
+            serde_json::from_str(&read(dir, ".claude/settings.json")).unwrap();
+        let mut edited = 0;
+        for entries in settings["hooks"].as_object_mut().unwrap().values_mut() {
+            for entry in entries.as_array_mut().unwrap() {
+                for hook in entry["hooks"].as_array_mut().unwrap() {
+                    if hook["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("nexus-session-guard.mjs"))
+                    {
+                        hook["timeout"] = serde_json::json!(99);
+                        edited += 1;
+                    }
+                }
+            }
+        }
+        assert!(edited > 0);
+        put(dir, ".claude/settings.json", &settings.to_string());
+    }
+
+    #[test]
+    fn test_claude_cleanup_keeps_an_edited_hook_and_its_script() {
+        let dir = temp_dir("cc-edited-hook");
+        claude_projection(&dir);
+        edit_guard_hooks(&dir);
+        let report = run(&dir, Projection::Claude, &ctx(false));
+        // The edited hook stays, and so does the script it runs.
+        let settings = read(&dir, ".claude/settings.json");
+        assert!(settings.contains("nexus-session-guard.mjs"));
+        assert!(dir.join(".claude/hooks/nexus-session-guard.mjs").exists());
+        assert!(report.kept.iter().any(|(p, r)| {
+            p == ".claude/hooks/nexus-session-guard.mjs" && *r == KeepReason::InUse
+        }));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_claude_cleanup_with_force_removes_an_edited_hook() {
+        let dir = temp_dir("cc-edited-hook-force");
+        claude_projection(&dir);
+        edit_guard_hooks(&dir);
+        run(&dir, Projection::Claude, &ctx(true));
+        assert!(!dir.join(".claude/hooks/nexus-session-guard.mjs").exists());
+        if dir.join(".claude/settings.json").exists() {
+            assert!(!read(&dir, ".claude/settings.json").contains("nexus-session-guard.mjs"));
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
