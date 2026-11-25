@@ -940,12 +940,16 @@ pub(crate) fn merge_claude_hooks_checked(
             continue;
         }
         let script_path = target.join(&entry.target_path);
-        let Ok(content) = fs::read_to_string(&script_path) else {
-            continue;
+        let keep = match fs::read(&script_path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            // Unreadable: keep the record so a later pull retries the cleanup.
+            Err(_) => true,
+            Ok(bytes) => {
+                nexus_core::hash::sha256_hex_bytes(&bytes) == entry.file_sha256
+                    && fs::remove_file(&script_path).is_err()
+            }
         };
-        if nexus_core::hash::sha256_hex(&content) == entry.file_sha256
-            && fs::remove_file(&script_path).is_err()
-        {
+        if keep {
             retained.push(ccx::CcxLockHookEntry {
                 registrations: Vec::new(),
                 ..(*entry).clone()
@@ -4356,6 +4360,44 @@ mod tests {
             "unmodified hook file must be deleted"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unreadable_withdrawn_script_keeps_its_record() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("hooks-removal-unreadable");
+        let body = "// withdrawn hook script";
+        let script = dir.join(".claude/hooks/nexus-gone.mjs");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, body).unwrap();
+        fs::write(dir.join(".claude/settings.json"), "{}").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&script).is_ok() {
+            // Permissions do not apply (for example when run as root).
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let previous = std::collections::BTreeMap::from([hook_lock_entry(
+            "gone",
+            ".claude/hooks/nexus-gone.mjs",
+            body,
+            &[("Stop", None)],
+        )]);
+        let merge = merge_claude_hooks_checked(&dir, &[], Some(&previous))
+            .unwrap()
+            .unwrap();
+        // The record stays, without registrations, so a later pull retries.
+        assert_eq!(merge.retained.len(), 1);
+        assert_eq!(
+            merge.retained[0].target_path,
+            ".claude/hooks/nexus-gone.mjs"
+        );
+        assert!(merge.retained[0].registrations.is_empty());
+
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 

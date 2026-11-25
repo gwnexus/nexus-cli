@@ -3478,7 +3478,9 @@ pub(crate) fn plan_dropped_skill_files(
     load_pull_manifest(workspace, agentic_root)
         .into_iter()
         .filter(|(path, _)| roots.iter().any(|r| path.starts_with(&format!("{r}/"))))
-        .filter(|(path, _)| !desired.contains(&path.as_str()))
+        // Case-insensitive: on a case-insensitive filesystem a stale record
+        // (`skill.md`) can name the desired file (`SKILL.md`).
+        .filter(|(path, _)| !desired.iter().any(|d| d.eq_ignore_ascii_case(path)))
         .filter(|(path, _)| validate_agent_file_target_path(workspace, path).is_ok())
         .map(|(path, hash)| match fs::read(workspace.join(&path)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => DroppedFile::Gone(path),
@@ -10386,6 +10388,22 @@ mod tests {
         assert!(load_pull_manifest(&dir, ".nexus")
             .keys()
             .all(|k| !k.contains("cr-review")));
+        assert!(plan_dropped_skill_files(&dir, ".nexus", true, &desired).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dropped_record_naming_a_desired_file_in_other_case_is_kept() {
+        let dir = temp_pull_dir("skill-dropped-case");
+        let skill = export_skill("nx-case", "Case", None);
+        pulled_claude_skills(&dir, std::slice::from_ref(&skill));
+        // An older pull recorded the same file under a lowercase name.
+        let lower = ".claude/skills/nexus-case/skill.md".to_string();
+        let body = fs::read_to_string(dir.join(".claude/skills/nexus-case/SKILL.md")).unwrap();
+        record_generated_many(&dir, ".nexus", &[(lower, body)]).unwrap();
+
+        let desired = desired_skill_files(&[skill], ".nexus", true);
+        let desired: Vec<&str> = desired.iter().map(|(p, _)| p.as_str()).collect();
         assert!(plan_dropped_skill_files(&dir, ".nexus", true, &desired).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
